@@ -18,6 +18,8 @@ import {
   ACTIVE_OVERHANG,
   BUSINESS_SIMPLICITY,
   IndustryClass,
+  cacheMarketCapBillions,
+  getCachedMarketCapBillions,
 } from "@/lib/classification";
 
 // ---------- Types ----------
@@ -78,6 +80,7 @@ export type StageFourResult = {
   delta: number | null;
   bidAskSpreadPct: number | null;
   premiumYieldPct: number | null;
+  note: string | null;
   details: {
     premiumYieldScore: number;
     deltaScore: number;
@@ -85,6 +88,10 @@ export type StageFourResult = {
     contractSymbol: string | null;
   };
 };
+
+// Hard kill: if bid-ask spread as % of mid exceeds this, the contract is
+// effectively untradeable — grade force to F and recommendation force to Skip.
+export const SPREAD_KILL_PCT = 15;
 
 export type ScreenerResult = {
   symbol: string;
@@ -102,6 +109,7 @@ export type ScreenerResult = {
   errors: string[];
   isWhitelisted: boolean;
   industryStatus: "pass" | "fail" | "unknown";
+  spreadTooWide: boolean;
 };
 
 // ---------- Helpers ----------
@@ -201,9 +209,21 @@ function scoreBusinessSimplicity(symbol: string): number {
 }
 
 async function fetchMarketCapBillions(symbol: string): Promise<number | null> {
+  // Cache first — market cap drifts slowly and the tiers we score against are
+  // wide (>$200B / $50-200B / $10-50B / <$10B) so a cached value is safe.
+  const cached = await getCachedMarketCapBillions(symbol);
+  if (cached !== null) {
+    return cached;
+  }
   const mcap = await getMarketCap(symbol);
-  if (typeof mcap !== "number" || mcap <= 0) return null;
-  return Math.round((mcap / 1e9) * 100) / 100;
+  if (typeof mcap !== "number" || !Number.isFinite(mcap) || mcap <= 0) {
+    console.warn(`[stage2:${symbol}] getMarketCap returned ${mcap}`);
+    return null;
+  }
+  const billions = Math.round((mcap / 1e9) * 100) / 100;
+  console.log(`[stage2:${symbol}] fetched marketCap=${mcap} → ${billions}B, caching`);
+  await cacheMarketCapBillions(symbol, billions);
+  return billions;
 }
 
 export async function runStageTwo(
@@ -514,6 +534,7 @@ export function runStageFour(
       delta: null,
       bidAskSpreadPct: null,
       premiumYieldPct: null,
+      note: null,
       details: { premiumYieldScore: 0, deltaScore: 0, spreadScore: 0, contractSymbol: null },
     };
   }
@@ -529,6 +550,7 @@ export function runStageFour(
       delta: null,
       bidAskSpreadPct: null,
       premiumYieldPct: null,
+      note: null,
       details: { premiumYieldScore: 0, deltaScore: 0, spreadScore: 0, contractSymbol: null },
     };
   }
@@ -542,17 +564,23 @@ export function runStageFour(
   const premiumYieldScore = scorePremiumYield(yieldPct);
   const deltaScore = scoreDelta(delta);
   const spreadScore = scoreSpread(spreadPctOfMid);
-  const score = premiumYieldScore + deltaScore + spreadScore;
+  const rawScore = premiumYieldScore + deltaScore + spreadScore;
+
+  const spreadTooWide = spreadPctOfMid > SPREAD_KILL_PCT;
+  // Spread-too-wide is a hard kill: force grade F regardless of other scores.
+  const opportunityGrade = spreadTooWide ? "F" : gradeFromOpportunityScore(rawScore);
+  const note = spreadTooWide ? "Spread too wide to trade" : null;
 
   return {
-    score,
+    score: rawScore,
     maxScore: 20,
-    opportunityGrade: gradeFromOpportunityScore(score),
+    opportunityGrade,
     suggestedStrike: Math.round(suggestedStrike * 100) / 100,
     premium: Math.round(premium * 100) / 100,
     delta: Math.round(delta * 1000) / 1000,
     bidAskSpreadPct: Math.round(spreadPctOfMid * 10) / 10,
     premiumYieldPct: Math.round(yieldPct * 1000) / 1000,
+    note,
     details: {
       premiumYieldScore,
       deltaScore,
@@ -560,6 +588,11 @@ export function runStageFour(
       contractSymbol: contract.symbol,
     },
   };
+}
+
+function isSpreadTooWide(stageFour: StageFourResult | null): boolean {
+  if (!stageFour) return false;
+  return stageFour.bidAskSpreadPct !== null && stageFour.bidAskSpreadPct > SPREAD_KILL_PCT;
 }
 
 // ---------- Final recommendation ----------
@@ -682,6 +715,7 @@ export async function evaluateStagesOneTwo(
     errors: [],
     isWhitelisted: context.isWhitelisted,
     industryStatus: context.industryStatus,
+    spreadTooWide: false,
   };
 
   return {
@@ -741,15 +775,21 @@ export async function runStagesThreeFour(base: ScreenerResult): Promise<Screener
     stageThree.details.expectedMovePct,
   );
 
-  const recommendation = stageThree.pass
+  const spreadTooWide = isSpreadTooWide(stageFour);
+  const baseRecommendation = stageThree.pass
     ? recommend(stageThree.crushGrade, stageFour.opportunityGrade)
     : "Skip";
+  // Spread-too-wide is a hard kill: override any recommendation to Skip.
+  const recommendation: ScreenerResult["recommendation"] = spreadTooWide
+    ? "Skip"
+    : baseRecommendation;
 
   return {
     ...base,
-    stoppedAt: stageThree.pass ? null : 3,
+    stoppedAt: stageThree.pass && !spreadTooWide ? null : 3,
     stageThree,
     stageFour,
     recommendation,
+    spreadTooWide,
   };
 }

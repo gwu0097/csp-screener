@@ -331,7 +331,9 @@ function mapYahooToPass(profile: {
 type CachedProfile = {
   industry: string | null;
   industry_pass: boolean | null;
-  market_cap_billions: number | null;
+  // Supabase numeric(10,2) deserializes to either number or string depending
+  // on the client version — handle both at the consumer.
+  market_cap_billions: number | string | null;
   updated_at: string | null;
 };
 
@@ -368,6 +370,45 @@ async function writeProfileCache(
     );
   } catch (e) {
     console.error(`[classify] cache write failed for ${symbol}:`, e instanceof Error ? e.message : e);
+  }
+}
+
+// Reads just the cached market cap (in billions). Returns null if the symbol
+// is not in the profile cache or market_cap_billions is null.
+export async function getCachedMarketCapBillions(symbol: string): Promise<number | null> {
+  const cached = await readProfileCache(symbol);
+  const v = cached?.market_cap_billions;
+  if (typeof v === "number" && Number.isFinite(v) && v > 0) return v;
+  // Supabase numeric columns can come back as strings; handle that too.
+  if (typeof v === "string") {
+    const n = Number(v);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
+}
+
+// Upserts the market cap (in billions) for a symbol. Leaves industry columns
+// untouched if the row already exists (supabase-js upsert only updates the
+// columns provided).
+export async function cacheMarketCapBillions(
+  symbol: string,
+  billions: number,
+): Promise<void> {
+  try {
+    const supabase = createServerClient();
+    await supabase.from("stock_profiles").upsert(
+      {
+        symbol: symbol.toUpperCase(),
+        market_cap_billions: Math.round(billions * 100) / 100,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "symbol" },
+    );
+  } catch (e) {
+    console.error(
+      `[classify] cacheMarketCapBillions write failed for ${symbol}:`,
+      e instanceof Error ? e.message : e,
+    );
   }
 }
 

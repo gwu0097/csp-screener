@@ -681,11 +681,17 @@ function ExpandedDetail({ r }: { r: ScreenerResult }) {
 
       <StageCard
         title="Stage 4 · Opportunity"
-        pass={(r.stageFour?.score ?? 0) >= 8}
+        pass={!r.spreadTooWide && (r.stageFour?.score ?? 0) >= 8}
         summary={r.stageFour ? `${r.stageFour.score}/20 — grade ${r.stageFour.opportunityGrade}` : "run analysis to populate"}
       >
         {r.stageFour && (
           <>
+            {r.stageFour.note && (
+              <div className="mb-2 rounded border border-rose-500/40 bg-rose-500/10 px-2 py-1 text-rose-300">
+                <AlertTriangle className="mr-1 inline h-3 w-3" />
+                {r.stageFour.note}
+              </div>
+            )}
             <Row
               k="Premium yield"
               v={`${r.stageFour.details.premiumYieldScore}/8 (${r.stageFour.premiumYieldPct !== null ? r.stageFour.premiumYieldPct.toFixed(2) + "%" : "—"})`}
