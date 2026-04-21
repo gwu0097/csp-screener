@@ -8,8 +8,12 @@
 // must pass `{ validateResult: false }` as the module-options argument so Yahoo
 // payload drift does not trip the library's Zod validator.
 
-import yahooFinance from "yahoo-finance2";
-import { getFinnhubPastEarningsDates } from "@/lib/earnings";
+import YahooFinance from "yahoo-finance2";
+
+// yahoo-finance2 v3 changed the default export from a pre-instantiated client
+// to the class itself. Calling methods on the class throws
+// "Call `const yahooFinance = new YahooFinance()` first." — instantiate once.
+const yahooFinance = new (YahooFinance as unknown as new () => Record<string, unknown>)();
 
 try {
   (yahooFinance as unknown as { suppressNotices?: (keys: string[]) => void }).suppressNotices?.([
@@ -47,6 +51,15 @@ type QuoteSummaryResult = {
   summaryProfile?: { sector?: string; industry?: string };
   summaryDetail?: { marketCap?: number };
   price?: { marketCap?: number };
+  earnings?: {
+    earningsChart?: {
+      quarterly?: Array<{
+        date?: string;
+        periodEndDate?: number;
+        reportedDate?: number; // unix seconds — the actual announcement timestamp
+      }>;
+    };
+  };
 };
 
 export type YahooProfile = {
@@ -58,34 +71,28 @@ export type YahooProfile = {
 type RawQuote = Record<string, unknown>;
 
 // ---------- Typed façades over yahoo-finance2 ----------
+// Methods must be called on the instance so `this` binds correctly. Pulling
+// them off into a local variable drops `this` and breaks internal _notices.
 
-type QuoteFn = (
-  s: string,
-  q?: Record<string, unknown>,
-  m?: { validateResult?: boolean },
-) => Promise<unknown>;
+type YFClient = {
+  quote: (
+    s: string,
+    q?: Record<string, unknown>,
+    m?: { validateResult?: boolean },
+  ) => Promise<unknown>;
+  historical: (
+    s: string,
+    opts: { period1: Date; period2: Date; interval: "1d" },
+    m?: { validateResult?: boolean },
+  ) => Promise<HistoricalRow[]>;
+  quoteSummary: (
+    s: string,
+    opts: { modules: string[] },
+    m?: { validateResult?: boolean },
+  ) => Promise<QuoteSummaryResult>;
+};
 
-type HistoricalFn = (
-  s: string,
-  opts: { period1: Date; period2: Date; interval: "1d" },
-  m?: { validateResult?: boolean },
-) => Promise<HistoricalRow[]>;
-
-type QuoteSummaryFn = (
-  s: string,
-  opts: { modules: string[] },
-  m?: { validateResult?: boolean },
-) => Promise<QuoteSummaryResult>;
-
-function yfQuote(): QuoteFn {
-  return (yahooFinance as unknown as { quote: QuoteFn }).quote;
-}
-function yfHistorical(): HistoricalFn {
-  return (yahooFinance as unknown as { historical: HistoricalFn }).historical;
-}
-function yfQuoteSummary(): QuoteSummaryFn {
-  return (yahooFinance as unknown as { quoteSummary: QuoteSummaryFn }).quoteSummary;
-}
+const yf = yahooFinance as unknown as YFClient;
 
 function logYahooFailure(label: string, e: unknown): void {
   const msg = e instanceof Error ? e.message : String(e);
@@ -96,7 +103,7 @@ function logYahooFailure(label: string, e: unknown): void {
 
 async function quoteRaw(symbol: string): Promise<RawQuote | null> {
   try {
-    const result = await yfQuote()(symbol, {}, MODULE_OPTS);
+    const result = await yf.quote(symbol, {}, MODULE_OPTS);
     if (result === null || result === undefined) {
       console.warn(`[yahoo] quote(${symbol}) returned ${result === null ? "null" : "undefined"}`);
       return null;
@@ -225,7 +232,7 @@ export async function getHistoricalPrices(
   to: Date,
 ): Promise<HistoricalRow[]> {
   try {
-    const rows = await yfHistorical()(
+    const rows = await yf.historical(
       symbol,
       { period1: from, period2: to, interval: "1d" },
       MODULE_OPTS,
@@ -241,7 +248,7 @@ export async function getHistoricalPrices(
 
 async function quoteSummary(symbol: string, modules: string[]): Promise<QuoteSummaryResult | null> {
   try {
-    const res = await yfQuoteSummary()(symbol, { modules }, MODULE_OPTS);
+    const res = await yf.quoteSummary(symbol, { modules }, MODULE_OPTS);
     return res ?? null;
   } catch (e) {
     logYahooFailure(`quoteSummary(${symbol}, [${modules.join(",")}])`, e);
@@ -334,29 +341,53 @@ async function getPastEarningsDates(symbol: string): Promise<Date[]> {
   }
 }
 
-// Historical overnight earnings moves. Earnings announcement dates come from
-// Finnhub (the old yahoo-finance2 earningsHistory module returned empty in
-// production); the price bars come from Yahoo historical.
+// Fetch past earnings ANNOUNCEMENT timestamps from Yahoo's `earnings` module
+// (earningsChart.quarterly[].reportedDate, unix seconds). This is the real
+// press-release moment, not the fiscal quarter end. Finnhub's
+// /calendar/earnings is forward-only on the free tier, so we don't use it.
+type Announcement = { tsMs: number; iso: string };
+
+async function getYahooPastAnnouncements(symbol: string): Promise<Announcement[]> {
+  const summary = await quoteSummary(symbol, ["earnings"]);
+  const quarterly = summary?.earnings?.earningsChart?.quarterly ?? [];
+  const announcements = quarterly
+    .map<Announcement | null>((q) => {
+      const rd = q?.reportedDate;
+      if (typeof rd !== "number" || rd <= 0) return null;
+      const tsMs = rd < 1e12 ? rd * 1000 : rd;
+      if (!Number.isFinite(tsMs)) return null;
+      return { tsMs, iso: new Date(tsMs).toISOString().slice(0, 10) };
+    })
+    .filter((x): x is Announcement => x !== null)
+    .filter((x) => x.tsMs < Date.now())
+    .sort((a, b) => b.tsMs - a.tsMs)
+    .slice(0, 8);
+  console.log(
+    `[yahoo-earnings] getYahooPastAnnouncements(${symbol}) quarters=${quarterly.length} kept=${announcements.length}: ${announcements.map((a) => a.iso).join(", ")}`,
+  );
+  return announcements;
+}
+
+// Historical overnight earnings moves. Yahoo returns bar.date at the market
+// OPEN time (13:30 UTC in summer, 14:30 UTC in winter — i.e. 9:30 ET), not at
+// midnight. Session close is bar.date + 6.5h.
 //
-// Move direction rules:
-//   BMO on D  → close(D-1) → open(D)      — market hadn't priced it yet before D
-//   AMC on D  → close(D)   → open(D+1)
-//   unknown   → treat as BMO (most common for Finnhub entries without hour)
+// Comparison is done against the actual announcement unix timestamp so
+// timezone/BMO/AMC/DMH falls out naturally:
+//   close-before = last bar where bar.date + 6.5h < announcementTs
+//                  (i.e. bar's session closed before the announcement)
+//   open-after   = first bar where bar.date > announcementTs
+//                  (i.e. bar's session opened after the announcement)
 export async function getHistoricalEarningsMovements(symbol: string): Promise<EarningsMove[]> {
   try {
-    const announcements = await getFinnhubPastEarningsDates(symbol);
+    const announcements = await getYahooPastAnnouncements(symbol);
     if (announcements.length === 0) {
-      console.warn(`[moves:${symbol}] Finnhub returned no past earnings announcements`);
+      console.warn(`[moves:${symbol}] no past announcements from Yahoo earnings module`);
       return [];
     }
 
-    // Fetch a price window covering every announcement + a pad on each side.
-    const sortedDates = announcements
-      .map((a) => a.date)
-      .sort((x, y) => (x < y ? -1 : x > y ? 1 : 0));
-    const earliestIso = sortedDates[0];
-    const earliestTs = new Date(earliestIso + "T00:00:00Z").getTime();
-    const from = new Date(earliestTs - 10 * 24 * 60 * 60 * 1000);
+    const earliest = announcements[announcements.length - 1];
+    const from = new Date(earliest.tsMs - 10 * 24 * 60 * 60 * 1000);
     const to = new Date(Date.now() + 5 * 24 * 60 * 60 * 1000);
 
     const prices = await getHistoricalPrices(symbol, from, to);
@@ -368,61 +399,43 @@ export async function getHistoricalEarningsMovements(symbol: string): Promise<Ea
       return [];
     }
 
-    const priceByDate = new Map<string, (typeof prices)[number]>();
-    for (const row of prices) {
-      priceByDate.set(row.date.toISOString().slice(0, 10), row);
-    }
     const sortedBars = [...prices].sort((a, b) => a.date.getTime() - b.date.getTime());
-
-    const lastBarOnOrBefore = (iso: string) => {
-      let hit: (typeof prices)[number] | null = null;
-      for (const b of sortedBars) {
-        const d = b.date.toISOString().slice(0, 10);
-        if (d <= iso) hit = b;
-        else break;
-      }
-      return hit;
-    };
-    const firstBarOnOrAfter = (iso: string) => {
-      for (const b of sortedBars) {
-        const d = b.date.toISOString().slice(0, 10);
-        if (d >= iso) return b;
-      }
-      return null;
-    };
-    const addDays = (iso: string, n: number) => {
-      const [y, m, d] = iso.split("-").map(Number);
-      const dt = new Date(Date.UTC(y, m - 1, d));
-      dt.setUTCDate(dt.getUTCDate() + n);
-      return dt.toISOString().slice(0, 10);
-    };
-    void priceByDate;
+    const sessionLengthMs = Math.round(6.5 * 60 * 60 * 1000);
 
     const moves: EarningsMove[] = [];
     const details: string[] = [];
-    for (const { date: edate, timing } of announcements) {
-      const isAmc = timing === "AMC";
-      const closeIso = isAmc ? edate : addDays(edate, -1);
-      const openIso = isAmc ? addDays(edate, 1) : edate;
-      const beforeBar = lastBarOnOrBefore(closeIso);
-      const afterBar = firstBarOnOrAfter(openIso);
-      const closeBefore = beforeBar?.close ?? null;
-      const openAfter = afterBar?.open ?? null;
+    for (const ann of announcements) {
+      let closeBar: (typeof prices)[number] | null = null;
+      for (const b of sortedBars) {
+        // bar's session close = bar.date + 6.5h; keep walking while that
+        // close was strictly before the announcement.
+        if (b.date.getTime() + sessionLengthMs < ann.tsMs) closeBar = b;
+        else break;
+      }
+      let openBar: (typeof prices)[number] | null = null;
+      for (const b of sortedBars) {
+        // bar.date IS the session open; the first bar whose open was after
+        // the announcement is our "open after" bar.
+        if (b.date.getTime() > ann.tsMs) {
+          openBar = b;
+          break;
+        }
+      }
 
-      if (closeBefore && openAfter && closeBefore > 0) {
-        const pct = (openAfter - closeBefore) / closeBefore;
+      if (closeBar && openBar && closeBar.close > 0) {
+        const pct = (openBar.open - closeBar.close) / closeBar.close;
         moves.push({
-          date: edate,
+          date: ann.iso,
           actualMovePct: Math.abs(pct),
           direction: pct > 0.001 ? "up" : pct < -0.001 ? "down" : "flat",
         });
         details.push(
-          `${edate}/${timing}: close(${beforeBar?.date.toISOString().slice(0, 10)})=${closeBefore.toFixed(2)} → ` +
-            `open(${afterBar?.date.toISOString().slice(0, 10)})=${openAfter.toFixed(2)} (${(pct * 100).toFixed(2)}%)`,
+          `${ann.iso}: close(${closeBar.date.toISOString().slice(0, 10)})=${closeBar.close.toFixed(2)} → ` +
+            `open(${openBar.date.toISOString().slice(0, 10)})=${openBar.open.toFixed(2)} (${(pct * 100).toFixed(2)}%)`,
         );
       } else {
         details.push(
-          `${edate}/${timing}: closeBefore=${closeBefore ?? "null"} openAfter=${openAfter ?? "null"} (skipped)`,
+          `${ann.iso}: closeBar=${closeBar ? closeBar.date.toISOString().slice(0, 10) : "null"} openBar=${openBar ? openBar.date.toISOString().slice(0, 10) : "null"} (skipped)`,
         );
       }
     }
