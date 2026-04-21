@@ -23,6 +23,7 @@ import {
   IndustryClass,
   PASSING_CLASSES,
   classifyFromSector,
+  getIndustryClassification,
 } from "@/lib/classification";
 
 // ---------- Types ----------
@@ -584,31 +585,64 @@ function isLikelyCommonEquity(symbol: string): boolean {
   return true;
 }
 
-export type PreFilterOptions = { maxCount?: number };
+export type PreFilterOptions = { maxCount?: number; yahooBudget?: number };
 
-export function preFilterEarningsCandidates<T extends RawEarningsCandidate>(
+export type PreFilterStats = {
+  raw: number;
+  shape: number;
+  mapHit: number;
+  cacheHit: number;
+  yahooHit: number;
+  yahooDropped: number;
+  kept: number;
+};
+
+export async function preFilterEarningsCandidates<T extends RawEarningsCandidate>(
   raw: T[],
   options: PreFilterOptions = {},
-): T[] {
+): Promise<{ kept: T[]; stats: PreFilterStats }> {
   const maxCount = options.maxCount ?? 20;
+  let yahooBudget = options.yahooBudget ?? 10;
 
   const timingOk = raw.filter((c) => c.timing === "BMO" || c.timing === "AMC");
   const shapeOk = timingOk.filter((c) => isLikelyCommonEquity(c.symbol));
 
-  const classifiedPass = shapeOk.filter((c) => {
-    const klass = INDUSTRY_MAP[normalizeSymbol(c.symbol)];
-    return klass !== undefined && PASSING_CLASSES.has(klass);
-  });
-
   const seen = new Set<string>();
-  const deduped = classifiedPass.filter((c) => {
+  const deduped = shapeOk.filter((c) => {
     const key = `${c.symbol}|${c.date}|${c.timing}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
   });
 
-  return deduped.slice(0, maxCount);
+  const kept: T[] = [];
+  const stats: PreFilterStats = {
+    raw: raw.length,
+    shape: shapeOk.length,
+    mapHit: 0,
+    cacheHit: 0,
+    yahooHit: 0,
+    yahooDropped: 0,
+    kept: 0,
+  };
+
+  for (const cand of deduped) {
+    if (kept.length >= maxCount) break;
+    const cls = await getIndustryClassification(cand.symbol, { yahooAllowed: yahooBudget > 0 });
+    if (cls.source === "map") stats.mapHit += 1;
+    else if (cls.source === "cache") stats.cacheHit += 1;
+    else if (cls.source === "yahoo") {
+      stats.yahooHit += 1;
+      yahooBudget -= 1;
+    } else {
+      stats.yahooDropped += 1;
+      continue;
+    }
+    if (cls.pass) kept.push(cand);
+  }
+
+  stats.kept = kept.length;
+  return { kept, stats };
 }
 
 export async function runScreenerForCandidates(

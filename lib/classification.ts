@@ -1,5 +1,9 @@
 // Curated classification maps. These are intentionally conservative and editable.
-// The screener falls back to Yahoo sector/industry when a ticker is missing.
+// The screener falls through to Supabase cache, then Yahoo sector lookup, when a
+// ticker is missing from INDUSTRY_MAP.
+
+import { createServerClient } from "@/lib/supabase";
+import { getCompanyProfile } from "@/lib/yahoo";
 
 export type IndustryClass =
   | "consumer_staples"
@@ -7,6 +11,8 @@ export type IndustryClass =
   | "large_pharma_stable"
   | "enterprise_software"
   | "large_diversified_financials"
+  | "business_services"
+  | "healthcare_equipment"
   | "industrials"
   | "cyclicals"
   | "commodities"
@@ -21,9 +27,13 @@ export const PASSING_CLASSES: ReadonlySet<IndustryClass> = new Set<IndustryClass
   "large_pharma_stable",
   "enterprise_software",
   "large_diversified_financials",
+  "business_services",
+  "healthcare_equipment",
 ]);
 
 export const INDUSTRY_MAP: Record<string, IndustryClass> = {
+  // ---------------- Passing ----------------
+
   // Consumer staples
   KO: "consumer_staples",
   PEP: "consumer_staples",
@@ -36,6 +46,14 @@ export const INDUSTRY_MAP: Record<string, IndustryClass> = {
   GIS: "consumer_staples",
   MO: "consumer_staples",
   PM: "consumer_staples",
+  MNST: "consumer_staples",
+  STZ: "consumer_staples",
+  TSN: "consumer_staples",
+  HRL: "consumer_staples",
+  SJM: "consumer_staples",
+  K: "consumer_staples",
+  CPB: "consumer_staples",
+  CAG: "consumer_staples",
 
   // Utilities
   NEE: "utilities",
@@ -46,8 +64,16 @@ export const INDUSTRY_MAP: Record<string, IndustryClass> = {
   XEL: "utilities",
   SRE: "utilities",
   ED: "utilities",
+  WEC: "utilities",
+  ES: "utilities",
+  ETR: "utilities",
+  PPL: "utilities",
+  CMS: "utilities",
+  NI: "utilities",
+  ATO: "utilities",
+  OKE: "utilities",
 
-  // Large, stable pharma / healthcare non-binary
+  // Large, stable pharma / non-binary healthcare
   JNJ: "large_pharma_stable",
   PFE: "large_pharma_stable",
   MRK: "large_pharma_stable",
@@ -56,8 +82,16 @@ export const INDUSTRY_MAP: Record<string, IndustryClass> = {
   BMY: "large_pharma_stable",
   AZN: "large_pharma_stable",
   NVS: "large_pharma_stable",
+  AMGN: "large_pharma_stable",
+  GILD: "large_pharma_stable",
+  BIIB: "large_pharma_stable",
+  REGN: "large_pharma_stable",
+  ZTS: "large_pharma_stable",
+  MCK: "large_pharma_stable",
+  ABC: "large_pharma_stable",
+  CAH: "large_pharma_stable",
 
-  // Enterprise software / stable SaaS
+  // Enterprise software / stable large-cap tech
   MSFT: "enterprise_software",
   ORCL: "enterprise_software",
   CRM: "enterprise_software",
@@ -66,6 +100,29 @@ export const INDUSTRY_MAP: Record<string, IndustryClass> = {
   NOW: "enterprise_software",
   SAP: "enterprise_software",
   IBM: "enterprise_software",
+  GOOGL: "enterprise_software",
+  GOOG: "enterprise_software",
+  META: "enterprise_software",
+  AAPL: "enterprise_software",
+  DOCU: "enterprise_software",
+  ZM: "enterprise_software",
+  WORK: "enterprise_software",
+  TEAM: "enterprise_software",
+  HUBS: "enterprise_software",
+  WDAY: "enterprise_software",
+  VEEV: "enterprise_software",
+  OKTA: "enterprise_software",
+  PANW: "enterprise_software",
+  FTNT: "enterprise_software",
+  CDNS: "enterprise_software",
+  SNPS: "enterprise_software",
+  ANSS: "enterprise_software",
+  PTC: "enterprise_software",
+  NUAN: "enterprise_software",
+  CTSH: "enterprise_software",
+  ACN: "enterprise_software",
+  INFY: "enterprise_software",
+  WIT: "enterprise_software",
 
   // Large diversified financials
   JPM: "large_diversified_financials",
@@ -78,8 +135,57 @@ export const INDUSTRY_MAP: Record<string, IndustryClass> = {
   BRK_B: "large_diversified_financials",
   V: "large_diversified_financials",
   MA: "large_diversified_financials",
+  AXP: "large_diversified_financials",
+  USB: "large_diversified_financials",
+  PNC: "large_diversified_financials",
+  TFC: "large_diversified_financials",
+  COF: "large_diversified_financials",
+  SCHW: "large_diversified_financials",
+  SPGI: "large_diversified_financials",
+  MCO: "large_diversified_financials",
+  ICE: "large_diversified_financials",
+  CME: "large_diversified_financials",
+  CBOE: "large_diversified_financials",
+  NDAQ: "large_diversified_financials",
 
-  // Failing categories — industrials / cyclicals / commodities / retail / narrative tech / services
+  // Business services — predictable B2B revenue, clean crush profile
+  ADP: "business_services",
+  PAYX: "business_services",
+  CTAS: "business_services",
+  CINF: "business_services",
+  ROP: "business_services",
+  VRSK: "business_services",
+  CPRT: "business_services",
+  FAST: "business_services",
+  GPC: "business_services",
+  EXPD: "business_services",
+  CHRW: "business_services",
+  XPO: "business_services",
+  JBHT: "business_services",
+  ODFL: "business_services",
+  NSC: "business_services",
+  UNP: "business_services",
+  CSX: "business_services",
+
+  // Healthcare equipment — predictable device revenue (not managed care)
+  ABT: "healthcare_equipment",
+  MDT: "healthcare_equipment",
+  SYK: "healthcare_equipment",
+  BSX: "healthcare_equipment",
+  EW: "healthcare_equipment",
+  ISRG: "healthcare_equipment",
+  DXCM: "healthcare_equipment",
+  BDX: "healthcare_equipment",
+  BAX: "healthcare_equipment",
+  ZBH: "healthcare_equipment",
+  HOLX: "healthcare_equipment",
+  IDXX: "healthcare_equipment",
+  MTD: "healthcare_equipment",
+  WAT: "healthcare_equipment",
+  A: "healthcare_equipment",
+
+  // ---------------- Failing (pre-filter drops these immediately) ----------------
+
   CAT: "industrials",
   DE: "industrials",
   BA: "industrials",
@@ -113,7 +219,11 @@ export function classifyFromSector(sector: string | null, industry: string | nul
   if (s.includes("consumer defensive") || s.includes("consumer staples")) return "consumer_staples";
   if (s.includes("utilities")) return "utilities";
   if (s.includes("healthcare")) {
+    if (isManagedCareIndustry(i)) return "healthcare_services";
     if (i.includes("drug manufacturers") && (i.includes("general") || i.includes("major"))) return "large_pharma_stable";
+    if (i.includes("medical devices") || i.includes("medical instruments") || i.includes("diagnostics & research")) {
+      return "healthcare_equipment";
+    }
     return "healthcare_services";
   }
   if (s.includes("financial")) return "large_diversified_financials";
@@ -145,3 +255,162 @@ export const ACTIVE_OVERHANG: ReadonlySet<string> = new Set<string>([
   "PFE",
   "WBA",
 ]);
+
+// ---------------- Yahoo-fallback classifier ----------------
+
+export type ClassificationSource = "map" | "cache" | "yahoo" | "unknown";
+
+export type ClassificationResult = {
+  pass: boolean;
+  industry: string;
+  source: ClassificationSource;
+};
+
+function normalizeSymbol(symbol: string): string {
+  return symbol.replace(/\./g, "_").replace(/-/g, "_").toUpperCase();
+}
+
+function isManagedCareIndustry(industry: string): boolean {
+  const i = industry.toLowerCase();
+  return (
+    i.includes("healthcare plans") ||
+    i.includes("medical care facilities") ||
+    i.includes("insurance—healthcare") ||
+    i.includes("insurance - healthcare")
+  );
+}
+
+// Yahoo sector → pass/fail as specified by the user.
+// PASS: Technology, Financial Services, Healthcare (not managed care),
+//       Consumer Defensive, Utilities, Communication Services (large cap only).
+// FAIL: Energy, Basic Materials, Industrials, Consumer Cyclical, Real Estate.
+function mapYahooToPass(profile: {
+  sector: string | null;
+  industry: string | null;
+  marketCap: number | null;
+}): { pass: boolean; industry: string } {
+  const sector = (profile.sector ?? "").toLowerCase();
+  const industry = profile.industry ?? profile.sector ?? "unknown";
+  const industryLc = industry.toLowerCase();
+
+  // Explicit fails
+  if (
+    sector.includes("energy") ||
+    sector.includes("basic materials") ||
+    sector.includes("industrials") ||
+    sector.includes("consumer cyclical") ||
+    sector.includes("real estate")
+  ) {
+    return { pass: false, industry };
+  }
+
+  // Always-pass sectors
+  if (
+    sector.includes("technology") ||
+    sector.includes("financial") ||
+    sector.includes("consumer defensive") ||
+    sector.includes("utilities")
+  ) {
+    return { pass: true, industry };
+  }
+
+  // Healthcare passes unless managed care / healthcare plans
+  if (sector.includes("healthcare")) {
+    return { pass: !isManagedCareIndustry(industryLc), industry };
+  }
+
+  // Communication Services: large-cap only (>= $10B)
+  if (sector.includes("communication")) {
+    const largeCap = (profile.marketCap ?? 0) >= 10_000_000_000;
+    return { pass: largeCap, industry };
+  }
+
+  return { pass: false, industry };
+}
+
+type CachedProfile = {
+  industry: string | null;
+  industry_pass: boolean | null;
+  market_cap_billions: number | null;
+  updated_at: string | null;
+};
+
+async function readProfileCache(symbol: string): Promise<CachedProfile | null> {
+  try {
+    const supabase = createServerClient();
+    const { data, error } = await supabase
+      .from("stock_profiles")
+      .select("industry, industry_pass, market_cap_billions, updated_at")
+      .eq("symbol", symbol.toUpperCase())
+      .maybeSingle();
+    if (error) return null;
+    return (data as CachedProfile) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function writeProfileCache(
+  symbol: string,
+  record: { industry: string | null; industry_pass: boolean; marketCapBillions: number | null },
+): Promise<void> {
+  try {
+    const supabase = createServerClient();
+    await supabase.from("stock_profiles").upsert(
+      {
+        symbol: symbol.toUpperCase(),
+        industry: record.industry,
+        industry_pass: record.industry_pass,
+        market_cap_billions: record.marketCapBillions,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "symbol" },
+    );
+  } catch (e) {
+    console.error(`[classify] cache write failed for ${symbol}:`, e instanceof Error ? e.message : e);
+  }
+}
+
+async function classifyFromYahoo(symbol: string): Promise<ClassificationResult> {
+  const profile = await getCompanyProfile(symbol);
+  if (!profile || (!profile.sector && !profile.industry)) {
+    // No usable data — cache the failure so we don't re-query.
+    await writeProfileCache(symbol, { industry: null, industry_pass: false, marketCapBillions: null });
+    return { pass: false, industry: "unknown", source: "yahoo" };
+  }
+  const { pass, industry } = mapYahooToPass(profile);
+  const mcapBillions =
+    typeof profile.marketCap === "number" && profile.marketCap > 0
+      ? Math.round((profile.marketCap / 1e9) * 100) / 100
+      : null;
+  await writeProfileCache(symbol, { industry, industry_pass: pass, marketCapBillions: mcapBillions });
+  return { pass, industry, source: "yahoo" };
+}
+
+// Public entrypoint — map → cache → (if allowed) Yahoo.
+export async function getIndustryClassification(
+  symbol: string,
+  options: { yahooAllowed?: boolean } = {},
+): Promise<ClassificationResult> {
+  const norm = normalizeSymbol(symbol);
+
+  const mapped = INDUSTRY_MAP[norm];
+  if (mapped !== undefined) {
+    return { pass: PASSING_CLASSES.has(mapped), industry: mapped, source: "map" };
+  }
+
+  const cached = await readProfileCache(symbol);
+  if (cached && cached.industry_pass !== null) {
+    return {
+      pass: cached.industry_pass === true,
+      industry: cached.industry ?? "cached",
+      source: "cache",
+    };
+  }
+
+  if (!options.yahooAllowed) {
+    return { pass: false, industry: "unknown", source: "unknown" };
+  }
+
+  return await classifyFromYahoo(symbol);
+}

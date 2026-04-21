@@ -30,6 +30,14 @@ type QuoteSummaryResult = {
   earningsHistory?: { history?: Array<{ quarter?: string | number | Date }> };
   assetProfile?: { sector?: string; industry?: string };
   summaryProfile?: { sector?: string; industry?: string };
+  summaryDetail?: { marketCap?: number };
+  price?: { marketCap?: number };
+};
+
+export type YahooProfile = {
+  sector: string | null;
+  industry: string | null;
+  marketCap: number | null;
 };
 
 async function quoteMinimal(symbol: string): Promise<MinimalQuote | null> {
@@ -91,15 +99,32 @@ export async function getHistoricalPrices(
 
 async function quoteSummary(symbol: string, modules: string[]): Promise<QuoteSummaryResult | null> {
   try {
-    const res = (await (
-      yahooFinance as unknown as {
-        quoteSummary: (s: string, opts: { modules: string[] }) => Promise<QuoteSummaryResult>;
-      }
-    ).quoteSummary(symbol, { modules })) as QuoteSummaryResult;
+    const fn = (yahooFinance as unknown as {
+      quoteSummary: (
+        s: string,
+        opts: { modules: string[] },
+        moduleOpts?: { validateResult?: boolean },
+      ) => Promise<QuoteSummaryResult>;
+    }).quoteSummary;
+    const res = await fn(symbol, { modules }, { validateResult: false });
     return res;
-  } catch {
+  } catch (e) {
+    console.error(`[yahoo] quoteSummary(${symbol}) failed:`, e instanceof Error ? e.message : e);
     return null;
   }
+}
+
+// Combined profile fetch — sector, industry, marketCap in a single API call.
+export async function getCompanyProfile(symbol: string): Promise<YahooProfile | null> {
+  const summary = await quoteSummary(symbol, ["assetProfile", "summaryProfile", "summaryDetail", "price"]);
+  if (!summary) return null;
+  const sector =
+    summary.assetProfile?.sector ?? summary.summaryProfile?.sector ?? null;
+  const industry =
+    summary.assetProfile?.industry ?? summary.summaryProfile?.industry ?? null;
+  const marketCap = summary.summaryDetail?.marketCap ?? summary.price?.marketCap ?? null;
+  if (!sector && !industry && !marketCap) return null;
+  return { sector, industry, marketCap };
 }
 
 async function getPastEarningsDates(symbol: string): Promise<Date[]> {
