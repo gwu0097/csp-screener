@@ -36,6 +36,13 @@ function basicAuthHeader(): string {
 }
 
 async function postTokenRequest(body: URLSearchParams): Promise<TokenResponse> {
+  const grantType = body.get("grant_type");
+  console.log("[schwab-token] POST", `${OAUTH_BASE}/token`, {
+    grant_type: grantType,
+    redirect_uri: body.get("redirect_uri"),
+    clientIdPresent: Boolean(CLIENT_ID),
+    clientSecretPresent: Boolean(CLIENT_SECRET),
+  });
   const res = await fetch(`${OAUTH_BASE}/token`, {
     method: "POST",
     headers: {
@@ -45,11 +52,17 @@ async function postTokenRequest(body: URLSearchParams): Promise<TokenResponse> {
     body: body.toString(),
     cache: "no-store",
   });
+  const text = await res.text();
+  console.log("[schwab-token] response status:", res.status, "body length:", text.length);
   if (!res.ok) {
-    const text = await res.text();
+    console.error("[schwab-token] error body:", text);
     throw new Error(`Schwab token request failed: ${res.status} ${text}`);
   }
-  return (await res.json()) as TokenResponse;
+  try {
+    return JSON.parse(text) as TokenResponse;
+  } catch {
+    throw new Error(`Schwab token response not JSON: ${text.slice(0, 200)}`);
+  }
 }
 
 async function persistTokens(tokens: TokenResponse): Promise<void> {

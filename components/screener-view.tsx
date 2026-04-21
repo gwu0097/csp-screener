@@ -2,7 +2,7 @@
 
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { RefreshCcw, AlertTriangle, ChevronDown, ChevronRight } from "lucide-react";
+import { Play, AlertTriangle, ChevronDown, ChevronRight, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -19,9 +19,13 @@ import { LogTradeDialog } from "@/components/log-trade-dialog";
 
 type Props = {
   connected: boolean;
-  results: ScreenerResult[];
-  errors: string[];
 };
+
+type RunState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "ready"; results: ScreenerResult[]; errors: string[]; ranAt: Date }
+  | { status: "error"; message: string };
 
 function recColor(rec: ScreenerResult["recommendation"]) {
   switch (rec) {
@@ -49,9 +53,10 @@ function fmtNum(n: number | null | undefined, digits = 2) {
   return n.toFixed(digits);
 }
 
-export function ScreenerView({ connected, results, errors }: Props) {
+export function ScreenerView({ connected }: Props) {
   const router = useRouter();
-  const [isPending, startTransition] = useTransition();
+  const [, startTransition] = useTransition();
+  const [state, setState] = useState<RunState>({ status: "idle" });
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [logRow, setLogRow] = useState<ScreenerResult | null>(null);
 
@@ -59,6 +64,31 @@ export function ScreenerView({ connected, results, errors }: Props) {
 
   const today = new Date().toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
   const isEarningsSeason = isLikelyEarningsSeason(new Date());
+
+  async function runScreener() {
+    setState({ status: "loading" });
+    setExpanded({});
+    try {
+      const res = await fetch("/api/screener", { cache: "no-store" });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error((body as { errors?: string[] }).errors?.[0] ?? `HTTP ${res.status}`);
+      }
+      const json = (await res.json()) as { results: ScreenerResult[]; errors: string[] };
+      setState({
+        status: "ready",
+        results: json.results ?? [],
+        errors: json.errors ?? [],
+        ranAt: new Date(),
+      });
+    } catch (e) {
+      setState({ status: "error", message: e instanceof Error ? e.message : "Screener failed" });
+    }
+  }
+
+  const isLoading = state.status === "loading";
+  const results = state.status === "ready" ? state.results : [];
+  const errors = state.status === "ready" ? state.errors : [];
 
   return (
     <div className="space-y-4">
@@ -71,6 +101,11 @@ export function ScreenerView({ connected, results, errors }: Props) {
           <Badge variant={connected ? "default" : "destructive"}>
             Schwab: {connected ? "connected" : "disconnected"}
           </Badge>
+          {state.status === "ready" && (
+            <span className="text-xs text-muted-foreground">
+              Last run: {state.ranAt.toLocaleTimeString()}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2">
           {!connected && (
@@ -79,12 +114,17 @@ export function ScreenerView({ connected, results, errors }: Props) {
             </Button>
           )}
           <Button
-            variant="outline"
-            disabled={isPending}
-            onClick={() => startTransition(() => router.refresh())}
+            variant={state.status === "idle" ? "default" : "outline"}
+            disabled={isLoading}
+            onClick={runScreener}
+            size={state.status === "idle" ? "default" : "default"}
           >
-            <RefreshCcw className={cn("mr-2 h-4 w-4", isPending && "animate-spin")} />
-            Refresh
+            {isLoading ? (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            ) : (
+              <Play className="mr-2 h-4 w-4" />
+            )}
+            {isLoading ? "Running…" : state.status === "ready" ? "Run again" : "Run Screener"}
           </Button>
         </div>
       </div>
@@ -93,6 +133,15 @@ export function ScreenerView({ connected, results, errors }: Props) {
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200">
           Schwab is not connected. The screener will still run Stage 1 and Stage 2 on industry/quality, but
           options-based stages require Schwab market data.
+        </div>
+      )}
+
+      {state.status === "error" && (
+        <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-200">
+          <div className="mb-1 flex items-center gap-2 font-medium">
+            <AlertTriangle className="h-4 w-4" /> Screener failed
+          </div>
+          <div>{state.message}</div>
         </div>
       )}
 
@@ -109,85 +158,113 @@ export function ScreenerView({ connected, results, errors }: Props) {
         </div>
       )}
 
-      <div className="overflow-hidden rounded-lg border border-border">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead className="w-8"></TableHead>
-              <TableHead>Symbol</TableHead>
-              <TableHead>Price</TableHead>
-              <TableHead>Earnings</TableHead>
-              <TableHead>DTE</TableHead>
-              <TableHead>Crush</TableHead>
-              <TableHead>Opp.</TableHead>
-              <TableHead>Strike</TableHead>
-              <TableHead>Premium</TableHead>
-              <TableHead>Delta</TableHead>
-              <TableHead>Spread</TableHead>
-              <TableHead>Recommendation</TableHead>
-              <TableHead></TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {results.length === 0 && (
+      {state.status === "idle" && (
+        <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-border bg-background/40 px-6 py-16 text-center">
+          <Play className="mb-3 h-10 w-10 text-muted-foreground" />
+          <h2 className="mb-1 text-lg font-semibold">Ready when you are</h2>
+          <p className="mb-6 max-w-md text-sm text-muted-foreground">
+            The screener pulls today&apos;s and tomorrow&apos;s earnings, runs all four scoring stages, and
+            returns a ranked list. It takes a few seconds.
+          </p>
+          <Button size="lg" onClick={runScreener}>
+            <Play className="mr-2 h-4 w-4" />
+            Run Screener
+          </Button>
+        </div>
+      )}
+
+      {state.status === "loading" && (
+        <div className="flex flex-col items-center justify-center rounded-lg border border-border bg-background/40 px-6 py-16 text-center">
+          <Loader2 className="mb-3 h-10 w-10 animate-spin text-muted-foreground" />
+          <div className="text-sm text-muted-foreground">
+            Fetching earnings calendar, options chains, and historical moves…
+          </div>
+        </div>
+      )}
+
+      {state.status === "ready" && (
+        <div className="overflow-hidden rounded-lg border border-border">
+          <Table>
+            <TableHeader>
               <TableRow>
-                <TableCell colSpan={13} className="py-10 text-center text-sm text-muted-foreground">
-                  No qualifying earnings today or tomorrow.
-                </TableCell>
+                <TableHead className="w-8"></TableHead>
+                <TableHead>Symbol</TableHead>
+                <TableHead>Price</TableHead>
+                <TableHead>Earnings</TableHead>
+                <TableHead>DTE</TableHead>
+                <TableHead>Crush</TableHead>
+                <TableHead>Opp.</TableHead>
+                <TableHead>Strike</TableHead>
+                <TableHead>Premium</TableHead>
+                <TableHead>Delta</TableHead>
+                <TableHead>Spread</TableHead>
+                <TableHead>Recommendation</TableHead>
+                <TableHead></TableHead>
               </TableRow>
-            )}
-            {results.map((r) => {
-              const id = `${r.symbol}-${r.earningsDate}`;
-              const open = !!expanded[id];
-              const actionable = r.recommendation === "Strong - Take the trade" || r.recommendation === "Marginal - Size smaller";
-              return (
-                <>
-                  <TableRow key={id} className="cursor-pointer" onClick={() => toggle(id)}>
-                    <TableCell>
-                      {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-                    </TableCell>
-                    <TableCell className="font-medium">{r.symbol}</TableCell>
-                    <TableCell>${fmtNum(r.price)}</TableCell>
-                    <TableCell className="text-xs">
-                      {r.earningsDate} <span className="text-muted-foreground">· {r.earningsTiming}</span>
-                    </TableCell>
-                    <TableCell>{r.daysToExpiry}</TableCell>
-                    <TableCell className={cn("font-mono", gradeColor(r.stageThree?.crushGrade))}>
-                      {r.stageThree?.crushGrade ?? "—"}
-                    </TableCell>
-                    <TableCell className={cn("font-mono", gradeColor(r.stageFour?.opportunityGrade))}>
-                      {r.stageFour?.opportunityGrade ?? "—"}
-                    </TableCell>
-                    <TableCell>{r.stageFour?.suggestedStrike ? `$${fmtNum(r.stageFour.suggestedStrike)}` : "—"}</TableCell>
-                    <TableCell>{r.stageFour?.premium !== null && r.stageFour?.premium !== undefined ? `$${fmtNum(r.stageFour.premium)}` : "—"}</TableCell>
-                    <TableCell>{fmtNum(r.stageFour?.delta ?? null, 3)}</TableCell>
-                    <TableCell>{r.stageFour?.bidAskSpreadPct !== null && r.stageFour?.bidAskSpreadPct !== undefined ? `${fmtNum(r.stageFour.bidAskSpreadPct, 1)}%` : "—"}</TableCell>
-                    <TableCell>
-                      <span className={cn("rounded-md border px-2 py-0.5 text-xs", recColor(r.recommendation))}>
-                        {r.recommendation}
-                      </span>
-                    </TableCell>
-                    <TableCell onClick={(e) => e.stopPropagation()}>
-                      {actionable && r.stageFour?.suggestedStrike ? (
-                        <Button size="sm" variant="secondary" onClick={() => setLogRow(r)}>
-                          Log trade
-                        </Button>
-                      ) : null}
-                    </TableCell>
-                  </TableRow>
-                  {open && (
-                    <TableRow key={`${id}-detail`}>
-                      <TableCell colSpan={13} className="bg-muted/30">
-                        <ExpandedDetail r={r} />
+            </TableHeader>
+            <TableBody>
+              {results.length === 0 && (
+                <TableRow>
+                  <TableCell colSpan={13} className="py-10 text-center text-sm text-muted-foreground">
+                    No qualifying earnings today or tomorrow.
+                  </TableCell>
+                </TableRow>
+              )}
+              {results.map((r) => {
+                const id = `${r.symbol}-${r.earningsDate}`;
+                const open = !!expanded[id];
+                const actionable =
+                  r.recommendation === "Strong - Take the trade" ||
+                  r.recommendation === "Marginal - Size smaller";
+                return (
+                  <>
+                    <TableRow key={id} className="cursor-pointer" onClick={() => toggle(id)}>
+                      <TableCell>
+                        {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                      </TableCell>
+                      <TableCell className="font-medium">{r.symbol}</TableCell>
+                      <TableCell>${fmtNum(r.price)}</TableCell>
+                      <TableCell className="text-xs">
+                        {r.earningsDate} <span className="text-muted-foreground">· {r.earningsTiming}</span>
+                      </TableCell>
+                      <TableCell>{r.daysToExpiry}</TableCell>
+                      <TableCell className={cn("font-mono", gradeColor(r.stageThree?.crushGrade))}>
+                        {r.stageThree?.crushGrade ?? "—"}
+                      </TableCell>
+                      <TableCell className={cn("font-mono", gradeColor(r.stageFour?.opportunityGrade))}>
+                        {r.stageFour?.opportunityGrade ?? "—"}
+                      </TableCell>
+                      <TableCell>{r.stageFour?.suggestedStrike ? `$${fmtNum(r.stageFour.suggestedStrike)}` : "—"}</TableCell>
+                      <TableCell>{r.stageFour?.premium !== null && r.stageFour?.premium !== undefined ? `$${fmtNum(r.stageFour.premium)}` : "—"}</TableCell>
+                      <TableCell>{fmtNum(r.stageFour?.delta ?? null, 3)}</TableCell>
+                      <TableCell>{r.stageFour?.bidAskSpreadPct !== null && r.stageFour?.bidAskSpreadPct !== undefined ? `${fmtNum(r.stageFour.bidAskSpreadPct, 1)}%` : "—"}</TableCell>
+                      <TableCell>
+                        <span className={cn("rounded-md border px-2 py-0.5 text-xs", recColor(r.recommendation))}>
+                          {r.recommendation}
+                        </span>
+                      </TableCell>
+                      <TableCell onClick={(e) => e.stopPropagation()}>
+                        {actionable && r.stageFour?.suggestedStrike ? (
+                          <Button size="sm" variant="secondary" onClick={() => setLogRow(r)}>
+                            Log trade
+                          </Button>
+                        ) : null}
                       </TableCell>
                     </TableRow>
-                  )}
-                </>
-              );
-            })}
-          </TableBody>
-        </Table>
-      </div>
+                    {open && (
+                      <TableRow key={`${id}-detail`}>
+                        <TableCell colSpan={13} className="bg-muted/30">
+                          <ExpandedDetail r={r} />
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </>
+                );
+              })}
+            </TableBody>
+          </Table>
+        </div>
+      )}
 
       {logRow && (
         <LogTradeDialog
@@ -196,6 +273,7 @@ export function ScreenerView({ connected, results, errors }: Props) {
           onOpenChange={(o) => !o && setLogRow(null)}
           onSuccess={() => {
             setLogRow(null);
+            // Trade log is separate from the screener run; refresh /history if we're there.
             startTransition(() => router.refresh());
           }}
         />
