@@ -1,5 +1,6 @@
 import {
   getOptionsChain,
+  getOptionsChainRange,
   SchwabOptionContract,
   SchwabOptionsChain,
 } from "@/lib/schwab";
@@ -330,28 +331,72 @@ function expectedMoveFromIv(iv: number | null, dte: number): number | null {
   return iv * Math.sqrt(dte / 365);
 }
 
+// Pick the expiration key whose DTE is closest to the target DTE, within the
+// allowed [minDte, maxDte] window. Schwab keys look like "2026-05-16:32".
+function pickExpirationNear(
+  chain: SchwabOptionsChain,
+  targetDte: number,
+  minDte: number,
+  maxDte: number,
+): { key: string; dte: number } | null {
+  const keys = Object.keys(chain.putExpDateMap ?? {});
+  let best: { key: string; dte: number } | null = null;
+  for (const k of keys) {
+    const parts = k.split(":");
+    const dte = Number(parts[1]);
+    if (!Number.isFinite(dte) || dte < minDte || dte > maxDte) continue;
+    if (!best || Math.abs(dte - targetDte) < Math.abs(best.dte - targetDte)) {
+      best = { key: k, dte };
+    }
+  }
+  return best;
+}
+
 export async function runStageThree(
   candidate: EarningsCandidate,
   chain: SchwabOptionsChain,
   monthlyChain: SchwabOptionsChain | null,
   historicalMoves: EarningsMove[],
 ): Promise<StageThreeResult> {
+  const sym = candidate.symbol;
   const weeklyAtm = pickAtmContract(chain, candidate.expiry, candidate.price);
   const weeklyIv = ivPercent(weeklyAtm?.volatility);
+  console.log(
+    `[stage3:${sym}] weekly ATM strike=${weeklyAtm?.strikePrice ?? "?"} raw.volatility=${weeklyAtm?.volatility ?? "?"} ` +
+      `weeklyIv=${weeklyIv} spot=${candidate.price} expiry=${candidate.expiry}`,
+  );
 
   let monthlyIv: number | null = null;
+  let monthlyExpiryKey: string | null = null;
   if (monthlyChain) {
-    const expKey = Object.keys(monthlyChain.putExpDateMap ?? {})[0];
-    if (expKey) {
-      const prefix = expKey.split(":")[0];
+    const monthlyExpKeys = Object.keys(monthlyChain.putExpDateMap ?? {});
+    console.log(
+      `[stage3:${sym}] monthly chain has ${monthlyExpKeys.length} expirations: ${monthlyExpKeys.slice(0, 8).join(", ")}`,
+    );
+    const picked = pickExpirationNear(monthlyChain, 30, 22, 55);
+    if (picked) {
+      monthlyExpiryKey = picked.key;
+      const prefix = picked.key.split(":")[0];
       const monthlyAtm = pickAtmContract(monthlyChain, prefix, candidate.price);
       monthlyIv = ivPercent(monthlyAtm?.volatility);
+      console.log(
+        `[stage3:${sym}] monthly ATM expKey=${picked.key} dte=${picked.dte} strike=${monthlyAtm?.strikePrice ?? "?"} ` +
+          `raw.volatility=${monthlyAtm?.volatility ?? "?"} monthlyIv=${monthlyIv}`,
+      );
+    } else {
+      console.warn(`[stage3:${sym}] monthly chain had no expiration in DTE window 22-55`);
     }
+  } else {
+    console.warn(`[stage3:${sym}] monthlyChain is null — monthly IV unavailable`);
   }
 
   const emPct = expectedMoveFromIv(weeklyIv, candidate.daysToExpiry);
   const movePcts = historicalMoves.map((m) => m.actualMovePct);
   const medianMove = movePcts.length > 0 ? median(movePcts) : null;
+  console.log(
+    `[stage3:${sym}] historicalMoves count=${historicalMoves.length} medianMove=${medianMove ?? "null"} ` +
+      `emPct=${emPct ?? "null"} (weeklyIv * sqrt(${candidate.daysToExpiry}/365))`,
+  );
 
   // 30-day realized vol proxy
   const today = new Date();
@@ -359,6 +404,10 @@ export async function runStageThree(
   const prices = await getHistoricalPrices(candidate.symbol, thirtyDaysAgo, today);
   const closes = prices.map((p) => p.close).filter((c) => c > 0);
   const realizedVol = annualizedRealizedVol(closes);
+  console.log(
+    `[stage3:${sym}] realizedVol30d bars=${prices.length} usableCloses=${closes.length} rv=${realizedVol ?? "null"} ` +
+      `ivEdgeRatio=${weeklyIv && realizedVol ? (weeklyIv / realizedVol).toFixed(2) : "n/a"}`,
+  );
 
   const surprise = await getEarningsSurpriseHistory(candidate.symbol);
 
@@ -370,6 +419,14 @@ export async function runStageThree(
 
   const score = historicalMoveScore + consistencyScore + termStructureScore + ivEdgeScore + surpriseScore;
   const threshold = crushThresholdForDte(candidate.daysToExpiry);
+
+  console.log(
+    `[stage3:${sym}] SCORES hist=${historicalMoveScore}/8 cons=${consistencyScore}/4 ` +
+      `term=${termStructureScore}/5 ivEdge=${ivEdgeScore}/4 surprise=${surpriseScore}/4 ` +
+      `total=${score}/25 threshold=${threshold} pass=${score >= threshold} ` +
+      `grade=${gradeFromCrushScore(score)}`,
+  );
+  void monthlyExpiryKey;
 
   return {
     score,
@@ -549,6 +606,22 @@ export async function safeGetChain(
   }
 }
 
+export async function safeGetChainRange(
+  symbol: string,
+  fromDate: string,
+  toDate: string,
+): Promise<SchwabOptionsChain | null> {
+  try {
+    return await getOptionsChainRange(symbol, fromDate, toDate);
+  } catch (e) {
+    console.warn(
+      `[screener] safeGetChainRange(${symbol}, ${fromDate}→${toDate}) failed:`,
+      e instanceof Error ? e.message : e,
+    );
+    return null;
+  }
+}
+
 export function chainHasWeeklyExpiry(chain: SchwabOptionsChain, expiryIso: string): boolean {
   return hasWeeklyFridayExpiry(chain, expiryIso);
 }
@@ -645,11 +718,19 @@ export async function runStagesThreeFour(base: ScreenerResult): Promise<Screener
   }
 
   const historicalMoves = await getHistoricalEarningsMovements(candidate.symbol);
-  const monthlyTarget = new Date(Date.now() + 35 * 24 * 60 * 60 * 1000);
-  const monthlyChain = await safeGetChain(
+
+  // Monthly IV needs a date RANGE, not a single day — 3rd-Friday monthly
+  // expiries only rarely coincide with any given today+N.
+  const monthlyFrom = new Date(Date.now() + 22 * 24 * 60 * 60 * 1000);
+  const monthlyTo = new Date(Date.now() + 55 * 24 * 60 * 60 * 1000);
+  const monthlyChain = await safeGetChainRange(
     candidate.symbol,
-    toIsoDate(monthlyTarget),
-    toIsoDate(monthlyTarget),
+    toIsoDate(monthlyFrom),
+    toIsoDate(monthlyTo),
+  );
+  console.log(
+    `[stage3:${candidate.symbol}] monthly chain fetch ${toIsoDate(monthlyFrom)}→${toIsoDate(monthlyTo)} ` +
+      `result=${monthlyChain ? "ok" : "null"}`,
   );
 
   const stageThree = await runStageThree(candidate, chain, monthlyChain, historicalMoves);

@@ -204,15 +204,31 @@ export async function getEarningsSurpriseHistory(symbol: string): Promise<Earnin
     const recent = rows.slice(0, 8);
     let beatsInBand = 0;
     let counted = 0;
+    const perQuarter: string[] = [];
     for (const r of recent) {
-      if (r.actual === null || r.estimate === null || r.estimate === 0) continue;
+      if (r.actual === null || r.estimate === null || r.estimate === 0) {
+        perQuarter.push(`${r.period}:skip(${r.actual}/${r.estimate})`);
+        continue;
+      }
       counted += 1;
       const surprisePct = (r.actual - r.estimate) / Math.abs(r.estimate);
-      if (surprisePct >= 0 && surprisePct <= 0.05) beatsInBand += 1;
+      const inBand = surprisePct >= 0 && surprisePct <= 0.05;
+      if (inBand) beatsInBand += 1;
+      perQuarter.push(
+        `${r.period}:${(surprisePct * 100).toFixed(1)}%${inBand ? "✓" : ""}`,
+      );
     }
     const score = Math.min(4, Math.round((beatsInBand / Math.max(1, counted)) * 4));
+    console.log(
+      `[finnhub] getEarningsSurpriseHistory(${symbol}) raw=${rows.length} examined=${counted} ` +
+        `beatsInBand=${beatsInBand} score=${score}/4 — ${perQuarter.join(", ")}`,
+    );
     return { surpriseScore: score, beatsWithin5Pct: beatsInBand, quartersExamined: counted };
-  } catch {
+  } catch (e) {
+    console.warn(
+      `[finnhub] getEarningsSurpriseHistory(${symbol}) failed:`,
+      e instanceof Error ? e.message : e,
+    );
     return { surpriseScore: 0, beatsWithin5Pct: 0, quartersExamined: 0 };
   }
 }

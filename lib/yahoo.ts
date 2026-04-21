@@ -268,16 +268,61 @@ export async function getCompanyProfile(symbol: string): Promise<YahooProfile | 
   }
 }
 
+// yahoo-finance2 sometimes unwraps { raw, fmt } objects into the raw value,
+// sometimes not. Accept every shape we've seen in the wild.
+function parseYahooDate(v: unknown): Date | null {
+  if (v == null) return null;
+  if (v instanceof Date) return Number.isNaN(v.getTime()) ? null : v;
+  if (typeof v === "string") {
+    const d = new Date(v);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  if (typeof v === "number") {
+    const ms = v < 1e12 ? v * 1000 : v; // treat small numbers as unix seconds
+    const d = new Date(ms);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  if (typeof v === "object") {
+    const obj = v as { raw?: unknown; fmt?: unknown };
+    if (typeof obj.raw === "number") {
+      const ms = obj.raw < 1e12 ? obj.raw * 1000 : obj.raw;
+      const d = new Date(ms);
+      if (!Number.isNaN(d.getTime())) return d;
+    }
+    if (typeof obj.raw === "string") {
+      const d = new Date(obj.raw);
+      if (!Number.isNaN(d.getTime())) return d;
+    }
+    if (typeof obj.fmt === "string") {
+      const d = new Date(obj.fmt);
+      if (!Number.isNaN(d.getTime())) return d;
+    }
+  }
+  return null;
+}
+
 async function getPastEarningsDates(symbol: string): Promise<Date[]> {
   try {
     const summary = await quoteSummary(symbol, ["earningsHistory"]);
     const history = summary?.earningsHistory?.history ?? [];
-    return history
-      .map((h) => (h?.quarter ? new Date(h.quarter as string | number | Date) : null))
-      .filter((d): d is Date => d !== null && !Number.isNaN(d.getTime()))
+    if (history.length > 0) {
+      const sample = history[0]?.quarter;
+      console.log(
+        `[yahoo] getPastEarningsDates(${symbol}) history length=${history.length} sample.quarter type=${typeof sample} value=${JSON.stringify(sample)}`,
+      );
+    } else {
+      console.warn(`[yahoo] getPastEarningsDates(${symbol}) earningsHistory.history is empty or missing`);
+    }
+    const parsed = history
+      .map((h) => parseYahooDate(h?.quarter))
+      .filter((d): d is Date => d !== null)
       .filter((d) => d.getTime() < Date.now())
       .sort((a, b) => b.getTime() - a.getTime())
       .slice(0, 8);
+    console.log(
+      `[yahoo] getPastEarningsDates(${symbol}) parsed ${parsed.length} valid dates: ${parsed.map((d) => d.toISOString().slice(0, 10)).join(", ")}`,
+    );
+    return parsed;
   } catch (e) {
     logYahooFailure(`getPastEarningsDates(${symbol})`, e);
     return [];
@@ -287,15 +332,26 @@ async function getPastEarningsDates(symbol: string): Promise<Date[]> {
 export async function getHistoricalEarningsMovements(symbol: string): Promise<EarningsMove[]> {
   try {
     const earningsDates = await getPastEarningsDates(symbol);
-    if (earningsDates.length === 0) return [];
+    if (earningsDates.length === 0) {
+      console.warn(`[yahoo] getHistoricalEarningsMovements(${symbol}) — no past earnings dates, returning []`);
+      return [];
+    }
 
     const earliest = earningsDates[earningsDates.length - 1];
     const from = new Date(earliest.getTime() - 10 * 24 * 60 * 60 * 1000);
     const to = new Date();
     const prices = await getHistoricalPrices(symbol, from, to);
-    if (prices.length === 0) return [];
+    console.log(
+      `[yahoo] getHistoricalEarningsMovements(${symbol}) fetched ${prices.length} bars ` +
+        `from ${from.toISOString().slice(0, 10)} to ${to.toISOString().slice(0, 10)}`,
+    );
+    if (prices.length === 0) {
+      console.warn(`[yahoo] getHistoricalEarningsMovements(${symbol}) — historical() returned empty`);
+      return [];
+    }
 
     const moves: EarningsMove[] = [];
+    const details: string[] = [];
     for (const ed of earningsDates) {
       const target = ed.getTime();
       let closeBefore: number | null = null;
@@ -313,15 +369,22 @@ export async function getHistoricalEarningsMovements(symbol: string): Promise<Ea
         }
       }
 
+      const iso = ed.toISOString().slice(0, 10);
       if (closeBefore && openAfter && closeBefore > 0) {
         const pct = (openAfter - closeBefore) / closeBefore;
         moves.push({
-          date: ed.toISOString().slice(0, 10),
+          date: iso,
           actualMovePct: Math.abs(pct),
           direction: pct > 0.001 ? "up" : pct < -0.001 ? "down" : "flat",
         });
+        details.push(`${iso}: ${closeBefore.toFixed(2)}→${openAfter.toFixed(2)} (${(pct * 100).toFixed(2)}%)`);
+      } else {
+        details.push(`${iso}: closeBefore=${closeBefore ?? "null"} openAfter=${openAfter ?? "null"} (skipped)`);
       }
     }
+    console.log(
+      `[yahoo] getHistoricalEarningsMovements(${symbol}) produced ${moves.length} moves; details: ${details.join(" | ")}`,
+    );
     return moves;
   } catch (e) {
     logYahooFailure(`getHistoricalEarningsMovements(${symbol})`, e);

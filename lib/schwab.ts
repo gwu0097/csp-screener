@@ -263,6 +263,26 @@ export async function getOptionsChain(
   return schwabGet<SchwabOptionsChain>(`${MARKETDATA_BASE}/chains`, params);
 }
 
+// Range variant — returns every expiration inside [fromDate, toDate] for the
+// symbol. Used for the monthly IV lookup, where targeting a single day is
+// unreliable (3rd-Friday expiries only rarely coincide with any particular
+// day N days out).
+export async function getOptionsChainRange(
+  symbol: string,
+  fromDate: string,
+  toDate: string,
+): Promise<SchwabOptionsChain> {
+  return schwabGet<SchwabOptionsChain>(`${MARKETDATA_BASE}/chains`, {
+    symbol,
+    contractType: "PUT",
+    strikeCount: 30,
+    includeUnderlyingQuote: true,
+    strategy: "SINGLE",
+    fromDate,
+    toDate,
+  });
+}
+
 export type SchwabQuote = {
   symbol: string;
   quote?: {
