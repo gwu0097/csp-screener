@@ -40,7 +40,9 @@ export type YahooProfile = {
   marketCap: number | null;
 };
 
-async function quoteMinimal(symbol: string): Promise<MinimalQuote | null> {
+type RawQuote = Record<string, unknown>;
+
+async function quoteRaw(symbol: string): Promise<RawQuote | null> {
   try {
     // yahoo-finance2 runs Zod validation on the response by default. Yahoo
     // regularly adds new fields, causing validation to throw. Disable it so
@@ -53,23 +55,90 @@ async function quoteMinimal(symbol: string): Promise<MinimalQuote | null> {
       ) => Promise<unknown>;
     }).quote;
     const result = await fn(symbol, {}, { validateResult: false });
-    if (!result) return null;
-    const record = (Array.isArray(result) ? result[0] : result) as MinimalQuote | null | undefined;
-    return record ?? null;
+    if (result === null || result === undefined) {
+      console.warn(`[yahoo] quote(${symbol}) returned ${result === null ? "null" : "undefined"}`);
+      return null;
+    }
+    const record = (Array.isArray(result) ? result[0] : result) as RawQuote | null | undefined;
+    if (!record) {
+      console.warn(
+        `[yahoo] quote(${symbol}) returned empty ${Array.isArray(result) ? "array" : "object"}`,
+      );
+      return null;
+    }
+    return record;
   } catch (e) {
-    console.error(`[yahoo] quote(${symbol}) failed:`, e instanceof Error ? e.message : e);
+    console.error(
+      `[yahoo] quote(${symbol}) threw:`,
+      e instanceof Error ? e.message : e,
+      e instanceof Error ? e.stack?.split("\n").slice(0, 3).join(" | ") : undefined,
+    );
     return null;
   }
 }
 
+function pickNumber(obj: RawQuote, key: string): number | null {
+  const v = obj[key];
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+async function quoteMinimal(symbol: string): Promise<MinimalQuote | null> {
+  const record = await quoteRaw(symbol);
+  if (!record) return null;
+  return {
+    regularMarketPrice: pickNumber(record, "regularMarketPrice") ?? undefined,
+    marketCap: pickNumber(record, "marketCap") ?? undefined,
+  };
+}
+
 export async function getCurrentPrice(symbol: string): Promise<number | null> {
-  const q = await quoteMinimal(symbol);
-  const price = q?.regularMarketPrice;
-  if (typeof price !== "number" || !Number.isFinite(price) || price <= 0) {
-    console.warn(`[yahoo] no regularMarketPrice for ${symbol}`);
-    return null;
+  const record = await quoteRaw(symbol);
+  if (!record) return null;
+
+  // Try several price fields in priority order. Yahoo sometimes omits
+  // regularMarketPrice when the market is closed or the symbol is thinly
+  // traded, but one of the fallbacks is almost always present.
+  const priceFields = [
+    "regularMarketPrice",
+    "postMarketPrice",
+    "preMarketPrice",
+    "regularMarketPreviousClose",
+    "bid",
+    "ask",
+  ] as const;
+  for (const field of priceFields) {
+    const v = pickNumber(record, field);
+    if (v !== null && v > 0) {
+      if (field !== "regularMarketPrice") {
+        console.warn(`[yahoo] getCurrentPrice(${symbol}) fell back to ${field}=${v}`);
+      }
+      return v;
+    }
   }
-  return price;
+
+  // Nothing usable — dump every field we care about so the issue is diagnosable
+  // in the Vercel log.
+  console.warn(`[yahoo] getCurrentPrice(${symbol}) no usable price field. Top-level keys:`, Object.keys(record));
+  const debug: Record<string, unknown> = {};
+  for (const key of [
+    "symbol",
+    "quoteType",
+    "marketState",
+    "regularMarketPrice",
+    "regularMarketPreviousClose",
+    "postMarketPrice",
+    "preMarketPrice",
+    "bid",
+    "ask",
+    "marketCap",
+    "currency",
+    "exchange",
+    "quoteSourceName",
+  ]) {
+    debug[key] = record[key];
+  }
+  console.warn(`[yahoo] quote(${symbol}) debug fields:`, debug);
+  return null;
 }
 
 export async function getMarketCap(symbol: string): Promise<number | null> {

@@ -33,36 +33,69 @@ async function finnhubGet<T>(path: string, params: Record<string, string | numbe
   return (await res.json()) as T;
 }
 
-function toISODate(d: Date): string {
-  return d.toISOString().slice(0, 10);
+// Returns the current calendar date as YYYY-MM-DD in the US Eastern
+// (America/New_York) time zone — the market's local date.
+function todayInEastern(): string {
+  // "en-CA" locale formats dates as YYYY-MM-DD.
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
 }
 
+function addOneDayIso(date: string): string {
+  const [y, m, d] = date.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + 1);
+  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, "0")}-${String(dt.getUTCDate()).padStart(2, "0")}`;
+}
+
+// Only returns the earnings a trader can act on TODAY:
+//   - today's AMC (after market close)
+//   - tomorrow's BMO (before market open)
+// Dates are compared in US Eastern (market) time.
 export async function getTodayEarnings(): Promise<EarningsCalendarItem[]> {
-  const today = new Date();
-  const tomorrow = new Date(today.getTime() + 24 * 60 * 60 * 1000);
-  const from = toISODate(today);
-  const to = toISODate(tomorrow);
+  const today = todayInEastern();
+  const tomorrow = addOneDayIso(today);
 
   try {
-    const data = await finnhubGet<{ earningsCalendar: FinnhubCalendarEntry[] }>("/calendar/earnings", { from, to });
+    const data = await finnhubGet<{ earningsCalendar: FinnhubCalendarEntry[] }>("/calendar/earnings", {
+      from: today,
+      to: tomorrow,
+    });
     const rows = data.earningsCalendar ?? [];
-    return rows
-      .map<EarningsCalendarItem | null>((r) => {
-        const hour = (r.hour ?? "").toLowerCase();
-        const timing: EarningsCalendarItem["timing"] | null =
-          hour === "bmo" ? "BMO" : hour === "amc" ? "AMC" : hour === "dmh" ? "DMH" : null;
-        if (!timing) return null;
-        return {
-          symbol: r.symbol,
-          date: r.date,
-          timing,
-          estimatedEPS: r.epsEstimate ?? null,
-          actualEPS: r.epsActual ?? null,
-        };
-      })
-      .filter((x): x is EarningsCalendarItem => x !== null)
-      .filter((x) => x.timing === "BMO" || x.timing === "AMC");
-  } catch {
+
+    const parsed: EarningsCalendarItem[] = [];
+    for (const r of rows) {
+      const hour = (r.hour ?? "").toLowerCase();
+      const timing: EarningsCalendarItem["timing"] | null =
+        hour === "bmo" ? "BMO" : hour === "amc" ? "AMC" : hour === "dmh" ? "DMH" : null;
+      if (!timing) continue;
+      parsed.push({
+        symbol: r.symbol,
+        date: r.date,
+        timing,
+        estimatedEPS: r.epsEstimate ?? null,
+        actualEPS: r.epsActual ?? null,
+      });
+    }
+
+    const kept = parsed.filter(
+      (x) =>
+        (x.date === today && x.timing === "AMC") ||
+        (x.date === tomorrow && x.timing === "BMO"),
+    );
+
+    console.log(
+      `[earnings] Finnhub returned ${rows.length}, parsed ${parsed.length}, kept ${kept.length} ` +
+        `(today=${today} AMC + tomorrow=${tomorrow} BMO)`,
+    );
+
+    return kept;
+  } catch (e) {
+    console.error("[earnings] getTodayEarnings failed:", e instanceof Error ? e.message : e);
     return [];
   }
 }
