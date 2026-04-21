@@ -117,24 +117,51 @@ export function ScreenerView({ connected }: Props) {
   const [logRow, setLogRow] = useState<ScreenerResult | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>("stage2");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  // When `groupMode` is non-null, results render as two groups with a divider.
+  // Clicking any column header switches to flat sort and sets groupMode=null.
+  const [groupMode, setGroupMode] = useState<"stage2" | "grades" | null>(null);
 
   const toggle = (id: string) => setExpanded((s) => ({ ...s, [id]: !s[id] }));
 
   function onSort(key: SortKey) {
-    if (sortKey === key) {
+    // Any column click escapes grouped mode and becomes a flat sort.
+    if (groupMode === null && sortKey === key) {
       setSortDir((d) => (d === "asc" ? "desc" : "asc"));
     } else {
+      setGroupMode(null);
       setSortKey(key);
       setSortDir(key === "symbol" ? "asc" : "desc");
     }
   }
 
-  const sortedResults = useMemo(() => {
-    if (!results) return [];
+  const view = useMemo<{ items: ScreenerResult[]; group1Count: number | null }>(() => {
+    if (!results) return { items: [], group1Count: null };
+
+    const priceOf = (r: ScreenerResult) => prices[r.symbol.toUpperCase()] ?? r.price;
+
+    if (groupMode !== null) {
+      const group1 = results.filter((r) => r.industryStatus === "pass");
+      const group2 = results.filter((r) => r.industryStatus !== "pass");
+
+      if (groupMode === "stage2") {
+        group1.sort((a, b) => (b.stageTwo?.score ?? -999) - (a.stageTwo?.score ?? -999));
+      } else {
+        // "grades" — crush grade, then opportunity grade. A > B > C > F > (none).
+        group1.sort((a, b) => {
+          const cd = gradeOrder(a.stageThree?.crushGrade) - gradeOrder(b.stageThree?.crushGrade);
+          if (cd !== 0) return cd;
+          return gradeOrder(a.stageFour?.opportunityGrade) - gradeOrder(b.stageFour?.opportunityGrade);
+        });
+      }
+      // Group 2: price descending — higher-priced names tend to have more liquid options.
+      group2.sort((a, b) => priceOf(b) - priceOf(a));
+
+      return { items: [...group1, ...group2], group1Count: group1.length };
+    }
+
+    // Flat sort
     const copy = [...results];
     copy.sort((a, b) => {
-      const priceA = prices[a.symbol.toUpperCase()] ?? a.price;
-      const priceB = prices[b.symbol.toUpperCase()] ?? b.price;
       let va: number | string = 0;
       let vb: number | string = 0;
       switch (sortKey) {
@@ -143,8 +170,8 @@ export function ScreenerView({ connected }: Props) {
           vb = b.symbol;
           break;
         case "price":
-          va = priceA;
-          vb = priceB;
+          va = priceOf(a);
+          vb = priceOf(b);
           break;
         case "dte":
           va = a.daysToExpiry;
@@ -185,8 +212,11 @@ export function ScreenerView({ connected }: Props) {
       const diff = (va as number) - (vb as number);
       return sortDir === "asc" ? diff : -diff;
     });
-    return copy;
-  }, [results, prices, sortKey, sortDir]);
+    return { items: copy, group1Count: null };
+  }, [results, prices, sortKey, sortDir, groupMode]);
+
+  const sortedResults = view.items;
+  const group1Count = view.group1Count;
 
   async function screenToday() {
     setStatus("screening");
@@ -214,6 +244,7 @@ export function ScreenerView({ connected }: Props) {
       setPrices(json.prices ?? {});
       setScreenedAt(json.screenedAt ? new Date(json.screenedAt) : new Date());
       setLastStats(json.stats ?? null);
+      setGroupMode("stage2");
       setStatus("idle");
       setMessage(`Screened ${(json.results ?? []).length} candidates`);
     } catch (e) {
@@ -280,6 +311,7 @@ export function ScreenerView({ connected }: Props) {
       const next = results.map((r) => byKey.get(`${r.symbol}|${r.earningsDate}`) ?? r);
       setResults(next);
       setPrices((prev) => ({ ...prev, ...json.prices }));
+      setGroupMode("grades");
       setMessage(`Analyzed ${json.results.length} candidates`);
       setStatus("idle");
     } catch (e) {
@@ -454,7 +486,7 @@ export function ScreenerView({ connected }: Props) {
                     </TableCell>
                   </TableRow>
                 )}
-                {sortedResults.map((r) => {
+                {sortedResults.map((r, idx) => {
                   const id = `${r.symbol}-${r.earningsDate}`;
                   const open = !!expanded[id];
                   const displayedPrice = prices[r.symbol.toUpperCase()] ?? r.price;
@@ -462,8 +494,20 @@ export function ScreenerView({ connected }: Props) {
                   const actionable =
                     r.recommendation === "Strong - Take the trade" ||
                     r.recommendation === "Marginal - Size smaller";
+                  const showDivider = group1Count !== null && idx === group1Count && idx > 0;
                   return (
                     <>
+                      {showDivider && (
+                        <TableRow key={`divider-${idx}`} className="hover:bg-transparent">
+                          <TableCell
+                            colSpan={14}
+                            className="bg-amber-500/10 py-1.5 text-center text-xs italic text-amber-300/90"
+                          >
+                            <AlertTriangle className="mr-1.5 inline h-3 w-3" />
+                            Outside screener criteria — use caution
+                          </TableCell>
+                        </TableRow>
+                      )}
                       <TableRow key={id} className="cursor-pointer" onClick={() => toggle(id)}>
                         <TableCell>
                           {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
