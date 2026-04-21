@@ -34,22 +34,34 @@ type QuoteSummaryResult = {
 
 async function quoteMinimal(symbol: string): Promise<MinimalQuote | null> {
   try {
-    const q = (await (yahooFinance as unknown as { quote: (s: string) => Promise<unknown> }).quote(symbol)) as
-      | MinimalQuote
-      | MinimalQuote[]
-      | null
-      | undefined;
-    if (!q) return null;
-    if (Array.isArray(q)) return q[0] ?? null;
-    return q;
-  } catch {
+    // yahoo-finance2 runs Zod validation on the response by default. Yahoo
+    // regularly adds new fields, causing validation to throw. Disable it so
+    // we still get the price payload.
+    const fn = (yahooFinance as unknown as {
+      quote: (
+        s: string,
+        q?: Record<string, unknown>,
+        m?: { validateResult?: boolean },
+      ) => Promise<unknown>;
+    }).quote;
+    const result = await fn(symbol, {}, { validateResult: false });
+    if (!result) return null;
+    const record = (Array.isArray(result) ? result[0] : result) as MinimalQuote | null | undefined;
+    return record ?? null;
+  } catch (e) {
+    console.error(`[yahoo] quote(${symbol}) failed:`, e instanceof Error ? e.message : e);
     return null;
   }
 }
 
 export async function getCurrentPrice(symbol: string): Promise<number | null> {
   const q = await quoteMinimal(symbol);
-  return q?.regularMarketPrice ?? null;
+  const price = q?.regularMarketPrice;
+  if (typeof price !== "number" || !Number.isFinite(price) || price <= 0) {
+    console.warn(`[yahoo] no regularMarketPrice for ${symbol}`);
+    return null;
+  }
+  return price;
 }
 
 export async function getMarketCap(symbol: string): Promise<number | null> {

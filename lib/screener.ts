@@ -15,7 +15,6 @@ import {
 import {
   getAnalystEstimates,
   getEarningsSurpriseHistory,
-  getTodayEarnings,
 } from "@/lib/earnings";
 import {
   ACTIVE_OVERHANG,
@@ -563,32 +562,63 @@ async function safeGetChain(symbol: string, fromDate: string, toDate: string): P
   }
 }
 
-export async function runScreener(): Promise<{ connected: boolean; results: ScreenerResult[]; errors: string[] }> {
-  const errors: string[] = [];
-  const { connected } = await isSchwabConnected();
+export type RawEarningsCandidate = { symbol: string; date: string; timing: "BMO" | "AMC" };
 
-  let earnings: Array<{ symbol: string; date: string; timing: "BMO" | "AMC" }>;
-  try {
-    const rows = await getTodayEarnings();
-    earnings = rows
-      .filter((r) => r.timing === "BMO" || r.timing === "AMC")
-      .map((r) => ({ symbol: r.symbol, date: r.date, timing: r.timing as "BMO" | "AMC" }));
-  } catch (e) {
-    errors.push(`Earnings calendar fetch failed: ${e instanceof Error ? e.message : String(e)}`);
-    earnings = [];
-  }
+// Known ETF / fund tickers that can occasionally appear in calendar feeds.
+const KNOWN_ETFS: ReadonlySet<string> = new Set<string>([
+  "SPY", "IVV", "VOO", "VTI", "VXUS", "QQQ", "QQQM", "IWM", "DIA",
+  "EEM", "EFA", "VEA", "VWO", "AGG", "BND", "LQD", "HYG", "TLT", "IEF",
+  "GLD", "SLV", "USO", "UNG", "DBC",
+  "XLF", "XLK", "XLE", "XLV", "XLP", "XLU", "XLI", "XLRE", "XLB", "XLY", "XLC",
+  "TQQQ", "SQQQ", "UVXY", "SOXL", "SOXS", "SPXL", "SPXS", "TMF", "TMV", "ARKK", "SVXY",
+  "SCHD", "SCHB", "VIG", "JEPI", "JEPQ", "BIL", "SHV", "SGOV",
+]);
+
+function isLikelyCommonEquity(symbol: string): boolean {
+  if (!symbol) return false;
+  const s = symbol.trim().toUpperCase();
+  if (s.length === 0 || s.length > 10) return false;
+  // Plain letters, optionally followed by .CLASS or -CLASS (e.g. BRK.B, BRK-B).
+  if (!/^[A-Z]{1,5}([.\-][A-Z]{1,2})?$/.test(s)) return false;
+  if (KNOWN_ETFS.has(s)) return false;
+  return true;
+}
+
+export type PreFilterOptions = { maxCount?: number };
+
+export function preFilterEarningsCandidates<T extends RawEarningsCandidate>(
+  raw: T[],
+  options: PreFilterOptions = {},
+): T[] {
+  const maxCount = options.maxCount ?? 20;
+
+  const timingOk = raw.filter((c) => c.timing === "BMO" || c.timing === "AMC");
+  const shapeOk = timingOk.filter((c) => isLikelyCommonEquity(c.symbol));
+
+  const classifiedPass = shapeOk.filter((c) => {
+    const klass = INDUSTRY_MAP[normalizeSymbol(c.symbol)];
+    return klass !== undefined && PASSING_CLASSES.has(klass);
+  });
 
   const seen = new Set<string>();
-  const uniqueEarnings = earnings.filter((e) => {
-    const key = `${e.symbol}|${e.date}|${e.timing}`;
+  const deduped = classifiedPass.filter((c) => {
+    const key = `${c.symbol}|${c.date}|${c.timing}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
   });
 
-  const results: ScreenerResult[] = [];
+  return deduped.slice(0, maxCount);
+}
 
-  for (const row of uniqueEarnings) {
+export async function runScreenerForCandidates(
+  candidates: RawEarningsCandidate[],
+): Promise<{ connected: boolean; results: ScreenerResult[]; errors: string[] }> {
+  const errors: string[] = [];
+  const { connected } = await isSchwabConnected();
+
+  const results: ScreenerResult[] = [];
+  for (const row of candidates) {
     const result = await evaluateOne(row, connected, errors);
     results.push(result);
   }
