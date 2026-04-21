@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { LineChart, History, Settings } from "lucide-react";
+import { LineChart, History, Settings, Star } from "lucide-react";
 
 export function Nav() {
   return (
@@ -13,6 +13,9 @@ export function Nav() {
           <nav className="flex items-center gap-4 text-sm text-muted-foreground">
             <Link href="/" className="hover:text-foreground">
               Screener
+            </Link>
+            <Link href="/watchlist" className="inline-flex items-center gap-1 hover:text-foreground">
+              <Star className="h-4 w-4" /> Watchlist
             </Link>
             <Link href="/history" className="inline-flex items-center gap-1 hover:text-foreground">
               <History className="h-4 w-4" /> History

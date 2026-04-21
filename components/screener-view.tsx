@@ -1,8 +1,19 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Play, AlertTriangle, ChevronDown, ChevronRight, Loader2 } from "lucide-react";
+import {
+  Play,
+  AlertTriangle,
+  ChevronDown,
+  ChevronRight,
+  Loader2,
+  RefreshCcw,
+  Sparkles,
+  Star,
+  ArrowUp,
+  ArrowDown,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -13,19 +24,31 @@ import {
   TableBody,
   TableCell,
 } from "@/components/ui/table";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import type { ScreenerResult } from "@/lib/screener";
 import { LogTradeDialog } from "@/components/log-trade-dialog";
 
-type Props = {
-  connected: boolean;
-};
+type Props = { connected: boolean };
 
-type RunState =
-  | { status: "idle" }
-  | { status: "loading" }
-  | { status: "ready"; results: ScreenerResult[]; errors: string[]; ranAt: Date }
-  | { status: "error"; message: string };
+type RunStatus = "idle" | "screening" | "applying" | "analyzing" | "error";
+
+type SortKey =
+  | "symbol"
+  | "price"
+  | "dte"
+  | "crush"
+  | "opportunity"
+  | "strike"
+  | "premium"
+  | "delta"
+  | "spread"
+  | "stage2";
 
 function recColor(rec: ScreenerResult["recommendation"]) {
   switch (rec) {
@@ -33,6 +56,8 @@ function recColor(rec: ScreenerResult["recommendation"]) {
       return "bg-emerald-500/15 text-emerald-300 border-emerald-500/40";
     case "Marginal - Size smaller":
       return "bg-amber-500/15 text-amber-300 border-amber-500/40";
+    case "Needs analysis":
+      return "bg-sky-500/15 text-sky-300 border-sky-500/40";
     case "Skip":
       return "bg-muted text-muted-foreground";
     default:
@@ -48,244 +73,462 @@ function gradeColor(grade: string | null | undefined) {
   return "text-rose-300";
 }
 
+function fmtPrice(n: number | null | undefined) {
+  if (n === null || n === undefined || !Number.isFinite(n) || n === 0) return "--";
+  return `$${n.toFixed(2)}`;
+}
+
 function fmtNum(n: number | null | undefined, digits = 2) {
   if (n === null || n === undefined || !Number.isFinite(n)) return "—";
   return n.toFixed(digits);
 }
 
+function gradeOrder(g: string | null | undefined): number {
+  if (g === "A") return 0;
+  if (g === "B") return 1;
+  if (g === "C") return 2;
+  if (g === "F") return 3;
+  return 4;
+}
+
 export function ScreenerView({ connected }: Props) {
   const router = useRouter();
-  const [, startTransition] = useTransition();
-  const [state, setState] = useState<RunState>({ status: "idle" });
+  const [status, setStatus] = useState<RunStatus>("idle");
+  const [results, setResults] = useState<ScreenerResult[] | null>(null);
+  const [prices, setPrices] = useState<Record<string, number>>({});
+  const [screenedAt, setScreenedAt] = useState<Date | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [analyzingSymbols, setAnalyzingSymbols] = useState<Set<string>>(new Set());
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [logRow, setLogRow] = useState<ScreenerResult | null>(null);
+  const [sortKey, setSortKey] = useState<SortKey>("stage2");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
 
   const toggle = (id: string) => setExpanded((s) => ({ ...s, [id]: !s[id] }));
 
-  const today = new Date().toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
-  const isEarningsSeason = isLikelyEarningsSeason(new Date());
-
-  async function runScreener() {
-    setState({ status: "loading" });
-    setExpanded({});
-    try {
-      const res = await fetch("/api/screener", { cache: "no-store" });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error((body as { errors?: string[] }).errors?.[0] ?? `HTTP ${res.status}`);
-      }
-      const json = (await res.json()) as { results: ScreenerResult[]; errors: string[] };
-      setState({
-        status: "ready",
-        results: json.results ?? [],
-        errors: json.errors ?? [],
-        ranAt: new Date(),
-      });
-    } catch (e) {
-      setState({ status: "error", message: e instanceof Error ? e.message : "Screener failed" });
+  function onSort(key: SortKey) {
+    if (sortKey === key) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDir(key === "symbol" ? "asc" : "desc");
     }
   }
 
-  const isLoading = state.status === "loading";
-  const results = state.status === "ready" ? state.results : [];
-  const errors = state.status === "ready" ? state.errors : [];
+  const sortedResults = useMemo(() => {
+    if (!results) return [];
+    const copy = [...results];
+    copy.sort((a, b) => {
+      const priceA = prices[a.symbol.toUpperCase()] ?? a.price;
+      const priceB = prices[b.symbol.toUpperCase()] ?? b.price;
+      let va: number | string = 0;
+      let vb: number | string = 0;
+      switch (sortKey) {
+        case "symbol":
+          va = a.symbol;
+          vb = b.symbol;
+          break;
+        case "price":
+          va = priceA;
+          vb = priceB;
+          break;
+        case "dte":
+          va = a.daysToExpiry;
+          vb = b.daysToExpiry;
+          break;
+        case "crush":
+          va = gradeOrder(a.stageThree?.crushGrade);
+          vb = gradeOrder(b.stageThree?.crushGrade);
+          break;
+        case "opportunity":
+          va = gradeOrder(a.stageFour?.opportunityGrade);
+          vb = gradeOrder(b.stageFour?.opportunityGrade);
+          break;
+        case "strike":
+          va = a.stageFour?.suggestedStrike ?? -1;
+          vb = b.stageFour?.suggestedStrike ?? -1;
+          break;
+        case "premium":
+          va = a.stageFour?.premium ?? -1;
+          vb = b.stageFour?.premium ?? -1;
+          break;
+        case "delta":
+          va = a.stageFour?.delta ?? 999;
+          vb = b.stageFour?.delta ?? 999;
+          break;
+        case "spread":
+          va = a.stageFour?.bidAskSpreadPct ?? 999;
+          vb = b.stageFour?.bidAskSpreadPct ?? 999;
+          break;
+        case "stage2":
+          va = a.stageTwo?.score ?? -999;
+          vb = b.stageTwo?.score ?? -999;
+          break;
+      }
+      if (typeof va === "string" && typeof vb === "string") {
+        return sortDir === "asc" ? va.localeCompare(vb) : vb.localeCompare(va);
+      }
+      const diff = (va as number) - (vb as number);
+      return sortDir === "asc" ? diff : -diff;
+    });
+    return copy;
+  }, [results, prices, sortKey, sortDir]);
+
+  async function screenToday() {
+    setStatus("screening");
+    setError(null);
+    setMessage(null);
+    setExpanded({});
+    try {
+      const res = await fetch("/api/screener/screen", { method: "POST", cache: "no-store" });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`);
+      }
+      const json = (await res.json()) as {
+        results: ScreenerResult[];
+        prices: Record<string, number>;
+        screenedAt: string;
+      };
+      setResults(json.results);
+      setPrices(json.prices);
+      setScreenedAt(new Date(json.screenedAt));
+      setStatus("idle");
+      setMessage(`Screened ${json.results.length} candidates`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Screen failed");
+      setStatus("error");
+    }
+  }
+
+  async function applyWatchlist() {
+    if (!results) return;
+    setStatus("applying");
+    setError(null);
+    setMessage(null);
+    try {
+      const res = await fetch("/api/screener/apply-watchlist", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ currentSymbols: results.map((r) => r.symbol) }),
+        cache: "no-store",
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`);
+      }
+      const json = (await res.json()) as {
+        added: ScreenerResult[];
+        removed: string[];
+        updatedPrices: Record<string, number>;
+      };
+      const removedSet = new Set(json.removed.map((s) => s.toUpperCase()));
+      const next = results.filter((r) => !removedSet.has(r.symbol.toUpperCase())).concat(json.added);
+      setResults(next);
+      setPrices((prev) => ({ ...prev, ...json.updatedPrices }));
+      setMessage(`Added ${json.added.length}, removed ${json.removed.length}`);
+      setStatus("idle");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Apply watchlist failed");
+      setStatus("error");
+    }
+  }
+
+  async function runAnalysis() {
+    if (!results || !connected) return;
+    setStatus("analyzing");
+    setError(null);
+    setMessage(null);
+    setAnalyzingSymbols(new Set(results.map((r) => r.symbol.toUpperCase())));
+    try {
+      const res = await fetch("/api/screener/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ candidates: results }),
+        cache: "no-store",
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`);
+      }
+      const json = (await res.json()) as {
+        results: ScreenerResult[];
+        prices: Record<string, number>;
+      };
+      const byKey = new Map(json.results.map((r) => [`${r.symbol}|${r.earningsDate}`, r]));
+      const next = results.map((r) => byKey.get(`${r.symbol}|${r.earningsDate}`) ?? r);
+      setResults(next);
+      setPrices((prev) => ({ ...prev, ...json.prices }));
+      setMessage(`Analyzed ${json.results.length} candidates`);
+      setStatus("idle");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Analysis failed");
+      setStatus("error");
+    } finally {
+      setAnalyzingSymbols(new Set());
+    }
+  }
+
+  const hasResults = (results?.length ?? 0) > 0 || status === "screening";
+  const busy = status === "screening" || status === "applying" || status === "analyzing";
 
   return (
-    <div className="space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-3 text-sm">
-          <span className="text-muted-foreground">{today}</span>
-          <Badge variant={isEarningsSeason ? "default" : "secondary"}>
-            {isEarningsSeason ? "Earnings season" : "Off-cycle"}
-          </Badge>
-          <Badge variant={connected ? "default" : "destructive"}>
-            Schwab: {connected ? "connected" : "disconnected"}
-          </Badge>
-          {state.status === "ready" && (
-            <span className="text-xs text-muted-foreground">
-              Last run: {state.ranAt.toLocaleTimeString()}
-            </span>
-          )}
-        </div>
-        <div className="flex items-center gap-2">
-          {!connected && (
-            <Button asChild variant="default">
-              <a href="/api/auth/schwab">Connect Schwab</a>
-            </Button>
-          )}
-          <Button
-            variant={state.status === "idle" ? "default" : "outline"}
-            disabled={isLoading}
-            onClick={runScreener}
-            size={state.status === "idle" ? "default" : "default"}
-          >
-            {isLoading ? (
-              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-            ) : (
-              <Play className="mr-2 h-4 w-4" />
+    <TooltipProvider>
+      <div className="space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-3 text-sm">
+            <Badge variant={connected ? "default" : "destructive"}>
+              Schwab: {connected ? "connected" : "disconnected"}
+            </Badge>
+            {screenedAt && (
+              <span className="text-xs text-muted-foreground">
+                Last screened:{" "}
+                {screenedAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: true })}
+              </span>
             )}
-            {isLoading ? "Running…" : state.status === "ready" ? "Run again" : "Run Screener"}
-          </Button>
-        </div>
-      </div>
-
-      {!connected && (
-        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200">
-          Schwab is not connected. The screener will still run Stage 1 and Stage 2 on industry/quality, but
-          options-based stages require Schwab market data.
-        </div>
-      )}
-
-      {state.status === "error" && (
-        <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-200">
-          <div className="mb-1 flex items-center gap-2 font-medium">
-            <AlertTriangle className="h-4 w-4" /> Screener failed
+            {message && !error && <span className="text-xs text-emerald-300">{message}</span>}
           </div>
-          <div>{state.message}</div>
-        </div>
-      )}
-
-      {errors.length > 0 && (
-        <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-200">
-          <div className="mb-1 flex items-center gap-2 font-medium">
-            <AlertTriangle className="h-4 w-4" /> Partial data
-          </div>
-          <ul className="list-inside list-disc space-y-0.5">
-            {errors.slice(0, 5).map((e, i) => (
-              <li key={i}>{e}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {state.status === "idle" && (
-        <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-border bg-background/40 px-6 py-16 text-center">
-          <Play className="mb-3 h-10 w-10 text-muted-foreground" />
-          <h2 className="mb-1 text-lg font-semibold">Ready when you are</h2>
-          <p className="mb-6 max-w-md text-sm text-muted-foreground">
-            The screener pulls today&apos;s and tomorrow&apos;s earnings, runs all four scoring stages, and
-            returns a ranked list. It takes a few seconds.
-          </p>
-          <Button size="lg" onClick={runScreener}>
-            <Play className="mr-2 h-4 w-4" />
-            Run Screener
-          </Button>
-        </div>
-      )}
-
-      {state.status === "loading" && (
-        <div className="flex flex-col items-center justify-center rounded-lg border border-border bg-background/40 px-6 py-16 text-center">
-          <Loader2 className="mb-3 h-10 w-10 animate-spin text-muted-foreground" />
-          <div className="text-sm text-muted-foreground">
-            Fetching earnings calendar, options chains, and historical moves…
-          </div>
-        </div>
-      )}
-
-      {state.status === "ready" && (
-        <div className="overflow-hidden rounded-lg border border-border">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead className="w-8"></TableHead>
-                <TableHead>Symbol</TableHead>
-                <TableHead>Price</TableHead>
-                <TableHead>Earnings</TableHead>
-                <TableHead>DTE</TableHead>
-                <TableHead>Crush</TableHead>
-                <TableHead>Opp.</TableHead>
-                <TableHead>Strike</TableHead>
-                <TableHead>Premium</TableHead>
-                <TableHead>Delta</TableHead>
-                <TableHead>Spread</TableHead>
-                <TableHead>Recommendation</TableHead>
-                <TableHead></TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {results.length === 0 && (
-                <TableRow>
-                  <TableCell colSpan={13} className="py-10 text-center text-sm text-muted-foreground">
-                    No qualifying earnings today or tomorrow.
-                  </TableCell>
-                </TableRow>
+          <div className="flex items-center gap-2">
+            {!connected && (
+              <Button asChild variant="outline" size="sm">
+                <a href="/api/auth/schwab">Connect Schwab</a>
+              </Button>
+            )}
+            <Button onClick={screenToday} disabled={busy}>
+              {status === "screening" ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <Play className="mr-2 h-4 w-4" />
               )}
-              {results.map((r) => {
-                const id = `${r.symbol}-${r.earningsDate}`;
-                const open = !!expanded[id];
-                const actionable =
-                  r.recommendation === "Strong - Take the trade" ||
-                  r.recommendation === "Marginal - Size smaller";
-                return (
-                  <>
-                    <TableRow key={id} className="cursor-pointer" onClick={() => toggle(id)}>
-                      <TableCell>
-                        {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-                      </TableCell>
-                      <TableCell className="font-medium">{r.symbol}</TableCell>
-                      <TableCell>${fmtNum(r.price)}</TableCell>
-                      <TableCell className="text-xs">
-                        {r.earningsDate} <span className="text-muted-foreground">· {r.earningsTiming}</span>
-                      </TableCell>
-                      <TableCell>{r.daysToExpiry}</TableCell>
-                      <TableCell className={cn("font-mono", gradeColor(r.stageThree?.crushGrade))}>
-                        {r.stageThree?.crushGrade ?? "—"}
-                      </TableCell>
-                      <TableCell className={cn("font-mono", gradeColor(r.stageFour?.opportunityGrade))}>
-                        {r.stageFour?.opportunityGrade ?? "—"}
-                      </TableCell>
-                      <TableCell>{r.stageFour?.suggestedStrike ? `$${fmtNum(r.stageFour.suggestedStrike)}` : "—"}</TableCell>
-                      <TableCell>{r.stageFour?.premium !== null && r.stageFour?.premium !== undefined ? `$${fmtNum(r.stageFour.premium)}` : "—"}</TableCell>
-                      <TableCell>{fmtNum(r.stageFour?.delta ?? null, 3)}</TableCell>
-                      <TableCell>{r.stageFour?.bidAskSpreadPct !== null && r.stageFour?.bidAskSpreadPct !== undefined ? `${fmtNum(r.stageFour.bidAskSpreadPct, 1)}%` : "—"}</TableCell>
-                      <TableCell>
-                        <span className={cn("rounded-md border px-2 py-0.5 text-xs", recColor(r.recommendation))}>
-                          {r.recommendation}
-                        </span>
-                      </TableCell>
-                      <TableCell onClick={(e) => e.stopPropagation()}>
-                        {actionable && r.stageFour?.suggestedStrike ? (
-                          <Button size="sm" variant="secondary" onClick={() => setLogRow(r)}>
-                            Log trade
-                          </Button>
-                        ) : null}
-                      </TableCell>
-                    </TableRow>
-                    {open && (
-                      <TableRow key={`${id}-detail`}>
-                        <TableCell colSpan={13} className="bg-muted/30">
-                          <ExpandedDetail r={r} />
+              {status === "screening" ? "Screening…" : "Screen Today"}
+            </Button>
+            <Button variant="secondary" disabled={!results || busy} onClick={applyWatchlist}>
+              {status === "applying" ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <RefreshCcw className="mr-2 h-4 w-4" />
+              )}
+              Apply Watchlist
+            </Button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span>
+                  <Button
+                    className="bg-indigo-500 text-white hover:bg-indigo-400 disabled:opacity-60"
+                    disabled={!results || busy || !connected}
+                    onClick={runAnalysis}
+                  >
+                    {status === "analyzing" ? (
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    ) : (
+                      <Sparkles className="mr-2 h-4 w-4" />
+                    )}
+                    Run Analysis
+                  </Button>
+                </span>
+              </TooltipTrigger>
+              {!connected && <TooltipContent>Connect Schwab to run analysis</TooltipContent>}
+            </Tooltip>
+          </div>
+        </div>
+
+        {error && (
+          <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-200">
+            <div className="mb-1 flex items-center gap-2 font-medium">
+              <AlertTriangle className="h-4 w-4" /> {error}
+            </div>
+          </div>
+        )}
+
+        {!results && status !== "screening" && (
+          <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-border bg-background/40 px-6 py-16 text-center">
+            <Play className="mb-3 h-10 w-10 text-muted-foreground" />
+            <h2 className="mb-1 text-lg font-semibold">No screen run yet</h2>
+            <p className="mb-6 max-w-md text-sm text-muted-foreground">
+              Click Screen Today to pull today&apos;s AMC and tomorrow&apos;s BMO earnings and score them
+              through Stage 1 and Stage 2. Run Analysis later to fill in crush + opportunity grades.
+            </p>
+            <Button size="lg" onClick={screenToday} disabled={busy}>
+              <Play className="mr-2 h-4 w-4" />
+              Screen Today
+            </Button>
+          </div>
+        )}
+
+        {status === "screening" && (
+          <div className="flex flex-col items-center justify-center rounded-lg border border-border bg-background/40 px-6 py-16 text-center">
+            <Loader2 className="mb-3 h-10 w-10 animate-spin text-muted-foreground" />
+            <div className="text-sm text-muted-foreground">
+              Fetching earnings calendar, pricing batch, and scoring stages 1 & 2…
+            </div>
+          </div>
+        )}
+
+        {hasResults && status !== "screening" && (
+          <div className="overflow-hidden rounded-lg border border-border">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="w-8"></TableHead>
+                  <SortableHeader label="Symbol" active={sortKey === "symbol"} dir={sortDir} onClick={() => onSort("symbol")} />
+                  <SortableHeader label="Price" active={sortKey === "price"} dir={sortDir} onClick={() => onSort("price")} />
+                  <TableHead>Earnings</TableHead>
+                  <SortableHeader label="DTE" active={sortKey === "dte"} dir={sortDir} onClick={() => onSort("dte")} />
+                  <SortableHeader label="Q" active={sortKey === "stage2"} dir={sortDir} onClick={() => onSort("stage2")} />
+                  <SortableHeader label="Crush" active={sortKey === "crush"} dir={sortDir} onClick={() => onSort("crush")} />
+                  <SortableHeader label="Opp." active={sortKey === "opportunity"} dir={sortDir} onClick={() => onSort("opportunity")} />
+                  <SortableHeader label="Strike" active={sortKey === "strike"} dir={sortDir} onClick={() => onSort("strike")} />
+                  <SortableHeader label="Premium" active={sortKey === "premium"} dir={sortDir} onClick={() => onSort("premium")} />
+                  <SortableHeader label="Delta" active={sortKey === "delta"} dir={sortDir} onClick={() => onSort("delta")} />
+                  <SortableHeader label="Spread" active={sortKey === "spread"} dir={sortDir} onClick={() => onSort("spread")} />
+                  <TableHead>Recommendation</TableHead>
+                  <TableHead></TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {sortedResults.length === 0 && (
+                  <TableRow>
+                    <TableCell colSpan={14} className="py-10 text-center text-sm text-muted-foreground">
+                      No qualifying earnings today or tomorrow after filters.
+                    </TableCell>
+                  </TableRow>
+                )}
+                {sortedResults.map((r) => {
+                  const id = `${r.symbol}-${r.earningsDate}`;
+                  const open = !!expanded[id];
+                  const displayedPrice = prices[r.symbol.toUpperCase()] ?? r.price;
+                  const analyzingRow = analyzingSymbols.has(r.symbol.toUpperCase());
+                  const actionable =
+                    r.recommendation === "Strong - Take the trade" ||
+                    r.recommendation === "Marginal - Size smaller";
+                  return (
+                    <>
+                      <TableRow key={id} className="cursor-pointer" onClick={() => toggle(id)}>
+                        <TableCell>
+                          {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                        </TableCell>
+                        <TableCell className="font-medium">
+                          <span className="inline-flex items-center gap-1">
+                            {r.symbol}
+                            {r.isWhitelisted && (
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Star className="h-3.5 w-3.5 fill-amber-300 text-amber-300" />
+                                </TooltipTrigger>
+                                <TooltipContent>Whitelisted</TooltipContent>
+                              </Tooltip>
+                            )}
+                            {r.industryStatus === "fail" && !r.isWhitelisted && (
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <AlertTriangle className="h-3.5 w-3.5 text-amber-400" />
+                                </TooltipTrigger>
+                                <TooltipContent>
+                                  Industry not on the preferred list (−2 Stage 2 penalty)
+                                </TooltipContent>
+                              </Tooltip>
+                            )}
+                          </span>
+                        </TableCell>
+                        <TableCell>{fmtPrice(displayedPrice)}</TableCell>
+                        <TableCell className="text-xs">
+                          {r.earningsDate} <span className="text-muted-foreground">· {r.earningsTiming}</span>
+                        </TableCell>
+                        <TableCell>{r.daysToExpiry}</TableCell>
+                        <TableCell className="font-mono">
+                          {r.stageTwo ? `${r.stageTwo.score}` : "—"}
+                        </TableCell>
+                        <TableCell className={cn("font-mono", gradeColor(r.stageThree?.crushGrade))}>
+                          {analyzingRow ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : (r.stageThree?.crushGrade ?? "—")}
+                        </TableCell>
+                        <TableCell className={cn("font-mono", gradeColor(r.stageFour?.opportunityGrade))}>
+                          {analyzingRow ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : (r.stageFour?.opportunityGrade ?? "—")}
+                        </TableCell>
+                        <TableCell>{r.stageFour?.suggestedStrike ? `$${fmtNum(r.stageFour.suggestedStrike)}` : "—"}</TableCell>
+                        <TableCell>
+                          {r.stageFour?.premium !== null && r.stageFour?.premium !== undefined
+                            ? `$${fmtNum(r.stageFour.premium)}`
+                            : "—"}
+                        </TableCell>
+                        <TableCell>{fmtNum(r.stageFour?.delta ?? null, 3)}</TableCell>
+                        <TableCell>
+                          {r.stageFour?.bidAskSpreadPct !== null && r.stageFour?.bidAskSpreadPct !== undefined
+                            ? `${fmtNum(r.stageFour.bidAskSpreadPct, 1)}%`
+                            : "—"}
+                        </TableCell>
+                        <TableCell>
+                          <span className={cn("rounded-md border px-2 py-0.5 text-xs", recColor(r.recommendation))}>
+                            {r.recommendation}
+                          </span>
+                        </TableCell>
+                        <TableCell onClick={(e) => e.stopPropagation()}>
+                          {actionable && r.stageFour?.suggestedStrike ? (
+                            <Button size="sm" variant="secondary" onClick={() => setLogRow(r)}>
+                              Log trade
+                            </Button>
+                          ) : null}
                         </TableCell>
                       </TableRow>
-                    )}
-                  </>
-                );
-              })}
-            </TableBody>
-          </Table>
-        </div>
-      )}
+                      {open && (
+                        <TableRow key={`${id}-detail`}>
+                          <TableCell colSpan={14} className="bg-muted/30">
+                            <ExpandedDetail r={r} />
+                          </TableCell>
+                        </TableRow>
+                      )}
+                    </>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          </div>
+        )}
 
-      {logRow && (
-        <LogTradeDialog
-          row={logRow}
-          open={!!logRow}
-          onOpenChange={(o) => !o && setLogRow(null)}
-          onSuccess={() => {
-            setLogRow(null);
-            // Trade log is separate from the screener run; refresh /history if we're there.
-            startTransition(() => router.refresh());
-          }}
-        />
-      )}
-    </div>
+        {logRow && (
+          <LogTradeDialog
+            row={logRow}
+            open={!!logRow}
+            onOpenChange={(o) => !o && setLogRow(null)}
+            onSuccess={() => {
+              setLogRow(null);
+              router.refresh();
+            }}
+          />
+        )}
+      </div>
+    </TooltipProvider>
+  );
+}
+
+function SortableHeader({
+  label,
+  active,
+  dir,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  dir: "asc" | "desc";
+  onClick: () => void;
+}) {
+  return (
+    <TableHead
+      onClick={onClick}
+      className="cursor-pointer select-none hover:text-foreground"
+    >
+      <span className="inline-flex items-center gap-1">
+        {label}
+        {active && (dir === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />)}
+      </span>
+    </TableHead>
   );
 }
 
 function ExpandedDetail({ r }: { r: ScreenerResult }) {
   return (
     <div className="grid gap-4 p-3 md:grid-cols-4">
-      <StageCard title="Stage 1 · Hard filters" pass={r.stageOne.pass} summary={r.stageOne.reason}>
+      <StageCard title="Stage 1 · Context" pass={r.stageOne.pass} summary={r.stageOne.reason}>
         {Object.entries(r.stageOne.details).map(([k, v]) => (
           <Row key={k} k={k} v={String(v ?? "—")} />
         ))}
@@ -302,7 +545,11 @@ function ExpandedDetail({ r }: { r: ScreenerResult }) {
             <Row k="Market cap tier" v={`${r.stageTwo.details.marketCapTier}/3`} />
             <Row k="Analyst dispersion" v={`${r.stageTwo.details.analystDispersion}/3`} />
             <Row k="Overhang penalty" v={String(r.stageTwo.details.activeOverhangPenalty)} />
-            <Row k="Market cap" v={r.stageTwo.details.marketCapBillions ? `$${r.stageTwo.details.marketCapBillions.toFixed(1)}B` : "—"} />
+            <Row k="Industry penalty" v={String(r.stageTwo.details.industryPenalty)} />
+            <Row
+              k="Market cap"
+              v={r.stageTwo.details.marketCapBillions ? `$${r.stageTwo.details.marketCapBillions.toFixed(1)}B` : "—"}
+            />
             <Row k="Industry class" v={r.stageTwo.details.industryClass} />
           </>
         )}
@@ -311,7 +558,11 @@ function ExpandedDetail({ r }: { r: ScreenerResult }) {
       <StageCard
         title="Stage 3 · Crush"
         pass={r.stageThree?.pass ?? false}
-        summary={r.stageThree ? `${r.stageThree.score}/25 — grade ${r.stageThree.crushGrade} (threshold ${r.stageThree.threshold})` : "not reached"}
+        summary={
+          r.stageThree
+            ? `${r.stageThree.score}/25 — grade ${r.stageThree.crushGrade} (threshold ${r.stageThree.threshold})`
+            : "run analysis to populate"
+        }
       >
         {r.stageThree && (
           <>
@@ -320,11 +571,6 @@ function ExpandedDetail({ r }: { r: ScreenerResult }) {
             <Row k="Term structure" v={`${r.stageThree.details.termStructureScore}/5`} />
             <Row k="IV edge" v={`${r.stageThree.details.ivEdgeScore}/4`} />
             <Row k="Surprise reliability" v={`${r.stageThree.details.surpriseScore}/4`} />
-            <Row k="Median move" v={r.stageThree.details.medianHistoricalMovePct !== null ? `${(r.stageThree.details.medianHistoricalMovePct * 100).toFixed(2)}%` : "—"} />
-            <Row k="EM" v={r.stageThree.details.expectedMovePct !== null ? `${(r.stageThree.details.expectedMovePct * 100).toFixed(2)}%` : "—"} />
-            <Row k="Weekly IV" v={r.stageThree.details.weeklyIv !== null ? `${(r.stageThree.details.weeklyIv * 100).toFixed(1)}%` : "—"} />
-            <Row k="Monthly IV" v={r.stageThree.details.monthlyIv !== null ? `${(r.stageThree.details.monthlyIv * 100).toFixed(1)}%` : "—"} />
-            <Row k="30d realized" v={r.stageThree.details.realizedVol30d !== null ? `${(r.stageThree.details.realizedVol30d * 100).toFixed(1)}%` : "—"} />
           </>
         )}
       </StageCard>
@@ -332,13 +578,19 @@ function ExpandedDetail({ r }: { r: ScreenerResult }) {
       <StageCard
         title="Stage 4 · Opportunity"
         pass={(r.stageFour?.score ?? 0) >= 8}
-        summary={r.stageFour ? `${r.stageFour.score}/20 — grade ${r.stageFour.opportunityGrade}` : "not reached"}
+        summary={r.stageFour ? `${r.stageFour.score}/20 — grade ${r.stageFour.opportunityGrade}` : "run analysis to populate"}
       >
         {r.stageFour && (
           <>
-            <Row k="Premium yield" v={`${r.stageFour.details.premiumYieldScore}/8 (${r.stageFour.premiumYieldPct !== null ? r.stageFour.premiumYieldPct.toFixed(2) + "%" : "—"})`} />
+            <Row
+              k="Premium yield"
+              v={`${r.stageFour.details.premiumYieldScore}/8 (${r.stageFour.premiumYieldPct !== null ? r.stageFour.premiumYieldPct.toFixed(2) + "%" : "—"})`}
+            />
             <Row k="Delta" v={`${r.stageFour.details.deltaScore}/6 (${r.stageFour.delta ?? "—"})`} />
-            <Row k="Spread" v={`${r.stageFour.details.spreadScore}/6 (${r.stageFour.bidAskSpreadPct !== null ? r.stageFour.bidAskSpreadPct + "%" : "—"})`} />
+            <Row
+              k="Spread"
+              v={`${r.stageFour.details.spreadScore}/6 (${r.stageFour.bidAskSpreadPct !== null ? r.stageFour.bidAskSpreadPct + "%" : "—"})`}
+            />
             <Row k="Contract" v={r.stageFour.details.contractSymbol ?? "—"} />
           </>
         )}
@@ -347,12 +599,27 @@ function ExpandedDetail({ r }: { r: ScreenerResult }) {
   );
 }
 
-function StageCard({ title, pass, summary, children }: { title: string; pass: boolean; summary: string; children: React.ReactNode }) {
+function StageCard({
+  title,
+  pass,
+  summary,
+  children,
+}: {
+  title: string;
+  pass: boolean;
+  summary: string;
+  children: React.ReactNode;
+}) {
   return (
     <div className="rounded-md border border-border bg-background/40 p-3 text-xs">
       <div className="mb-2 flex items-center justify-between">
         <div className="font-medium text-foreground">{title}</div>
-        <span className={cn("rounded border px-1.5 py-0.5", pass ? "border-emerald-500/40 text-emerald-300" : "border-rose-500/40 text-rose-300")}>
+        <span
+          className={cn(
+            "rounded border px-1.5 py-0.5",
+            pass ? "border-emerald-500/40 text-emerald-300" : "border-rose-500/40 text-rose-300",
+          )}
+        >
           {pass ? "pass" : "fail"}
         </span>
       </div>
@@ -369,16 +636,4 @@ function Row({ k, v }: { k: string; v: string }) {
       <span className="font-mono text-foreground">{v}</span>
     </div>
   );
-}
-
-function isLikelyEarningsSeason(d: Date): boolean {
-  const month = d.getUTCMonth() + 1;
-  const day = d.getUTCDate();
-  // Peak windows: mid-Jan–mid-Feb, mid-Apr–mid-May, mid-Jul–mid-Aug, mid-Oct–mid-Nov.
-  const in15to15 = (m1: number, m2: number) => {
-    if (month === m1 && day >= 15) return true;
-    if (month === m2 && day <= 15) return true;
-    return false;
-  };
-  return in15to15(1, 2) || in15to15(4, 5) || in15to15(7, 8) || in15to15(10, 11);
 }

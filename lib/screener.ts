@@ -2,14 +2,11 @@ import {
   getOptionsChain,
   SchwabOptionContract,
   SchwabOptionsChain,
-  isSchwabConnected,
 } from "@/lib/schwab";
 import {
-  getCurrentPrice,
   getHistoricalEarningsMovements,
   getHistoricalPrices,
   getMarketCap,
-  getSectorIndustry,
   EarningsMove,
 } from "@/lib/yahoo";
 import {
@@ -19,11 +16,7 @@ import {
 import {
   ACTIVE_OVERHANG,
   BUSINESS_SIMPLICITY,
-  INDUSTRY_MAP,
   IndustryClass,
-  PASSING_CLASSES,
-  classifyFromSector,
-  getIndustryClassification,
 } from "@/lib/classification";
 
 // ---------- Types ----------
@@ -49,6 +42,7 @@ export type StageTwoResult = {
     marketCapTier: number;
     analystDispersion: number;
     activeOverhangPenalty: number;
+    industryPenalty: number; // 0 or -2
     marketCapBillions: number | null;
     industryClass: IndustryClass;
   };
@@ -103,8 +97,10 @@ export type ScreenerResult = {
   stageTwo: StageTwoResult | null;
   stageThree: StageThreeResult | null;
   stageFour: StageFourResult | null;
-  recommendation: "Strong - Take the trade" | "Marginal - Size smaller" | "Skip" | "Cannot evaluate";
+  recommendation: "Strong - Take the trade" | "Marginal - Size smaller" | "Skip" | "Cannot evaluate" | "Needs analysis";
   errors: string[];
+  isWhitelisted: boolean;
+  industryStatus: "pass" | "fail" | "unknown";
 };
 
 // ---------- Helpers ----------
@@ -156,12 +152,6 @@ function normalizeSymbol(symbol: string): string {
 
 // ---------- Stage 1 ----------
 
-function classifyIndustry(symbol: string, sector: string | null, industry: string | null): IndustryClass {
-  const mapped = INDUSTRY_MAP[normalizeSymbol(symbol)];
-  if (mapped) return mapped;
-  return classifyFromSector(sector, industry);
-}
-
 function hasWeeklyFridayExpiry(chain: SchwabOptionsChain, targetFriday: string): boolean {
   const keys = Object.keys(chain.putExpDateMap ?? {});
   return keys.some((k) => k.startsWith(targetFriday));
@@ -172,28 +162,17 @@ export async function runStageOne(
   chain: SchwabOptionsChain | null,
   industryClass: IndustryClass,
 ): Promise<StageOneResult> {
+  // Stage 1 now records what upstream hard-kills already verified. The
+  // $70 floor, weekly-chain presence, blacklist, and ETF checks are
+  // enforced in /api/screener/screen before this runs.
+  const weeklyFound = chain ? hasWeeklyFridayExpiry(chain, candidate.expiry) : null;
   const details: StageOneResult["details"] = {
     timing: candidate.earningsTiming,
     price: candidate.price,
     industryClass,
     expiry: candidate.expiry,
-    weeklyExpiryFound: null,
+    weeklyExpiryFound: weeklyFound,
   };
-
-  if (candidate.earningsTiming !== "BMO" && candidate.earningsTiming !== "AMC") {
-    return { pass: false, reason: "Earnings during market hours — skip", details };
-  }
-  if (!Number.isFinite(candidate.price) || candidate.price < 20) {
-    return { pass: false, reason: `Stock price ${candidate.price} below $20 floor`, details };
-  }
-  if (!PASSING_CLASSES.has(industryClass)) {
-    return { pass: false, reason: `Industry class "${industryClass}" not on whitelist`, details };
-  }
-  const weeklyFound = chain ? hasWeeklyFridayExpiry(chain, candidate.expiry) : false;
-  details.weeklyExpiryFound = weeklyFound;
-  if (!weeklyFound) {
-    return { pass: false, reason: "No weekly (Friday) option expiry in Schwab chain", details };
-  }
   return { pass: true, reason: "Passed hard filters", details };
 }
 
@@ -229,6 +208,7 @@ async function fetchMarketCapBillions(symbol: string): Promise<number | null> {
 export async function runStageTwo(
   candidate: EarningsCandidate,
   industryClass: IndustryClass,
+  options: { industryPenalty?: number } = {},
 ): Promise<StageTwoResult> {
   const [mcapB, analyst] = await Promise.all([
     fetchMarketCapBillions(candidate.symbol),
@@ -238,8 +218,9 @@ export async function runStageTwo(
   const marketCapTier = scoreMarketCap(mcapB);
   const analystDispersion = scoreDispersion(analyst.dispersionPct);
   const preOverhang = businessSimplicity + marketCapTier + analystDispersion;
-  const penalty = ACTIVE_OVERHANG.has(normalizeSymbol(candidate.symbol)) ? -3 : 0;
-  const score = preOverhang + penalty;
+  const overhangPenalty = ACTIVE_OVERHANG.has(normalizeSymbol(candidate.symbol)) ? -3 : 0;
+  const industryPenalty = options.industryPenalty ?? 0;
+  const score = preOverhang + overhangPenalty + industryPenalty;
   const pass = preOverhang >= 6;
   return {
     score,
@@ -250,7 +231,8 @@ export async function runStageTwo(
       businessSimplicity,
       marketCapTier,
       analystDispersion,
-      activeOverhangPenalty: penalty,
+      activeOverhangPenalty: overhangPenalty,
+      industryPenalty,
       marketCapBillions: mcapB,
       industryClass,
     },
@@ -534,12 +516,13 @@ function recommend(crush: StageThreeResult["crushGrade"], opp: StageFourResult["
 
 // ---------- Orchestration ----------
 
-function buildCandidateFromEarnings(row: { symbol: string; date: string; timing: "BMO" | "AMC" }, price: number): EarningsCandidate {
+export type RawEarningsCandidate = { symbol: string; date: string; timing: "BMO" | "AMC" };
+
+export function buildCandidateFromEarnings(
+  row: { symbol: string; date: string; timing: "BMO" | "AMC" },
+  price: number,
+): EarningsCandidate {
   const earningsDate = new Date(row.date + "T00:00:00Z");
-  // BMO: earnings before market open on `date`. Trade placed day before, exits at next Friday.
-  // AMC: earnings after market close on `date`. Trade placed that day.
-  const today = new Date();
-  today.setUTCHours(0, 0, 0, 0);
   const friday = nextFridayOnOrAfter(earningsDate);
   const dte = businessDaysBetween(earningsDate, friday);
   return {
@@ -552,10 +535,13 @@ function buildCandidateFromEarnings(row: { symbol: string; date: string; timing:
   };
 }
 
-async function safeGetChain(symbol: string, fromDate: string, toDate: string): Promise<SchwabOptionsChain | null> {
+export async function safeGetChain(
+  symbol: string,
+  fromDate: string,
+  toDate: string,
+): Promise<SchwabOptionsChain | null> {
   try {
     const chain = await getOptionsChain(symbol, fromDate);
-    // Expand to date range if we need more coverage; rely on screener to pick the expiry it needs.
     void toDate;
     return chain;
   } catch {
@@ -563,7 +549,9 @@ async function safeGetChain(symbol: string, fromDate: string, toDate: string): P
   }
 }
 
-export type RawEarningsCandidate = { symbol: string; date: string; timing: "BMO" | "AMC" };
+export function chainHasWeeklyExpiry(chain: SchwabOptionsChain, expiryIso: string): boolean {
+  return hasWeeklyFridayExpiry(chain, expiryIso);
+}
 
 // Known ETF / fund tickers that can occasionally appear in calendar feeds.
 const KNOWN_ETFS: ReadonlySet<string> = new Set<string>([
@@ -575,221 +563,112 @@ const KNOWN_ETFS: ReadonlySet<string> = new Set<string>([
   "SCHD", "SCHB", "VIG", "JEPI", "JEPQ", "BIL", "SHV", "SGOV",
 ]);
 
-function isLikelyCommonEquity(symbol: string): boolean {
+export function isLikelyCommonEquity(symbol: string): boolean {
   if (!symbol) return false;
   const s = symbol.trim().toUpperCase();
   if (s.length === 0 || s.length > 10) return false;
-  // Plain letters, optionally followed by .CLASS or -CLASS (e.g. BRK.B, BRK-B).
   if (!/^[A-Z]{1,5}([.\-][A-Z]{1,2})?$/.test(s)) return false;
   if (KNOWN_ETFS.has(s)) return false;
   return true;
 }
 
-export type PreFilterOptions = { maxCount?: number; yahooBudget?: number };
+// ---- New pipeline helpers ----
 
-export type PreFilterStats = {
-  raw: number;
-  shape: number;
-  mapHit: number;
-  cacheHit: number;
-  yahooHit: number;
-  yahooDropped: number;
-  kept: number;
+export type ScreenContext = {
+  connected: boolean;
+  chain: SchwabOptionsChain | null;
+  industryClass: IndustryClass;
+  industryStatus: "pass" | "fail" | "unknown";
+  isWhitelisted: boolean;
 };
 
-export async function preFilterEarningsCandidates<T extends RawEarningsCandidate>(
-  raw: T[],
-  options: PreFilterOptions = {},
-): Promise<{ kept: T[]; stats: PreFilterStats }> {
-  const maxCount = options.maxCount ?? 20;
-  let yahooBudget = options.yahooBudget ?? 10;
-
-  const timingOk = raw.filter((c) => c.timing === "BMO" || c.timing === "AMC");
-  const shapeOk = timingOk.filter((c) => isLikelyCommonEquity(c.symbol));
-
-  const seen = new Set<string>();
-  const deduped = shapeOk.filter((c) => {
-    const key = `${c.symbol}|${c.date}|${c.timing}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-
-  const kept: T[] = [];
-  const stats: PreFilterStats = {
-    raw: raw.length,
-    shape: shapeOk.length,
-    mapHit: 0,
-    cacheHit: 0,
-    yahooHit: 0,
-    yahooDropped: 0,
-    kept: 0,
-  };
-
-  for (const cand of deduped) {
-    if (kept.length >= maxCount) break;
-    const cls = await getIndustryClassification(cand.symbol, { yahooAllowed: yahooBudget > 0 });
-    if (cls.source === "map") stats.mapHit += 1;
-    else if (cls.source === "cache") stats.cacheHit += 1;
-    else if (cls.source === "yahoo") {
-      stats.yahooHit += 1;
-      yahooBudget -= 1;
-    } else {
-      stats.yahooDropped += 1;
-      continue;
-    }
-    if (cls.pass) kept.push(cand);
-  }
-
-  stats.kept = kept.length;
-  return { kept, stats };
-}
-
-export async function runScreenerForCandidates(
-  candidates: RawEarningsCandidate[],
-): Promise<{ connected: boolean; results: ScreenerResult[]; errors: string[] }> {
-  const errors: string[] = [];
-  const { connected } = await isSchwabConnected();
-
-  const results: ScreenerResult[] = [];
-  for (const row of candidates) {
-    const result = await evaluateOne(row, connected, errors);
-    results.push(result);
-  }
-
-  const recOrder: Record<ScreenerResult["recommendation"], number> = {
-    "Strong - Take the trade": 0,
-    "Marginal - Size smaller": 1,
-    Skip: 2,
-    "Cannot evaluate": 3,
-  };
-  const gradeOrder: Record<string, number> = { A: 0, B: 1, C: 2, F: 3 };
-  results.sort((a, b) => {
-    const r = recOrder[a.recommendation] - recOrder[b.recommendation];
-    if (r !== 0) return r;
-    const ca = a.stageThree?.crushGrade ?? "F";
-    const cb = b.stageThree?.crushGrade ?? "F";
-    return gradeOrder[ca] - gradeOrder[cb];
-  });
-
-  return { connected, results, errors };
-}
-
-async function evaluateOne(
-  row: { symbol: string; date: string; timing: "BMO" | "AMC" },
-  connected: boolean,
-  errors: string[],
+// Runs Stage 1 + Stage 2 and returns a ScreenerResult with stages 3/4 null and
+// recommendation set to "Needs analysis". Stage 3/4 are populated later via
+// runStagesThreeFour when the user clicks "Run Analysis".
+export async function evaluateStagesOneTwo(
+  candidate: EarningsCandidate,
+  context: ScreenContext,
 ): Promise<ScreenerResult> {
-  const localErrors: string[] = [];
+  const industryPenalty =
+    context.isWhitelisted || context.industryStatus === "pass" || context.industryStatus === "unknown"
+      ? 0
+      : -2;
 
-  const price = await getCurrentPrice(row.symbol);
-  const candidatePrice = typeof price === "number" && Number.isFinite(price) ? price : 0;
-  const candidate = buildCandidateFromEarnings(row, candidatePrice);
+  const stageOne = await runStageOne(candidate, context.chain, context.industryClass);
+  const stageTwo = await runStageTwo(candidate, context.industryClass, { industryPenalty });
 
-  const { sector, industry } = await getSectorIndustry(row.symbol);
-  const industryClass = classifyIndustry(row.symbol, sector, industry);
-
-  let chain: SchwabOptionsChain | null = null;
-  if (connected) {
-    chain = await safeGetChain(row.symbol, candidate.expiry, candidate.expiry);
-    if (!chain) localErrors.push(`Schwab options chain unavailable for ${row.symbol}`);
-  }
-
-  const stageOne = await runStageOne(candidate, chain, industryClass);
-  if (!stageOne.pass) {
-    return {
-      symbol: candidate.symbol,
-      price: candidate.price,
-      earningsDate: candidate.earningsDate,
-      earningsTiming: candidate.earningsTiming,
-      daysToExpiry: candidate.daysToExpiry,
-      expiry: candidate.expiry,
-      stoppedAt: 1,
-      stageOne,
-      stageTwo: null,
-      stageThree: null,
-      stageFour: null,
-      recommendation: connected ? "Skip" : "Cannot evaluate",
-      errors: localErrors,
-    };
-  }
-
-  const stageTwo = await runStageTwo(candidate, industryClass);
-  if (!stageTwo.pass) {
-    return {
-      symbol: candidate.symbol,
-      price: candidate.price,
-      earningsDate: candidate.earningsDate,
-      earningsTiming: candidate.earningsTiming,
-      daysToExpiry: candidate.daysToExpiry,
-      expiry: candidate.expiry,
-      stoppedAt: 2,
-      stageOne,
-      stageTwo,
-      stageThree: null,
-      stageFour: null,
-      recommendation: "Skip",
-      errors: localErrors,
-    };
-  }
-
-  if (!chain) {
-    errors.push(...localErrors);
-    return {
-      symbol: candidate.symbol,
-      price: candidate.price,
-      earningsDate: candidate.earningsDate,
-      earningsTiming: candidate.earningsTiming,
-      daysToExpiry: candidate.daysToExpiry,
-      expiry: candidate.expiry,
-      stoppedAt: 3,
-      stageOne,
-      stageTwo,
-      stageThree: null,
-      stageFour: null,
-      recommendation: "Cannot evaluate",
-      errors: [...localErrors, "Schwab chain required for stage 3+"],
-    };
-  }
-
-  const historicalMoves = await getHistoricalEarningsMovements(candidate.symbol);
-  const monthlyTarget = new Date(Date.now() + 35 * 24 * 60 * 60 * 1000);
-  const monthlyChain = await safeGetChain(candidate.symbol, toIsoDate(monthlyTarget), toIsoDate(monthlyTarget));
-
-  const stageThree = await runStageThree(candidate, chain, monthlyChain, historicalMoves);
-  if (!stageThree.pass) {
-    return {
-      symbol: candidate.symbol,
-      price: candidate.price,
-      earningsDate: candidate.earningsDate,
-      earningsTiming: candidate.earningsTiming,
-      daysToExpiry: candidate.daysToExpiry,
-      expiry: candidate.expiry,
-      stoppedAt: 3,
-      stageOne,
-      stageTwo,
-      stageThree,
-      stageFour: null,
-      recommendation: "Skip",
-      errors: localErrors,
-    };
-  }
-
-  const stageFour = runStageFour(candidate, chain, stageThree.details.medianHistoricalMovePct, stageThree.details.expectedMovePct);
-
-  return {
+  const baseResult: Omit<ScreenerResult, "recommendation" | "stoppedAt" | "stageThree" | "stageFour"> = {
     symbol: candidate.symbol,
     price: candidate.price,
     earningsDate: candidate.earningsDate,
     earningsTiming: candidate.earningsTiming,
     daysToExpiry: candidate.daysToExpiry,
     expiry: candidate.expiry,
-    stoppedAt: null,
     stageOne,
     stageTwo,
+    errors: [],
+    isWhitelisted: context.isWhitelisted,
+    industryStatus: context.industryStatus,
+  };
+
+  return {
+    ...baseResult,
+    stoppedAt: null,
+    stageThree: null,
+    stageFour: null,
+    recommendation: "Needs analysis",
+  };
+}
+
+// Takes an existing stage-1/2 ScreenerResult and fills in stages 3 + 4 using
+// fresh Schwab + Yahoo data. Returns a new ScreenerResult (does not mutate).
+export async function runStagesThreeFour(base: ScreenerResult): Promise<ScreenerResult> {
+  const candidate: EarningsCandidate = {
+    symbol: base.symbol,
+    price: base.price,
+    earningsDate: base.earningsDate,
+    earningsTiming: base.earningsTiming,
+    daysToExpiry: base.daysToExpiry,
+    expiry: base.expiry,
+  };
+
+  const chain = await safeGetChain(candidate.symbol, candidate.expiry, candidate.expiry);
+  if (!chain || !chainHasWeeklyExpiry(chain, candidate.expiry)) {
+    return {
+      ...base,
+      stoppedAt: 3,
+      stageThree: null,
+      stageFour: null,
+      recommendation: "Cannot evaluate",
+      errors: [...(base.errors ?? []), "Schwab chain unavailable for weekly expiry"],
+    };
+  }
+
+  const historicalMoves = await getHistoricalEarningsMovements(candidate.symbol);
+  const monthlyTarget = new Date(Date.now() + 35 * 24 * 60 * 60 * 1000);
+  const monthlyChain = await safeGetChain(
+    candidate.symbol,
+    toIsoDate(monthlyTarget),
+    toIsoDate(monthlyTarget),
+  );
+
+  const stageThree = await runStageThree(candidate, chain, monthlyChain, historicalMoves);
+  const stageFour = runStageFour(
+    candidate,
+    chain,
+    stageThree.details.medianHistoricalMovePct,
+    stageThree.details.expectedMovePct,
+  );
+
+  const recommendation = stageThree.pass
+    ? recommend(stageThree.crushGrade, stageFour.opportunityGrade)
+    : "Skip";
+
+  return {
+    ...base,
+    stoppedAt: stageThree.pass ? null : 3,
     stageThree,
     stageFour,
-    recommendation: recommend(stageThree.crushGrade, stageFour.opportunityGrade),
-    errors: localErrors,
+    recommendation,
   };
 }

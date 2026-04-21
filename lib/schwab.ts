@@ -263,3 +263,17 @@ export async function getQuote(symbol: string): Promise<SchwabQuote | null> {
     return null;
   }
 }
+
+// Batch quote — one HTTP call for up to ~500 symbols. Schwab accepts comma-separated symbols.
+export async function getBatchQuotes(symbols: string[]): Promise<Record<string, SchwabQuote>> {
+  if (symbols.length === 0) return {};
+  try {
+    const resp = await schwabGet<Record<string, SchwabQuote>>(`${MARKETDATA_BASE}/quotes`, {
+      symbols: symbols.join(","),
+    });
+    return resp ?? {};
+  } catch (e) {
+    console.error("[schwab] getBatchQuotes failed:", e instanceof Error ? e.message : e);
+    return {};
+  }
+}
