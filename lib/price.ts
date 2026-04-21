@@ -3,6 +3,9 @@ import { getPriceDebug, getCurrentPrice } from "@/lib/yahoo";
 import { getFinnhubQuotePrice } from "@/lib/earnings";
 
 const VERBOSE_SAMPLE_COUNT = 3;
+const FINNHUB_DELAY_MS = 100; // stay under Finnhub free-tier 60/min
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 // Unified batch price lookup. Prefers Schwab (one HTTP call for N symbols)
 // when connected; otherwise falls back to Yahoo (parallel per-symbol).
@@ -82,19 +85,21 @@ export async function getBatchPrices(symbols: string[]): Promise<Record<string, 
     );
   }
 
-  // Finnhub /quote fallback — fills any remaining zeros.
+  // Finnhub /quote fallback — fills any remaining zeros. Sequential with a
+  // 100 ms gap between calls so we stay well under the free-tier 60/min cap.
   const zeros = uniqueSymbols.filter((s) => !map[s] || map[s] === 0);
   if (zeros.length > 0) {
-    console.log(`[price] finnhub fallback: ${zeros.length} symbols still at 0`);
-    await Promise.all(
-      zeros.map(async (s) => {
-        const fp = await getFinnhubQuotePrice(s);
-        if (fp > 0) {
-          map[s] = fp;
-          console.log(`[price] finnhub rescued ${s}=$${fp.toFixed(2)}`);
-        }
-      }),
+    console.log(
+      `[price] finnhub fallback: ${zeros.length} symbols still at 0, sequential with ${FINNHUB_DELAY_MS}ms gap`,
     );
+    for (const s of zeros) {
+      const fp = await getFinnhubQuotePrice(s);
+      if (fp > 0) {
+        map[s] = fp;
+        console.log(`[price] finnhub rescued ${s}=$${fp.toFixed(2)}`);
+      }
+      await sleep(FINNHUB_DELAY_MS);
+    }
     const finalHits = Object.values(map).filter((p) => p > 0).length;
     console.log(
       `[price] source=finnhub-fallback attempted=${zeros.length} finalHits=${finalHits}/${uniqueSymbols.length}`,

@@ -105,6 +105,27 @@ export async function exchangeCodeForTokens(code: string): Promise<void> {
   await persistTokens(tokens);
 }
 
+// Temporary workaround: persist tokens the user pastes in manually from a
+// browser session or out-of-band OAuth flow while the Schwab callback URL is
+// being modified. Takes an access_token + refresh_token, assumes the standard
+// Schwab TTLs (access 30 min, refresh 7 days from now).
+export async function saveManualTokens(params: {
+  accessToken: string;
+  refreshToken: string;
+  expiresInSeconds?: number;
+}): Promise<void> {
+  const accessToken = params.accessToken.trim();
+  const refreshToken = params.refreshToken.trim();
+  if (!accessToken) throw new Error("access_token is required");
+  if (!refreshToken) throw new Error("refresh_token is required");
+  await persistTokens({
+    access_token: accessToken,
+    refresh_token: refreshToken,
+    token_type: "Bearer",
+    expires_in: params.expiresInSeconds ?? ACCESS_TTL_SECONDS,
+  });
+}
+
 async function refreshAccessToken(refreshToken: string): Promise<TokenResponse> {
   const body = new URLSearchParams({
     grant_type: "refresh_token",
