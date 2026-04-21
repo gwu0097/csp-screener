@@ -195,6 +195,62 @@ export async function getFinnhubQuotePrice(symbol: string): Promise<number> {
   }
 }
 
+// Historical earnings announcements for a single symbol from Finnhub's
+// /calendar/earnings endpoint, filtered by symbol and the last ~400 days.
+// Returns { date, timing } pairs — timing is needed to compute overnight moves
+// correctly (BMO uses close(D-1)→open(D); AMC uses close(D)→open(D+1)).
+export type PastEarningsAnnouncement = {
+  date: string; // YYYY-MM-DD
+  timing: "BMO" | "AMC" | "DMH" | "unknown";
+};
+
+export async function getFinnhubPastEarningsDates(
+  symbol: string,
+): Promise<PastEarningsAnnouncement[]> {
+  const to = new Date();
+  const from = new Date(to.getTime() - 400 * 24 * 60 * 60 * 1000);
+  const fromIso = from.toISOString().slice(0, 10);
+  const toIso = to.toISOString().slice(0, 10);
+
+  try {
+    const data = await finnhubGet<{ earningsCalendar: FinnhubCalendarEntry[] }>(
+      "/calendar/earnings",
+      { symbol: symbol.toUpperCase(), from: fromIso, to: toIso },
+    );
+    const rows = data.earningsCalendar ?? [];
+    // Defense: if Finnhub ever ignores the symbol param, filter client-side.
+    const matching = rows.filter(
+      (r) => (r.symbol ?? "").toUpperCase() === symbol.toUpperCase(),
+    );
+    const announcements = matching
+      .map<PastEarningsAnnouncement | null>((r) => {
+        if (!r.date) return null;
+        const d = new Date(r.date + "T00:00:00Z");
+        if (Number.isNaN(d.getTime())) return null;
+        if (d.getTime() > Date.now()) return null;
+        const h = (r.hour ?? "").toLowerCase();
+        const timing: PastEarningsAnnouncement["timing"] =
+          h === "bmo" ? "BMO" : h === "amc" ? "AMC" : h === "dmh" ? "DMH" : "unknown";
+        return { date: r.date, timing };
+      })
+      .filter((x): x is PastEarningsAnnouncement => x !== null)
+      .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0))
+      .slice(0, 8);
+    console.log(
+      `[finnhub] getFinnhubPastEarningsDates(${symbol}) window=${fromIso}→${toIso} ` +
+        `raw=${rows.length} matched=${matching.length} kept=${announcements.length}: ` +
+        announcements.map((a) => `${a.date}/${a.timing}`).join(", "),
+    );
+    return announcements;
+  } catch (e) {
+    console.warn(
+      `[finnhub] getFinnhubPastEarningsDates(${symbol}) failed:`,
+      e instanceof Error ? e.message : e,
+    );
+    return [];
+  }
+}
+
 export async function getEarningsSurpriseHistory(symbol: string): Promise<EarningsSurprise> {
   try {
     const rows = await finnhubGet<Array<{ actual: number | null; estimate: number | null; period: string }>>(

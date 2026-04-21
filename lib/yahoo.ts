@@ -9,6 +9,7 @@
 // payload drift does not trip the library's Zod validator.
 
 import yahooFinance from "yahoo-finance2";
+import { getFinnhubPastEarningsDates } from "@/lib/earnings";
 
 try {
   (yahooFinance as unknown as { suppressNotices?: (keys: string[]) => void }).suppressNotices?.([
@@ -301,6 +302,10 @@ function parseYahooDate(v: unknown): Date | null {
   return null;
 }
 
+// Retained for debugging only — getHistoricalEarningsMovements now sources
+// dates from Finnhub since yahoo-finance2's earningsHistory module was
+// returning empty payloads in production.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 async function getPastEarningsDates(symbol: string): Promise<Date[]> {
   try {
     const summary = await quoteSummary(symbol, ["earningsHistory"]);
@@ -329,62 +334,99 @@ async function getPastEarningsDates(symbol: string): Promise<Date[]> {
   }
 }
 
+// Historical overnight earnings moves. Earnings announcement dates come from
+// Finnhub (the old yahoo-finance2 earningsHistory module returned empty in
+// production); the price bars come from Yahoo historical.
+//
+// Move direction rules:
+//   BMO on D  → close(D-1) → open(D)      — market hadn't priced it yet before D
+//   AMC on D  → close(D)   → open(D+1)
+//   unknown   → treat as BMO (most common for Finnhub entries without hour)
 export async function getHistoricalEarningsMovements(symbol: string): Promise<EarningsMove[]> {
   try {
-    const earningsDates = await getPastEarningsDates(symbol);
-    if (earningsDates.length === 0) {
-      console.warn(`[yahoo] getHistoricalEarningsMovements(${symbol}) — no past earnings dates, returning []`);
+    const announcements = await getFinnhubPastEarningsDates(symbol);
+    if (announcements.length === 0) {
+      console.warn(`[moves:${symbol}] Finnhub returned no past earnings announcements`);
       return [];
     }
 
-    const earliest = earningsDates[earningsDates.length - 1];
-    const from = new Date(earliest.getTime() - 10 * 24 * 60 * 60 * 1000);
-    const to = new Date();
+    // Fetch a price window covering every announcement + a pad on each side.
+    const sortedDates = announcements
+      .map((a) => a.date)
+      .sort((x, y) => (x < y ? -1 : x > y ? 1 : 0));
+    const earliestIso = sortedDates[0];
+    const earliestTs = new Date(earliestIso + "T00:00:00Z").getTime();
+    const from = new Date(earliestTs - 10 * 24 * 60 * 60 * 1000);
+    const to = new Date(Date.now() + 5 * 24 * 60 * 60 * 1000);
+
     const prices = await getHistoricalPrices(symbol, from, to);
     console.log(
-      `[yahoo] getHistoricalEarningsMovements(${symbol}) fetched ${prices.length} bars ` +
-        `from ${from.toISOString().slice(0, 10)} to ${to.toISOString().slice(0, 10)}`,
+      `[moves:${symbol}] fetched ${prices.length} price bars from ${from.toISOString().slice(0, 10)} to ${to.toISOString().slice(0, 10)}`,
     );
     if (prices.length === 0) {
-      console.warn(`[yahoo] getHistoricalEarningsMovements(${symbol}) — historical() returned empty`);
+      console.warn(`[moves:${symbol}] Yahoo historical() returned zero bars`);
       return [];
     }
+
+    const priceByDate = new Map<string, (typeof prices)[number]>();
+    for (const row of prices) {
+      priceByDate.set(row.date.toISOString().slice(0, 10), row);
+    }
+    const sortedBars = [...prices].sort((a, b) => a.date.getTime() - b.date.getTime());
+
+    const lastBarOnOrBefore = (iso: string) => {
+      let hit: (typeof prices)[number] | null = null;
+      for (const b of sortedBars) {
+        const d = b.date.toISOString().slice(0, 10);
+        if (d <= iso) hit = b;
+        else break;
+      }
+      return hit;
+    };
+    const firstBarOnOrAfter = (iso: string) => {
+      for (const b of sortedBars) {
+        const d = b.date.toISOString().slice(0, 10);
+        if (d >= iso) return b;
+      }
+      return null;
+    };
+    const addDays = (iso: string, n: number) => {
+      const [y, m, d] = iso.split("-").map(Number);
+      const dt = new Date(Date.UTC(y, m - 1, d));
+      dt.setUTCDate(dt.getUTCDate() + n);
+      return dt.toISOString().slice(0, 10);
+    };
+    void priceByDate;
 
     const moves: EarningsMove[] = [];
     const details: string[] = [];
-    for (const ed of earningsDates) {
-      const target = ed.getTime();
-      let closeBefore: number | null = null;
-      let closeBeforeTs = 0;
-      let openAfter: number | null = null;
+    for (const { date: edate, timing } of announcements) {
+      const isAmc = timing === "AMC";
+      const closeIso = isAmc ? edate : addDays(edate, -1);
+      const openIso = isAmc ? addDays(edate, 1) : edate;
+      const beforeBar = lastBarOnOrBefore(closeIso);
+      const afterBar = firstBarOnOrAfter(openIso);
+      const closeBefore = beforeBar?.close ?? null;
+      const openAfter = afterBar?.open ?? null;
 
-      for (const row of prices) {
-        const t = row.date.getTime();
-        if (t < target && t > closeBeforeTs) {
-          closeBefore = row.close;
-          closeBeforeTs = t;
-        }
-        if (t >= target && openAfter === null) {
-          openAfter = row.open;
-        }
-      }
-
-      const iso = ed.toISOString().slice(0, 10);
       if (closeBefore && openAfter && closeBefore > 0) {
         const pct = (openAfter - closeBefore) / closeBefore;
         moves.push({
-          date: iso,
+          date: edate,
           actualMovePct: Math.abs(pct),
           direction: pct > 0.001 ? "up" : pct < -0.001 ? "down" : "flat",
         });
-        details.push(`${iso}: ${closeBefore.toFixed(2)}→${openAfter.toFixed(2)} (${(pct * 100).toFixed(2)}%)`);
+        details.push(
+          `${edate}/${timing}: close(${beforeBar?.date.toISOString().slice(0, 10)})=${closeBefore.toFixed(2)} → ` +
+            `open(${afterBar?.date.toISOString().slice(0, 10)})=${openAfter.toFixed(2)} (${(pct * 100).toFixed(2)}%)`,
+        );
       } else {
-        details.push(`${iso}: closeBefore=${closeBefore ?? "null"} openAfter=${openAfter ?? "null"} (skipped)`);
+        details.push(
+          `${edate}/${timing}: closeBefore=${closeBefore ?? "null"} openAfter=${openAfter ?? "null"} (skipped)`,
+        );
       }
     }
-    console.log(
-      `[yahoo] getHistoricalEarningsMovements(${symbol}) produced ${moves.length} moves; details: ${details.join(" | ")}`,
-    );
+    console.log(`[moves:${symbol}] produced ${moves.length} moves — ${details.join(" | ")}`);
     return moves;
   } catch (e) {
     logYahooFailure(`getHistoricalEarningsMovements(${symbol})`, e);
