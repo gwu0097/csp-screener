@@ -1,19 +1,31 @@
 import { getBatchQuotes, isSchwabConnected } from "@/lib/schwab";
-import { getCurrentPrice } from "@/lib/yahoo";
+import { getPriceDebug, getCurrentPrice } from "@/lib/yahoo";
+import { getFinnhubQuotePrice } from "@/lib/earnings";
+
+const VERBOSE_SAMPLE_COUNT = 3;
 
 // Unified batch price lookup. Prefers Schwab (one HTTP call for N symbols)
 // when connected; otherwise falls back to Yahoo (parallel per-symbol).
-// Returns { SYMBOL: price } — price is 0 for lookups that failed.
+// Any symbol still priced at 0 after the primary source gets one more shot at
+// Finnhub's /quote endpoint — a temporary debugging safety net until we
+// understand why Yahoo returns $0 on Vercel.
+//
+// Returns { SYMBOL: price } — price is 0 for lookups that failed everywhere.
 export async function getBatchPrices(symbols: string[]): Promise<Record<string, number>> {
   if (symbols.length === 0) return {};
   const uniqueSymbols = Array.from(new Set(symbols.map((s) => s.trim().toUpperCase())));
+  console.log(
+    `[price] node=${process.version} vercelRegion=${process.env.VERCEL_REGION ?? "n/a"} ` +
+      `symbols=${uniqueSymbols.length}`,
+  );
 
   const { connected } = await isSchwabConnected().catch(() => ({ connected: false }));
+
+  const map: Record<string, number> = Object.fromEntries(uniqueSymbols.map((s) => [s, 0]));
 
   if (connected) {
     try {
       const quotes = await getBatchQuotes(uniqueSymbols);
-      const map: Record<string, number> = {};
       for (const sym of uniqueSymbols) {
         const entry = quotes[sym];
         const px = entry?.quote?.lastPrice ?? entry?.quote?.mark ?? entry?.quote?.closePrice ?? 0;
@@ -21,22 +33,73 @@ export async function getBatchPrices(symbols: string[]): Promise<Record<string, 
       }
       const hits = Object.values(map).filter((p) => p > 0).length;
       console.log(`[price] source=schwab symbols=${uniqueSymbols.length} hits=${hits}`);
-      // If Schwab responded but nothing came back, treat as failure and try Yahoo.
-      if (hits > 0) return map;
-      console.warn("[price] schwab returned no usable prices, falling back to yahoo");
+      if (hits === 0) {
+        console.warn("[price] schwab returned no usable prices, falling back to yahoo");
+      }
     } catch (e) {
       console.error("[price] schwab batch failed, falling back to yahoo:", e instanceof Error ? e.message : e);
     }
   }
 
-  const entries = await Promise.all(
-    uniqueSymbols.map(async (s) => {
-      const p = await getCurrentPrice(s);
-      return [s, typeof p === "number" && Number.isFinite(p) && p > 0 ? p : 0] as const;
-    }),
-  );
-  const map = Object.fromEntries(entries);
-  const hits = Object.values(map).filter((p) => p > 0).length;
-  console.log(`[price] source=yahoo symbols=${uniqueSymbols.length} hits=${hits}`);
+  // Yahoo pass — fills any symbol still at 0.
+  const needYahoo = uniqueSymbols.filter((s) => !map[s] || map[s] === 0);
+  if (needYahoo.length > 0) {
+    await Promise.all(
+      needYahoo.map(async (s, idx) => {
+        if (idx < VERBOSE_SAMPLE_COUNT) {
+          const debug = await getPriceDebug(s);
+          const rawKeys = debug.raw ? Object.keys(debug.raw) : null;
+          const priceFields = debug.raw
+            ? {
+                regularMarketPrice: debug.raw.regularMarketPrice,
+                postMarketPrice: debug.raw.postMarketPrice,
+                preMarketPrice: debug.raw.preMarketPrice,
+                regularMarketPreviousClose: debug.raw.regularMarketPreviousClose,
+                bid: debug.raw.bid,
+                ask: debug.raw.ask,
+                marketState: debug.raw.marketState,
+                currency: debug.raw.currency,
+                quoteType: debug.raw.quoteType,
+                symbol: debug.raw.symbol,
+                exchange: debug.raw.exchange,
+              }
+            : null;
+          console.log(
+            `[price] verbose(${s}): price=${debug.price} fieldUsed=${debug.fieldUsed} ` +
+              `rawKeyCount=${rawKeys?.length ?? 0} rawKeys=${rawKeys ? JSON.stringify(rawKeys) : "null"}`,
+          );
+          console.log(`[price] verbose(${s}) priceFields:`, priceFields);
+          map[s] = debug.price && debug.price > 0 ? debug.price : 0;
+          return;
+        }
+        const p = await getCurrentPrice(s);
+        map[s] = typeof p === "number" && Number.isFinite(p) && p > 0 ? p : 0;
+      }),
+    );
+    const hitsAfterYahoo = Object.values(map).filter((p) => p > 0).length;
+    console.log(
+      `[price] source=yahoo attempted=${needYahoo.length} hitsAfterYahoo=${hitsAfterYahoo}/${uniqueSymbols.length}`,
+    );
+  }
+
+  // Finnhub /quote fallback — fills any remaining zeros.
+  const zeros = uniqueSymbols.filter((s) => !map[s] || map[s] === 0);
+  if (zeros.length > 0) {
+    console.log(`[price] finnhub fallback: ${zeros.length} symbols still at 0`);
+    await Promise.all(
+      zeros.map(async (s) => {
+        const fp = await getFinnhubQuotePrice(s);
+        if (fp > 0) {
+          map[s] = fp;
+          console.log(`[price] finnhub rescued ${s}=$${fp.toFixed(2)}`);
+        }
+      }),
+    );
+    const finalHits = Object.values(map).filter((p) => p > 0).length;
+    console.log(
+      `[price] source=finnhub-fallback attempted=${zeros.length} finalHits=${finalHits}/${uniqueSymbols.length}`,
+    );
+  }
+
   return map;
 }

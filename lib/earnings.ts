@@ -171,6 +171,30 @@ export type EarningsSurprise = {
   quartersExamined: number;
 };
 
+// Finnhub /quote — lightweight fallback for price when Yahoo returns 0.
+// Returns 0 on failure. Shape: { c: current, pc: previousClose, d, dp, h, l, o, t }.
+export async function getFinnhubQuotePrice(symbol: string): Promise<number> {
+  try {
+    const data = await finnhubGet<{
+      c?: number;
+      pc?: number;
+      h?: number;
+      l?: number;
+      o?: number;
+    }>("/quote", { symbol: symbol.toUpperCase() });
+    if (typeof data.c === "number" && data.c > 0) return data.c;
+    if (typeof data.pc === "number" && data.pc > 0) return data.pc;
+    if (typeof data.o === "number" && data.o > 0) return data.o;
+    console.warn(
+      `[finnhub] quote(${symbol}) returned no usable price: c=${data.c} pc=${data.pc} o=${data.o}`,
+    );
+    return 0;
+  } catch (e) {
+    console.warn(`[finnhub] quote(${symbol}) failed:`, e instanceof Error ? e.message : e);
+    return 0;
+  }
+}
+
 export async function getEarningsSurpriseHistory(symbol: string): Promise<EarningsSurprise> {
   try {
     const rows = await finnhubGet<Array<{ actual: number | null; estimate: number | null; period: string }>>(

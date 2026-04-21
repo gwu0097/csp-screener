@@ -181,6 +181,31 @@ export async function getCurrentPrice(symbol: string): Promise<number | null> {
   }
 }
 
+// Debug-only: returns the raw quote record plus which price field was picked.
+// Used by lib/price.ts to log detailed info for the first few symbols on a run
+// when Yahoo appears to be returning 0 for everything.
+export async function getPriceDebug(symbol: string): Promise<{
+  price: number | null;
+  fieldUsed: string | null;
+  raw: Record<string, unknown> | null;
+}> {
+  const record = await quoteRaw(symbol);
+  if (!record) return { price: null, fieldUsed: null, raw: null };
+  const priceFields = [
+    "regularMarketPrice",
+    "postMarketPrice",
+    "preMarketPrice",
+    "regularMarketPreviousClose",
+    "bid",
+    "ask",
+  ] as const;
+  for (const field of priceFields) {
+    const v = pickNumber(record, field);
+    if (v !== null && v > 0) return { price: v, fieldUsed: field, raw: record };
+  }
+  return { price: null, fieldUsed: null, raw: record };
+}
+
 export async function getMarketCap(symbol: string): Promise<number | null> {
   try {
     const q = await quoteMinimal(symbol);
