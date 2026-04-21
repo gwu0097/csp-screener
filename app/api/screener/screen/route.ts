@@ -32,112 +32,186 @@ type ScreenResponse = {
     afterPriceFilter: number;
     afterChainFilter: number;
     final: number;
+    droppedByEtf: string[];
+    droppedByBlacklist: string[];
+    droppedByPrice: string[];
+    droppedByChain: string[];
   };
+  error?: string;
 };
 
 export async function POST() {
-  const { connected } = await isSchwabConnected().catch(() => ({ connected: false }));
+  console.log(`[screen] handler called at ${new Date().toISOString()}`);
 
-  const earnings = await getTodayEarnings();
-  const { whitelist, blacklist } = await getWatchlistSymbols();
-
-  const stats = {
-    finnhub: earnings.length,
+  const stats: ScreenResponse["stats"] = {
+    finnhub: 0,
     afterEtfAndBlacklist: 0,
     afterPriceFilter: 0,
     afterChainFilter: 0,
     final: 0,
+    droppedByEtf: [],
+    droppedByBlacklist: [],
+    droppedByPrice: [],
+    droppedByChain: [],
   };
 
-  // Step 2: hard kill ETFs + blacklist. Also narrow the timing type to BMO|AMC.
-  type Survivor = { symbol: string; date: string; timing: "BMO" | "AMC" };
-  const survivors: Survivor[] = earnings
-    .filter((e) => e.timing === "AMC" || e.timing === "BMO")
-    .filter((e) => isLikelyCommonEquity(e.symbol))
-    .filter((e) => !blacklist.has(e.symbol.toUpperCase()))
-    .map((e) => ({ symbol: e.symbol, date: e.date, timing: e.timing as "BMO" | "AMC" }));
-  stats.afterEtfAndBlacklist = survivors.length;
+  try {
+    const { connected } = await isSchwabConnected().catch(() => ({ connected: false }));
+    console.log(`[screen] schwab connected=${connected}`);
 
-  // Step 3: fetch prices
-  const prices = await getBatchPrices(survivors.map((s) => s.symbol));
-
-  // Step 4: price floor
-  const afterPrice = survivors.filter((s) => (prices[s.symbol.toUpperCase()] ?? 0) >= MIN_PRICE);
-  stats.afterPriceFilter = afterPrice.length;
-
-  // Step 5: chain check (only when Schwab connected — skip otherwise)
-  type WithChain = (typeof afterPrice)[number] & { expiry: string; price: number };
-  const afterChain: WithChain[] = [];
-  for (const row of afterPrice) {
-    const price = prices[row.symbol.toUpperCase()] ?? 0;
-    const candidate = buildCandidateFromEarnings({ symbol: row.symbol, date: row.date, timing: row.timing }, price);
-    if (!connected) {
-      afterChain.push({ ...row, expiry: candidate.expiry, price });
-      continue;
+    const earnings = await getTodayEarnings();
+    stats.finnhub = earnings.length;
+    console.log(`[screen] earnings from Finnhub: ${earnings.length}`);
+    if (earnings.length === 0) {
+      console.warn(
+        "[screen] Finnhub returned 0 eligible earnings for today-AMC or tomorrow-BMO. " +
+          "Check [finnhub] and [earnings] log lines above for the exact URL, date window, and raw row breakdown.",
+      );
     }
-    const chain = await safeGetChain(row.symbol, candidate.expiry, candidate.expiry);
-    if (chain && chainHasWeeklyExpiry(chain, candidate.expiry)) {
-      afterChain.push({ ...row, expiry: candidate.expiry, price });
-    }
-  }
-  stats.afterChainFilter = afterChain.length;
 
-  // Step 6 + 7: classify and score stages 1+2
-  let yahooBudget = YAHOO_FALLBACK_BUDGET;
-  const results: ScreenerResult[] = [];
-  for (const row of afterChain) {
-    const upper = row.symbol.toUpperCase();
-    const cls = await getIndustryClassification(upper, { yahooAllowed: yahooBudget > 0 });
-    if (cls.source === "yahoo") yahooBudget -= 1;
-
-    const isWhitelisted = whitelist.has(upper);
-    const industryStatus: "pass" | "fail" | "unknown" = isWhitelisted
-      ? "pass"
-      : cls.source === "unknown"
-        ? "unknown"
-        : cls.pass
-          ? "pass"
-          : "fail";
-
-    const candidate = buildCandidateFromEarnings(
-      { symbol: row.symbol, date: row.date, timing: row.timing },
-      row.price,
+    const { whitelist, blacklist } = await getWatchlistSymbols();
+    console.log(
+      `[screen] watchlist: whitelist=${whitelist.size} blacklist=${blacklist.size}`,
     );
 
-    // We already refetched the chain above; refetch cheaply via cache-less call
-    // only when Schwab is connected. (Schwab SDK has no transport cache so this
-    // is an extra call, but keeps the code simple.)
-    const chain = connected ? await safeGetChain(row.symbol, candidate.expiry, candidate.expiry) : null;
+    // Step 2: hard kill ETFs + blacklist. Also narrow the timing type to BMO|AMC.
+    type Survivor = { symbol: string; date: string; timing: "BMO" | "AMC" };
+    const survivors: Survivor[] = [];
+    for (const e of earnings) {
+      if (e.timing !== "AMC" && e.timing !== "BMO") continue;
+      const upper = e.symbol.toUpperCase();
+      if (!isLikelyCommonEquity(e.symbol)) {
+        stats.droppedByEtf.push(upper);
+        continue;
+      }
+      if (blacklist.has(upper)) {
+        stats.droppedByBlacklist.push(upper);
+        continue;
+      }
+      survivors.push({ symbol: e.symbol, date: e.date, timing: e.timing as "BMO" | "AMC" });
+    }
+    stats.afterEtfAndBlacklist = survivors.length;
+    console.log(
+      `[screen] after ETF/blacklist: ${survivors.length} ` +
+        `(dropped ETF=${stats.droppedByEtf.length}, blacklist=${stats.droppedByBlacklist.length})`,
+    );
 
-    const context: ScreenContext = {
+    // Step 3: fetch prices
+    const prices = await getBatchPrices(survivors.map((s) => s.symbol));
+    const priceHits = Object.values(prices).filter((p) => p > 0).length;
+    console.log(
+      `[screen] priced ${survivors.length} symbols, ${priceHits} with non-zero price`,
+    );
+
+    // Step 4: price floor
+    const afterPrice: Survivor[] = [];
+    for (const s of survivors) {
+      const p = prices[s.symbol.toUpperCase()] ?? 0;
+      if (p >= MIN_PRICE) {
+        afterPrice.push(s);
+      } else {
+        stats.droppedByPrice.push(`${s.symbol.toUpperCase()}($${p.toFixed(2)})`);
+      }
+    }
+    stats.afterPriceFilter = afterPrice.length;
+    console.log(
+      `[screen] after $${MIN_PRICE} price floor: ${afterPrice.length} ` +
+        `(dropped=${stats.droppedByPrice.length}; examples=${stats.droppedByPrice.slice(0, 6).join(",")})`,
+    );
+
+    // Step 5: chain check (only when Schwab connected — skip otherwise)
+    type WithChain = Survivor & { expiry: string; price: number };
+    const afterChain: WithChain[] = [];
+    for (const row of afterPrice) {
+      const price = prices[row.symbol.toUpperCase()] ?? 0;
+      const candidate = buildCandidateFromEarnings(
+        { symbol: row.symbol, date: row.date, timing: row.timing },
+        price,
+      );
+      if (!connected) {
+        afterChain.push({ ...row, expiry: candidate.expiry, price });
+        continue;
+      }
+      const chain = await safeGetChain(row.symbol, candidate.expiry, candidate.expiry);
+      if (chain && chainHasWeeklyExpiry(chain, candidate.expiry)) {
+        afterChain.push({ ...row, expiry: candidate.expiry, price });
+      } else {
+        stats.droppedByChain.push(row.symbol.toUpperCase());
+      }
+    }
+    stats.afterChainFilter = afterChain.length;
+    console.log(
+      `[screen] after weekly-chain filter: ${afterChain.length} ` +
+        `(dropped=${stats.droppedByChain.length} — ${stats.droppedByChain.slice(0, 6).join(",")})`,
+    );
+
+    // Step 6 + 7: classify and score stages 1+2
+    let yahooBudget = YAHOO_FALLBACK_BUDGET;
+    const results: ScreenerResult[] = [];
+    for (const row of afterChain) {
+      const upper = row.symbol.toUpperCase();
+      const cls = await getIndustryClassification(upper, { yahooAllowed: yahooBudget > 0 });
+      if (cls.source === "yahoo") yahooBudget -= 1;
+
+      const isWhitelisted = whitelist.has(upper);
+      const industryStatus: "pass" | "fail" | "unknown" = isWhitelisted
+        ? "pass"
+        : cls.source === "unknown"
+          ? "unknown"
+          : cls.pass
+            ? "pass"
+            : "fail";
+
+      const candidate = buildCandidateFromEarnings(
+        { symbol: row.symbol, date: row.date, timing: row.timing },
+        row.price,
+      );
+
+      const chain = connected
+        ? await safeGetChain(row.symbol, candidate.expiry, candidate.expiry)
+        : null;
+
+      const context: ScreenContext = {
+        connected,
+        chain,
+        industryClass: cls.industry as ScreenContext["industryClass"],
+        industryStatus,
+        isWhitelisted,
+      };
+
+      const result = await evaluateStagesOneTwo(candidate, context);
+      results.push(result);
+    }
+
+    results.sort((a, b) => (b.stageTwo?.score ?? -999) - (a.stageTwo?.score ?? -999));
+    const final = results.slice(0, MAX_RESULTS);
+    stats.final = final.length;
+
+    console.log(
+      `[screen] SUMMARY finnhub=${stats.finnhub} afterEtfBlacklist=${stats.afterEtfAndBlacklist} ` +
+        `afterPrice(>=$${MIN_PRICE})=${stats.afterPriceFilter} afterChain=${stats.afterChainFilter} ` +
+        `final=${stats.final} connected=${connected}`,
+    );
+
+    const response: ScreenResponse = {
       connected,
-      chain,
-      industryClass: cls.industry as ScreenContext["industryClass"],
-      industryStatus,
-      isWhitelisted,
+      screenedAt: new Date().toISOString(),
+      results: final,
+      prices,
+      stats,
     };
-
-    const result = await evaluateStagesOneTwo(candidate, context);
-    results.push(result);
+    return NextResponse.json(response);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "unknown";
+    console.error("[screen] handler failed:", msg, e instanceof Error ? e.stack : undefined);
+    const response: ScreenResponse = {
+      connected: false,
+      screenedAt: new Date().toISOString(),
+      results: [],
+      prices: {},
+      stats,
+      error: msg,
+    };
+    return NextResponse.json(response, { status: 500 });
   }
-
-  // Sort by Stage 2 score descending, cap at 20.
-  results.sort((a, b) => (b.stageTwo?.score ?? -999) - (a.stageTwo?.score ?? -999));
-  const final = results.slice(0, MAX_RESULTS);
-  stats.final = final.length;
-
-  console.log(
-    `[screen] finnhub=${stats.finnhub} afterEtfBlacklist=${stats.afterEtfAndBlacklist} ` +
-      `afterPrice(>=$${MIN_PRICE})=${stats.afterPriceFilter} afterChain=${stats.afterChainFilter} ` +
-      `final=${stats.final} connected=${connected}`,
-  );
-
-  const response: ScreenResponse = {
-    connected,
-    screenedAt: new Date().toISOString(),
-    results: final,
-    prices,
-    stats,
-  };
-  return NextResponse.json(response);
 }

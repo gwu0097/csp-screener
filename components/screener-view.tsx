@@ -38,6 +38,18 @@ type Props = { connected: boolean };
 
 type RunStatus = "idle" | "screening" | "applying" | "analyzing" | "error";
 
+type ScreenStats = {
+  finnhub: number;
+  afterEtfAndBlacklist: number;
+  afterPriceFilter: number;
+  afterChainFilter: number;
+  final: number;
+  droppedByEtf: string[];
+  droppedByBlacklist: string[];
+  droppedByPrice: string[];
+  droppedByChain: string[];
+};
+
 type SortKey =
   | "symbol"
   | "price"
@@ -99,6 +111,7 @@ export function ScreenerView({ connected }: Props) {
   const [screenedAt, setScreenedAt] = useState<Date | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [lastStats, setLastStats] = useState<ScreenStats | null>(null);
   const [analyzingSymbols, setAnalyzingSymbols] = useState<Set<string>>(new Set());
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [logRow, setLogRow] = useState<ScreenerResult | null>(null);
@@ -180,24 +193,31 @@ export function ScreenerView({ connected }: Props) {
     setError(null);
     setMessage(null);
     setExpanded({});
+    setLastStats(null);
     try {
       const res = await fetch("/api/screener/screen", { method: "POST", cache: "no-store" });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`);
-      }
-      const json = (await res.json()) as {
-        results: ScreenerResult[];
-        prices: Record<string, number>;
-        screenedAt: string;
+      const json = (await res.json().catch(() => ({}))) as {
+        results?: ScreenerResult[];
+        prices?: Record<string, number>;
+        screenedAt?: string;
+        stats?: ScreenStats;
+        error?: string;
       };
-      setResults(json.results);
-      setPrices(json.prices);
-      setScreenedAt(new Date(json.screenedAt));
+      if (!res.ok || json.error) {
+        const msg = json.error ?? `HTTP ${res.status}`;
+        setError(`Screen failed: ${msg}`);
+        setStatus("error");
+        if (json.stats) setLastStats(json.stats);
+        return;
+      }
+      setResults(json.results ?? []);
+      setPrices(json.prices ?? {});
+      setScreenedAt(json.screenedAt ? new Date(json.screenedAt) : new Date());
+      setLastStats(json.stats ?? null);
       setStatus("idle");
-      setMessage(`Screened ${json.results.length} candidates`);
+      setMessage(`Screened ${(json.results ?? []).length} candidates`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Screen failed");
+      setError(`Screen failed: ${e instanceof Error ? e.message : "network error"}`);
       setStatus("error");
     }
   }
@@ -270,7 +290,8 @@ export function ScreenerView({ connected }: Props) {
     }
   }
 
-  const hasResults = (results?.length ?? 0) > 0 || status === "screening";
+  const hasResults = (results?.length ?? 0) > 0;
+  const emptyAfterScreen = results !== null && results.length === 0 && status !== "screening";
   const busy = status === "screening" || status === "applying" || status === "analyzing";
 
   return (
@@ -361,6 +382,45 @@ export function ScreenerView({ connected }: Props) {
             <Loader2 className="mb-3 h-10 w-10 animate-spin text-muted-foreground" />
             <div className="text-sm text-muted-foreground">
               Fetching earnings calendar, pricing batch, and scoring stages 1 & 2…
+            </div>
+          </div>
+        )}
+
+        {emptyAfterScreen && lastStats && (
+          <div className="rounded-lg border border-border bg-background/40 p-4 text-sm">
+            <div className="mb-2 font-medium">No candidates survived the filters.</div>
+            <div className="space-y-1 font-mono text-xs text-muted-foreground">
+              <div>
+                Finnhub raw: <span className="text-foreground">{lastStats.finnhub}</span>
+              </div>
+              <div>
+                After ETF / blacklist: <span className="text-foreground">{lastStats.afterEtfAndBlacklist}</span>
+                {lastStats.droppedByEtf.length > 0 && (
+                  <> · ETF dropped: {lastStats.droppedByEtf.slice(0, 8).join(", ")}</>
+                )}
+                {lastStats.droppedByBlacklist.length > 0 && (
+                  <> · blacklist dropped: {lastStats.droppedByBlacklist.slice(0, 8).join(", ")}</>
+                )}
+              </div>
+              <div>
+                After $70 price floor: <span className="text-foreground">{lastStats.afterPriceFilter}</span>
+                {lastStats.droppedByPrice.length > 0 && (
+                  <> · price dropped: {lastStats.droppedByPrice.slice(0, 8).join(", ")}</>
+                )}
+              </div>
+              <div>
+                After weekly-chain filter: <span className="text-foreground">{lastStats.afterChainFilter}</span>
+                {lastStats.droppedByChain.length > 0 && (
+                  <> · no-chain: {lastStats.droppedByChain.slice(0, 8).join(", ")}</>
+                )}
+              </div>
+              <div>
+                Final: <span className="text-foreground">{lastStats.final}</span>
+              </div>
+            </div>
+            <div className="mt-3 text-xs text-muted-foreground">
+              If Finnhub raw is 0, check the Vercel runtime logs for the <code>[finnhub]</code> and <code>[earnings]</code>
+              lines — they show the exact URL, date window, and raw row breakdown.
             </div>
           </div>
         )}

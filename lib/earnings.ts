@@ -25,9 +25,16 @@ async function finnhubGet<T>(path: string, params: Record<string, string | numbe
     url.searchParams.set(k, String(v));
   }
   url.searchParams.set("token", FINNHUB_KEY);
+
+  // Log the URL without the token so we can confirm the exact date range.
+  const safe = new URL(url.toString());
+  safe.searchParams.set("token", "***");
+  console.log(`[finnhub] GET ${safe.toString()}`);
+
   const res = await fetch(url.toString(), { cache: "no-store" });
   if (!res.ok) {
     const text = await res.text();
+    console.error(`[finnhub] ${path} HTTP ${res.status}: ${text.slice(0, 200)}`);
     throw new Error(`Finnhub ${path} failed: ${res.status} ${text}`);
   }
   return (await res.json()) as T;
@@ -60,12 +67,34 @@ export async function getTodayEarnings(): Promise<EarningsCalendarItem[]> {
   const today = todayInEastern();
   const tomorrow = addOneDayIso(today);
 
+  console.log(`[earnings] window today=${today} tomorrow=${tomorrow}`);
+
   try {
     const data = await finnhubGet<{ earningsCalendar: FinnhubCalendarEntry[] }>("/calendar/earnings", {
       from: today,
       to: tomorrow,
     });
     const rows = data.earningsCalendar ?? [];
+
+    // Breakdown of the raw Finnhub payload by date and by timing so we can see
+    // exactly what the calendar returned before any filtering.
+    const byDate = new Map<string, number>();
+    const byTiming = { bmo: 0, amc: 0, dmh: 0, other: 0, missing: 0 };
+    for (const r of rows) {
+      byDate.set(r.date, (byDate.get(r.date) ?? 0) + 1);
+      const h = (r.hour ?? "").toLowerCase();
+      if (h === "bmo") byTiming.bmo += 1;
+      else if (h === "amc") byTiming.amc += 1;
+      else if (h === "dmh") byTiming.dmh += 1;
+      else if (!h) byTiming.missing += 1;
+      else byTiming.other += 1;
+    }
+    const dateBreakdown = Array.from(byDate.entries())
+      .map(([d, n]) => `${d}=${n}`)
+      .join(", ");
+    console.log(
+      `[earnings] raw rows=${rows.length} dates={${dateBreakdown}} timing=${JSON.stringify(byTiming)}`,
+    );
 
     const parsed: EarningsCalendarItem[] = [];
     for (const r of rows) {
@@ -89,8 +118,9 @@ export async function getTodayEarnings(): Promise<EarningsCalendarItem[]> {
     );
 
     console.log(
-      `[earnings] Finnhub returned ${rows.length}, parsed ${parsed.length}, kept ${kept.length} ` +
-        `(today=${today} AMC + tomorrow=${tomorrow} BMO)`,
+      `[earnings] parsed=${parsed.length} kept=${kept.length} ` +
+        `(today=${today} AMC + tomorrow=${tomorrow} BMO) ` +
+        `symbols=${kept.map((k) => `${k.symbol}/${k.date}/${k.timing}`).join(",")}`,
     );
 
     return kept;
