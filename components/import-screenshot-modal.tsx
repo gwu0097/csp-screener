@@ -265,17 +265,32 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
               Found {parsed.length} trade{parsed.length === 1 ? "" : "s"} — review and confirm
             </div>
             <div className="max-h-96 overflow-auto rounded border border-border">
-              <table className="w-full">
+              <table className="w-full table-fixed">
+                {/* Explicit column widths keep the sticky header aligned with
+                    the body even when <input type="date"> renders wider than
+                    a plain text cell. Total ≈ 780px — narrower viewports
+                    fall back to the wrapper's overflow-auto. */}
+                <colgroup>
+                  <col style={{ width: "130px" }} />{/* Date */}
+                  <col style={{ width: "85px" }} />{/* Symbol */}
+                  <col style={{ width: "85px" }} />{/* Action */}
+                  <col style={{ width: "60px" }} />{/* Qty */}
+                  <col style={{ width: "80px" }} />{/* Strike */}
+                  <col style={{ width: "130px" }} />{/* Expiry */}
+                  <col style={{ width: "70px" }} />{/* Type */}
+                  <col style={{ width: "90px" }} />{/* Premium */}
+                  <col style={{ width: "40px" }} />{/* Delete */}
+                </colgroup>
                 <thead className="sticky top-0 z-10 bg-muted/40 text-left">
                   <tr>
-                    <th className="px-2 py-1">Date</th>
-                    <th className="px-2 py-1">Symbol</th>
-                    <th className="px-2 py-1">Action</th>
-                    <th className="px-2 py-1">Qty</th>
-                    <th className="px-2 py-1">Strike</th>
-                    <th className="px-2 py-1">Expiry</th>
-                    <th className="px-2 py-1">Type</th>
-                    <th className="px-2 py-1">Premium</th>
+                    <th className="whitespace-nowrap px-2 py-1">Date</th>
+                    <th className="whitespace-nowrap px-2 py-1">Symbol</th>
+                    <th className="whitespace-nowrap px-2 py-1">Action</th>
+                    <th className="whitespace-nowrap px-2 py-1">Qty</th>
+                    <th className="whitespace-nowrap px-2 py-1">Strike</th>
+                    <th className="whitespace-nowrap px-2 py-1">Expiry</th>
+                    <th className="whitespace-nowrap px-2 py-1">Type</th>
+                    <th className="whitespace-nowrap px-2 py-1">Premium</th>
                     <th className="px-2 py-1"></th>
                   </tr>
                 </thead>
@@ -287,7 +302,7 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
                           type="date"
                           value={t.timePlaced ?? todayIso()}
                           onChange={(e) => updateRow(idx, { timePlaced: e.target.value })}
-                          className="rounded border border-border bg-background px-1 py-0.5"
+                          className="w-full rounded border border-border bg-background px-1 py-0.5"
                         />
                       </td>
                       <td className="px-2 py-1">
@@ -330,7 +345,7 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
                           type="date"
                           value={t.expiry}
                           onChange={(e) => updateRow(idx, { expiry: e.target.value })}
-                          className="rounded border border-border bg-background px-1 py-0.5"
+                          className="w-full rounded border border-border bg-background px-1 py-0.5"
                         />
                       </td>
                       <td className="px-2 py-1">
