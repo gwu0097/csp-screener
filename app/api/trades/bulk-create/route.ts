@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient, TradeRow } from "@/lib/supabase";
+import { allocateCloseFIFO } from "@/lib/trade-allocation";
 
 export const dynamic = "force-dynamic";
 
@@ -24,48 +25,6 @@ type BulkBody = { trades?: TradeInput[] };
 
 function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
-}
-
-// Pick the oldest open trade whose (symbol, strike, expiry, broker) matches
-// and whose remaining contracts (original - sum of child closes) > 0. Returns
-// null if nothing available to link to.
-async function findOpenParent(
-  supabase: ReturnType<typeof createServerClient>,
-  input: TradeInput,
-): Promise<TradeRow | null> {
-  const broker = (input.broker ?? "schwab").toLowerCase();
-  // Grab candidate parents: open trades matching the key.
-  const { data: parents, error: pErr } = await supabase
-    .from("trades")
-    .select("*")
-    .eq("action", "open")
-    .eq("symbol", input.symbol.toUpperCase())
-    .eq("strike", input.strike)
-    .eq("expiry", input.expiry)
-    .eq("broker", broker)
-    .order("trade_date", { ascending: true });
-  if (pErr || !parents || parents.length === 0) return null;
-
-  // Sum close contracts per parent in one query.
-  const parentIds = parents.map((p: TradeRow) => p.id);
-  const { data: closes } = await supabase
-    .from("trades")
-    .select("parent_trade_id, contracts")
-    .eq("action", "close")
-    .in("parent_trade_id", parentIds);
-
-  const closedByParent = new Map<string, number>();
-  for (const c of (closes ?? []) as Array<{ parent_trade_id: string | null; contracts: number | null }>) {
-    if (!c.parent_trade_id) continue;
-    closedByParent.set(c.parent_trade_id, (closedByParent.get(c.parent_trade_id) ?? 0) + (c.contracts ?? 0));
-  }
-
-  for (const p of parents as TradeRow[]) {
-    const original = p.contracts ?? 1;
-    const closed = closedByParent.get(p.id) ?? 0;
-    if (original - closed > 0) return p;
-  }
-  return null;
 }
 
 type InsertRow = Omit<TradeRow, "id" | "created_at">;
@@ -153,23 +112,59 @@ export async function POST(req: NextRequest) {
     }
 
     try {
-      let parentId: string | null = null;
-      if (input.action === "close") {
-        const parent = await findOpenParent(supabase, input);
-        if (parent) {
-          parentId = parent.id;
-          matched += 1;
-        } else {
-          unmatched += 1;
+      if (input.action === "open") {
+        const row = buildInsert(input, null);
+        const { error: iErr } = await supabase.from("trades").insert(row);
+        if (iErr) {
+          errors.push(`${input.symbol}: ${iErr.message}`);
+          continue;
         }
-      }
-      const row = buildInsert(input, parentId);
-      const { error: iErr } = await supabase.from("trades").insert(row);
-      if (iErr) {
-        errors.push(`${input.symbol}: ${iErr.message}`);
+        created += 1;
         continue;
       }
-      created += 1;
+
+      // Close: distribute across open parents FIFO. A single close
+      // transaction can span multiple parent tranches (e.g. a 6-contract
+      // close against two 3-contract opens) — we insert one child row per
+      // parent consumed, plus one orphan child for any residue.
+      const { allocations, fullyClosedParentIds } = await allocateCloseFIFO(
+        supabase,
+        {
+          symbol: input.symbol,
+          strike: input.strike,
+          expiry: input.expiry,
+          broker: input.broker ?? "schwab",
+        },
+        input.contracts,
+      );
+      for (const alloc of allocations) {
+        const row = buildInsert(
+          { ...input, contracts: alloc.contracts },
+          alloc.parentId,
+        );
+        const { error: iErr } = await supabase.from("trades").insert(row);
+        if (iErr) {
+          errors.push(`${input.symbol}: ${iErr.message}`);
+          continue;
+        }
+        created += 1;
+        if (alloc.parentId) matched += 1;
+        else unmatched += 1;
+      }
+      // Flip closed_at on parents whose remaining capacity just hit zero.
+      // UI + other routes already exclude parent rows with closed_at set,
+      // so this keeps the "remaining=0 but still flagged open" state from
+      // showing up in queries that don't compute child sums.
+      const closedAtDate = input.timePlaced ?? input.trade_date ?? todayIso();
+      for (const pid of fullyClosedParentIds) {
+        const { error: uErr } = await supabase
+          .from("trades")
+          .update({ closed_at: closedAtDate })
+          .eq("id", pid);
+        if (uErr) {
+          errors.push(`${input.symbol} closed_at set on ${pid}: ${uErr.message}`);
+        }
+      }
     } catch (e) {
       errors.push(
         `${input.symbol}: ${e instanceof Error ? e.message : "insert failed"}`,
