@@ -3,7 +3,17 @@ import { NextRequest, NextResponse } from "next/server";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60; // VLM calls can be slow
 
-const MINIMAX_URL = "https://api.minimaxi.chat/v1/chat/completions";
+// Endpoints to try in order. Some accounts are provisioned on .io, most on
+// .chat (note the trailing 'i' in minimaxi). We try both before giving up.
+const MINIMAX_ENDPOINTS = [
+  "https://api.minimaxi.chat/v1/chat/completions",
+  "https://api.minimax.io/v1/chat/completions",
+];
+// Models to try in order. MiniMax-M2.7 is the current vision-capable default;
+// M2.5 is the prior generation; abab6.5-chat is widely available on older
+// plans (text-only — will 400 on image_url content, but worth the attempt as
+// a last resort so the error message is unambiguous).
+const MINIMAX_MODELS = ["MiniMax-M2.7", "MiniMax-M2.5", "abab6.5-chat"];
 const MINIMAX_KEY = process.env.MINIMAX_API_KEY ?? "";
 
 // The exact field contract the caller will see. Mirrors the spec prompt so
@@ -129,36 +139,71 @@ export async function POST(req: NextRequest) {
     `[parse-screenshot] broker=${broker} mime=${mime} base64_bytes=${rawLen}`,
   );
 
-  try {
-    const minimaxBody = {
-      model: "MiniMax-VL-01",
-      messages: [
-        {
-          role: "user",
-          content: [
-            { type: "image_url", image_url: { url: dataUrl } },
-            { type: "text", text: PROMPT },
-          ],
-        },
-      ],
-      max_tokens: 2000,
-    };
-    const res = await fetch(MINIMAX_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${MINIMAX_KEY}`,
-        "Content-Type": "application/json",
+  const buildBody = (model: string) => ({
+    model,
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "image_url", image_url: { url: dataUrl } },
+          { type: "text", text: PROMPT },
+        ],
       },
-      body: JSON.stringify(minimaxBody),
-      cache: "no-store",
-    });
+    ],
+    max_tokens: 2000,
+  });
 
-    if (!res.ok) {
-      const text = await res.text();
-      // Log FULL error body so we can see exactly what Minimax rejected.
-      console.error(`Minimax error: ${res.status} ${text}`);
+  // Walk (model × endpoint) until one succeeds. On 401 we bail early —
+  // that's an auth problem no permutation will fix. On 400/403/404/429 we
+  // log and try the next combo. Network errors just get logged and we
+  // keep going to the next endpoint.
+  let res: Response | null = null;
+  const failures: string[] = [];
+  try {
+    outer: for (const model of MINIMAX_MODELS) {
+      for (const endpoint of MINIMAX_ENDPOINTS) {
+        console.log(`[parse-screenshot] trying model=${model} endpoint=${endpoint}`);
+        let attempt: Response;
+        try {
+          attempt = await fetch(endpoint, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${MINIMAX_KEY}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify(buildBody(model)),
+            cache: "no-store",
+          });
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          failures.push(`${model}@${endpoint} network: ${msg}`);
+          console.warn(`[parse-screenshot] network error ${model}@${endpoint}: ${msg}`);
+          continue;
+        }
+        if (attempt.ok) {
+          console.log(`[parse-screenshot] ok model=${model} endpoint=${endpoint}`);
+          res = attempt;
+          break outer;
+        }
+        const errText = await attempt.text();
+        console.error(`Minimax error: ${attempt.status} ${errText}`);
+        failures.push(
+          `${model}@${endpoint} => ${attempt.status}: ${errText.slice(0, 200)}`,
+        );
+        if (attempt.status === 401) {
+          return NextResponse.json(
+            { error: `Minimax auth failed (401). Check MINIMAX_API_KEY. ${errText.slice(0, 300)}` },
+            { status: 502 },
+          );
+        }
+      }
+    }
+
+    if (!res) {
       return NextResponse.json(
-        { error: `Minimax HTTP ${res.status}: ${text.slice(0, 500)}` },
+        {
+          error: `All Minimax attempts failed. ${failures.join(" | ").slice(0, 800)}`,
+        },
         { status: 502 },
       );
     }
