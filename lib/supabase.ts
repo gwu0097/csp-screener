@@ -31,6 +31,8 @@ export type SchwabTokenRow = {
   updated_at: string;
 };
 
+export type TradeAction = "open" | "close";
+
 export type TradeRow = {
   id: string;
   symbol: string;
@@ -46,5 +48,24 @@ export type TradeRow = {
   crush_grade: string | null;
   opportunity_grade: string | null;
   notes: string | null;
+  created_at: string;
+  // Added in migration 004 — trades_and_market_context.sql.
+  broker: string | null;
+  contracts: number | null;
+  action: TradeAction | null;
+  parent_trade_id: string | null;
+  stock_price_at_entry: number | null;
+  stock_price_at_close: number | null;
+  delta_at_entry: number | null;
+  em_pct_at_entry: number | null;
+  strike_multiple: number | null;
+};
+
+export type MarketContextRow = {
+  id: string;
+  date: string;
+  vix: number | null;
+  spy_price: number | null;
+  market_regime: string | null;
   created_at: string;
 };

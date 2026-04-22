@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { LineChart, History, Settings, Star } from "lucide-react";
+import { LineChart, BookOpen, Briefcase, Settings, Star } from "lucide-react";
 
 export function Nav() {
   return (
@@ -14,11 +14,14 @@ export function Nav() {
             <Link href="/" className="hover:text-foreground">
               Screener
             </Link>
+            <Link href="/positions" className="inline-flex items-center gap-1 hover:text-foreground">
+              <Briefcase className="h-4 w-4" /> Positions
+            </Link>
+            <Link href="/journal" className="inline-flex items-center gap-1 hover:text-foreground">
+              <BookOpen className="h-4 w-4" /> Journal
+            </Link>
             <Link href="/watchlist" className="inline-flex items-center gap-1 hover:text-foreground">
               <Star className="h-4 w-4" /> Watchlist
-            </Link>
-            <Link href="/history" className="inline-flex items-center gap-1 hover:text-foreground">
-              <History className="h-4 w-4" /> History
             </Link>
             <Link href="/settings" className="inline-flex items-center gap-1 hover:text-foreground">
               <Settings className="h-4 w-4" /> Settings
