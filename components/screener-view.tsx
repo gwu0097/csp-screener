@@ -104,38 +104,18 @@ function gradeOrder(g: string | null | undefined): number {
 }
 
 // localStorage keys for screener persistence.
-const LS = {
-  results: "screener_results",
-  timestamp: "screener_timestamp",
-  stats: "screener_stats",
-  prices: "screener_prices",
-} as const;
-const MAX_AGE_MS = 24 * 60 * 60 * 1000; // auto-clear after 24h
+const LS_RESULTS = "screener_results";
+const LS_TIMESTAMP = "screener_timestamp";
+const LS_PRICES = "screener_prices";
 
 function clearStoredScreen() {
   try {
     if (typeof window === "undefined") return;
-    for (const k of Object.values(LS)) window.localStorage.removeItem(k);
+    window.localStorage.removeItem(LS_RESULTS);
+    window.localStorage.removeItem(LS_TIMESTAMP);
+    window.localStorage.removeItem(LS_PRICES);
   } catch {
     // ignore — quota / privacy mode
-  }
-}
-
-function saveStoredScreen(
-  results: ScreenerResult[],
-  timestamp: Date,
-  prices: Record<string, number>,
-  stats: ScreenStats | null,
-) {
-  try {
-    if (typeof window === "undefined") return;
-    window.localStorage.setItem(LS.results, JSON.stringify(results));
-    window.localStorage.setItem(LS.timestamp, timestamp.toISOString());
-    window.localStorage.setItem(LS.prices, JSON.stringify(prices));
-    if (stats) window.localStorage.setItem(LS.stats, JSON.stringify(stats));
-    else window.localStorage.removeItem(LS.stats);
-  } catch (e) {
-    console.warn("[screener] saveStoredScreen failed:", e);
   }
 }
 
@@ -163,50 +143,6 @@ function normaliseResult(r: Partial<ScreenerResult> & { symbol?: string }): Scre
   };
 }
 
-type RestoredState = {
-  results: ScreenerResult[];
-  timestamp: Date;
-  prices: Record<string, number>;
-  stats: ScreenStats | null;
-  ageMs: number;
-};
-
-function loadStoredScreen(): RestoredState | null {
-  try {
-    if (typeof window === "undefined") return null;
-    const ts = window.localStorage.getItem(LS.timestamp);
-    const resultsJson = window.localStorage.getItem(LS.results);
-    if (!ts || !resultsJson) return null;
-    const timestamp = new Date(ts);
-    if (Number.isNaN(timestamp.getTime())) {
-      clearStoredScreen();
-      return null;
-    }
-    const ageMs = Date.now() - timestamp.getTime();
-    if (ageMs > MAX_AGE_MS) {
-      clearStoredScreen();
-      return null;
-    }
-    const raw = JSON.parse(resultsJson) as unknown;
-    if (!Array.isArray(raw)) {
-      clearStoredScreen();
-      return null;
-    }
-    const results = raw
-      .map((r) => normaliseResult(r as Partial<ScreenerResult>))
-      .filter((r): r is ScreenerResult => r !== null);
-    const pricesJson = window.localStorage.getItem(LS.prices);
-    const statsJson = window.localStorage.getItem(LS.stats);
-    const prices = pricesJson ? (JSON.parse(pricesJson) as Record<string, number>) : {};
-    const stats = statsJson ? (JSON.parse(statsJson) as ScreenStats) : null;
-    return { results, timestamp, prices, stats, ageMs };
-  } catch (e) {
-    console.warn("[screener] loadStoredScreen failed:", e);
-    clearStoredScreen();
-    return null;
-  }
-}
-
 export function ScreenerView({ connected }: Props) {
   const router = useRouter();
   const [status, setStatus] = useState<RunStatus>("idle");
@@ -225,18 +161,34 @@ export function ScreenerView({ connected }: Props) {
   // Clicking any column header switches to flat sort and sets groupMode=null.
   const [groupMode, setGroupMode] = useState<"stage2" | "grades" | null>(null);
 
-  // Restore any cached screen on mount. Runs client-side only.
   useEffect(() => {
-    const restored = loadStoredScreen();
-    if (!restored) return;
-    setResults(restored.results);
-    setPrices(restored.prices);
-    setScreenedAt(restored.timestamp);
-    setLastStats(restored.stats);
-    // If any result has Stage 3+4 data, the user had run Run Analysis before —
-    // restore that grouping; otherwise group by Stage 2 score.
-    const analyzed = restored.results.some((r) => r.stageThree !== null);
-    setGroupMode(analyzed ? "grades" : "stage2");
+    try {
+      const raw = localStorage.getItem(LS_RESULTS);
+      const ts = localStorage.getItem(LS_TIMESTAMP);
+      const pricesRaw = localStorage.getItem(LS_PRICES);
+      console.log("[screener] mount restore - raw length:", raw?.length, "ts:", ts);
+      if (raw && ts) {
+        const age = Date.now() - new Date(ts).getTime();
+        if (age < 24 * 60 * 60 * 1000) {
+          const parsed = (JSON.parse(raw) as unknown[])
+            .map((r) => normaliseResult(r as Partial<ScreenerResult>))
+            .filter((r): r is ScreenerResult => r !== null);
+          setResults(parsed);
+          if (pricesRaw) setPrices(JSON.parse(pricesRaw));
+          setScreenedAt(new Date(ts));
+          const analyzed = parsed.some((r) => r.stageThree !== null);
+          setGroupMode(analyzed ? "grades" : "stage2");
+          console.log("[screener] restored", parsed.length, "results");
+        } else {
+          localStorage.removeItem(LS_RESULTS);
+          localStorage.removeItem(LS_TIMESTAMP);
+          localStorage.removeItem(LS_PRICES);
+          console.log("[screener] cleared stale results");
+        }
+      }
+    } catch (e) {
+      console.error("localStorage restore failed", e);
+    }
   }, []);
 
   const toggle = (id: string) => setExpanded((s) => ({ ...s, [id]: !s[id] }));
@@ -363,15 +315,22 @@ export function ScreenerView({ connected }: Props) {
       const nextResults = json.results ?? [];
       const nextPrices = json.prices ?? {};
       const nextStats = json.stats ?? null;
-      const nextTimestamp = json.screenedAt ? new Date(json.screenedAt) : new Date();
+      const timestampIso = json.screenedAt ?? new Date().toISOString();
+      // Save BEFORE setState
+      try {
+        localStorage.setItem(LS_RESULTS, JSON.stringify(nextResults));
+        localStorage.setItem(LS_TIMESTAMP, timestampIso);
+        localStorage.setItem(LS_PRICES, JSON.stringify(nextPrices));
+      } catch (e) {
+        console.error("localStorage save failed", e);
+      }
       setResults(nextResults);
       setPrices(nextPrices);
-      setScreenedAt(nextTimestamp);
+      setScreenedAt(new Date(timestampIso));
       setLastStats(nextStats);
       setGroupMode("stage2");
       setStatus("idle");
       setMessage(`Screened ${nextResults.length} candidates`);
-      saveStoredScreen(nextResults, nextTimestamp, nextPrices, nextStats);
     } catch (e) {
       setError(`Screen failed: ${e instanceof Error ? e.message : "network error"}`);
       setStatus("error");
@@ -402,13 +361,20 @@ export function ScreenerView({ connected }: Props) {
       const removedSet = new Set(json.removed.map((s) => s.toUpperCase()));
       const next = results.filter((r) => !removedSet.has(r.symbol.toUpperCase())).concat(json.added);
       const mergedPrices = { ...prices, ...json.updatedPrices };
+      // Save BEFORE setState. Preserve the existing timestamp so "Last screened"
+      // still reflects the most recent Screen run; fall back to now if missing.
+      const timestampIso = (screenedAt ?? new Date()).toISOString();
+      try {
+        localStorage.setItem(LS_RESULTS, JSON.stringify(next));
+        localStorage.setItem(LS_TIMESTAMP, timestampIso);
+        localStorage.setItem(LS_PRICES, JSON.stringify(mergedPrices));
+      } catch (e) {
+        console.error("localStorage save failed", e);
+      }
       setResults(next);
       setPrices(mergedPrices);
       setMessage(`Added ${json.added.length}, removed ${json.removed.length}`);
       setStatus("idle");
-      // Persist the mutated list. Keep the original screenedAt timestamp so
-      // the "Last screened" badge still reflects the most recent Screen run.
-      if (screenedAt) saveStoredScreen(next, screenedAt, mergedPrices, lastStats);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Apply watchlist failed");
       setStatus("error");
@@ -439,12 +405,20 @@ export function ScreenerView({ connected }: Props) {
       const byKey = new Map(json.results.map((r) => [`${r.symbol}|${r.earningsDate}`, r]));
       const next = results.map((r) => byKey.get(`${r.symbol}|${r.earningsDate}`) ?? r);
       const mergedPrices = { ...prices, ...json.prices };
+      // Save BEFORE setState
+      const timestampIso = (screenedAt ?? new Date()).toISOString();
+      try {
+        localStorage.setItem(LS_RESULTS, JSON.stringify(next));
+        localStorage.setItem(LS_TIMESTAMP, timestampIso);
+        localStorage.setItem(LS_PRICES, JSON.stringify(mergedPrices));
+      } catch (e) {
+        console.error("localStorage save failed", e);
+      }
       setResults(next);
       setPrices(mergedPrices);
       setGroupMode("grades");
       setMessage(`Analyzed ${json.results.length} candidates`);
       setStatus("idle");
-      if (screenedAt) saveStoredScreen(next, screenedAt, mergedPrices, lastStats);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Analysis failed");
       setStatus("error");
