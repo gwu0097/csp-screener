@@ -88,7 +88,24 @@ function coerceTrade(raw: unknown, fallbackBroker: string): ParsedTrade | null {
   };
 }
 
+// Accept either a full data URL (preferred — preserves mime) or a raw base64
+// string (legacy — we assume PNG). Minimax rejects mime/bytes mismatches
+// with 400 so the mime type must be truthful. Returns { dataUrl, mime, rawLen }
+// for logging without leaking the image data itself.
+function normalizeImage(input: string): { dataUrl: string; mime: string; rawLen: number } {
+  const match = input.match(/^data:(image\/[a-zA-Z+.-]+);base64,(.+)$/);
+  if (match) {
+    return { dataUrl: input, mime: match[1], rawLen: match[2].length };
+  }
+  return {
+    dataUrl: `data:image/png;base64,${input}`,
+    mime: "image/png",
+    rawLen: input.length,
+  };
+}
+
 export async function POST(req: NextRequest) {
+  console.log(`[parse-screenshot] MINIMAX_API_KEY present: ${!!process.env.MINIMAX_API_KEY}`);
   if (!MINIMAX_KEY) {
     return NextResponse.json(
       { error: "MINIMAX_API_KEY is not configured on the server" },
@@ -103,38 +120,45 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  const image = (body.image ?? "").replace(/^data:image\/[^;]+;base64,/, "");
+  const rawImage = body.image ?? "";
   const broker = (body.broker ?? "schwab").toLowerCase();
-  if (!image) return NextResponse.json({ error: "Missing image" }, { status: 400 });
+  if (!rawImage) return NextResponse.json({ error: "Missing image" }, { status: 400 });
+
+  const { dataUrl, mime, rawLen } = normalizeImage(rawImage);
+  console.log(
+    `[parse-screenshot] broker=${broker} mime=${mime} base64_bytes=${rawLen}`,
+  );
 
   try {
+    const minimaxBody = {
+      model: "MiniMax-VL-01",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "image_url", image_url: { url: dataUrl } },
+            { type: "text", text: PROMPT },
+          ],
+        },
+      ],
+      max_tokens: 2000,
+    };
     const res = await fetch(MINIMAX_URL, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${MINIMAX_KEY}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        model: "MiniMax-VL-01",
-        messages: [
-          {
-            role: "user",
-            content: [
-              { type: "image_url", image_url: { url: `data:image/png;base64,${image}` } },
-              { type: "text", text: PROMPT },
-            ],
-          },
-        ],
-        max_tokens: 1000,
-      }),
+      body: JSON.stringify(minimaxBody),
       cache: "no-store",
     });
 
     if (!res.ok) {
       const text = await res.text();
-      console.error(`[parse-screenshot] minimax ${res.status}: ${text.slice(0, 300)}`);
+      // Log FULL error body so we can see exactly what Minimax rejected.
+      console.error(`Minimax error: ${res.status} ${text}`);
       return NextResponse.json(
-        { error: `Minimax HTTP ${res.status}` },
+        { error: `Minimax HTTP ${res.status}: ${text.slice(0, 500)}` },
         { status: 502 },
       );
     }

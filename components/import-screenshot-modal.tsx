@@ -105,11 +105,13 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
     setParsing(true);
     setError(null);
     try {
-      const base64 = dataUrl.replace(/^data:image\/[^;]+;base64,/, "");
+      // Send the FULL data URL so the server can forward the real mime type
+      // to Minimax. Minimax returns 400 if the declared mime doesn't match
+      // the image bytes (e.g. JPEG-over-the-wire labeled as PNG).
       const res = await fetch("/api/trades/parse-screenshot", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image: base64, broker }),
+        body: JSON.stringify({ image: dataUrl, broker }),
       });
       const json = (await res.json()) as { trades?: ParsedTrade[]; error?: string };
       if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
