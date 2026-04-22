@@ -7,7 +7,7 @@ export const maxDuration = 60; // VLM calls can be slow
 // retained in the env but intentionally unused here (prior attempts hit
 // model-availability + JSON-format issues). Gemini's key lives in the URL
 // query string, not in a header.
-const GEMINI_MODEL = "gemini-1.5-flash";
+const GEMINI_MODEL = "gemini-2.0-flash";
 const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 const GEMINI_KEY = process.env.GEMINI_API_KEY ?? "";
 
