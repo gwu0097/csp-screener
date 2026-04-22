@@ -380,16 +380,43 @@ export async function GET(req: NextRequest) {
   // TEMP debug field — removable once the "0 positions" production bug is
   // resolved. Surfaces server-side state in the curl response because we
   // don't have Vercel CLI access to read function logs.
+  // Decode the SERVICE_ROLE_KEY JWT payload (base64url-decoded, no
+  // signature verification — we just want the public claims for
+  // diagnostic purposes). Safe to expose: role/ref/iss are not secrets,
+  // they're the things Supabase *shows* you in the dashboard.
+  function decodeJwtClaims(tok: string): Record<string, unknown> | string {
+    try {
+      const parts = tok.split(".");
+      if (parts.length !== 3) return "<not a JWT>";
+      return JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8")) as Record<string, unknown>;
+    } catch (e) {
+      return `<decode failed: ${e instanceof Error ? e.message : String(e)}>`;
+    }
+  }
+  const svcKey = process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";
+  const svcClaims = decodeJwtClaims(svcKey);
+  const urlHost = process.env.NEXT_PUBLIC_SUPABASE_URL
+    ? new URL(process.env.NEXT_PUBLIC_SUPABASE_URL).host
+    : null;
+  const urlProjectRef = urlHost ? urlHost.split(".")[0] : null;
+  const jwtProjectRef =
+    typeof svcClaims === "object" ? String(svcClaims.ref ?? "") : null;
+
   const debug = {
     envPresent: {
       NEXT_PUBLIC_SUPABASE_URL: !!process.env.NEXT_PUBLIC_SUPABASE_URL,
       SUPABASE_SERVICE_ROLE_KEY: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
       NEXT_PUBLIC_SUPABASE_ANON_KEY: !!process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
     },
-    supabaseUrlHost: process.env.NEXT_PUBLIC_SUPABASE_URL
-      ? new URL(process.env.NEXT_PUBLIC_SUPABASE_URL).host
-      : null,
-    serviceRoleKeyLen: (process.env.SUPABASE_SERVICE_ROLE_KEY ?? "").length,
+    supabaseUrlHost: urlHost,
+    serviceRoleKeyLen: svcKey.length,
+    // JWT-embedded project ref from the service_role key vs the URL host.
+    // Mismatch = key is for a different project than the URL points to.
+    urlProjectRef,
+    jwtProjectRef,
+    refMatches: urlProjectRef !== null && urlProjectRef === jwtProjectRef,
+    jwtRole: typeof svcClaims === "object" ? String(svcClaims.role ?? "") : null,
+    jwtClaims: svcClaims,
     rowCounts: {
       allTrades: allTrades.length,
       openAction: allTrades.filter((t) => t.action === "open").length,
