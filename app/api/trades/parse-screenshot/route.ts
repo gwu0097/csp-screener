@@ -22,6 +22,9 @@ export type ParsedTrade = {
   optionType: "put" | "call";
   premium: number;
   broker: string;
+  // Actual date the trade was placed (from the ToS "Time Placed" column).
+  // Optional — if the model can't recover it, downstream falls back to today.
+  timePlaced?: string; // YYYY-MM-DD
 };
 
 const PROMPT = `This is a screenshot of a ThinkorSwim (ThinkOrSwim) brokerage order history table. The table has colored rows (red for SELL/open, green for BUY/close).
@@ -39,6 +42,7 @@ For each options row:
 - optionType: 'put' or 'call' from StrikeType column
 - expiry: convert the Exp date to YYYY-MM-DD format
 - premium: the Price column value
+- timePlaced: YYYY-MM-DD from the Time Placed column (first column). Drop the time-of-day portion — date only.
 
 Return ONLY a JSON array, no explanation, no markdown.
 
@@ -134,6 +138,13 @@ function coerceTrade(raw: unknown, fallbackBroker: string): ParsedTrade | null {
   const premium = Number(r.premium);
   const expiry = typeof r.expiry === "string" ? r.expiry.slice(0, 10) : "";
   const broker = typeof r.broker === "string" && r.broker.trim() ? r.broker.toLowerCase() : fallbackBroker;
+  // timePlaced is optional — only accept values that parse as YYYY-MM-DD.
+  // The model sometimes returns "11/22/24 14:30" or ISO with time; take
+  // the first 10 chars only if it matches the strict date format.
+  const rawTime = typeof r.timePlaced === "string" ? r.timePlaced.trim() : "";
+  const timePlaced = /^\d{4}-\d{2}-\d{2}$/.test(rawTime.slice(0, 10))
+    ? rawTime.slice(0, 10)
+    : undefined;
   if (!symbol || !action || !optionType) return null;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(expiry)) return null;
   if (!Number.isFinite(contracts) || contracts <= 0) return null;
@@ -148,6 +159,7 @@ function coerceTrade(raw: unknown, fallbackBroker: string): ParsedTrade | null {
     optionType,
     premium,
     broker,
+    timePlaced,
   };
 }
 

@@ -12,6 +12,9 @@ export type TradeInput = {
   optionType?: "put" | "call"; // currently only puts are screened, but honored
   premium: number;
   broker?: string | null;
+  // Preferred source for trade_date / closed_at when importing history.
+  // parse-screenshot pulls this from the ToS "Time Placed" column.
+  timePlaced?: string;     // YYYY-MM-DD
   trade_date?: string;     // defaults to today
   earnings_date?: string;  // optional; not required for close rows
   notes?: string | null;
@@ -70,16 +73,20 @@ type InsertRow = Omit<TradeRow, "id" | "created_at">;
 function buildInsert(input: TradeInput, parentId: string | null): InsertRow {
   const today = todayIso();
   const broker = (input.broker ?? "schwab").toLowerCase();
+  // timePlaced (from screenshot import) takes precedence over explicit
+  // trade_date; both fall back to today. Closes also honor timePlaced so
+  // a multi-day history import lands on its real closed_at date.
+  const effectiveDate = input.timePlaced ?? input.trade_date ?? today;
   return {
     symbol: input.symbol.toUpperCase(),
-    trade_date: input.trade_date ?? today,
+    trade_date: effectiveDate,
     earnings_date: input.earnings_date ?? today,
     entry_stock_price: null,
     strike: input.strike,
     expiry: input.expiry,
     premium_sold: input.action === "open" ? input.premium : 0,
     premium_bought: input.action === "close" ? input.premium : null,
-    closed_at: input.action === "close" ? today : null,
+    closed_at: input.action === "close" ? effectiveDate : null,
     outcome: null,
     crush_grade: null,
     opportunity_grade: null,
