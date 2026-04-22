@@ -953,32 +953,14 @@ export function calculateThreeLayerGrade(
   vix: number | null,
 ): ThreeLayerGrade {
   // ---- Layer 1: Industry standard (0-60 pts) ----
+  // For a 2x-EM CSP strategy, strike-survival probability is the dominant
+  // signal — weight POP heavily. Crush grade is still shown in its own
+  // column and Layer 2/3 factors; it isn't re-scored here.
   const crushGrade = stageThreeResult.crushGrade;
   const opportunityGrade = stageFourResult.opportunityGrade;
-  const crushPts = gradeScore(crushGrade, 20, 14, 8);
-  const oppPts = gradeScore(opportunityGrade, 20, 14, 8);
 
-  // Term structure score is 0-5 in Stage 3 — scale to 0-10.
-  const termStructureRaw = stageThreeResult.details.termStructureScore;
-  const termPts = (termStructureRaw / 5) * 10;
-
-  // ivEdge sweet spot 1.3-1.6 → full 10 pts. Below or above falls off linearly.
-  const weeklyIv = stageThreeResult.details.weeklyIv ?? null;
-  const realizedVol = stageThreeResult.details.realizedVol30d ?? null;
-  const ivEdge =
-    weeklyIv !== null && realizedVol !== null && realizedVol > 0
-      ? weeklyIv / realizedVol
-      : 0;
-  let ivEdgePts = 0;
-  if (ivEdge >= 1.3 && ivEdge <= 1.6) ivEdgePts = 10;
-  else if (ivEdge > 1.0 && ivEdge < 1.3) ivEdgePts = ((ivEdge - 1.0) / 0.3) * 10;
-  else if (ivEdge > 1.6 && ivEdge <= 2.0) ivEdgePts = ((2.0 - ivEdge) / 0.4) * 10;
-  else ivEdgePts = 0;
-
-  const industryScore = crushPts + oppPts + termPts + ivEdgePts;
-  // Industry grade maps 0-60 to A/B/C/F proportionally (48/60=B, etc.).
-  const industryGrade = scoreToGrade((industryScore / 60) * 100);
-
+  // POP = 1 − |delta|. Compute before scoring so we can feed it into
+  // Layer 1 directly.
   const delta = stageFourResult.delta ?? 0;
   const probabilityOfProfit = 1 - Math.abs(delta);
   const premium = stageFourResult.premium ?? 0;
@@ -987,6 +969,45 @@ export function calculateThreeLayerGrade(
   // EV per contract (dollars): POP × premium − (1 − POP) × breakeven-to-zero loss.
   // Rough proxy — assumes the put assigns and stock drops to 0 on the miss side.
   const expectedValue = probabilityOfProfit * premium * 100 - (1 - probabilityOfProfit) * strike * 100;
+
+  // Probability of profit (25 pts max).
+  let popPts = 0;
+  if (probabilityOfProfit >= 0.9) popPts = 25;
+  else if (probabilityOfProfit >= 0.85) popPts = 20;
+  else if (probabilityOfProfit >= 0.8) popPts = 15;
+  else if (probabilityOfProfit >= 0.75) popPts = 8;
+  else popPts = 0;
+
+  // IV edge sweet-spot buckets (15 pts max).
+  //   1.3-1.6 → 15 (ideal)
+  //   1.6-1.9 → 10 (real event risk priced in)
+  //   1.2-1.3 → 8  (modest)
+  //   > 1.9   → 5  (market pricing a real move)
+  //   < 1.2   → 0
+  const weeklyIv = stageThreeResult.details.weeklyIv ?? null;
+  const realizedVol = stageThreeResult.details.realizedVol30d ?? null;
+  const ivEdge =
+    weeklyIv !== null && realizedVol !== null && realizedVol > 0
+      ? weeklyIv / realizedVol
+      : 0;
+  let ivEdgePts = 0;
+  if (ivEdge >= 1.3 && ivEdge < 1.6) ivEdgePts = 15;
+  else if (ivEdge >= 1.6 && ivEdge < 1.9) ivEdgePts = 10;
+  else if (ivEdge >= 1.2 && ivEdge < 1.3) ivEdgePts = 8;
+  else if (ivEdge >= 1.9) ivEdgePts = 5;
+  else ivEdgePts = 0;
+
+  // Term structure raw score 0-5 → 0-10.
+  const termStructureRaw = stageThreeResult.details.termStructureScore;
+  const termPts = (termStructureRaw / 5) * 10;
+
+  // Opportunity grade (10 pts max).
+  const oppPts = gradeScore(opportunityGrade, 10, 7, 3);
+
+  const industryScore = popPts + ivEdgePts + termPts + oppPts;
+  // Industry grade maps 0-60 to A/B/C/F on the 80/65/50 score thresholds
+  // (same as final-score bucketing).
+  const industryGrade = scoreToGrade((industryScore / 60) * 100);
 
   // ---- Layer 2: Personal intelligence (0-25 pts, or null if insufficient) ----
   let personalScore: number | null = null;
@@ -1043,8 +1064,22 @@ export function calculateThreeLayerGrade(
   else if (finalGrade === "C") recommendation = "Marginal - Size small";
 
   const reasonParts: string[] = [];
+  // Lead with POP + strike: the dominant signal for a 2x-EM CSP strategy.
+  const popPct = (probabilityOfProfit * 100).toFixed(0);
+  const ivEdgeBand =
+    ivEdge >= 1.3 && ivEdge < 1.6
+      ? "in ideal range"
+      : ivEdge >= 1.6 && ivEdge < 1.9
+        ? "slightly elevated but within range"
+        : ivEdge >= 1.2 && ivEdge < 1.3
+          ? "modest"
+          : ivEdge >= 1.9
+            ? "market pricing a real move"
+            : ivEdge > 0
+              ? "below crush-setup threshold"
+              : "n/a";
   reasonParts.push(
-    `Crush ${crushGrade}/opp ${opportunityGrade} → industry grade ${industryGrade} (${industryScore.toFixed(0)}/60).`,
+    `${popPct}% probability of profit at $${strike.toFixed(2)} strike. IV edge ${ivEdge.toFixed(2)} ${ivEdgeBand}. Opp ${opportunityGrade}, crush ${crushGrade} — industry ${industryGrade} (${industryScore.toFixed(0)}/60).`,
   );
   if (personalScore !== null) {
     reasonParts.push(
