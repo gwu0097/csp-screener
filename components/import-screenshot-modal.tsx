@@ -68,18 +68,27 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
       const target = e.target as HTMLElement | null;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
       const items = e.clipboardData?.items;
-      if (!items) return;
+      if (!items) {
+        console.log("[paste] no clipboard items");
+        return;
+      }
+      console.log(`[paste] clipboard items count=${items.length}`);
       for (let i = 0; i < items.length; i++) {
         const it = items[i];
+        console.log(`[paste] item[${i}] kind=${it.kind} type=${it.type}`);
         if (it.type.startsWith("image/")) {
           const blob = it.getAsFile();
           if (blob) {
             e.preventDefault();
+            console.log(`[paste] image blob size=${blob.size} type=${blob.type}`);
             const url = await readAsDataUrl(blob);
+            console.log(`[paste] dataUrl ready length=${url.length} prefix=${url.slice(0, 32)}`);
             setDataUrl(url);
             setParsed(null);
             setError(null);
             break;
+          } else {
+            console.warn(`[paste] item[${i}] is image but getAsFile returned null`);
           }
         }
       }
@@ -90,18 +99,25 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
 
   async function onFile(file: File | null | undefined) {
     if (!file) return;
+    console.log(`[upload] file name=${file.name} size=${file.size} type=${file.type}`);
     if (!file.type.startsWith("image/")) {
       setError("Not an image file");
       return;
     }
     const url = await readAsDataUrl(file);
+    console.log(`[upload] dataUrl ready length=${url.length} prefix=${url.slice(0, 32)}`);
     setDataUrl(url);
     setParsed(null);
     setError(null);
   }
 
   async function parse() {
-    if (!dataUrl) return;
+    if (!dataUrl) {
+      console.warn("[parse] no dataUrl — cannot send");
+      setError("No image captured. Paste or upload first.");
+      return;
+    }
+    console.log(`[parse] sending image dataUrl length=${dataUrl.length}`);
     setParsing(true);
     setError(null);
     try {

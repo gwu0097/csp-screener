@@ -188,6 +188,9 @@ export async function POST(req: NextRequest) {
 
   const rawImage = body.image ?? "";
   const broker = (body.broker ?? "schwab").toLowerCase();
+  // Distinct from base64 length: the raw JSON field as received. If this
+  // is 0/undefined, the client isn't actually sending anything.
+  console.log(`[parse-screenshot] image bytes: ${rawImage ? rawImage.length : 0}`);
   if (!rawImage) return NextResponse.json({ error: "Missing image" }, { status: 400 });
 
   const { dataUrl, mime, rawLen } = normalizeImage(rawImage);
@@ -310,8 +313,12 @@ export async function POST(req: NextRequest) {
       .map((r) => coerceTrade(r, broker))
       .filter((t): t is ParsedTrade => t !== null);
 
+    // NB: model_trades is the array parsed from Minimax's response, not the
+    // count of bytes received. If model_trades=0 we got a valid response
+    // with no trades — check the logged raw content to see what the model
+    // actually produced.
     console.log(
-      `[parse-screenshot] broker=${broker} raw=${parsed.length} accepted=${trades.length}`,
+      `[parse-screenshot] broker=${broker} model_trades=${parsed.length} accepted=${trades.length}`,
     );
     return NextResponse.json({ trades });
   } catch (e) {
