@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import crypto from "node:crypto";
 import { createServerClient, TradeRow } from "@/lib/supabase";
 import { getOptionsChain, SchwabOptionContract } from "@/lib/schwab";
 import { getCurrentPrice, getHistoricalPrices } from "@/lib/yahoo";
@@ -401,6 +402,40 @@ export async function GET(req: NextRequest) {
   const urlProjectRef = urlHost ? urlHost.split(".")[0] : null;
   const jwtProjectRef =
     typeof svcClaims === "object" ? String(svcClaims.ref ?? "") : null;
+  // Key fingerprint: first 16 hex chars of SHA-256(key). Different
+  // production vs local fingerprint = different key values → rotation
+  // happened in one env and not the other.
+  const svcKeyFingerprint = svcKey
+    ? crypto.createHash("sha256").update(svcKey).digest("hex").slice(0, 16)
+    : null;
+
+  // Direct REST probe — bypasses supabase-js so we can see the raw HTTP
+  // status. If supabase-js was hiding a 401, this will show it.
+  let restProbe: {
+    status: number | null;
+    bodyPreview: string | null;
+  } = { status: null, bodyPreview: null };
+  try {
+    const restRes = await fetch(
+      `${process.env.NEXT_PUBLIC_SUPABASE_URL}/rest/v1/trades?select=id&limit=1`,
+      {
+        headers: {
+          apikey: svcKey,
+          Authorization: `Bearer ${svcKey}`,
+        },
+        cache: "no-store",
+      },
+    );
+    restProbe = {
+      status: restRes.status,
+      bodyPreview: (await restRes.text()).slice(0, 200),
+    };
+  } catch (e) {
+    restProbe = {
+      status: null,
+      bodyPreview: `fetch threw: ${e instanceof Error ? e.message : String(e)}`,
+    };
+  }
 
   const debug = {
     envPresent: {
@@ -410,6 +445,8 @@ export async function GET(req: NextRequest) {
     },
     supabaseUrlHost: urlHost,
     serviceRoleKeyLen: svcKey.length,
+    serviceRoleKeyFingerprint: svcKeyFingerprint,
+    restProbe,
     // JWT-embedded project ref from the service_role key vs the URL host.
     // Mismatch = key is for a different project than the URL points to.
     urlProjectRef,
