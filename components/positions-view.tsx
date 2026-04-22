@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { AlertTriangle, Briefcase, Camera, Loader2, Plus, RefreshCcw } from "lucide-react";
+import { AlertTriangle, Briefcase, Camera, Loader2, Plus, RefreshCcw, Zap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ImportScreenshotModal } from "@/components/import-screenshot-modal";
 import { ImportManualModal } from "@/components/import-manual-modal";
@@ -21,6 +21,7 @@ type PositionsResponse = {
     premiumBought: number | null;
   }>;
   opportunityAvailable: boolean;
+  live: boolean;
 };
 
 type BestOpportunity = { symbol: string; recommendation: string } | null;
@@ -69,20 +70,25 @@ function calcTodaysRealized(positions: OpenPositionClientView[]): number {
 export function PositionsView() {
   const [data, setData] = useState<PositionsResponse | null>(null);
   const [loading, setLoading] = useState(true);
+  const [liveLoading, setLiveLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [showScreenshot, setShowScreenshot] = useState(false);
   const [showManual, setShowManual] = useState(false);
   const [best, setBest] = useState<BestOpportunity>(null);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  // `live=false` is the fast path: Supabase + Yahoo spot, no Schwab chain.
+  // `live=true` is the full path (greeks, mark, P&L) — slower and only
+  // fired when the user clicks Refresh live data.
+  const load = useCallback(async (live: boolean) => {
+    if (live) setLiveLoading(true);
+    else setLoading(true);
     setError(null);
     const opp = readBestOpportunity();
     setBest(opp);
     try {
       const res = await fetch(
-        `/api/positions/open?opportunityAvailable=${opp !== null}`,
+        `/api/positions/open?opportunityAvailable=${opp !== null}&live=${live}`,
         { cache: "no-store" },
       );
       const json = (await res.json()) as PositionsResponse & { error?: string };
@@ -91,17 +97,22 @@ export function PositionsView() {
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load positions");
     } finally {
-      setLoading(false);
+      if (live) setLiveLoading(false);
+      else setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    void load();
+    // Initial load is fast — users see positions instantly; they can opt
+    // into live data via the dedicated button.
+    void load(false);
   }, [load]);
 
   const onImportSuccess = (msg: string) => {
     setMessage(msg);
-    void load();
+    // Fast refresh after import — user can click "Refresh live data" if
+    // they want greeks for the newly-imported positions.
+    void load(false);
   };
 
   const positions = data?.positions ?? [];
@@ -142,14 +153,36 @@ export function PositionsView() {
             </span>
           )}
         </div>
-        <Button variant="secondary" size="sm" onClick={load} disabled={loading}>
-          {loading ? (
-            <Loader2 className="mr-2 h-3 w-3 animate-spin" />
-          ) : (
-            <RefreshCcw className="mr-2 h-3 w-3" />
+        <div className="flex items-center gap-2">
+          {data && !data.live && positions.length > 0 && (
+            <span className="text-xs text-muted-foreground">Live data not loaded</span>
           )}
-          Refresh
-        </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => load(false)}
+            disabled={loading || liveLoading}
+          >
+            {loading ? (
+              <Loader2 className="mr-2 h-3 w-3 animate-spin" />
+            ) : (
+              <RefreshCcw className="mr-2 h-3 w-3" />
+            )}
+            Refresh
+          </Button>
+          <Button
+            size="sm"
+            onClick={() => load(true)}
+            disabled={loading || liveLoading || positions.length === 0}
+          >
+            {liveLoading ? (
+              <Loader2 className="mr-2 h-3 w-3 animate-spin" />
+            ) : (
+              <Zap className="mr-2 h-3 w-3" />
+            )}
+            Refresh live data
+          </Button>
+        </div>
       </div>
 
       {market?.warning && (

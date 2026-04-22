@@ -15,6 +15,29 @@ import {
 export const dynamic = "force-dynamic";
 export const maxDuration = 60; // many symbols in parallel
 
+// Wraps an async fetch with a hard timeout. Resolves to null if the
+// underlying promise doesn't settle within ms. Used so a single slow
+// upstream (Yahoo quote, Schwab chain) can't stall the whole endpoint.
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T | null> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      console.warn(`[positions] ${label} timed out after ${ms}ms`);
+      resolve(null);
+    }, ms);
+    p.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        console.warn(`[positions] ${label} threw: ${e instanceof Error ? e.message : e}`);
+        resolve(null);
+      },
+    );
+  });
+}
+
 type OpenPosition = {
   id: string;
   symbol: string;
@@ -103,6 +126,10 @@ function pickContractFromChain(
 export async function GET(req: NextRequest) {
   const opportunityAvailable =
     req.nextUrl.searchParams.get("opportunityAvailable") === "true";
+  // Default is FAST mode: Supabase + Yahoo spot (5s timeout) only. No Schwab
+  // options chain, no 10-day bars. Client opts into live greeks + P&L with
+  // ?live=true (triggered by the "Refresh live data" button).
+  const live = req.nextUrl.searchParams.get("live") === "true";
 
   const supabase = createServerClient();
   const { data: rows, error } = await supabase
@@ -193,17 +220,28 @@ export async function GET(req: NextRequest) {
     const expiry = parent.expiry;
     const dte = daysBetween(now, new Date(expiry + "T00:00:00Z"));
 
-    const [chain, yahooPrice, bars] = await Promise.all([
-      getOptionsChain(symbol, expiry).catch((e) => {
-        console.warn(`[positions:${symbol}] chain failed: ${e instanceof Error ? e.message : e}`);
-        return null;
-      }),
-      getCurrentPrice(symbol),
-      getHistoricalPrices(
-        symbol,
-        new Date(now.getTime() - 10 * 24 * 60 * 60 * 1000),
-        now,
-      ),
+    // Fast mode: only Yahoo spot (5s timeout). Live mode: add Schwab chain
+    // (15s) + 10-day bars (5s) in parallel with the spot.
+    const spotPromise = withTimeout(getCurrentPrice(symbol), 5000, `spot(${symbol})`);
+    const chainPromise = live
+      ? withTimeout(getOptionsChain(symbol, expiry), 15000, `chain(${symbol})`)
+      : Promise.resolve(null);
+    const barsPromise = live
+      ? withTimeout(
+          getHistoricalPrices(
+            symbol,
+            new Date(now.getTime() - 10 * 24 * 60 * 60 * 1000),
+            now,
+          ),
+          5000,
+          `bars(${symbol})`,
+        ).then((r) => r ?? [])
+      : Promise.resolve([] as Awaited<ReturnType<typeof getHistoricalPrices>>);
+
+    const [yahooPrice, chain, bars] = await Promise.all([
+      spotPromise,
+      chainPromise,
+      barsPromise,
     ]);
 
     const contract = chain ? pickContractFromChain(chain, strike, expiry) : null;
@@ -334,5 +372,6 @@ export async function GET(req: NextRequest) {
     positions,
     unmatchedCloses,
     opportunityAvailable,
+    live,
   });
 }
