@@ -114,10 +114,38 @@ export async function GET(req: NextRequest) {
   }
 
   const allTrades = (rows ?? []) as TradeRow[];
+
+  // --- Diagnostic logs (kept in while we investigate the "0 positions"
+  // issue from screenshot imports). Safe to trim later. ---
+  const actionCounts: Record<string, number> = {};
+  const closedAtSet = { set: 0, null: 0 };
+  const parentIdSet = { set: 0, null: 0 };
+  for (const t of allTrades) {
+    const key = t.action === null || t.action === undefined ? "null" : String(t.action);
+    actionCounts[key] = (actionCounts[key] ?? 0) + 1;
+    if (t.closed_at) closedAtSet.set += 1;
+    else closedAtSet.null += 1;
+    if (t.parent_trade_id) parentIdSet.set += 1;
+    else parentIdSet.null += 1;
+  }
+  console.log(
+    `[positions] fetched ${allTrades.length} trades from supabase. ` +
+      `action distribution: ${JSON.stringify(actionCounts)}. ` +
+      `closed_at: ${JSON.stringify(closedAtSet)}. ` +
+      `parent_trade_id: ${JSON.stringify(parentIdSet)}.`,
+  );
+  console.log(
+    `[positions] opens filter: t.action === 'open' AND !t.closed_at`,
+  );
+
   // action='open' AND not already closed via the legacy PATCH flow
   // (same-row closed_at set instead of a child close record).
   const opens = allTrades.filter((t) => t.action === "open" && !t.closed_at);
   const closes = allTrades.filter((t) => t.action === "close");
+  console.log(
+    `[positions] after filter — opens=${opens.length}, closes=${closes.length}. ` +
+      `(raw opens before closed_at filter: ${allTrades.filter((t) => t.action === "open").length})`,
+  );
 
   // Bucket closes by parent id for partial-close math.
   const closesByParent = new Map<string, TradeRow[]>();
@@ -129,14 +157,30 @@ export async function GET(req: NextRequest) {
   }
 
   // Compute remaining qty; only render positions with remaining > 0.
-  const activeParents = opens
-    .map((p) => {
-      const kids = closesByParent.get(p.id) ?? [];
-      const closedQty = kids.reduce((sum, k) => sum + (k.contracts ?? 0), 0);
-      const original = p.contracts ?? 1;
-      return { parent: p, remaining: original - closedQty, kids, original };
-    })
-    .filter((r) => r.remaining > 0);
+  const withRemaining = opens.map((p) => {
+    const kids = closesByParent.get(p.id) ?? [];
+    const closedQty = kids.reduce((sum, k) => sum + (k.contracts ?? 0), 0);
+    const original = p.contracts ?? 1;
+    return { parent: p, remaining: original - closedQty, kids, original };
+  });
+  const activeParents = withRemaining.filter((r) => r.remaining > 0);
+  console.log(
+    `[positions] remaining-qty filter: ${withRemaining.length} opens → ${activeParents.length} active ` +
+      `(${withRemaining.length - activeParents.length} fully closed).`,
+  );
+  if (withRemaining.length > 0 && activeParents.length === 0) {
+    console.warn(
+      `[positions] ALL opens have remaining=0. Sample first 5:\n` +
+        withRemaining
+          .slice(0, 5)
+          .map(
+            (r) =>
+              `  ${r.parent.symbol} ${r.parent.strike} ${r.parent.expiry} ` +
+              `contracts=${r.original} closed=${r.original - r.remaining} remaining=${r.remaining} id=${r.parent.id}`,
+          )
+          .join("\n"),
+    );
+  }
 
   const now = new Date();
 
