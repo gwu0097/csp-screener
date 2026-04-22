@@ -136,6 +136,12 @@ export async function GET(req: NextRequest) {
     .from("trades")
     .select("*")
     .order("trade_date", { ascending: false });
+  console.log(
+    "[pos] supabase rows:",
+    rows?.length,
+    "error:",
+    error?.message,
+  );
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
@@ -169,6 +175,7 @@ export async function GET(req: NextRequest) {
   // (same-row closed_at set instead of a child close record).
   const opens = allTrades.filter((t) => t.action === "open" && !t.closed_at);
   const closes = allTrades.filter((t) => t.action === "close");
+  console.log("[pos] after filter opens:", opens?.length, "closes:", closes?.length);
   console.log(
     `[positions] after filter — opens=${opens.length}, closes=${closes.length}. ` +
       `(raw opens before closed_at filter: ${allTrades.filter((t) => t.action === "open").length})`,
@@ -191,6 +198,7 @@ export async function GET(req: NextRequest) {
     return { parent: p, remaining: original - closedQty, kids, original };
   });
   const activeParents = withRemaining.filter((r) => r.remaining > 0);
+  console.log("[pos] active parents:", activeParents?.length);
   console.log(
     `[positions] remaining-qty filter: ${withRemaining.length} opens → ${activeParents.length} active ` +
       `(${withRemaining.length - activeParents.length} fully closed).`,
@@ -367,11 +375,38 @@ export async function GET(req: NextRequest) {
       unmatched: true,
     }));
 
+  console.log("[pos] returning positions:", positions?.length);
+
+  // TEMP debug field — removable once the "0 positions" production bug is
+  // resolved. Surfaces server-side state in the curl response because we
+  // don't have Vercel CLI access to read function logs.
+  const debug = {
+    envPresent: {
+      NEXT_PUBLIC_SUPABASE_URL: !!process.env.NEXT_PUBLIC_SUPABASE_URL,
+      SUPABASE_SERVICE_ROLE_KEY: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: !!process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+    },
+    supabaseUrlHost: process.env.NEXT_PUBLIC_SUPABASE_URL
+      ? new URL(process.env.NEXT_PUBLIC_SUPABASE_URL).host
+      : null,
+    serviceRoleKeyLen: (process.env.SUPABASE_SERVICE_ROLE_KEY ?? "").length,
+    rowCounts: {
+      allTrades: allTrades.length,
+      openAction: allTrades.filter((t) => t.action === "open").length,
+      closeAction: allTrades.filter((t) => t.action === "close").length,
+      nullAction: allTrades.filter((t) => t.action === null || t.action === undefined).length,
+    },
+    opensAfterFilter: opens.length,
+    activeParents: activeParents.length,
+    positionsReturned: positions.length,
+  };
+
   return NextResponse.json({
     market,
     positions,
     unmatchedCloses,
     opportunityAvailable,
     live,
+    debug,
   });
 }
