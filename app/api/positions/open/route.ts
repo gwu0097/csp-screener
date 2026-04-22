@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import crypto from "node:crypto";
-import { createServerClient, TradeRow } from "@/lib/supabase";
+import { createServerClient } from "@/lib/supabase";
 import { getOptionsChain, SchwabOptionContract } from "@/lib/schwab";
 import { getCurrentPrice, getHistoricalPrices } from "@/lib/yahoo";
 import { getMarketContext } from "@/lib/market";
@@ -8,17 +7,78 @@ import {
   recommendPosition,
   postEarningsMomentum,
   isTwoDayDrop,
+  remainingContracts,
   URGENCY_ORDER,
   type Urgency,
   type Momentum,
+  type Fill,
+  type PositionRow,
 } from "@/lib/positions";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 60; // many symbols in parallel
+export const maxDuration = 60;
 
-// Wraps an async fetch with a hard timeout. Resolves to null if the
-// underlying promise doesn't settle within ms. Used so a single slow
-// upstream (Yahoo quote, Schwab chain) can't stall the whole endpoint.
+type OpenPosition = {
+  id: string;
+  symbol: string;
+  broker: string;
+  strike: number;
+  expiry: string;
+  optionType: "put" | "call";
+  totalContracts: number;      // contracts originally opened
+  remainingContracts: number;  // contracts still open
+  avgPremiumSold: number | null;
+  openedDate: string;
+  currentStockPrice: number | null;
+  currentMark: number | null;
+  currentBid: number | null;
+  currentAsk: number | null;
+  currentDelta: number | null;
+  currentTheta: number | null;
+  currentIv: number | null;
+  dte: number;
+  pnlDollars: number | null;
+  pnlPct: number | null;
+  distanceToStrikePct: number | null;
+  thetaDecayTotal: number | null;
+  momentum: Momentum | null;
+  urgency: Urgency;
+  recommendationReason: string;
+  fills: Fill[];
+};
+
+function daysBetween(a: Date, b: Date): number {
+  return Math.round((b.getTime() - a.getTime()) / (24 * 60 * 60 * 1000));
+}
+
+function pickContractFromChain(
+  chain: Awaited<ReturnType<typeof getOptionsChain>>,
+  strike: number,
+  expiry: string,
+): SchwabOptionContract | null {
+  const keys = Object.keys(chain.putExpDateMap ?? {});
+  const expKey = keys.find((k) => k.startsWith(expiry));
+  if (!expKey) return null;
+  const strikes = chain.putExpDateMap[expKey];
+  const wanted = String(Number(strike));
+  const direct = strikes[wanted] ?? strikes[strike.toFixed(2)] ?? null;
+  if (direct && direct.length > 0) return direct[0];
+  let best: SchwabOptionContract | null = null;
+  let bestDiff = Infinity;
+  for (const contracts of Object.values(strikes)) {
+    for (const c of contracts) {
+      const d = Math.abs(c.strikePrice - strike);
+      if (d < bestDiff) {
+        best = c;
+        bestDiff = d;
+      }
+    }
+  }
+  return best;
+}
+
+// Wraps an async upstream with a hard timeout; resolves to null on timeout
+// or throw so a single slow/failed call can't stall the whole batch.
 function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T | null> {
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
@@ -39,211 +99,68 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T | n
   });
 }
 
-type OpenPosition = {
-  id: string;
-  symbol: string;
-  broker: string;
-  action: "open";
-  contracts: number;        // remaining contracts after child closes
-  originalContracts: number;
-  strike: number;
-  expiry: string;
-  optionType: "put";        // screener produces puts; extend later if needed
-  premiumSold: number;
-  tradeDate: string;
-  entryStockPrice: number | null;
-  entryDelta: number | null;
-  // Live data
-  currentStockPrice: number | null;
-  currentMark: number | null;
-  currentBid: number | null;
-  currentAsk: number | null;
-  currentDelta: number | null;
-  currentTheta: number | null;
-  currentIv: number | null;
-  dte: number;
-  // Derived
-  pnlDollars: number | null;
-  pnlPct: number | null;
-  distanceToStrikePct: number | null;
-  thetaDecayTotal: number | null; // theta * dte * contracts * 100 (dollar value)
-  momentum: Momentum | null;
-  urgency: Urgency;
-  recommendationReason: string;
-  // Partial close history for this parent.
-  closes: Array<{
-    id: string;
-    closedAt: string | null;
-    premiumBought: number | null;
-    contracts: number;
-  }>;
-  unmatched: false;
-};
-
-type UnmatchedClose = {
-  id: string;
-  symbol: string;
-  broker: string;
-  action: "close";
-  contracts: number;
-  strike: number;
-  expiry: string;
-  premiumBought: number | null;
-  closedAt: string | null;
-  unmatched: true;
-};
-
-function daysBetween(a: Date, b: Date): number {
-  return Math.round((b.getTime() - a.getTime()) / (24 * 60 * 60 * 1000));
-}
-
-function pickContractFromChain(
-  chain: Awaited<ReturnType<typeof getOptionsChain>>,
-  strike: number,
-  expiry: string,
-): SchwabOptionContract | null {
-  const keys = Object.keys(chain.putExpDateMap ?? {});
-  const expKey = keys.find((k) => k.startsWith(expiry));
-  if (!expKey) return null;
-  const strikes = chain.putExpDateMap[expKey];
-  // Schwab keys strikes as decimal strings; exact match first, then nearest.
-  const wanted = String(Number(strike));
-  const direct = strikes[wanted] ?? strikes[strike.toFixed(2)] ?? null;
-  if (direct && direct.length > 0) return direct[0];
-  let best: SchwabOptionContract | null = null;
-  let bestDiff = Infinity;
-  for (const contracts of Object.values(strikes)) {
-    for (const c of contracts) {
-      const d = Math.abs(c.strikePrice - strike);
-      if (d < bestDiff) {
-        best = c;
-        bestDiff = d;
-      }
-    }
-  }
-  return best;
-}
-
 export async function GET(req: NextRequest) {
   const opportunityAvailable =
     req.nextUrl.searchParams.get("opportunityAvailable") === "true";
-  // Default is FAST mode: Supabase + Yahoo spot (5s timeout) only. No Schwab
-  // options chain, no 10-day bars. Client opts into live greeks + P&L with
-  // ?live=true (triggered by the "Refresh live data" button).
   const live = req.nextUrl.searchParams.get("live") === "true";
 
   const supabase = createServerClient();
-  const { data: rows, error } = await supabase
-    .from("trades")
+
+  // 1. Open positions + all their fills.
+  const { data: posRows, error: pErr } = await supabase
+    .from<PositionRow>("positions")
     .select("*")
-    .order("trade_date", { ascending: false });
-  console.log(
-    "[pos] supabase rows:",
-    rows?.length,
-    "error:",
-    error?.message,
-  );
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    .eq("status", "open")
+    .order("opened_date", { ascending: true });
+  if (pErr) {
+    return NextResponse.json({ error: pErr.message }, { status: 500 });
   }
+  const positionsList = (posRows ?? []) as PositionRow[];
 
-  const allTrades = (rows ?? []) as TradeRow[];
-
-  // --- Diagnostic logs (kept in while we investigate the "0 positions"
-  // issue from screenshot imports). Safe to trim later. ---
-  const actionCounts: Record<string, number> = {};
-  const closedAtSet = { set: 0, null: 0 };
-  const parentIdSet = { set: 0, null: 0 };
-  for (const t of allTrades) {
-    const key = t.action === null || t.action === undefined ? "null" : String(t.action);
-    actionCounts[key] = (actionCounts[key] ?? 0) + 1;
-    if (t.closed_at) closedAtSet.set += 1;
-    else closedAtSet.null += 1;
-    if (t.parent_trade_id) parentIdSet.set += 1;
-    else parentIdSet.null += 1;
-  }
-  console.log(
-    `[positions] fetched ${allTrades.length} trades from supabase. ` +
-      `action distribution: ${JSON.stringify(actionCounts)}. ` +
-      `closed_at: ${JSON.stringify(closedAtSet)}. ` +
-      `parent_trade_id: ${JSON.stringify(parentIdSet)}.`,
-  );
-  console.log(
-    `[positions] opens filter: t.action === 'open' AND !t.closed_at`,
-  );
-
-  // action='open' AND not already closed via the legacy PATCH flow
-  // (same-row closed_at set instead of a child close record).
-  const opens = allTrades.filter((t) => t.action === "open" && !t.closed_at);
-  const closes = allTrades.filter((t) => t.action === "close");
-  console.log("[pos] after filter opens:", opens?.length, "closes:", closes?.length);
-  console.log(
-    `[positions] after filter — opens=${opens.length}, closes=${closes.length}. ` +
-      `(raw opens before closed_at filter: ${allTrades.filter((t) => t.action === "open").length})`,
-  );
-
-  // Bucket closes by parent id for partial-close math.
-  const closesByParent = new Map<string, TradeRow[]>();
-  for (const c of closes) {
-    if (!c.parent_trade_id) continue;
-    const arr = closesByParent.get(c.parent_trade_id) ?? [];
-    arr.push(c);
-    closesByParent.set(c.parent_trade_id, arr);
-  }
-
-  // Compute remaining qty; only render positions with remaining > 0.
-  const withRemaining = opens.map((p) => {
-    const kids = closesByParent.get(p.id) ?? [];
-    const closedQty = kids.reduce((sum, k) => sum + (k.contracts ?? 0), 0);
-    const original = p.contracts ?? 1;
-    return { parent: p, remaining: original - closedQty, kids, original };
-  });
-  const activeParents = withRemaining.filter((r) => r.remaining > 0);
-  console.log("[pos] active parents:", activeParents?.length);
-  console.log(
-    `[positions] remaining-qty filter: ${withRemaining.length} opens → ${activeParents.length} active ` +
-      `(${withRemaining.length - activeParents.length} fully closed).`,
-  );
-  if (withRemaining.length > 0 && activeParents.length === 0) {
-    console.warn(
-      `[positions] ALL opens have remaining=0. Sample first 5:\n` +
-        withRemaining
-          .slice(0, 5)
-          .map(
-            (r) =>
-              `  ${r.parent.symbol} ${r.parent.strike} ${r.parent.expiry} ` +
-              `contracts=${r.original} closed=${r.original - r.remaining} remaining=${r.remaining} id=${r.parent.id}`,
-          )
-          .join("\n"),
-    );
+  // Fetch all fills for these positions in one call.
+  const positionIds = positionsList.map((p) => p.id);
+  const fillsByPosition = new Map<string, Fill[]>();
+  if (positionIds.length > 0) {
+    const { data: fillsRows } = await supabase
+      .from<Fill & { position_id: string }>("fills")
+      .select("position_id, fill_type, contracts, premium, fill_date")
+      .in("position_id", positionIds);
+    for (const f of (fillsRows ?? []) as Array<Fill & { position_id: string }>) {
+      const arr = fillsByPosition.get(f.position_id) ?? [];
+      arr.push({
+        fill_type: f.fill_type,
+        contracts: f.contracts,
+        premium: f.premium,
+        fill_date: f.fill_date,
+      });
+      fillsByPosition.set(f.position_id, arr);
+    }
   }
 
   const now = new Date();
 
-  // Fetch market context + per-position live data in parallel.
   const marketPromise = getMarketContext();
-  const positionPromises = activeParents.map(async (r) => {
-    const { parent, remaining, kids, original } = r;
-    const symbol = parent.symbol;
-    const strike = Number(parent.strike);
-    const expiry = parent.expiry;
+
+  const positionPromises = positionsList.map(async (p) => {
+    const fills = fillsByPosition.get(p.id) ?? [];
+    const remaining = remainingContracts(fills);
+    const strike = Number(p.strike);
+    const expiry = p.expiry;
     const dte = daysBetween(now, new Date(expiry + "T00:00:00Z"));
 
-    // Fast mode: only Yahoo spot (5s timeout). Live mode: add Schwab chain
-    // (15s) + 10-day bars (5s) in parallel with the spot.
-    const spotPromise = withTimeout(getCurrentPrice(symbol), 5000, `spot(${symbol})`);
+    const spotPromise = withTimeout(getCurrentPrice(p.symbol), 5000, `spot(${p.symbol})`);
     const chainPromise = live
-      ? withTimeout(getOptionsChain(symbol, expiry), 15000, `chain(${symbol})`)
+      ? withTimeout(getOptionsChain(p.symbol, expiry), 15000, `chain(${p.symbol})`)
       : Promise.resolve(null);
     const barsPromise = live
       ? withTimeout(
           getHistoricalPrices(
-            symbol,
+            p.symbol,
             new Date(now.getTime() - 10 * 24 * 60 * 60 * 1000),
             now,
           ),
           5000,
-          `bars(${symbol})`,
+          `bars(${p.symbol})`,
         ).then((r) => r ?? [])
       : Promise.resolve([] as Awaited<ReturnType<typeof getHistoricalPrices>>);
 
@@ -269,7 +186,7 @@ export async function GET(req: NextRequest) {
     const rawIv = contract?.volatility ?? null;
     const iv = rawIv !== null ? (rawIv > 1 ? rawIv / 100 : rawIv) : null;
 
-    const premiumSold = Number(parent.premium_sold) || 0;
+    const premiumSold = Number(p.avg_premium_sold ?? 0);
     const pnlDollars =
       mark !== null && premiumSold > 0
         ? (premiumSold - mark) * remaining * 100
@@ -282,22 +199,20 @@ export async function GET(req: NextRequest) {
         ? ((currentStockPrice - strike) / currentStockPrice) * 100
         : null;
 
-    const closes = bars.map((b) => b.close).filter((c) => c > 0);
-    const twoDayDrop = isTwoDayDrop(closes);
+    const closesArr = bars.map((b) => b.close).filter((c) => c > 0);
+    const twoDayDrop = isTwoDayDrop(closesArr);
 
-    const entryStockPrice =
-      parent.stock_price_at_entry ?? parent.entry_stock_price ?? null;
     const momentum =
-      currentStockPrice !== null ? postEarningsMomentum(entryStockPrice, currentStockPrice) : null;
+      currentStockPrice !== null ? postEarningsMomentum(null, currentStockPrice) : null;
 
     const rec = recommendPosition({
       profitPct: pnlPct ?? 0,
       distanceToStrikePct: distanceToStrikePct ?? 100,
       dte: Math.max(0, dte),
-      entryDelta: parent.delta_at_entry,
+      entryDelta: null,
       currentDelta: delta,
       currentTheta: theta,
-      entryStockPrice,
+      entryStockPrice: null,
       currentStockPrice: currentStockPrice ?? 0,
       twoDayDrop,
       opportunityAvailable,
@@ -307,19 +222,16 @@ export async function GET(req: NextRequest) {
       theta !== null && dte > 0 ? theta * dte * remaining * 100 : null;
 
     const out: OpenPosition = {
-      id: parent.id,
-      symbol,
-      broker: parent.broker ?? "schwab",
-      action: "open",
-      contracts: remaining,
-      originalContracts: original,
+      id: p.id,
+      symbol: p.symbol,
+      broker: p.broker,
       strike,
       expiry,
       optionType: "put",
-      premiumSold,
-      tradeDate: parent.trade_date,
-      entryStockPrice,
-      entryDelta: parent.delta_at_entry,
+      totalContracts: p.total_contracts,
+      remainingContracts: remaining,
+      avgPremiumSold: p.avg_premium_sold !== null ? Number(p.avg_premium_sold) : null,
+      openedDate: p.opened_date,
       currentStockPrice,
       currentMark: mark,
       currentBid: bid,
@@ -335,15 +247,9 @@ export async function GET(req: NextRequest) {
       momentum,
       urgency: rec.urgency,
       recommendationReason: rec.reason,
-      closes: kids
-        .sort((a, b) => (a.closed_at ?? a.trade_date).localeCompare(b.closed_at ?? b.trade_date))
-        .map((k) => ({
-          id: k.id,
-          closedAt: k.closed_at,
-          premiumBought: k.premium_bought,
-          contracts: k.contracts ?? 0,
-        })),
-      unmatched: false,
+      fills: fills
+        .slice()
+        .sort((a, b) => a.fill_date.localeCompare(b.fill_date)),
     };
     return out;
   });
@@ -359,132 +265,10 @@ export async function GET(req: NextRequest) {
     return a.dte - b.dte;
   });
 
-  // Orphan closes: action='close' with no parent_trade_id. Surface for manual
-  // reconciliation (matches user's "flag unmatched, don't reject" answer).
-  const unmatchedCloses: UnmatchedClose[] = closes
-    .filter((c) => c.parent_trade_id === null)
-    .map((c) => ({
-      id: c.id,
-      symbol: c.symbol,
-      broker: c.broker ?? "schwab",
-      action: "close",
-      contracts: c.contracts ?? 0,
-      strike: Number(c.strike),
-      expiry: c.expiry,
-      premiumBought: c.premium_bought,
-      closedAt: c.closed_at,
-      unmatched: true,
-    }));
-
-  console.log("[pos] returning positions:", positions?.length);
-
-  // TEMP debug field — removable once the "0 positions" production bug is
-  // resolved. Surfaces server-side state in the curl response because we
-  // don't have Vercel CLI access to read function logs.
-  // Decode the SERVICE_ROLE_KEY JWT payload (base64url-decoded, no
-  // signature verification — we just want the public claims for
-  // diagnostic purposes). Safe to expose: role/ref/iss are not secrets,
-  // they're the things Supabase *shows* you in the dashboard.
-  function decodeJwtClaims(tok: string): Record<string, unknown> | string {
-    try {
-      const parts = tok.split(".");
-      if (parts.length !== 3) return "<not a JWT>";
-      return JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8")) as Record<string, unknown>;
-    } catch (e) {
-      return `<decode failed: ${e instanceof Error ? e.message : String(e)}>`;
-    }
-  }
-  const svcKey = process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";
-  const svcClaims = decodeJwtClaims(svcKey);
-  const urlHost = process.env.NEXT_PUBLIC_SUPABASE_URL
-    ? new URL(process.env.NEXT_PUBLIC_SUPABASE_URL).host
-    : null;
-  const urlProjectRef = urlHost ? urlHost.split(".")[0] : null;
-  const jwtProjectRef =
-    typeof svcClaims === "object" ? String(svcClaims.ref ?? "") : null;
-  // Key fingerprint: first 16 hex chars of SHA-256(key). Different
-  // production vs local fingerprint = different key values → rotation
-  // happened in one env and not the other.
-  const svcKeyFingerprint = svcKey
-    ? crypto.createHash("sha256").update(svcKey).digest("hex").slice(0, 16)
-    : null;
-
-  // REST probe A: same query the supabase-js client uses (select=*
-  // &order=trade_date.desc). If this returns rows but the client
-  // returns [], the bug is in supabase-js, not PostgREST.
-  async function restProbeQuery(label: string, qs: string) {
-    try {
-      const r = await fetch(
-        `${process.env.NEXT_PUBLIC_SUPABASE_URL}/rest/v1/trades?${qs}`,
-        {
-          headers: { apikey: svcKey, Authorization: `Bearer ${svcKey}` },
-          cache: "no-store",
-        },
-      );
-      const body = await r.text();
-      let rowCount: number | null = null;
-      try {
-        const j = JSON.parse(body);
-        if (Array.isArray(j)) rowCount = j.length;
-      } catch {
-        /* ignore */
-      }
-      return {
-        label,
-        status: r.status,
-        rowCount,
-        bodyPreview: body.slice(0, 300),
-      };
-    } catch (e) {
-      return {
-        label,
-        status: null,
-        rowCount: null,
-        bodyPreview: `fetch threw: ${e instanceof Error ? e.message : String(e)}`,
-      };
-    }
-  }
-  const restProbe = await restProbeQuery("smoke", "select=id&limit=1");
-  const restProbeMatch = await restProbeQuery(
-    "mirrors supabase-js",
-    "select=*&order=trade_date.desc",
-  );
-
-  const debug = {
-    envPresent: {
-      NEXT_PUBLIC_SUPABASE_URL: !!process.env.NEXT_PUBLIC_SUPABASE_URL,
-      SUPABASE_SERVICE_ROLE_KEY: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
-      NEXT_PUBLIC_SUPABASE_ANON_KEY: !!process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
-    },
-    supabaseUrlHost: urlHost,
-    serviceRoleKeyLen: svcKey.length,
-    serviceRoleKeyFingerprint: svcKeyFingerprint,
-    restProbe,
-    restProbeMatch,
-    // JWT-embedded project ref from the service_role key vs the URL host.
-    // Mismatch = key is for a different project than the URL points to.
-    urlProjectRef,
-    jwtProjectRef,
-    refMatches: urlProjectRef !== null && urlProjectRef === jwtProjectRef,
-    jwtRole: typeof svcClaims === "object" ? String(svcClaims.role ?? "") : null,
-    jwtClaims: svcClaims,
-    rowCounts: {
-      allTrades: allTrades.length,
-      openAction: allTrades.filter((t) => t.action === "open").length,
-      closeAction: allTrades.filter((t) => t.action === "close").length,
-      nullAction: allTrades.filter((t) => t.action === null || t.action === undefined).length,
-    },
-    opensAfterFilter: opens.length,
-    activeParents: activeParents.length,
-    positionsReturned: positions.length,
-  };
-
   return NextResponse.json({
     market,
     positions,
-    unmatchedCloses,
     opportunityAvailable,
     live,
-    debug,
   });
 }

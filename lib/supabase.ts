@@ -308,35 +308,8 @@ export type SchwabTokenRow = {
   updated_at: string;
 };
 
-export type TradeAction = "open" | "close";
-
-export type TradeRow = {
-  id: string;
-  symbol: string;
-  trade_date: string;
-  earnings_date: string;
-  entry_stock_price: number | null;
-  strike: number;
-  expiry: string;
-  premium_sold: number;
-  premium_bought: number | null;
-  closed_at: string | null;
-  outcome: string | null;
-  crush_grade: string | null;
-  opportunity_grade: string | null;
-  notes: string | null;
-  created_at: string;
-  // Added in migration 004 — trades_and_market_context.sql.
-  broker: string | null;
-  contracts: number | null;
-  action: TradeAction | null;
-  parent_trade_id: string | null;
-  stock_price_at_entry: number | null;
-  stock_price_at_close: number | null;
-  delta_at_entry: number | null;
-  em_pct_at_entry: number | null;
-  strike_multiple: number | null;
-};
+// TradeRow / the `trades` table were removed when we rebuilt the journal
+// around `positions` + `fills`. See lib/positions.ts for the new row types.
 
 export type MarketContextRow = {
   id: string;

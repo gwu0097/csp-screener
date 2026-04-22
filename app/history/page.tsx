@@ -1,19 +1,23 @@
-import { createServerClient, TradeRow } from "@/lib/supabase";
-import { HistoryView } from "@/components/history-view";
+import Link from "next/link";
 
 export const dynamic = "force-dynamic";
-export const revalidate = 0;
 
-export default async function HistoryPage() {
-  let trades: TradeRow[] = [];
-  let error: string | null = null;
-  try {
-    const supabase = createServerClient();
-    const { data, error: err } = await supabase.from("trades").select("*").order("created_at", { ascending: false });
-    if (err) throw err;
-    trades = (data ?? []) as TradeRow[];
-  } catch (e) {
-    error = e instanceof Error ? e.message : "Failed to load trades";
-  }
-  return <HistoryView trades={trades} error={error} />;
+// /history ran against the pre-rebuild single-row trades table. It's been
+// superseded by /journal, which reads positions + fills.
+export default function HistoryPage() {
+  return (
+    <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-border bg-background/40 px-6 py-16 text-center">
+      <h1 className="mb-2 text-lg font-semibold">History moved</h1>
+      <p className="mb-4 max-w-md text-sm text-muted-foreground">
+        This page ran against the old trades schema. It&apos;s been replaced by
+        the Journal, which uses the new positions + fills model.
+      </p>
+      <Link
+        href="/journal"
+        className="rounded-md border border-border bg-background px-3 py-1.5 text-sm hover:bg-muted/40"
+      >
+        Go to Journal
+      </Link>
+    </div>
+  );
 }

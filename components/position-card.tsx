@@ -11,21 +11,20 @@ import {
   fmtPctSigned,
   fmtSignedDelta,
 } from "@/lib/format";
-import type { Urgency, Momentum } from "@/lib/positions";
+import type { Urgency, Momentum, Fill } from "@/lib/positions";
 
+// Server shape from /api/positions/open. Matches the rebuilt route.
 export type OpenPositionClientView = {
   id: string;
   symbol: string;
   broker: string;
-  contracts: number;
-  originalContracts: number;
   strike: number;
   expiry: string;
   optionType: "put" | "call";
-  premiumSold: number;
-  tradeDate: string;
-  entryStockPrice: number | null;
-  entryDelta: number | null;
+  totalContracts: number;
+  remainingContracts: number;
+  avgPremiumSold: number | null;
+  openedDate: string;
   currentStockPrice: number | null;
   currentMark: number | null;
   currentBid: number | null;
@@ -41,12 +40,7 @@ export type OpenPositionClientView = {
   momentum: Momentum | null;
   urgency: Urgency;
   recommendationReason: string;
-  closes: Array<{
-    id: string;
-    closedAt: string | null;
-    premiumBought: number | null;
-    contracts: number;
-  }>;
+  fills: Fill[];
 };
 
 function urgencyStyle(u: Urgency) {
@@ -79,7 +73,9 @@ export function PositionCard({ position: p, onCloseSubmitted }: Props) {
   const [closeAllPrice, setCloseAllPrice] = useState<string>(
     p.currentMark !== null ? p.currentMark.toFixed(2) : "",
   );
-  const [partialQty, setPartialQty] = useState<number>(Math.max(1, Math.floor(p.contracts / 2)));
+  const [partialQty, setPartialQty] = useState<number>(
+    Math.max(1, Math.floor(p.remainingContracts / 2)),
+  );
   const [partialPrice, setPartialPrice] = useState<string>(
     p.currentMark !== null ? p.currentMark.toFixed(2) : "",
   );
@@ -92,12 +88,12 @@ export function PositionCard({ position: p, onCloseSubmitted }: Props) {
       setError("Enter a valid price");
       return;
     }
-    if (qty <= 0 || qty > p.contracts) {
-      setError(`Qty must be 1..${p.contracts}`);
+    if (qty <= 0 || qty > p.remainingContracts) {
+      setError(`Qty must be 1..${p.remainingContracts}`);
       return;
     }
     setError(null);
-    setSubmitting(qty === p.contracts ? "all" : "partial");
+    setSubmitting(qty === p.remainingContracts ? "all" : "partial");
     try {
       const res = await fetch("/api/trades/bulk-create", {
         method: "POST",
@@ -118,18 +114,12 @@ export function PositionCard({ position: p, onCloseSubmitted }: Props) {
         }),
       });
       const json = (await res.json()) as {
-        created?: number;
-        matched?: number;
-        unmatched?: number;
+        fills_inserted?: number;
         errors?: string[];
         error?: string;
       };
       if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
-      onCloseSubmitted(
-        `Closed ${qty} ${p.symbol} @ ${fmtDollars(premium)}${
-          (json.unmatched ?? 0) > 0 ? " (unmatched — reconcile later)" : ""
-        }`,
-      );
+      onCloseSubmitted(`Closed ${qty} ${p.symbol} @ ${fmtDollars(premium)}`);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Close failed");
     } finally {
@@ -151,7 +141,7 @@ export function PositionCard({ position: p, onCloseSubmitted }: Props) {
           {expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
           <span className="text-lg font-semibold">{p.symbol}</span>
           <span className="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">
-            {p.contracts}×
+            {p.remainingContracts}/{p.totalContracts}×
           </span>
           <span className="text-sm">${p.strike} {p.optionType.toUpperCase()}</span>
           <span className="text-xs text-muted-foreground">· {p.expiry}</span>
@@ -168,7 +158,7 @@ export function PositionCard({ position: p, onCloseSubmitted }: Props) {
       </div>
 
       <div className="mt-3 grid grid-cols-2 gap-x-6 gap-y-1 font-mono text-xs md:grid-cols-4">
-        <Cell k="Sold" v={fmtDollars(p.premiumSold)} />
+        <Cell k="Avg sold" v={fmtDollars(p.avgPremiumSold)} />
         <Cell k="Current" v={fmtDollars(p.currentMark)} />
         <Cell
           k="P&L"
@@ -188,30 +178,32 @@ export function PositionCard({ position: p, onCloseSubmitted }: Props) {
               : "—"
           }
         />
-        <Cell k="Δ entry" v={fmtSignedDelta(p.entryDelta)} />
         <Cell k="Δ now" v={fmtSignedDelta(p.currentDelta)} />
+        <Cell
+          k="Theta left"
+          v={
+            p.thetaDecayTotal !== null
+              ? fmtDollars(p.thetaDecayTotal)
+              : "—"
+          }
+        />
       </div>
 
       <div className="mt-3 text-xs text-muted-foreground">{p.recommendationReason}</div>
 
       <div className="mt-2 grid grid-cols-2 gap-x-6 gap-y-1 text-xs">
+        <Cell k="Opened" v={p.openedDate} />
         <Cell
-          k="Theta decay left"
-          v={
-            p.thetaDecayTotal !== null
-              ? `${fmtDollars(p.thetaDecayTotal)} over ${p.dte} days`
-              : "—"
-          }
-        />
-        <Cell
-          k="Post-earnings"
+          k="Momentum"
           v={<span className={momentumStyle(p.momentum)}>{p.momentum ?? "—"}</span>}
         />
       </div>
 
       <div className="mt-3 flex flex-col gap-2 md:flex-row md:items-center">
         <div className="flex items-center gap-2">
-          <label className="text-xs text-muted-foreground">Close all {p.contracts} @</label>
+          <label className="text-xs text-muted-foreground">
+            Close all {p.remainingContracts} @
+          </label>
           <input
             type="number"
             step="0.01"
@@ -221,23 +213,26 @@ export function PositionCard({ position: p, onCloseSubmitted }: Props) {
           />
           <Button
             size="sm"
-            onClick={() => submitClose(p.contracts, closeAllPrice)}
+            onClick={() => submitClose(p.remainingContracts, closeAllPrice)}
             disabled={submitting !== null}
           >
             {submitting === "all" ? <Loader2 className="h-3 w-3 animate-spin" /> : "Close all"}
           </Button>
         </div>
-        {p.contracts > 1 && (
+        {p.remainingContracts > 1 && (
           <div className="flex items-center gap-2">
             <label className="text-xs text-muted-foreground">Partial</label>
             <input
               type="number"
               min="1"
-              max={p.contracts}
+              max={p.remainingContracts}
               value={partialQty}
               onChange={(e) =>
                 setPartialQty(
-                  Math.min(p.contracts, Math.max(1, Number(e.target.value) || 1)),
+                  Math.min(
+                    p.remainingContracts,
+                    Math.max(1, Number(e.target.value) || 1),
+                  ),
                 )
               }
               className="w-14 rounded border border-border bg-background px-2 py-1 text-xs"
@@ -270,27 +265,27 @@ export function PositionCard({ position: p, onCloseSubmitted }: Props) {
 
       {expanded && (
         <div className="mt-4 rounded border border-border bg-muted/20 p-3 text-xs">
-          <div className="mb-2 font-medium">Position history</div>
+          <div className="mb-2 font-medium">Fills history</div>
           <div className="space-y-1">
-            <div>
-              <span className="text-muted-foreground">Opened {p.tradeDate}:</span>{" "}
-              Sold {p.originalContracts}× @ {fmtDollars(p.premiumSold)}
-              {p.entryStockPrice !== null && (
-                <span className="text-muted-foreground">
-                  {" "}
-                  · stock {fmtDollars(p.entryStockPrice)}
-                </span>
-              )}
-            </div>
-            {p.closes.length === 0 && (
-              <div className="text-muted-foreground">No partial closes yet</div>
+            {p.fills.length === 0 && (
+              <div className="text-muted-foreground">No fills recorded</div>
             )}
-            {p.closes.map((c) => (
-              <div key={c.id}>
-                <span className="text-muted-foreground">
-                  Closed {c.closedAt ?? "—"}:
-                </span>{" "}
-                Bought {c.contracts}× @ {fmtDollars(c.premiumBought)}
+            {p.fills.map((f, idx) => (
+              <div key={idx} className="flex items-center justify-between gap-2">
+                <span>
+                  <span className="text-muted-foreground">{f.fill_date}:</span>{" "}
+                  <span
+                    className={
+                      f.fill_type === "open" ? "text-rose-300" : "text-emerald-300"
+                    }
+                  >
+                    {f.fill_type === "open" ? "SELL to open" : "BUY to close"}
+                  </span>{" "}
+                  {f.contracts}× @ {fmtDollars(f.premium)}
+                </span>
+                <span className="font-mono text-muted-foreground">
+                  {fmtDollars(f.premium * f.contracts * 100)}
+                </span>
               </div>
             ))}
           </div>

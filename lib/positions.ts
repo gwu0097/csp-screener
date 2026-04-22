@@ -1,5 +1,81 @@
 // Shared types + recommendation engine for /positions.
 // Pure functions: no I/O here, so they're trivially unit-testable.
+//
+// Two layers live here:
+//   1. Recommendation engine (Urgency/Momentum + recommendPosition)
+//   2. Fill aggregation helpers (remaining contracts, avg premiums, pnl)
+//
+// The fill helpers back the new positions+fills schema: every trade order
+// is a Fill row, summed into a Position row by symbol/strike/expiry/broker.
+
+// ---------- Fill aggregation ----------
+
+export type FillType = "open" | "close";
+
+export type Fill = {
+  fill_type: FillType;
+  contracts: number;
+  premium: number;
+  fill_date: string;
+};
+
+export type PositionRow = {
+  id: string;
+  symbol: string;
+  strike: number;
+  expiry: string;
+  broker: string;
+  total_contracts: number;
+  avg_premium_sold: number | null;
+  status: "open" | "closed";
+  opened_date: string;
+  closed_date: string | null;
+  realized_pnl: number | null;
+  fills?: Fill[];
+};
+
+// Remaining open contracts on a position = opens - closes. Zero when the
+// position is fully closed out.
+export function remainingContracts(fills: Fill[]): number {
+  const opened = fills
+    .filter((f) => f.fill_type === "open")
+    .reduce((sum, f) => sum + f.contracts, 0);
+  const closed = fills
+    .filter((f) => f.fill_type === "close")
+    .reduce((sum, f) => sum + f.contracts, 0);
+  return opened - closed;
+}
+
+// Contract-weighted average premium across all open fills.
+export function avgPremiumSold(fills: Fill[]): number {
+  const opens = fills.filter((f) => f.fill_type === "open");
+  const totalContracts = opens.reduce((s, f) => s + f.contracts, 0);
+  if (totalContracts === 0) return 0;
+  const totalPremium = opens.reduce((s, f) => s + f.premium * f.contracts, 0);
+  return totalPremium / totalContracts;
+}
+
+// Contract-weighted average premium across all close fills.
+export function avgPremiumBought(fills: Fill[]): number {
+  const closes = fills.filter((f) => f.fill_type === "close");
+  const totalContracts = closes.reduce((s, f) => s + f.contracts, 0);
+  if (totalContracts === 0) return 0;
+  const totalPremium = closes.reduce((s, f) => s + f.premium * f.contracts, 0);
+  return totalPremium / totalContracts;
+}
+
+// Realized P&L in dollars: (avg sold − avg bought) × contracts_closed × 100.
+// Positive when the short closed for less credit than received.
+export function realizedPnl(fills: Fill[]): number {
+  const sold = avgPremiumSold(fills);
+  const bought = avgPremiumBought(fills);
+  const closedContracts = fills
+    .filter((f) => f.fill_type === "close")
+    .reduce((s, f) => s + f.contracts, 0);
+  return (sold - bought) * closedContracts * 100;
+}
+
+// ---------- Recommendation engine ----------
 
 export type Urgency = "EMERGENCY_CUT" | "CUT" | "MONITOR" | "HOLD";
 export type Momentum = "BULLISH" | "NEUTRAL" | "BEARISH";

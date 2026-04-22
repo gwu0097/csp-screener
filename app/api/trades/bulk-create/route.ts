@@ -1,23 +1,27 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createServerClient, TradeRow } from "@/lib/supabase";
-import { allocateCloseFIFO } from "@/lib/trade-allocation";
+import { createServerClient } from "@/lib/supabase";
+import {
+  remainingContracts,
+  avgPremiumSold,
+  realizedPnl,
+  type Fill,
+  type PositionRow,
+} from "@/lib/positions";
 
 export const dynamic = "force-dynamic";
 
+// Shape the screenshot parser and manual-add modal send us.
 export type TradeInput = {
   symbol: string;
   action: "open" | "close";
   contracts: number;
   strike: number;
-  expiry: string;          // YYYY-MM-DD
-  optionType?: "put" | "call"; // currently only puts are screened, but honored
+  expiry: string; // YYYY-MM-DD
+  optionType?: "put" | "call";
   premium: number;
   broker?: string | null;
-  // Preferred source for trade_date / closed_at when importing history.
-  // parse-screenshot pulls this from the ToS "Time Placed" column.
-  timePlaced?: string;     // YYYY-MM-DD
-  trade_date?: string;     // defaults to today
-  earnings_date?: string;  // optional; not required for close rows
+  timePlaced?: string; // YYYY-MM-DD preferred from ToS "Time Placed"
+  trade_date?: string;
   notes?: string | null;
 };
 
@@ -27,41 +31,13 @@ function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-type InsertRow = Omit<TradeRow, "id" | "created_at">;
-
-function buildInsert(input: TradeInput, parentId: string | null): InsertRow {
-  const today = todayIso();
-  const broker = (input.broker ?? "schwab").toLowerCase();
-  // timePlaced (from screenshot import) takes precedence over explicit
-  // trade_date; both fall back to today. Closes also honor timePlaced so
-  // a multi-day history import lands on its real closed_at date.
-  const effectiveDate = input.timePlaced ?? input.trade_date ?? today;
-  return {
-    symbol: input.symbol.toUpperCase(),
-    trade_date: effectiveDate,
-    earnings_date: input.earnings_date ?? today,
-    entry_stock_price: null,
-    strike: input.strike,
-    expiry: input.expiry,
-    premium_sold: input.action === "open" ? input.premium : 0,
-    premium_bought: input.action === "close" ? input.premium : null,
-    closed_at: input.action === "close" ? effectiveDate : null,
-    outcome: null,
-    crush_grade: null,
-    opportunity_grade: null,
-    notes: input.notes ?? null,
-    broker,
-    contracts: input.contracts,
-    action: input.action,
-    parent_trade_id: parentId,
-    stock_price_at_entry: null,
-    stock_price_at_close: null,
-    delta_at_entry: null,
-    em_pct_at_entry: null,
-    strike_multiple: null,
-  };
+function normalizeBroker(b?: string | null): string {
+  return (b ?? "schwab").toLowerCase();
 }
 
+// For each incoming fill, find (or create) the matching position, then
+// insert a fills row and rebuild the position's aggregates from scratch
+// off its full fill set.
 export async function POST(req: NextRequest) {
   let body: BulkBody;
   try {
@@ -75,12 +51,8 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "No trades provided" }, { status: 400 });
   }
 
-  // Process all opens before any closes within the same batch. ToS exports
-  // chronologically (newest first), so a 3-day screenshot often has today's
-  // closes ABOVE the opens they're closing against. Without this sort,
-  // findOpenParent runs while the matching open hasn't been inserted yet
-  // and every close ends up orphaned (parent_trade_id=null).
-  // Stable sort preserves input order within each action group.
+  // Opens first within the batch — that way a position exists before any
+  // close fill in the same batch tries to attach to it.
   const items = [...itemsRaw].sort((a, b) => {
     const aw = a.action === "open" ? 0 : a.action === "close" ? 1 : 2;
     const bw = b.action === "open" ? 0 : b.action === "close" ? 1 : 2;
@@ -89,15 +61,13 @@ export async function POST(req: NextRequest) {
 
   const supabase = createServerClient();
   const errors: string[] = [];
-  let created = 0;
-  let matched = 0;
-  let unmatched = 0;
+  let positionsCreated = 0;
+  const positionsTouched = new Set<string>();
+  let fillsInserted = 0;
 
-  // Sequential on purpose: the same batch may close multiple contracts
-  // against the same parent; each close must see earlier inserts when
-  // computing remaining capacity.
+  const required = ["symbol", "action", "contracts", "strike", "expiry", "premium"] as const;
+
   for (const input of items) {
-    const required = ["symbol", "action", "contracts", "strike", "expiry", "premium"] as const;
     const missing = required.find((k) => {
       const v = input[k];
       return v === undefined || v === null || v === "";
@@ -111,59 +81,112 @@ export async function POST(req: NextRequest) {
       continue;
     }
 
+    const symbol = input.symbol.toUpperCase();
+    const broker = normalizeBroker(input.broker);
+    const fillDate = input.timePlaced ?? input.trade_date ?? todayIso();
+
     try {
-      if (input.action === "open") {
-        const row = buildInsert(input, null);
-        const { error: iErr } = await supabase.from("trades").insert(row);
-        if (iErr) {
-          errors.push(`${input.symbol}: ${iErr.message}`);
-          continue;
-        }
-        created += 1;
+      // 1. Find or create the position.
+      const { data: findData, error: fErr } = await supabase
+        .from("positions")
+        .select("*")
+        .eq("symbol", symbol)
+        .eq("strike", input.strike)
+        .eq("expiry", input.expiry)
+        .eq("broker", broker)
+        .limit(1);
+      if (fErr) {
+        errors.push(`${input.symbol}: find failed — ${fErr.message}`);
         continue;
       }
+      const existing = (findData ?? []) as PositionRow[];
 
-      // Close: distribute across open parents FIFO. A single close
-      // transaction can span multiple parent tranches (e.g. a 6-contract
-      // close against two 3-contract opens) — we insert one child row per
-      // parent consumed, plus one orphan child for any residue.
-      const { allocations, fullyClosedParentIds } = await allocateCloseFIFO(
-        supabase,
-        {
-          symbol: input.symbol,
-          strike: input.strike,
-          expiry: input.expiry,
-          broker: input.broker ?? "schwab",
-        },
-        input.contracts,
-      );
-      for (const alloc of allocations) {
-        const row = buildInsert(
-          { ...input, contracts: alloc.contracts },
-          alloc.parentId,
-        );
-        const { error: iErr } = await supabase.from("trades").insert(row);
-        if (iErr) {
-          errors.push(`${input.symbol}: ${iErr.message}`);
+      let positionId: string;
+      if (existing.length > 0) {
+        positionId = existing[0].id;
+      } else {
+        // New position. total_contracts/avg_premium_sold get set to real
+        // values by the recompute step below — we just need valid defaults.
+        const { data: insertedRaw, error: iErr } = await supabase
+          .from("positions")
+          .insert({
+            symbol,
+            strike: input.strike,
+            expiry: input.expiry,
+            option_type: input.optionType ?? "put",
+            broker,
+            total_contracts: 0,
+            avg_premium_sold: null,
+            status: "open",
+            opened_date: fillDate,
+            notes: input.notes ?? null,
+          })
+          .select()
+          .single();
+        const inserted = insertedRaw as PositionRow | null;
+        if (iErr || !inserted) {
+          errors.push(`${input.symbol}: create position failed — ${iErr?.message ?? "unknown"}`);
           continue;
         }
-        created += 1;
-        if (alloc.parentId) matched += 1;
-        else unmatched += 1;
+        positionId = inserted.id;
+        positionsCreated += 1;
       }
-      // Flip closed_at on parents whose remaining capacity just hit zero.
-      // UI + other routes already exclude parent rows with closed_at set,
-      // so this keeps the "remaining=0 but still flagged open" state from
-      // showing up in queries that don't compute child sums.
-      const closedAtDate = input.timePlaced ?? input.trade_date ?? todayIso();
-      for (const pid of fullyClosedParentIds) {
-        const { error: uErr } = await supabase
-          .from("trades")
-          .update({ closed_at: closedAtDate })
-          .eq("id", pid);
-        if (uErr) {
-          errors.push(`${input.symbol} closed_at set on ${pid}: ${uErr.message}`);
-        }
+
+      // 2. Insert the fill.
+      const { error: fillErr } = await supabase.from("fills").insert({
+        position_id: positionId,
+        fill_type: input.action,
+        contracts: input.contracts,
+        premium: input.premium,
+        fill_date: fillDate,
+        fill_time: new Date().toISOString(),
+      });
+      if (fillErr) {
+        errors.push(`${input.symbol}: fill insert failed — ${fillErr.message}`);
+        continue;
+      }
+      fillsInserted += 1;
+      positionsTouched.add(positionId);
+
+      // 3. Recompute position aggregates from the full fill set.
+      const { data: allFillsRaw, error: afErr } = await supabase
+        .from("fills")
+        .select("fill_type, contracts, premium, fill_date")
+        .eq("position_id", positionId);
+      if (afErr) {
+        errors.push(`${input.symbol}: refetch fills failed — ${afErr.message}`);
+        continue;
+      }
+      const fills = (allFillsRaw ?? []) as Fill[];
+      const remaining = remainingContracts(fills);
+      const totalOpened = fills
+        .filter((f) => f.fill_type === "open")
+        .reduce((s, f) => s + f.contracts, 0);
+      const sold = avgPremiumSold(fills);
+      const status: "open" | "closed" = remaining === 0 && totalOpened > 0 ? "closed" : "open";
+      const closedDate =
+        status === "closed"
+          ? fills
+              .filter((f) => f.fill_type === "close")
+              .map((f) => f.fill_date)
+              .sort()
+              .pop() ?? null
+          : null;
+      const pnl = realizedPnl(fills);
+
+      const { error: uErr } = await supabase
+        .from("positions")
+        .update({
+          total_contracts: totalOpened,
+          avg_premium_sold: totalOpened > 0 ? sold : null,
+          status,
+          closed_date: closedDate,
+          realized_pnl: pnl,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", positionId);
+      if (uErr) {
+        errors.push(`${input.symbol}: position update failed — ${uErr.message}`);
       }
     } catch (e) {
       errors.push(
@@ -173,7 +196,13 @@ export async function POST(req: NextRequest) {
   }
 
   console.log(
-    `[bulk-create] processed=${items.length} created=${created} matched=${matched} unmatched=${unmatched} errors=${errors.length}`,
+    `[bulk-create] items=${items.length} positions_created=${positionsCreated} positions_updated=${positionsTouched.size - positionsCreated} fills_inserted=${fillsInserted} errors=${errors.length}`,
   );
-  return NextResponse.json({ created, matched, unmatched, errors });
+
+  return NextResponse.json({
+    positions_created: positionsCreated,
+    positions_updated: Math.max(0, positionsTouched.size - positionsCreated),
+    fills_inserted: fillsInserted,
+    errors,
+  });
 }

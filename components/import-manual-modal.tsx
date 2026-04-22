@@ -64,9 +64,9 @@ export function ImportManualModal({ open, onOpenChange, onSuccess, prefill }: Pr
         }),
       });
       const json = (await res.json()) as {
-        created?: number;
-        matched?: number;
-        unmatched?: number;
+        positions_created?: number;
+        positions_updated?: number;
+        fills_inserted?: number;
         errors?: string[];
         error?: string;
       };
@@ -74,9 +74,9 @@ export function ImportManualModal({ open, onOpenChange, onSuccess, prefill }: Pr
         throw new Error(json.error ?? `HTTP ${res.status}`);
       }
       const parts = [
-        `Logged ${json.created ?? 0}`,
-        (json.matched ?? 0) > 0 ? `matched ${json.matched}` : null,
-        (json.unmatched ?? 0) > 0 ? `unmatched ${json.unmatched}` : null,
+        `Logged ${json.fills_inserted ?? 0} fill${(json.fills_inserted ?? 0) === 1 ? "" : "s"}`,
+        (json.positions_created ?? 0) > 0 ? `${json.positions_created} new position${json.positions_created === 1 ? "" : "s"}` : null,
+        (json.positions_updated ?? 0) > 0 ? `${json.positions_updated} updated` : null,
       ].filter(Boolean);
       onSuccess(parts.join(", "));
       onOpenChange(false);
