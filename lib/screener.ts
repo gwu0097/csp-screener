@@ -57,6 +57,9 @@ export type StageThreeResult = {
   pass: boolean;
   crushGrade: "A" | "B" | "C" | "F";
   threshold: number;
+  // True when we have fewer than 3 historical earnings moves — the F grade in
+  // this case reflects missing data, not a genuinely weak crusher.
+  insufficientData: boolean;
   details: {
     historicalMoveScore: number;
     consistencyScore: number;
@@ -91,7 +94,9 @@ export type StageFourResult = {
 
 // Hard kill: if bid-ask spread as % of mid exceeds this, the contract is
 // effectively untradeable — grade force to F and recommendation force to Skip.
-export const SPREAD_KILL_PCT = 15;
+// 20% tolerates weekly single-stock option spreads while still killing truly
+// untradeable names (NDAQ ~78%, TMO ~85% seen in practice).
+export const SPREAD_KILL_PCT = 20;
 
 export type ScreenerResult = {
   symbol: string;
@@ -105,7 +110,13 @@ export type ScreenerResult = {
   stageTwo: StageTwoResult | null;
   stageThree: StageThreeResult | null;
   stageFour: StageFourResult | null;
-  recommendation: "Strong - Take the trade" | "Marginal - Size smaller" | "Skip" | "Cannot evaluate" | "Needs analysis";
+  recommendation:
+    | "Strong - Take the trade"
+    | "Marginal - Size smaller"
+    | "Marginal - Crush unproven"
+    | "Skip"
+    | "Cannot evaluate"
+    | "Needs analysis";
   errors: string[];
   isWhitelisted: boolean;
   industryStatus: "pass" | "fail" | "unknown";
@@ -454,6 +465,7 @@ export async function runStageThree(
     pass: score >= threshold,
     threshold,
     crushGrade: gradeFromCrushScore(score),
+    insufficientData: historicalMoves.length < 3,
     details: {
       historicalMoveScore,
       consistencyScore,
@@ -776,17 +788,28 @@ export async function runStagesThreeFour(base: ScreenerResult): Promise<Screener
   );
 
   const spreadTooWide = isSpreadTooWide(stageFour);
-  const baseRecommendation = stageThree.pass
-    ? recommend(stageThree.crushGrade, stageFour.opportunityGrade)
-    : "Skip";
-  // Spread-too-wide is a hard kill: override any recommendation to Skip.
-  const recommendation: ScreenerResult["recommendation"] = spreadTooWide
-    ? "Skip"
-    : baseRecommendation;
+  // Spread-too-wide is a hard kill regardless of any other signal.
+  // Otherwise: if Stage 3 passes, use the normal crush×opportunity matrix.
+  // If Stage 3 fails only because history is thin (insufficientData) AND the
+  // opportunity is strong (A/B), surface it as "Marginal - Crush unproven"
+  // so the user can decide rather than being blanket-skipped.
+  const oppA = stageFour.opportunityGrade === "A";
+  const oppB = stageFour.opportunityGrade === "B";
+  let recommendation: ScreenerResult["recommendation"];
+  if (spreadTooWide) {
+    recommendation = "Skip";
+  } else if (stageThree.pass) {
+    recommendation = recommend(stageThree.crushGrade, stageFour.opportunityGrade);
+  } else if (stageThree.insufficientData && (oppA || oppB)) {
+    recommendation = "Marginal - Crush unproven";
+  } else {
+    recommendation = "Skip";
+  }
+  const tradeable = !spreadTooWide && recommendation !== "Skip";
 
   return {
     ...base,
-    stoppedAt: stageThree.pass && !spreadTooWide ? null : 3,
+    stoppedAt: tradeable ? null : 3,
     stageThree,
     stageFour,
     recommendation,

@@ -67,6 +67,7 @@ function recColor(rec: ScreenerResult["recommendation"]) {
     case "Strong - Take the trade":
       return "bg-emerald-500/15 text-emerald-300 border-emerald-500/40";
     case "Marginal - Size smaller":
+    case "Marginal - Crush unproven":
       return "bg-amber-500/15 text-amber-300 border-amber-500/40";
     case "Needs analysis":
       return "bg-sky-500/15 text-sky-300 border-sky-500/40";
@@ -82,7 +83,16 @@ function gradeColor(grade: string | null | undefined) {
   if (grade === "A") return "text-emerald-300";
   if (grade === "B") return "text-sky-300";
   if (grade === "C") return "text-amber-300";
+  if (grade === "?") return "text-muted-foreground";
   return "text-rose-300";
+}
+
+// Display "?" instead of F when the F grade reflects insufficient history
+// rather than a genuinely weak crusher.
+function displayCrushGrade(s: ScreenerResult["stageThree"]): string {
+  if (!s) return "—";
+  if (s.crushGrade === "F" && s.insufficientData) return "?";
+  return s.crushGrade;
 }
 
 function fmtPrice(n: number | null | undefined) {
@@ -609,7 +619,8 @@ export function ScreenerView({ connected }: Props) {
                   const analyzingRow = analyzingSymbols.has(r.symbol.toUpperCase());
                   const actionable =
                     r.recommendation === "Strong - Take the trade" ||
-                    r.recommendation === "Marginal - Size smaller";
+                    r.recommendation === "Marginal - Size smaller" ||
+                    r.recommendation === "Marginal - Crush unproven";
                   const showDivider = group1Count !== null && idx === group1Count && idx > 0;
                   return (
                     <>
@@ -659,8 +670,8 @@ export function ScreenerView({ connected }: Props) {
                         <TableCell className="font-mono">
                           {r.stageTwo ? `${r.stageTwo.score}` : "—"}
                         </TableCell>
-                        <TableCell className={cn("font-mono", gradeColor(r.stageThree?.crushGrade))}>
-                          {analyzingRow ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : (r.stageThree?.crushGrade ?? "—")}
+                        <TableCell className={cn("font-mono", gradeColor(displayCrushGrade(r.stageThree)))}>
+                          {analyzingRow ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : displayCrushGrade(r.stageThree)}
                         </TableCell>
                         <TableCell className={cn("font-mono", gradeColor(r.stageFour?.opportunityGrade))}>
                           {analyzingRow ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : (r.stageFour?.opportunityGrade ?? "—")}
@@ -780,7 +791,9 @@ function ExpandedDetail({ r }: { r: ScreenerResult }) {
         pass={r.stageThree?.pass ?? false}
         summary={
           r.stageThree
-            ? `${r.stageThree.score}/25 — grade ${r.stageThree.crushGrade} (threshold ${r.stageThree.threshold})`
+            ? `${r.stageThree.score}/25 — grade ${displayCrushGrade(r.stageThree)}${
+                r.stageThree.insufficientData ? " (insufficient history)" : ""
+              } (threshold ${r.stageThree.threshold})`
             : "run analysis to populate"
         }
       >
