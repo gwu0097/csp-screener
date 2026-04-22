@@ -67,6 +67,17 @@ function calcTodaysRealized(positions: OpenPositionClientView[]): number {
   return total;
 }
 
+// Temporary debug panel state — visible at the top of the page so we can
+// diagnose "0 positions" without DevTools. Remove once fixed.
+type DebugInfo = {
+  url: string;
+  status: number | null;
+  elapsedMs: number | null;
+  bodyText: string | null;
+  errorMessage: string | null;
+  timestamp: string;
+};
+
 export function PositionsView() {
   const [data, setData] = useState<PositionsResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -76,6 +87,7 @@ export function PositionsView() {
   const [showScreenshot, setShowScreenshot] = useState(false);
   const [showManual, setShowManual] = useState(false);
   const [best, setBest] = useState<BestOpportunity>(null);
+  const [debug, setDebug] = useState<DebugInfo | null>(null);
 
   // `live=false` is the fast path: Supabase + Yahoo spot, no Schwab chain.
   // `live=true` is the full path (greeks, mark, P&L) — slower and only
@@ -86,16 +98,51 @@ export function PositionsView() {
     setError(null);
     const opp = readBestOpportunity();
     setBest(opp);
+
+    const url = `/api/positions/open?opportunityAvailable=${opp !== null}&live=${live}`;
+    const t0 = Date.now();
+    const dbg: DebugInfo = {
+      url,
+      status: null,
+      elapsedMs: null,
+      bodyText: null,
+      errorMessage: null,
+      timestamp: new Date().toISOString(),
+    };
+
     try {
-      const res = await fetch(
-        `/api/positions/open?opportunityAvailable=${opp !== null}&live=${live}`,
-        { cache: "no-store" },
-      );
-      const json = (await res.json()) as PositionsResponse & { error?: string };
+      const res = await fetch(url, { cache: "no-store" });
+      dbg.status = res.status;
+      dbg.elapsedMs = Date.now() - t0;
+      // Read as text first so we can log the raw body even if JSON parse
+      // fails. Then parse.
+      const bodyText = await res.text();
+      dbg.bodyText = bodyText;
+
+      let json: (PositionsResponse & { error?: string }) | null = null;
+      try {
+        json = JSON.parse(bodyText) as PositionsResponse & { error?: string };
+      } catch {
+        // Leave json null; logged below.
+      }
+
+      console.log("[positions] API response:", {
+        status: res.status,
+        ok: res.ok,
+        data: JSON.stringify(json),
+      });
+
+      if (!json) throw new Error(`Non-JSON response: ${bodyText.slice(0, 200)}`);
       if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
       setData(json);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load positions");
+      setDebug(dbg);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to load positions";
+      console.log("[positions] fetch error:", err);
+      dbg.errorMessage = msg;
+      dbg.elapsedMs = dbg.elapsedMs ?? Date.now() - t0;
+      setError(msg);
+      setDebug(dbg);
     } finally {
       if (live) setLiveLoading(false);
       else setLoading(false);
@@ -120,8 +167,57 @@ export function PositionsView() {
   const todaysRealized = calcTodaysRealized(positions);
   const unmatched = data?.unmatchedCloses ?? [];
 
+  // First position, pretty-printed, for the debug panel. Falls back to
+  // null if we don't have any.
+  const firstPositionJson =
+    data?.positions && data.positions.length > 0
+      ? JSON.stringify(data.positions[0], null, 2)
+      : null;
+
   return (
     <div className="space-y-4">
+      {/* TEMP DEBUG PANEL — remove once 0-positions bug is diagnosed. */}
+      {debug && (
+        <div className="rounded-lg border-2 border-rose-500/60 bg-rose-500/5 p-3 text-xs">
+          <div className="mb-1 flex items-center justify-between">
+            <span className="font-semibold text-rose-200">
+              DEBUG · /api/positions/open
+            </span>
+            <span className="text-muted-foreground">{debug.timestamp}</span>
+          </div>
+          <div className="mb-1 font-mono text-rose-100">
+            status:{" "}
+            <span
+              className={
+                debug.status && debug.status >= 200 && debug.status < 300
+                  ? "text-emerald-300"
+                  : "text-rose-300"
+              }
+            >
+              {debug.status ?? "—"}
+            </span>
+            {" · "}positions.length:{" "}
+            <span className="text-foreground">{data?.positions?.length ?? 0}</span>
+            {" · "}elapsed: {debug.elapsedMs ?? "—"}ms
+          </div>
+          {debug.errorMessage && (
+            <div className="mb-1 font-mono text-rose-300">
+              error: {debug.errorMessage}
+            </div>
+          )}
+          {firstPositionJson && (
+            <details className="mt-2" open>
+              <summary className="cursor-pointer text-rose-200">
+                first position (raw JSON)
+              </summary>
+              <pre className="mt-1 max-h-64 overflow-auto rounded border border-rose-500/30 bg-background/60 p-2 text-[10px] leading-tight">
+                {firstPositionJson}
+              </pre>
+            </details>
+          )}
+        </div>
+      )}
+
       {/* Header bar */}
       <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
         <div className="flex flex-wrap items-center gap-3">
