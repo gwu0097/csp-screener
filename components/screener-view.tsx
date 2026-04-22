@@ -63,7 +63,9 @@ type SortKey =
   | "premium"
   | "delta"
   | "spread"
-  | "stage2";
+  | "stage2"
+  | "grade"
+  | "recommendation";
 
 function recColor(rec: ScreenerResult["recommendation"]) {
   switch (rec) {
@@ -88,6 +90,16 @@ function gradeColor(grade: string | null | undefined) {
   if (grade === "C") return "text-amber-300";
   if (grade === "?") return "text-muted-foreground";
   return "text-rose-300";
+}
+
+// Badge palette for the primary Grade column (the three-layer finalGrade).
+// User spec: A=green, B=teal, C=amber, F=red.
+function finalGradeBadgeColor(grade: string | null | undefined) {
+  if (grade === "A") return "border-emerald-500/40 bg-emerald-500/20 text-emerald-300";
+  if (grade === "B") return "border-teal-500/40 bg-teal-500/20 text-teal-300";
+  if (grade === "C") return "border-amber-500/40 bg-amber-500/20 text-amber-300";
+  if (grade === "F") return "border-rose-500/40 bg-rose-500/20 text-rose-300";
+  return "border-border bg-background text-muted-foreground";
 }
 
 // Display "?" instead of F when the F grade reflects insufficient history
@@ -173,8 +185,10 @@ export function ScreenerView({ connected }: Props) {
   const [tracked, setTracked] = useState<Set<string>>(new Set());
   // Transient toast for Track confirmations. One line above the table.
   const [trackToast, setTrackToast] = useState<string | null>(null);
-  const [sortKey, setSortKey] = useState<SortKey>("stage2");
-  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  // Default sort: finalGrade (A→F). ascending=true means A before F because
+  // gradeOrder returns 0 for A, 3 for F. Tracked rows always float to top.
+  const [sortKey, setSortKey] = useState<SortKey>("grade");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   // When `groupMode` is non-null, results render as two groups with a divider.
   // Clicking any column header switches to flat sort and sets groupMode=null.
   const [groupMode, setGroupMode] = useState<"stage2" | "grades" | null>(null);
@@ -241,8 +255,9 @@ export function ScreenerView({ connected }: Props) {
           setResults(parsed);
           if (pricesRaw) setPrices(JSON.parse(pricesRaw));
           setScreenedAt(new Date(ts));
-          const analyzed = parsed.some((r) => r.stageThree !== null);
-          setGroupMode(analyzed ? "grades" : "stage2");
+          // Flat sort with tracked-first ordering is the default; skip the
+          // old two-group display entirely.
+          setGroupMode(null);
           console.log("[screener] restored", parsed.length, "results");
         } else {
           localStorage.removeItem(LS_RESULTS);
@@ -294,9 +309,24 @@ export function ScreenerView({ connected }: Props) {
       return { items: [...group1, ...group2], group1Count: group1.length };
     }
 
-    // Flat sort
+    // Flat sort. Tracked rows always float to the top regardless of the
+    // chosen sort key — they're the ones the user is actively deciding on.
     const copy = [...results];
+    const recOrder = (rec: ScreenerResult["recommendation"]): number => {
+      if (rec === "Strong - Take the trade") return 0;
+      if (rec === "Marginal - Size smaller") return 1;
+      if (rec === "Marginal - Crush unproven") return 2;
+      if (rec === "Needs analysis") return 3;
+      if (rec === "Cannot evaluate") return 4;
+      return 5; // Skip
+    };
     copy.sort((a, b) => {
+      // 1. Tracked always first.
+      const aT = tracked.has(a.symbol.toUpperCase()) ? 0 : 1;
+      const bT = tracked.has(b.symbol.toUpperCase()) ? 0 : 1;
+      if (aT !== bT) return aT - bT;
+
+      // 2. Primary sort on the chosen column.
       let va: number | string = 0;
       let vb: number | string = 0;
       switch (sortKey) {
@@ -340,15 +370,31 @@ export function ScreenerView({ connected }: Props) {
           va = a.stageTwo?.score ?? -999;
           vb = b.stageTwo?.score ?? -999;
           break;
+        case "grade":
+          va = gradeOrder(a.threeLayer?.finalGrade);
+          vb = gradeOrder(b.threeLayer?.finalGrade);
+          break;
+        case "recommendation":
+          va = recOrder(a.recommendation);
+          vb = recOrder(b.recommendation);
+          break;
       }
+      let primary: number;
       if (typeof va === "string" && typeof vb === "string") {
-        return sortDir === "asc" ? va.localeCompare(vb) : vb.localeCompare(va);
+        primary = sortDir === "asc" ? va.localeCompare(vb) : vb.localeCompare(va);
+      } else {
+        const diff = (va as number) - (vb as number);
+        primary = sortDir === "asc" ? diff : -diff;
       }
-      const diff = (va as number) - (vb as number);
-      return sortDir === "asc" ? diff : -diff;
+      if (primary !== 0) return primary;
+
+      // 3. Tiebreakers: finalGrade (A→F) then quality score (desc).
+      const gDiff = gradeOrder(a.threeLayer?.finalGrade) - gradeOrder(b.threeLayer?.finalGrade);
+      if (gDiff !== 0) return gDiff;
+      return (b.stageTwo?.score ?? -999) - (a.stageTwo?.score ?? -999);
     });
     return { items: copy, group1Count: null };
-  }, [results, prices, sortKey, sortDir, groupMode]);
+  }, [results, prices, sortKey, sortDir, groupMode, tracked]);
 
   const sortedResults = view.items;
   const group1Count = view.group1Count;
@@ -402,7 +448,7 @@ export function ScreenerView({ connected }: Props) {
       setPrices(nextPrices);
       setScreenedAt(new Date(timestampIso));
       setLastStats(nextStats);
-      setGroupMode("stage2");
+      setGroupMode(null);
       setStatus("idle");
       setMessage(`Screened ${nextResults.length} candidates`);
     } catch (e) {
@@ -493,7 +539,7 @@ export function ScreenerView({ connected }: Props) {
       }
       setResults(next);
       setPrices(mergedPrices);
-      setGroupMode("grades");
+      setGroupMode(null);
       setMessage(`Analyzed ${json.results.length} candidates`);
       setStatus("idle");
     } catch (e) {
@@ -696,7 +742,8 @@ export function ScreenerView({ connected }: Props) {
               <TableHeader>
                 <TableRow>
                   <TableHead className="w-8"></TableHead>
-                  <TableHead className="w-10 text-xs text-muted-foreground">Track</TableHead>
+                  <TableHead className="w-14 text-xs text-muted-foreground">Track</TableHead>
+                  <SortableHeader label="Grade" active={sortKey === "grade"} dir={sortDir} onClick={() => onSort("grade")} />
                   <SortableHeader label="Symbol" active={sortKey === "symbol"} dir={sortDir} onClick={() => onSort("symbol")} />
                   <SortableHeader label="Price" active={sortKey === "price"} dir={sortDir} onClick={() => onSort("price")} />
                   <TableHead>Earnings</TableHead>
@@ -708,14 +755,14 @@ export function ScreenerView({ connected }: Props) {
                   <SortableHeader label="Premium" active={sortKey === "premium"} dir={sortDir} onClick={() => onSort("premium")} />
                   <SortableHeader label="Delta" active={sortKey === "delta"} dir={sortDir} onClick={() => onSort("delta")} />
                   <SortableHeader label="Spread" active={sortKey === "spread"} dir={sortDir} onClick={() => onSort("spread")} />
-                  <TableHead>Recommendation</TableHead>
+                  <SortableHeader label="Recommendation" active={sortKey === "recommendation"} dir={sortDir} onClick={() => onSort("recommendation")} />
                   <TableHead></TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {sortedResults.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={15} className="py-10 text-center text-sm text-muted-foreground">
+                    <TableCell colSpan={16} className="py-10 text-center text-sm text-muted-foreground">
                       No qualifying earnings today or tomorrow after filters.
                     </TableCell>
                   </TableRow>
@@ -735,7 +782,7 @@ export function ScreenerView({ connected }: Props) {
                       {showDivider && (
                         <TableRow key={`divider-${idx}`} className="hover:bg-transparent">
                           <TableCell
-                            colSpan={15}
+                            colSpan={16}
                             className="bg-amber-500/10 py-1.5 text-center text-xs italic text-amber-300/90"
                           >
                             <AlertTriangle className="mr-1.5 inline h-3 w-3" />
@@ -743,7 +790,7 @@ export function ScreenerView({ connected }: Props) {
                           </TableCell>
                         </TableRow>
                       )}
-                      <TableRow key={id} className="cursor-pointer" onClick={() => toggle(id)}>
+                      <TableRow key={id} className="h-[52px] cursor-pointer" onClick={() => toggle(id)}>
                         <TableCell>
                           {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
                         </TableCell>
@@ -752,11 +799,25 @@ export function ScreenerView({ connected }: Props) {
                             type="checkbox"
                             checked={tracked.has(r.symbol.toUpperCase())}
                             onChange={() => toggleTracked(r.symbol)}
-                            className="h-4 w-4 cursor-pointer rounded border-border bg-background"
+                            className="h-6 w-6 cursor-pointer rounded border-border bg-background"
                             aria-label={`Track ${r.symbol}`}
                           />
                         </TableCell>
-                        <TableCell className="font-medium">
+                        <TableCell>
+                          {r.threeLayer ? (
+                            <span
+                              className={cn(
+                                "rounded-md border px-3 py-1 text-sm font-bold",
+                                finalGradeBadgeColor(r.threeLayer.finalGrade),
+                              )}
+                            >
+                              {r.threeLayer.finalGrade}
+                            </span>
+                          ) : (
+                            <span className="text-sm text-muted-foreground">—</span>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-[15px] font-bold">
                           <span className="inline-flex items-center gap-1">
                             {r.symbol}
                             {r.isWhitelisted && (
@@ -779,34 +840,34 @@ export function ScreenerView({ connected }: Props) {
                             )}
                           </span>
                         </TableCell>
-                        <TableCell>{fmtPrice(displayedPrice)}</TableCell>
+                        <TableCell className="text-sm">{fmtPrice(displayedPrice)}</TableCell>
                         <TableCell className="text-xs">
                           {r.earningsDate} <span className="text-muted-foreground">· {r.earningsTiming}</span>
                         </TableCell>
-                        <TableCell>{r.daysToExpiry}</TableCell>
-                        <TableCell className="font-mono">
+                        <TableCell className="text-sm">{r.daysToExpiry}</TableCell>
+                        <TableCell className="font-mono text-sm">
                           {r.stageTwo ? `${r.stageTwo.score}` : "—"}
                         </TableCell>
-                        <TableCell className={cn("font-mono", gradeColor(displayCrushGrade(r.stageThree)))}>
+                        <TableCell className={cn("font-mono text-sm", gradeColor(displayCrushGrade(r.stageThree)))}>
                           {analyzingRow ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : displayCrushGrade(r.stageThree)}
                         </TableCell>
-                        <TableCell className={cn("font-mono", gradeColor(r.stageFour?.opportunityGrade))}>
+                        <TableCell className={cn("font-mono text-sm", gradeColor(r.stageFour?.opportunityGrade))}>
                           {analyzingRow ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : (r.stageFour?.opportunityGrade ?? "—")}
                         </TableCell>
-                        <TableCell>{r.stageFour?.suggestedStrike ? `$${fmtNum(r.stageFour.suggestedStrike)}` : "—"}</TableCell>
-                        <TableCell>
+                        <TableCell className="text-sm">{r.stageFour?.suggestedStrike ? `$${fmtNum(r.stageFour.suggestedStrike)}` : "—"}</TableCell>
+                        <TableCell className="text-sm">
                           {r.stageFour?.premium !== null && r.stageFour?.premium !== undefined
                             ? `$${fmtNum(r.stageFour.premium)}`
                             : "—"}
                         </TableCell>
-                        <TableCell>{fmtNum(r.stageFour?.delta ?? null, 3)}</TableCell>
-                        <TableCell>
+                        <TableCell className="text-sm">{fmtNum(r.stageFour?.delta ?? null, 3)}</TableCell>
+                        <TableCell className="text-sm">
                           {r.stageFour?.bidAskSpreadPct !== null && r.stageFour?.bidAskSpreadPct !== undefined
                             ? `${fmtNum(r.stageFour.bidAskSpreadPct, 1)}%`
                             : "—"}
                         </TableCell>
                         <TableCell>
-                          <span className={cn("rounded-md border px-2 py-0.5 text-xs", recColor(r.recommendation))}>
+                          <span className={cn("rounded-md border px-3 py-1 text-sm", recColor(r.recommendation))}>
                             {r.recommendation}
                           </span>
                         </TableCell>
@@ -826,7 +887,7 @@ export function ScreenerView({ connected }: Props) {
                       </TableRow>
                       {open && (
                         <TableRow key={`${id}-detail`}>
-                          <TableCell colSpan={15} className="bg-muted/30">
+                          <TableCell colSpan={16} className="bg-muted/30">
                             <ExpandedDetail r={r} />
                           </TableCell>
                         </TableRow>
