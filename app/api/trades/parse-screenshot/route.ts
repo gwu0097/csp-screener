@@ -4,27 +4,12 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60; // VLM calls can be slow
 
 // Screenshot parsing is powered by Google Gemini vision. MINIMAX_API_KEY is
-// retained in the env but intentionally unused here (prior attempts hit
-// model-availability + JSON-format issues). Gemini's key lives in the URL
-// query string, not in a header.
-//
-// Model fallback: gemini-1.5-flash is the stable id most projects have
-// access to; -latest alias is tried next in case the plain name isn't
-// resolved for this key. We walk the list until one returns 2xx.
-const GEMINI_MODELS = ["gemini-1.5-flash", "gemini-1.5-flash-latest"];
-const GEMINI_ENDPOINT_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
+// retained in the env but intentionally unused here. Auth goes via the
+// x-goog-api-key header (not a query param) so the key never lands in URL
+// logs or referrer headers.
+const GEMINI_MODEL = "gemini-2.5-flash";
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 const GEMINI_KEY = process.env.GEMINI_API_KEY ?? "";
-
-function geminiUrl(model: string): string {
-  return `${GEMINI_ENDPOINT_BASE}/${model}:generateContent?key=${encodeURIComponent(GEMINI_KEY)}`;
-}
-
-// Redact the key for logs — the URL structure is useful to debug, the key
-// is not. Replace the value portion of ?key=... with *** so accidental log
-// sharing doesn't leak the credential.
-function redactUrl(url: string): string {
-  return url.replace(/(key=)[^&]+/, "$1***");
-}
 
 // The exact field contract the caller will see. Mirrors the spec prompt so
 // the review table has predictable columns.
@@ -204,61 +189,45 @@ export async function POST(req: NextRequest) {
     `[parse-screenshot] broker=${broker} mime=${mime} base64_bytes=${rawLen}`,
   );
 
-  const geminiBody = JSON.stringify({
-    contents: [
-      {
-        parts: [
-          { inline_data: { mime_type: mime, data } },
-          { text: PROMPT },
-        ],
+  console.log(`[parse-screenshot] gemini url: ${GEMINI_URL}`);
+  let res: Response;
+  try {
+    res = await fetch(GEMINI_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": GEMINI_KEY,
       },
-    ],
-    generationConfig: {
-      temperature: 0,
-      maxOutputTokens: 2000,
-    },
-  });
+      body: JSON.stringify({
+        contents: [
+          {
+            parts: [
+              { inline_data: { mime_type: mime, data } },
+              { text: PROMPT },
+            ],
+          },
+        ],
+        generationConfig: { temperature: 0, maxOutputTokens: 2000 },
+      }),
+      cache: "no-store",
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(`[parse-screenshot] gemini network error: ${msg}`);
+    return NextResponse.json({ error: `Gemini network error: ${msg}` }, { status: 502 });
+  }
 
-  // Walk models in order; first 2xx wins. On 401/403 we bail (auth issue
-  // no model change will fix). On other non-2xx, log + try next.
-  let res: Response | null = null;
-  const failures: string[] = [];
-  for (const model of GEMINI_MODELS) {
-    const url = geminiUrl(model);
-    console.log(`[parse-screenshot] gemini url: ${redactUrl(url)}`);
-    let attempt: Response;
-    try {
-      attempt = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: geminiBody,
-        cache: "no-store",
-      });
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      console.error(`[parse-screenshot] gemini network error (${model}): ${msg}`);
-      failures.push(`${model} network: ${msg}`);
-      continue;
-    }
-    if (attempt.ok) {
-      console.log(`[parse-screenshot] gemini ok model=${model}`);
-      res = attempt;
-      break;
-    }
-    const errText = await attempt.text();
-    console.error(`Gemini error ${model}: ${attempt.status} ${errText}`);
-    failures.push(`${model} => ${attempt.status}: ${errText.slice(0, 200)}`);
-    if (attempt.status === 401 || attempt.status === 403) {
+  if (!res.ok) {
+    const errText = await res.text();
+    console.error(`Gemini error: ${res.status} ${errText}`);
+    if (res.status === 401 || res.status === 403) {
       return NextResponse.json(
-        { error: `Gemini auth failed (${attempt.status}). Check GEMINI_API_KEY. ${errText.slice(0, 300)}` },
+        { error: `Gemini auth failed (${res.status}). Check GEMINI_API_KEY. ${errText.slice(0, 300)}` },
         { status: 502 },
       );
     }
-  }
-
-  if (!res) {
     return NextResponse.json(
-      { error: `All Gemini attempts failed. ${failures.join(" | ").slice(0, 800)}` },
+      { error: `Gemini HTTP ${res.status}: ${errText.slice(0, 500)}` },
       { status: 502 },
     );
   }
