@@ -57,17 +57,83 @@ Return ONLY a valid JSON array. Example:
   }
 ]`;
 
-// The model sometimes wraps the array in ```json fences or adds a leading
-// "Here is the JSON:" line. Strip those before parsing.
-function extractJsonArray(text: string): unknown {
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-  const raw = (fenced ? fenced[1] : text).trim();
-  const start = raw.indexOf("[");
-  const end = raw.lastIndexOf("]");
-  if (start === -1 || end === -1 || end < start) {
-    throw new Error("No JSON array found in model output");
+// Try to pull structured data out of an LLM response. Models wrap their
+// output inconsistently — plain JSON, ```json fences, generic ``` fences,
+// prose-then-array, smart quotes, trailing commas, single-object instead of
+// array. Walks a prioritized cascade; returns both the parsed value and the
+// method that worked so we can log which shape the model produced.
+type ExtractResult =
+  | { ok: true; data: unknown; method: string }
+  | { ok: false };
+
+function tryParse(text: string): unknown | undefined {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
   }
-  return JSON.parse(raw.slice(start, end + 1));
+}
+
+function sanitize(text: string): string {
+  return text
+    // Smart quotes → straight
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    // Trailing commas before ] or }
+    .replace(/,\s*([\]}])/g, "$1")
+    // Strip stray BOM / zero-width
+    .replace(/[﻿​]/g, "");
+}
+
+function extractJsonFromText(text: string): ExtractResult {
+  const trimmed = text.trim();
+
+  // 1. Direct parse — happens when the model actually returned pure JSON.
+  const direct = tryParse(trimmed);
+  if (direct !== undefined) return { ok: true, data: direct, method: "direct" };
+
+  // 2. ```json ... ``` fenced block.
+  const jsonFence = trimmed.match(/```json\s*([\s\S]*?)\s*```/i);
+  if (jsonFence) {
+    const inside = sanitize(jsonFence[1].trim());
+    const parsed = tryParse(inside);
+    if (parsed !== undefined) return { ok: true, data: parsed, method: "json-fence" };
+  }
+
+  // 3. Any ``` ... ``` fence (no language tag).
+  const anyFence = trimmed.match(/```\s*([\s\S]*?)\s*```/);
+  if (anyFence) {
+    const inside = sanitize(anyFence[1].trim());
+    const parsed = tryParse(inside);
+    if (parsed !== undefined) return { ok: true, data: parsed, method: "code-fence" };
+  }
+
+  // 4. Widest [...] substring — "outer" array. This tolerates prose before
+  // or after the array (e.g. "Here are the trades: [ ... ]. Hope that helps.")
+  const arrayMatch = trimmed.match(/\[[\s\S]*\]/);
+  if (arrayMatch) {
+    const raw = arrayMatch[0];
+    const parsed = tryParse(raw);
+    if (parsed !== undefined) return { ok: true, data: parsed, method: "array-regex" };
+    const sanitized = tryParse(sanitize(raw));
+    if (sanitized !== undefined) return { ok: true, data: sanitized, method: "array-regex-sanitized" };
+  }
+
+  // 5. Widest {...} substring — single object. Wrap in an array so
+  // downstream code treats it like the other shapes.
+  const objMatch = trimmed.match(/\{[\s\S]*\}/);
+  if (objMatch) {
+    const parsed = tryParse(objMatch[0]);
+    if (parsed !== undefined && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return { ok: true, data: [parsed], method: "object-regex-wrapped" };
+    }
+    const sanitized = tryParse(sanitize(objMatch[0]));
+    if (sanitized !== undefined && typeof sanitized === "object" && !Array.isArray(sanitized)) {
+      return { ok: true, data: [sanitized], method: "object-regex-wrapped-sanitized" };
+    }
+  }
+
+  return { ok: false };
 }
 
 function coerceTrade(raw: unknown, fallbackBroker: string): ParsedTrade | null {
@@ -216,16 +282,38 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Empty response from Minimax" }, { status: 502 });
     }
 
-    let parsed: unknown;
-    try {
-      parsed = extractJsonArray(content);
-    } catch (e) {
-      console.error(`[parse-screenshot] parse failed: ${e instanceof Error ? e.message : e}`);
-      console.error(`[parse-screenshot] raw content: ${content.slice(0, 500)}`);
-      return NextResponse.json({ error: "Could not parse model output as JSON" }, { status: 502 });
+    // Log the raw model output so we can see exactly what format it used.
+    console.log(
+      `[parse-screenshot] raw content (len=${content.length}): ${content.slice(0, 2000)}`,
+    );
+
+    const extracted = extractJsonFromText(content);
+    if (!extracted.ok) {
+      console.error(
+        `[parse-screenshot] extraction failed — all methods exhausted. Full raw content: ${content}`,
+      );
+      return NextResponse.json(
+        {
+          error: `Could not parse model output as JSON. Raw model output: ${content.slice(0, 1500)}`,
+        },
+        { status: 502 },
+      );
+    }
+    console.log(`[parse-screenshot] extracted via method=${extracted.method}`);
+
+    let parsed: unknown = extracted.data;
+    // Single-object shapes get wrapped so the rest of the pipeline treats
+    // them uniformly with the array case.
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      parsed = [parsed];
     }
     if (!Array.isArray(parsed)) {
-      return NextResponse.json({ error: "Model did not return a JSON array" }, { status: 502 });
+      return NextResponse.json(
+        {
+          error: `Model returned non-array/object JSON (${typeof parsed}). Raw: ${content.slice(0, 800)}`,
+        },
+        { status: 502 },
+      );
     }
 
     const trades = parsed
