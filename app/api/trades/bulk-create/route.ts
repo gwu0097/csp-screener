@@ -111,10 +111,22 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  const items = Array.isArray(body.trades) ? body.trades : [];
-  if (items.length === 0) {
+  const itemsRaw = Array.isArray(body.trades) ? body.trades : [];
+  if (itemsRaw.length === 0) {
     return NextResponse.json({ error: "No trades provided" }, { status: 400 });
   }
+
+  // Process all opens before any closes within the same batch. ToS exports
+  // chronologically (newest first), so a 3-day screenshot often has today's
+  // closes ABOVE the opens they're closing against. Without this sort,
+  // findOpenParent runs while the matching open hasn't been inserted yet
+  // and every close ends up orphaned (parent_trade_id=null).
+  // Stable sort preserves input order within each action group.
+  const items = [...itemsRaw].sort((a, b) => {
+    const aw = a.action === "open" ? 0 : a.action === "close" ? 1 : 2;
+    const bw = b.action === "open" ? 0 : b.action === "close" ? 1 : 2;
+    return aw - bw;
+  });
 
   const supabase = createServerClient();
   const errors: string[] = [];
