@@ -31,7 +31,9 @@ const PROMPT = `This is a screenshot of a ThinkorSwim (ThinkOrSwim) brokerage or
 
 Column headers are: Time Placed, Spread, Side, QtyPos Effect, Symbol, Exp, StrikeType, Price, TIF, Status
 
-Extract every filled options trade row. Ignore stock trades (where StrikeType says 'STOCK' or 'ETF').
+Extract every filled options trade row. Ignore stock trades (StrikeType 'STOCK' or 'ETF') AND ignore rows where Status column says CANCELED or EXPIRED. Only include rows with Status exactly FILLED.
+
+If Status = FILLED and the row is an option (not STOCK/ETF), you must include it. Count your FILLED rows before finalizing — do not skip any.
 
 For each options row:
 - action: if Side=SELL and QtyPos Effect contains 'TO OPEN' → 'open'
@@ -46,7 +48,9 @@ For each options row:
 
 Return ONLY a JSON array, no explanation, no markdown.
 
-Extract EVERY row in the table. Do not stop early. There may be 10-30 rows. Return all of them.`;
+Extract EVERY row in the table. Do not stop early. There may be 10-30 rows. Return all of them.
+
+The Price column shows values like '.60 LMT' or '7.15 LMT'. The premium is the numeric value only — strip the ' LMT' / ' MKT' suffix and return the result as a JSON number (not a string). '.60 LMT' becomes 0.60. Read the exact digits — do not substitute, round, or guess.`;
 
 // Try to pull structured data out of an LLM response. Models wrap their
 // output inconsistently — plain JSON, ```json fences, generic ``` fences,
@@ -221,7 +225,14 @@ export async function POST(req: NextRequest) {
             ],
           },
         ],
-        generationConfig: { temperature: 0, maxOutputTokens: 8192 },
+        generationConfig: {
+          temperature: 0,
+          maxOutputTokens: 8192,
+          // 2.5 Flash is a thinking model; thinking tokens count against
+          // maxOutputTokens. For this extraction task, reasoning burns
+          // budget without helping quality, so we disable it.
+          thinkingConfig: { thinkingBudget: 0 },
+        },
       }),
       cache: "no-store",
     });
