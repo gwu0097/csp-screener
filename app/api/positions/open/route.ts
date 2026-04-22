@@ -409,33 +409,46 @@ export async function GET(req: NextRequest) {
     ? crypto.createHash("sha256").update(svcKey).digest("hex").slice(0, 16)
     : null;
 
-  // Direct REST probe — bypasses supabase-js so we can see the raw HTTP
-  // status. If supabase-js was hiding a 401, this will show it.
-  let restProbe: {
-    status: number | null;
-    bodyPreview: string | null;
-  } = { status: null, bodyPreview: null };
-  try {
-    const restRes = await fetch(
-      `${process.env.NEXT_PUBLIC_SUPABASE_URL}/rest/v1/trades?select=id&limit=1`,
-      {
-        headers: {
-          apikey: svcKey,
-          Authorization: `Bearer ${svcKey}`,
+  // REST probe A: same query the supabase-js client uses (select=*
+  // &order=trade_date.desc). If this returns rows but the client
+  // returns [], the bug is in supabase-js, not PostgREST.
+  async function restProbeQuery(label: string, qs: string) {
+    try {
+      const r = await fetch(
+        `${process.env.NEXT_PUBLIC_SUPABASE_URL}/rest/v1/trades?${qs}`,
+        {
+          headers: { apikey: svcKey, Authorization: `Bearer ${svcKey}` },
+          cache: "no-store",
         },
-        cache: "no-store",
-      },
-    );
-    restProbe = {
-      status: restRes.status,
-      bodyPreview: (await restRes.text()).slice(0, 200),
-    };
-  } catch (e) {
-    restProbe = {
-      status: null,
-      bodyPreview: `fetch threw: ${e instanceof Error ? e.message : String(e)}`,
-    };
+      );
+      const body = await r.text();
+      let rowCount: number | null = null;
+      try {
+        const j = JSON.parse(body);
+        if (Array.isArray(j)) rowCount = j.length;
+      } catch {
+        /* ignore */
+      }
+      return {
+        label,
+        status: r.status,
+        rowCount,
+        bodyPreview: body.slice(0, 300),
+      };
+    } catch (e) {
+      return {
+        label,
+        status: null,
+        rowCount: null,
+        bodyPreview: `fetch threw: ${e instanceof Error ? e.message : String(e)}`,
+      };
+    }
   }
+  const restProbe = await restProbeQuery("smoke", "select=id&limit=1");
+  const restProbeMatch = await restProbeQuery(
+    "mirrors supabase-js",
+    "select=*&order=trade_date.desc",
+  );
 
   const debug = {
     envPresent: {
@@ -447,6 +460,7 @@ export async function GET(req: NextRequest) {
     serviceRoleKeyLen: svcKey.length,
     serviceRoleKeyFingerprint: svcKeyFingerprint,
     restProbe,
+    restProbeMatch,
     // JWT-embedded project ref from the service_role key vs the URL host.
     // Mismatch = key is for a different project than the URL points to.
     urlProjectRef,
