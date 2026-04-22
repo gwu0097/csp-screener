@@ -40,7 +40,9 @@ For each options row:
 - expiry: convert the Exp date to YYYY-MM-DD format
 - premium: the Price column value
 
-Return ONLY a JSON array, no explanation, no markdown.`;
+Return ONLY a JSON array, no explanation, no markdown.
+
+Extract EVERY row in the table. Do not stop early. There may be 10-30 rows. Return all of them.`;
 
 // Try to pull structured data out of an LLM response. Models wrap their
 // output inconsistently — plain JSON, ```json fences, generic ``` fences,
@@ -207,7 +209,7 @@ export async function POST(req: NextRequest) {
             ],
           },
         ],
-        generationConfig: { temperature: 0, maxOutputTokens: 2000 },
+        generationConfig: { temperature: 0, maxOutputTokens: 8192 },
       }),
       cache: "no-store",
     });
