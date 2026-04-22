@@ -92,6 +92,16 @@ export type StageFourResult = {
     spreadScore: number;
     contractSymbol: string | null;
   };
+  // Compact snapshot of the weekly put chain so the UI can run a custom
+  // strike analysis client-side without a new API call. Populated by
+  // runStageFour; sorted by strike ascending.
+  availableStrikes?: Array<{
+    strike: number;
+    bid: number;
+    ask: number;
+    mark: number;
+    delta: number;
+  }>;
 };
 
 // Hard kill: if bid-ask spread as % of mid exceeds this, the contract is
@@ -592,8 +602,26 @@ export function runStageFour(
   medianHistoricalMovePct: number | null,
   emPct: number | null,
 ): StageFourResult {
-  const referenceMove = medianHistoricalMovePct ?? emPct;
-  if (referenceMove === null) {
+  // Strike picker: prefer the IV-implied weekly move (emPct, = weeklyIv ×
+  // √(dte/365)) over historical median moves. Historical tells you what
+  // the stock HAS done on recent quarters; emPct tells you what the
+  // market IS pricing for THIS event. For a 2x-EM CSP strategy we want
+  // the forward-looking number — otherwise thin-mover names like AXP get
+  // strikes too close to spot and POP collapses.
+  const referenceMove = emPct ?? medianHistoricalMovePct;
+  const referenceSource: "iv" | "historical" | "none" =
+    emPct !== null ? "iv" : medianHistoricalMovePct !== null ? "historical" : "none";
+  const suggestedStrike =
+    referenceMove !== null ? candidate.price * (1 - 2.0 * referenceMove) : null;
+  console.log(
+    `[stage4:${candidate.symbol}] strike calc: price=${candidate.price} ` +
+      `emPct=${emPct !== null ? emPct.toFixed(4) : "null"} ` +
+      `historicalMedian=${medianHistoricalMovePct !== null ? medianHistoricalMovePct.toFixed(4) : "null"} ` +
+      `source=${referenceSource} ` +
+      `suggestedStrike=${suggestedStrike !== null ? suggestedStrike.toFixed(2) : "null"} ` +
+      `dte=${candidate.daysToExpiry}`,
+  );
+  if (referenceMove === null || suggestedStrike === null) {
     return {
       score: 0,
       maxScore: 20,
@@ -607,7 +635,6 @@ export function runStageFour(
       details: { premiumYieldScore: 0, deltaScore: 0, spreadScore: 0, contractSymbol: null },
     };
   }
-  const suggestedStrike = candidate.price * (1 - 2.0 * referenceMove);
   const contract = pickStrikeNearest(chain, candidate.expiry, suggestedStrike);
   if (!contract) {
     return {
@@ -640,6 +667,28 @@ export function runStageFour(
   const opportunityGrade = spreadTooWide ? "F" : gradeFromOpportunityScore(rawScore);
   const note = spreadTooWide ? "Spread too wide to trade" : null;
 
+  // Compact snapshot of the weekly put chain — the UI uses it to let
+  // users try a custom strike without another API round-trip.
+  const expKey = Object.keys(chain.putExpDateMap ?? {}).find((k) =>
+    k.startsWith(candidate.expiry),
+  );
+  const availableStrikes: StageFourResult["availableStrikes"] = [];
+  if (expKey) {
+    for (const arr of Object.values(chain.putExpDateMap[expKey])) {
+      for (const c of arr) {
+        const strikeMid = (c.bid + c.ask) / 2 || c.mark || c.last || 0;
+        availableStrikes!.push({
+          strike: c.strikePrice,
+          bid: c.bid,
+          ask: c.ask,
+          mark: Math.round(strikeMid * 100) / 100,
+          delta: Math.round(c.delta * 1000) / 1000,
+        });
+      }
+    }
+    availableStrikes!.sort((a, b) => a.strike - b.strike);
+  }
+
   return {
     score: rawScore,
     maxScore: 20,
@@ -650,6 +699,7 @@ export function runStageFour(
     bidAskSpreadPct: Math.round(spreadPctOfMid * 10) / 10,
     premiumYieldPct: Math.round(yieldPct * 1000) / 1000,
     note,
+    availableStrikes,
     details: {
       premiumYieldScore,
       deltaScore,

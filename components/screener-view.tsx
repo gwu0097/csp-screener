@@ -30,7 +30,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import type { ScreenerResult } from "@/lib/screener";
+import type { ScreenerResult, StageFourResult } from "@/lib/screener";
 import type { MarketContext } from "@/lib/market";
 
 // localStorage key for the Track checkbox state (screener_tracked is an
@@ -81,6 +81,37 @@ function recColor(rec: ScreenerResult["recommendation"]) {
     default:
       return "bg-slate-700/30 text-slate-300";
   }
+}
+
+// The Recommendation column in the main table is now driven by the
+// three-layer finalGrade (the holistic verdict). The old Stage-3/Stage-4
+// ScreenerResult.recommendation becomes the "options model signal" shown
+// in the expanded row for reference only.
+type DisplayRec = { label: string; className: string };
+function displayRecFromFinalGrade(
+  finalGrade: string | null | undefined,
+  fallback: ScreenerResult["recommendation"],
+): DisplayRec {
+  if (finalGrade === "A") {
+    return {
+      label: "Strong — Take the trade",
+      className: "bg-emerald-500/15 text-emerald-300 border-emerald-500/40",
+    };
+  }
+  if (finalGrade === "B") {
+    return {
+      label: "Marginal — Size smaller",
+      className: "bg-amber-500/15 text-amber-300 border-amber-500/40",
+    };
+  }
+  if (finalGrade === "C" || finalGrade === "F") {
+    return {
+      label: "Skip",
+      className: "bg-muted text-muted-foreground border-border",
+    };
+  }
+  // No threeLayer yet (pre-analysis) — fall back to the Stage-3/4 verdict.
+  return { label: fallback, className: recColor(fallback) };
 }
 
 function gradeColor(grade: string | null | undefined) {
@@ -743,14 +774,47 @@ export function ScreenerView({ connected }: Props) {
                 <TableRow>
                   <TableHead className="w-8"></TableHead>
                   <TableHead className="w-14 text-xs text-muted-foreground">Track</TableHead>
-                  <SortableHeader label="Grade" active={sortKey === "grade"} dir={sortDir} onClick={() => onSort("grade")} />
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span>
+                        <SortableHeader label="Grade" active={sortKey === "grade"} dir={sortDir} onClick={() => onSort("grade")} />
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent className="max-w-sm text-xs">
+                      Three-layer final grade: Industry (POP, IV edge, term, opp) +
+                      Your history (win rate, ROC) + Regime (news, VIX). A ≥ 80,
+                      B ≥ 65, C ≥ 50, F &lt; 50.
+                    </TooltipContent>
+                  </Tooltip>
                   <SortableHeader label="Symbol" active={sortKey === "symbol"} dir={sortDir} onClick={() => onSort("symbol")} />
                   <SortableHeader label="Price" active={sortKey === "price"} dir={sortDir} onClick={() => onSort("price")} />
                   <TableHead>Earnings</TableHead>
                   <SortableHeader label="DTE" active={sortKey === "dte"} dir={sortDir} onClick={() => onSort("dte")} />
                   <SortableHeader label="Q" active={sortKey === "stage2"} dir={sortDir} onClick={() => onSort("stage2")} />
-                  <SortableHeader label="Crush" active={sortKey === "crush"} dir={sortDir} onClick={() => onSort("crush")} />
-                  <SortableHeader label="Opp." active={sortKey === "opportunity"} dir={sortDir} onClick={() => onSort("opportunity")} />
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span>
+                        <SortableHeader label="Crush" active={sortKey === "crush"} dir={sortDir} onClick={() => onSort("crush")} />
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent className="max-w-sm text-xs">
+                      Stage 3 crush grade — quality of the IV-crush setup
+                      (historical moves, consistency, term structure, IV edge,
+                      surprise reliability). &ldquo;?&rdquo; = fewer than 3 historical
+                      earnings moves available.
+                    </TooltipContent>
+                  </Tooltip>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span>
+                        <SortableHeader label="Opp." active={sortKey === "opportunity"} dir={sortDir} onClick={() => onSort("opportunity")} />
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent className="max-w-sm text-xs">
+                      Stage 4 opportunity grade — premium yield, delta, and
+                      bid-ask spread. F = spread &gt; {`${20}%`} (untradeable).
+                    </TooltipContent>
+                  </Tooltip>
                   <SortableHeader label="Strike" active={sortKey === "strike"} dir={sortDir} onClick={() => onSort("strike")} />
                   <SortableHeader label="Premium" active={sortKey === "premium"} dir={sortDir} onClick={() => onSort("premium")} />
                   <SortableHeader label="Delta" active={sortKey === "delta"} dir={sortDir} onClick={() => onSort("delta")} />
@@ -772,10 +836,14 @@ export function ScreenerView({ connected }: Props) {
                   const open = !!expanded[id];
                   const displayedPrice = prices[r.symbol.toUpperCase()] ?? r.price;
                   const analyzingRow = analyzingSymbols.has(r.symbol.toUpperCase());
-                  const actionable =
-                    r.recommendation === "Strong - Take the trade" ||
-                    r.recommendation === "Marginal - Size smaller" ||
-                    r.recommendation === "Marginal - Crush unproven";
+                  // Log Trade / Track button visibility now follows the
+                  // three-layer finalGrade when available, otherwise the
+                  // Stage-3/4 verdict for pre-analysis rows.
+                  const actionable = r.threeLayer
+                    ? r.threeLayer.finalGrade === "A" || r.threeLayer.finalGrade === "B"
+                    : r.recommendation === "Strong - Take the trade" ||
+                      r.recommendation === "Marginal - Size smaller" ||
+                      r.recommendation === "Marginal - Crush unproven";
                   const showDivider = group1Count !== null && idx === group1Count && idx > 0;
                   return (
                     <>
@@ -867,9 +935,19 @@ export function ScreenerView({ connected }: Props) {
                             : "—"}
                         </TableCell>
                         <TableCell>
-                          <span className={cn("rounded-md border px-3 py-1 text-sm", recColor(r.recommendation))}>
-                            {r.recommendation}
-                          </span>
+                          {(() => {
+                            const d = displayRecFromFinalGrade(
+                              r.threeLayer?.finalGrade,
+                              r.recommendation,
+                            );
+                            return (
+                              <span
+                                className={cn("rounded-md border px-3 py-1 text-sm", d.className)}
+                              >
+                                {d.label}
+                              </span>
+                            );
+                          })()}
                         </TableCell>
                         <TableCell onClick={(e) => e.stopPropagation()}>
                           {actionable && r.stageFour?.suggestedStrike ? (
@@ -937,12 +1015,62 @@ function gradeBadgeColor(g: string | null | undefined): string {
   return "border-border text-muted-foreground bg-background/40";
 }
 
-function GradeBadge({ grade }: { grade: string | null | undefined }) {
-  return (
-    <span className={cn("rounded border px-1.5 py-0.5 font-mono", gradeBadgeColor(grade))}>
+function GradeBadge({
+  grade,
+  tooltip,
+  size = "sm",
+}: {
+  grade: string | null | undefined;
+  tooltip?: React.ReactNode;
+  size?: "sm" | "md";
+}) {
+  const sizing = size === "md" ? "px-3 py-1 text-sm font-bold" : "px-1.5 py-0.5 font-mono";
+  const badge = (
+    <span className={cn("rounded border", sizing, gradeBadgeColor(grade))}>
       {grade ?? "?"}
     </span>
   );
+  if (!tooltip) return badge;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="cursor-help">{badge}</span>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-sm text-xs">{tooltip}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+// Pure client-side replica of Layer 1 POP scoring — used for the custom
+// strike "grade impact" preview so we don't have to round-trip the
+// server. Mirrors the bucket table in lib/screener.ts.
+function layer1PopPts(pop: number): number {
+  if (pop >= 0.9) return 25;
+  if (pop >= 0.85) return 20;
+  if (pop >= 0.8) return 15;
+  if (pop >= 0.75) return 8;
+  return 0;
+}
+
+type CustomStrikeAnalysis = {
+  strike: number;
+  distancePct: number;
+  pop: number;
+  premium: number;
+  delta: number;
+  breakeven: number;
+  // Layer-1 only moves on POP when we swap strikes — other factors
+  // (ivEdge, term, opp) are held constant. We show the resulting
+  // finalScore + finalGrade for the user to eyeball the impact.
+  finalScoreNew: number;
+  finalGradeNew: "A" | "B" | "C" | "F";
+};
+
+function scoreToGradeClient(score: number): "A" | "B" | "C" | "F" {
+  if (score >= 80) return "A";
+  if (score >= 65) return "B";
+  if (score >= 50) return "C";
+  return "F";
 }
 
 function ExpandedDetail({ r }: { r: ScreenerResult }) {
@@ -980,10 +1108,37 @@ function ExpandedDetail({ r }: { r: ScreenerResult }) {
     );
   }
 
+  // Layer 1 score pieces excluding POP (stay constant across strike
+  // changes). industryScore = popPts + ivEdgePts + termPts + oppPts
+  // — so when we swap strike, only popPts moves. Compute the non-POP
+  // sum once; the custom-strike analysis adds the new POP pts on top.
+  const currentPopPts = layer1PopPts(tl.industryFactors.probabilityOfProfit);
+  const nonPopIndustry = tl.industryScore - currentPopPts;
+  const termPts = Math.round((tl.industryFactors.termStructure / 5) * 10);
+  const oppPts =
+    tl.industryFactors.opportunityGrade === "A"
+      ? 10
+      : tl.industryFactors.opportunityGrade === "B"
+        ? 7
+        : tl.industryFactors.opportunityGrade === "C"
+          ? 3
+          : 0;
+  const ivEdgePts = Math.max(0, Math.round(nonPopIndustry - termPts - oppPts));
+
   return (
     <div className="space-y-3 p-3">
       <div className="grid gap-3 md:grid-cols-3">
-        <LayerCard title="LAYER 1 — INDUSTRY STANDARD" grade={tl.industryGrade}>
+        <LayerCard
+          title="LAYER 1 — INDUSTRY STANDARD"
+          grade={tl.industryGrade}
+          tooltip={
+            <div className="space-y-1">
+              <div className="font-semibold">Layer 1 breakdown ({tl.industryScore.toFixed(0)}/60)</div>
+              <div>POP {currentPopPts}/25 · IV edge {ivEdgePts}/15</div>
+              <div>Term {termPts}/10 · Opp {oppPts}/10</div>
+            </div>
+          }
+        >
           <Row k="Crush" v={`${tl.industryFactors.crushGrade}`} />
           <Row k="Opportunity" v={`${tl.industryFactors.opportunityGrade}`} />
           <Row
@@ -999,7 +1154,35 @@ function ExpandedDetail({ r }: { r: ScreenerResult }) {
           <Row k="Breakeven" v={`$${tl.industryFactors.breakevenPrice.toFixed(2)}`} />
         </LayerCard>
 
-        <LayerCard title="LAYER 2 — YOUR INTELLIGENCE" grade={tl.personalGrade === "INSUFFICIENT" ? "?" : tl.personalGrade}>
+        <LayerCard
+          title="LAYER 2 — YOUR INTELLIGENCE"
+          grade={tl.personalGrade === "INSUFFICIENT" ? "?" : tl.personalGrade}
+          tooltip={
+            tl.personalFactors.dataInsufficient ? (
+              <div>
+                Insufficient history — need 5+ closed trades on {r.symbol} (you have{" "}
+                {tl.personalFactors.tickerTradeCount}). Neutral 12.5 applied to final score.
+              </div>
+            ) : (
+              <div className="space-y-1">
+                <div className="font-semibold">Layer 2 breakdown ({tl.personalScore ?? 0}/25)</div>
+                <div>
+                  {tl.personalFactors.tickerTradeCount} prior trades ·
+                  {" "}
+                  {tl.personalFactors.tickerWinRate !== null
+                    ? `${tl.personalFactors.tickerWinRate.toFixed(0)}% win rate`
+                    : "win rate n/a"}
+                </div>
+                <div>
+                  Avg ROC{" "}
+                  {tl.personalFactors.tickerAvgRoc !== null
+                    ? `${tl.personalFactors.tickerAvgRoc.toFixed(2)}%`
+                    : "n/a"}
+                </div>
+              </div>
+            )
+          }
+        >
           {tl.personalFactors.dataInsufficient ? (
             <div className="text-xs text-muted-foreground">
               Insufficient data — need 5+ trades on {r.symbol} (you have {tl.personalFactors.tickerTradeCount})
@@ -1031,7 +1214,29 @@ function ExpandedDetail({ r }: { r: ScreenerResult }) {
           )}
         </LayerCard>
 
-        <LayerCard title="LAYER 3 — CURRENT REGIME" grade={tl.regimeGrade}>
+        <LayerCard
+          title="LAYER 3 — CURRENT REGIME"
+          grade={tl.regimeGrade}
+          tooltip={
+            <div className="space-y-1">
+              <div className="font-semibold">Layer 3 breakdown ({tl.regimeScore}/15)</div>
+              <div>Sentiment: {tl.regimeFactors.newsSentiment}</div>
+              <div>
+                VIX{" "}
+                {tl.regimeFactors.vix !== null ? tl.regimeFactors.vix.toFixed(1) : "n/a"}{" "}
+                ({tl.regimeFactors.vixRegime ?? "—"})
+              </div>
+              {tl.regimeFactors.hasActiveOverhang && (
+                <div className="text-rose-300">
+                  Overhang: {tl.regimeFactors.overhangDescription} ({tl.regimeFactors.gradePenalty}pts)
+                </div>
+              )}
+              {tl.regimeFactors.gradePenalty !== 0 && !tl.regimeFactors.hasActiveOverhang && (
+                <div className="text-amber-300">Penalty: {tl.regimeFactors.gradePenalty}pts</div>
+              )}
+            </div>
+          }
+        >
           <Row
             k="News sentiment"
             v={tl.regimeFactors.newsSentiment}
@@ -1062,27 +1267,173 @@ function ExpandedDetail({ r }: { r: ScreenerResult }) {
         </LayerCard>
       </div>
 
+      <CustomStrikeAnalyzer
+        suggestedStrike={tl.industryFactors.breakevenPrice + (r.stageFour?.premium ?? 0)}
+        currentPrice={r.price}
+        availableStrikes={r.stageFour?.availableStrikes}
+        nonPopIndustry={nonPopIndustry}
+        l2ForFinal={tl.personalScore ?? 12.5}
+        regimeScore={tl.regimeScore}
+        penalty={tl.regimeFactors.gradePenalty}
+        currentFinalGrade={tl.finalGrade}
+        currentFinalScore={tl.finalScore}
+      />
+
       <div className="rounded-md border border-border bg-background/40 p-3">
         <div className="flex items-center gap-2">
           <span className="text-xs font-medium text-muted-foreground">FINAL GRADE:</span>
-          <GradeBadge grade={tl.finalGrade} />
+          <GradeBadge
+            grade={tl.finalGrade}
+            size="md"
+            tooltip={
+              <div className="space-y-1">
+                <div className="font-semibold">Final: {tl.finalGrade} ({tl.finalScore.toFixed(0)}/100)</div>
+                <div>Industry {tl.industryScore.toFixed(0)} + Personal {tl.personalScore ?? 12.5} + Regime {tl.regimeScore} + Penalty {tl.regimeFactors.gradePenalty} = {tl.finalScore.toFixed(0)}</div>
+                <div className="pt-1 text-muted-foreground">
+                  Thresholds: A ≥ 80, B ≥ 65, C ≥ 50, F &lt; 50
+                </div>
+              </div>
+            }
+          />
           <span className="text-xs text-muted-foreground">
             ({tl.finalScore.toFixed(0)}/100)
           </span>
         </div>
         <div className="mt-2 text-xs text-muted-foreground">{tl.recommendationReason}</div>
+        <div className="mt-2 text-[11px] text-muted-foreground">
+          Options model signal: <span className="text-foreground">{r.recommendation}</span>
+        </div>
       </div>
     </div>
   );
 }
 
+function CustomStrikeAnalyzer({
+  suggestedStrike,
+  currentPrice,
+  availableStrikes,
+  nonPopIndustry,
+  l2ForFinal,
+  regimeScore,
+  penalty,
+  currentFinalGrade,
+  currentFinalScore,
+}: {
+  suggestedStrike: number;
+  currentPrice: number;
+  availableStrikes: StageFourResult["availableStrikes"];
+  nonPopIndustry: number;
+  l2ForFinal: number;
+  regimeScore: number;
+  penalty: number;
+  currentFinalGrade: "A" | "B" | "C" | "F";
+  currentFinalScore: number;
+}) {
+  const [input, setInput] = useState("");
+  const [result, setResult] = useState<CustomStrikeAnalysis | null>(null);
+
+  const strikes = availableStrikes ?? [];
+
+  function analyze() {
+    const parsed = Number(input);
+    if (!Number.isFinite(parsed) || parsed <= 0 || strikes.length === 0) {
+      setResult(null);
+      return;
+    }
+    // Snap to the closest strike the chain actually exposes.
+    let nearest = strikes[0];
+    let bestDiff = Math.abs(strikes[0].strike - parsed);
+    for (const s of strikes) {
+      const d = Math.abs(s.strike - parsed);
+      if (d < bestDiff) {
+        nearest = s;
+        bestDiff = d;
+      }
+    }
+    const pop = 1 - Math.abs(nearest.delta);
+    const premium = nearest.mark;
+    const breakeven = nearest.strike - premium;
+    const distancePct =
+      currentPrice > 0 ? ((currentPrice - nearest.strike) / currentPrice) * 100 : 0;
+
+    const newPopPts = layer1PopPts(pop);
+    const newIndustry = nonPopIndustry + newPopPts;
+    const newFinal = Math.max(0, newIndustry + l2ForFinal + regimeScore + penalty);
+    setResult({
+      strike: nearest.strike,
+      distancePct,
+      pop,
+      premium,
+      delta: nearest.delta,
+      breakeven,
+      finalScoreNew: newFinal,
+      finalGradeNew: scoreToGradeClient(newFinal),
+    });
+  }
+
+  return (
+    <div className="rounded-md border border-border bg-background/40 p-3 text-xs">
+      <div className="flex flex-wrap items-center gap-3">
+        <span className="text-muted-foreground">
+          Suggested:{" "}
+          <span className="text-foreground">${suggestedStrike.toFixed(2)}</span>{" "}
+          <span className="text-muted-foreground">(2x EM)</span>
+        </span>
+        <span className="text-muted-foreground">·</span>
+        <label className="flex items-center gap-2">
+          <span className="text-muted-foreground">Try:</span>
+          <input
+            type="number"
+            step="0.5"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="strike"
+            className="w-24 rounded border border-border bg-background px-2 py-1"
+          />
+        </label>
+        <Button size="sm" variant="secondary" onClick={analyze} disabled={strikes.length === 0}>
+          Analyze
+        </Button>
+        {strikes.length === 0 && (
+          <span className="text-muted-foreground">(no chain snapshot available)</span>
+        )}
+      </div>
+      {result && (
+        <div className="mt-3 rounded border border-border bg-muted/20 p-2">
+          <div className="mb-1 font-medium">Custom Strike Analysis</div>
+          <div className="grid grid-cols-2 gap-x-6 gap-y-0.5 font-mono md:grid-cols-3">
+            <Row k="Strike" v={`$${result.strike.toFixed(2)}`} />
+            <Row k="Distance" v={`${result.distancePct.toFixed(1)}% OTM`} />
+            <Row k="Prob of profit" v={`${(result.pop * 100).toFixed(0)}%`} />
+            <Row k="Premium" v={`$${result.premium.toFixed(2)}`} />
+            <Row k="Delta" v={result.delta.toFixed(3)} />
+            <Row k="Breakeven" v={`$${result.breakeven.toFixed(2)}`} />
+          </div>
+          <div className="mt-2 flex items-center gap-2 border-t border-border pt-2">
+            <span className="text-muted-foreground">Grade impact:</span>
+            <GradeBadge grade={currentFinalGrade} />
+            <span className="text-muted-foreground">→</span>
+            <GradeBadge grade={result.finalGradeNew} />
+            <span className="text-muted-foreground">
+              (score {currentFinalScore.toFixed(0)} → {result.finalScoreNew.toFixed(0)})
+            </span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 function LayerCard({
   title,
   grade,
+  tooltip,
   children,
 }: {
   title: string;
   grade: string | null | undefined;
+  tooltip?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
@@ -1091,7 +1442,7 @@ function LayerCard({
         <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
           {title}
         </div>
-        <GradeBadge grade={grade} />
+        <GradeBadge grade={grade} tooltip={tooltip} />
       </div>
       <div className="space-y-0.5">{children}</div>
     </div>
