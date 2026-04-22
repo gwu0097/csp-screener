@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
 import {
   Play,
   AlertTriangle,
@@ -32,8 +31,11 @@ import {
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import type { ScreenerResult } from "@/lib/screener";
-import { LogTradeDialog } from "@/components/log-trade-dialog";
 import type { MarketContext } from "@/lib/market";
+
+// localStorage key for the Track checkbox state (screener_tracked is an
+// array of UPPERCASE symbols). Cleared whenever Screen Today runs.
+const LS_TRACKED = "screener_tracked";
 
 type Props = { connected: boolean };
 
@@ -151,11 +153,11 @@ function normaliseResult(r: Partial<ScreenerResult> & { symbol?: string }): Scre
     isWhitelisted: r.isWhitelisted ?? false,
     industryStatus: r.industryStatus ?? "unknown",
     spreadTooWide: r.spreadTooWide ?? false,
+    threeLayer: r.threeLayer ?? null,
   };
 }
 
 export function ScreenerView({ connected }: Props) {
-  const router = useRouter();
   const [status, setStatus] = useState<RunStatus>("idle");
   const [results, setResults] = useState<ScreenerResult[] | null>(null);
   const [prices, setPrices] = useState<Record<string, number>>({});
@@ -165,7 +167,12 @@ export function ScreenerView({ connected }: Props) {
   const [lastStats, setLastStats] = useState<ScreenStats | null>(null);
   const [analyzingSymbols, setAnalyzingSymbols] = useState<Set<string>>(new Set());
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
-  const [logRow, setLogRow] = useState<ScreenerResult | null>(null);
+  // Track checkbox state: set of UPPERCASE symbols the user has opted to
+  // track for tonight's trades. Persisted in localStorage; passed to the
+  // analyze endpoint so tracked_tickers gets upserted on every run.
+  const [tracked, setTracked] = useState<Set<string>>(new Set());
+  // Transient toast for Track confirmations. One line above the table.
+  const [trackToast, setTrackToast] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>("stage2");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   // When `groupMode` is non-null, results render as two groups with a divider.
@@ -183,7 +190,41 @@ export function ScreenerView({ connected }: Props) {
       .then((r) => r.json())
       .then((j) => setDailyContext(j))
       .catch(() => setDailyContext(null));
+
+    // Restore Track checkbox state from localStorage.
+    try {
+      const raw = localStorage.getItem(LS_TRACKED);
+      if (raw) {
+        const arr = JSON.parse(raw) as unknown;
+        if (Array.isArray(arr)) {
+          setTracked(new Set(arr.filter((s): s is string => typeof s === "string")));
+        }
+      }
+    } catch {
+      /* ignore */
+    }
   }, []);
+
+  function toggleTracked(symbol: string) {
+    const upper = symbol.toUpperCase();
+    setTracked((prev) => {
+      const next = new Set(prev);
+      if (next.has(upper)) {
+        next.delete(upper);
+        setTrackToast(`Untracked ${upper}`);
+      } else {
+        next.add(upper);
+        setTrackToast(`Tracking ${upper} — grades captured on next analysis run`);
+      }
+      try {
+        localStorage.setItem(LS_TRACKED, JSON.stringify(Array.from(next)));
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
+    window.setTimeout(() => setTrackToast(null), 4000);
+  }
 
   useEffect(() => {
     try {
@@ -315,6 +356,15 @@ export function ScreenerView({ connected }: Props) {
   async function screenToday() {
     // Clear any stale cached screen FIRST — a new run always replaces old data.
     clearStoredScreen();
+    // A new screen = a new trading day. Tracked tickers from the previous
+    // day's analysis shouldn't carry over (they apply to yesterday's
+    // expiry chain).
+    setTracked(new Set());
+    try {
+      localStorage.removeItem(LS_TRACKED);
+    } catch {
+      /* ignore */
+    }
     setStatus("screening");
     setError(null);
     setMessage(null);
@@ -415,7 +465,10 @@ export function ScreenerView({ connected }: Props) {
       const res = await fetch("/api/screener/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ candidates: results }),
+        body: JSON.stringify({
+          candidates: results,
+          trackedSymbols: Array.from(tracked),
+        }),
         cache: "no-store",
       });
       if (!res.ok) {
@@ -512,6 +565,7 @@ export function ScreenerView({ connected }: Props) {
               </span>
             )}
             {message && !error && <span className="text-xs text-emerald-300">{message}</span>}
+            {trackToast && <span className="text-xs text-sky-300">{trackToast}</span>}
           </div>
           <div className="flex items-center gap-2">
             {!connected && (
@@ -642,6 +696,7 @@ export function ScreenerView({ connected }: Props) {
               <TableHeader>
                 <TableRow>
                   <TableHead className="w-8"></TableHead>
+                  <TableHead className="w-10 text-xs text-muted-foreground">Track</TableHead>
                   <SortableHeader label="Symbol" active={sortKey === "symbol"} dir={sortDir} onClick={() => onSort("symbol")} />
                   <SortableHeader label="Price" active={sortKey === "price"} dir={sortDir} onClick={() => onSort("price")} />
                   <TableHead>Earnings</TableHead>
@@ -660,7 +715,7 @@ export function ScreenerView({ connected }: Props) {
               <TableBody>
                 {sortedResults.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={14} className="py-10 text-center text-sm text-muted-foreground">
+                    <TableCell colSpan={15} className="py-10 text-center text-sm text-muted-foreground">
                       No qualifying earnings today or tomorrow after filters.
                     </TableCell>
                   </TableRow>
@@ -680,7 +735,7 @@ export function ScreenerView({ connected }: Props) {
                       {showDivider && (
                         <TableRow key={`divider-${idx}`} className="hover:bg-transparent">
                           <TableCell
-                            colSpan={14}
+                            colSpan={15}
                             className="bg-amber-500/10 py-1.5 text-center text-xs italic text-amber-300/90"
                           >
                             <AlertTriangle className="mr-1.5 inline h-3 w-3" />
@@ -691,6 +746,15 @@ export function ScreenerView({ connected }: Props) {
                       <TableRow key={id} className="cursor-pointer" onClick={() => toggle(id)}>
                         <TableCell>
                           {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                        </TableCell>
+                        <TableCell onClick={(e) => e.stopPropagation()}>
+                          <input
+                            type="checkbox"
+                            checked={tracked.has(r.symbol.toUpperCase())}
+                            onChange={() => toggleTracked(r.symbol)}
+                            className="h-4 w-4 cursor-pointer rounded border-border bg-background"
+                            aria-label={`Track ${r.symbol}`}
+                          />
                         </TableCell>
                         <TableCell className="font-medium">
                           <span className="inline-flex items-center gap-1">
@@ -748,15 +812,21 @@ export function ScreenerView({ connected }: Props) {
                         </TableCell>
                         <TableCell onClick={(e) => e.stopPropagation()}>
                           {actionable && r.stageFour?.suggestedStrike ? (
-                            <Button size="sm" variant="secondary" onClick={() => setLogRow(r)}>
-                              Log trade
+                            <Button
+                              size="sm"
+                              variant={tracked.has(r.symbol.toUpperCase()) ? "default" : "secondary"}
+                              onClick={() => {
+                                if (!tracked.has(r.symbol.toUpperCase())) toggleTracked(r.symbol);
+                              }}
+                            >
+                              {tracked.has(r.symbol.toUpperCase()) ? "Tracked" : "Log trade"}
                             </Button>
                           ) : null}
                         </TableCell>
                       </TableRow>
                       {open && (
                         <TableRow key={`${id}-detail`}>
-                          <TableCell colSpan={14} className="bg-muted/30">
+                          <TableCell colSpan={15} className="bg-muted/30">
                             <ExpandedDetail r={r} />
                           </TableCell>
                         </TableRow>
@@ -769,17 +839,6 @@ export function ScreenerView({ connected }: Props) {
           </div>
         )}
 
-        {logRow && (
-          <LogTradeDialog
-            row={logRow}
-            open={!!logRow}
-            onOpenChange={(o) => !o && setLogRow(null)}
-            onSuccess={() => {
-              setLogRow(null);
-              router.refresh();
-            }}
-          />
-        )}
       </div>
     </TooltipProvider>
   );
@@ -809,84 +868,171 @@ function SortableHeader({
   );
 }
 
-function ExpandedDetail({ r }: { r: ScreenerResult }) {
+function gradeBadgeColor(g: string | null | undefined): string {
+  if (g === "A") return "border-emerald-500/40 text-emerald-300 bg-emerald-500/10";
+  if (g === "B") return "border-sky-500/40 text-sky-300 bg-sky-500/10";
+  if (g === "C") return "border-amber-500/40 text-amber-300 bg-amber-500/10";
+  if (g === "F") return "border-rose-500/40 text-rose-300 bg-rose-500/10";
+  return "border-border text-muted-foreground bg-background/40";
+}
+
+function GradeBadge({ grade }: { grade: string | null | undefined }) {
   return (
-    <div className="grid gap-4 p-3 md:grid-cols-4">
-      <StageCard title="Stage 1 · Context" pass={r.stageOne.pass} summary={r.stageOne.reason}>
-        {Object.entries(r.stageOne.details).map(([k, v]) => (
-          <Row key={k} k={k} v={String(v ?? "—")} />
-        ))}
-      </StageCard>
+    <span className={cn("rounded border px-1.5 py-0.5 font-mono", gradeBadgeColor(grade))}>
+      {grade ?? "?"}
+    </span>
+  );
+}
 
-      <StageCard
-        title="Stage 2 · Quality"
-        pass={r.stageTwo?.pass ?? false}
-        summary={r.stageTwo ? `${r.stageTwo.score}/9 — ${r.stageTwo.reason}` : "not reached"}
-      >
-        {r.stageTwo && (
-          <>
-            <Row k="Business simplicity" v={`${r.stageTwo.details.businessSimplicity}/3`} />
-            <Row k="Market cap tier" v={`${r.stageTwo.details.marketCapTier}/3`} />
-            <Row k="Analyst dispersion" v={`${r.stageTwo.details.analystDispersion}/3`} />
-            <Row k="Overhang penalty" v={String(r.stageTwo.details.activeOverhangPenalty)} />
-            <Row k="Industry penalty" v={String(r.stageTwo.details.industryPenalty)} />
-            <Row
-              k="Market cap"
-              v={r.stageTwo.details.marketCapBillions ? `$${r.stageTwo.details.marketCapBillions.toFixed(1)}B` : "—"}
-            />
-            <Row k="Industry class" v={r.stageTwo.details.industryClass} />
-          </>
-        )}
-      </StageCard>
+function ExpandedDetail({ r }: { r: ScreenerResult }) {
+  const tl = r.threeLayer;
+  if (!tl) {
+    // Before Run Analysis has populated threeLayer, fall back to the
+    // Stage-1/2 detail cards — Stage 1 + Stage 2 still run during Screen
+    // Today so the user has SOMETHING to look at pre-analysis.
+    return (
+      <div className="grid gap-4 p-3 md:grid-cols-2">
+        <StageCard title="Stage 1 · Context" pass={r.stageOne.pass} summary={r.stageOne.reason}>
+          {Object.entries(r.stageOne.details).map(([k, v]) => (
+            <Row key={k} k={k} v={String(v ?? "—")} />
+          ))}
+        </StageCard>
+        <StageCard
+          title="Stage 2 · Quality"
+          pass={r.stageTwo?.pass ?? false}
+          summary={r.stageTwo ? `${r.stageTwo.score}/9 — ${r.stageTwo.reason}` : "not reached"}
+        >
+          {r.stageTwo && (
+            <>
+              <Row k="Business simplicity" v={`${r.stageTwo.details.businessSimplicity}/3`} />
+              <Row k="Market cap tier" v={`${r.stageTwo.details.marketCapTier}/3`} />
+              <Row k="Analyst dispersion" v={`${r.stageTwo.details.analystDispersion}/3`} />
+              <Row k="Industry class" v={r.stageTwo.details.industryClass} />
+            </>
+          )}
+        </StageCard>
+        <div className="text-xs text-muted-foreground md:col-span-2">
+          Click <span className="font-medium">Run Analysis</span> to compute the
+          three-layer grade (industry/personal/regime).
+        </div>
+      </div>
+    );
+  }
 
-      <StageCard
-        title="Stage 3 · Crush"
-        pass={r.stageThree?.pass ?? false}
-        summary={
-          r.stageThree
-            ? `${r.stageThree.score}/25 — grade ${displayCrushGrade(r.stageThree)}${
-                r.stageThree.insufficientData ? " (insufficient history)" : ""
-              } (threshold ${r.stageThree.threshold})`
-            : "run analysis to populate"
-        }
-      >
-        {r.stageThree && (
-          <>
-            <Row k="Historical move" v={`${r.stageThree.details.historicalMoveScore}/8`} />
-            <Row k="Consistency" v={`${r.stageThree.details.consistencyScore}/4`} />
-            <Row k="Term structure" v={`${r.stageThree.details.termStructureScore}/5`} />
-            <Row k="IV edge" v={`${r.stageThree.details.ivEdgeScore}/4`} />
-            <Row k="Surprise reliability" v={`${r.stageThree.details.surpriseScore}/4`} />
-          </>
-        )}
-      </StageCard>
+  return (
+    <div className="space-y-3 p-3">
+      <div className="grid gap-3 md:grid-cols-3">
+        <LayerCard title="LAYER 1 — INDUSTRY STANDARD" grade={tl.industryGrade}>
+          <Row k="Crush" v={`${tl.industryFactors.crushGrade}`} />
+          <Row k="Opportunity" v={`${tl.industryFactors.opportunityGrade}`} />
+          <Row
+            k="Prob of profit"
+            v={`${(tl.industryFactors.probabilityOfProfit * 100).toFixed(0)}%`}
+          />
+          <Row k="IV edge" v={tl.industryFactors.ivEdge.toFixed(2)} />
+          <Row k="Term" v={`${tl.industryFactors.termStructure}/5`} />
+          <Row
+            k="Expected value"
+            v={`$${tl.industryFactors.expectedValue.toFixed(0)}/contract`}
+          />
+          <Row k="Breakeven" v={`$${tl.industryFactors.breakevenPrice.toFixed(2)}`} />
+        </LayerCard>
 
-      <StageCard
-        title="Stage 4 · Opportunity"
-        pass={!r.spreadTooWide && (r.stageFour?.score ?? 0) >= 8}
-        summary={r.stageFour ? `${r.stageFour.score}/20 — grade ${r.stageFour.opportunityGrade}` : "run analysis to populate"}
-      >
-        {r.stageFour && (
-          <>
-            {r.stageFour.note && (
-              <div className="mb-2 rounded border border-rose-500/40 bg-rose-500/10 px-2 py-1 text-rose-300">
-                <AlertTriangle className="mr-1 inline h-3 w-3" />
-                {r.stageFour.note}
-              </div>
-            )}
-            <Row
-              k="Premium yield"
-              v={`${r.stageFour.details.premiumYieldScore}/8 (${r.stageFour.premiumYieldPct !== null ? r.stageFour.premiumYieldPct.toFixed(2) + "%" : "—"})`}
-            />
-            <Row k="Delta" v={`${r.stageFour.details.deltaScore}/6 (${r.stageFour.delta ?? "—"})`} />
-            <Row
-              k="Spread"
-              v={`${r.stageFour.details.spreadScore}/6 (${r.stageFour.bidAskSpreadPct !== null ? r.stageFour.bidAskSpreadPct + "%" : "—"})`}
-            />
-            <Row k="Contract" v={r.stageFour.details.contractSymbol ?? "—"} />
-          </>
-        )}
-      </StageCard>
+        <LayerCard title="LAYER 2 — YOUR INTELLIGENCE" grade={tl.personalGrade === "INSUFFICIENT" ? "?" : tl.personalGrade}>
+          {tl.personalFactors.dataInsufficient ? (
+            <div className="text-xs text-muted-foreground">
+              Insufficient data — need 5+ trades on {r.symbol} (you have {tl.personalFactors.tickerTradeCount})
+            </div>
+          ) : (
+            <>
+              <Row k={`${r.symbol} trades logged`} v={String(tl.personalFactors.tickerTradeCount)} />
+              <Row
+                k="Win rate"
+                v={
+                  tl.personalFactors.tickerWinRate !== null
+                    ? `${tl.personalFactors.tickerWinRate.toFixed(0)}%`
+                    : "—"
+                }
+              />
+              <Row
+                k="Avg ROC"
+                v={
+                  tl.personalFactors.tickerAvgRoc !== null
+                    ? `${tl.personalFactors.tickerAvgRoc.toFixed(2)}%`
+                    : "—"
+                }
+              />
+              <Row
+                k="Sample"
+                v={tl.personalFactors.tickerTradeCount >= 20 ? "robust" : "small"}
+              />
+            </>
+          )}
+        </LayerCard>
+
+        <LayerCard title="LAYER 3 — CURRENT REGIME" grade={tl.regimeGrade}>
+          <Row
+            k="News sentiment"
+            v={tl.regimeFactors.newsSentiment}
+          />
+          <Row
+            k="VIX"
+            v={
+              tl.regimeFactors.vix !== null
+                ? `${tl.regimeFactors.vix.toFixed(1)} (${tl.regimeFactors.vixRegime ?? "—"})`
+                : "—"
+            }
+          />
+          {tl.regimeFactors.hasActiveOverhang && (
+            <div className="mt-2 rounded border border-rose-500/40 bg-rose-500/10 px-2 py-1 text-xs text-rose-300">
+              <AlertTriangle className="mr-1 inline h-3 w-3" />
+              Active overhang: {tl.regimeFactors.overhangDescription ?? "see news"}
+              {" "}({tl.regimeFactors.gradePenalty}pts)
+            </div>
+          )}
+          {!tl.regimeFactors.hasActiveOverhang && tl.regimeFactors.gradePenalty !== 0 && (
+            <div className="mt-2 text-xs text-amber-300">
+              Penalty {tl.regimeFactors.gradePenalty}pts
+            </div>
+          )}
+          <div className="mt-2 text-[11px] text-muted-foreground">
+            {tl.regimeFactors.newsSummary}
+          </div>
+        </LayerCard>
+      </div>
+
+      <div className="rounded-md border border-border bg-background/40 p-3">
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-medium text-muted-foreground">FINAL GRADE:</span>
+          <GradeBadge grade={tl.finalGrade} />
+          <span className="text-xs text-muted-foreground">
+            ({tl.finalScore.toFixed(0)}/100)
+          </span>
+        </div>
+        <div className="mt-2 text-xs text-muted-foreground">{tl.recommendationReason}</div>
+      </div>
+    </div>
+  );
+}
+
+function LayerCard({
+  title,
+  grade,
+  children,
+}: {
+  title: string;
+  grade: string | null | undefined;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="rounded-md border border-border bg-background/40 p-3 text-xs">
+      <div className="mb-2 flex items-center justify-between">
+        <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+          {title}
+        </div>
+        <GradeBadge grade={grade} />
+      </div>
+      <div className="space-y-0.5">{children}</div>
     </div>
   );
 }

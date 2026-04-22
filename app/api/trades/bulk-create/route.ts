@@ -148,6 +148,51 @@ export async function POST(req: NextRequest) {
       fillsInserted += 1;
       positionsTouched.add(positionId);
 
+      // 2b. If this is an OPEN fill and the position doesn't yet have
+      // entry grades, try to find a tracked_tickers row captured during
+      // a prior Run Analysis and merge its entry_* fields in. Checks the
+      // same day as the fill OR the previous day (BMO trades are filed
+      // under their entry morning but were tracked the night before).
+      if (input.action === "open") {
+        const { data: posData } = await supabase
+          .from("positions")
+          .select("entry_crush_grade")
+          .eq("id", positionId)
+          .single();
+        const already = (posData as { entry_crush_grade?: string | null } | null)?.entry_crush_grade;
+        if (!already) {
+          const fillMs = new Date(fillDate + "T00:00:00Z").getTime();
+          const prevDay = new Date(fillMs - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+          const { data: trackedRaw } = await supabase
+            .from("tracked_tickers")
+            .select("*")
+            .eq("symbol", symbol)
+            .eq("expiry", input.expiry)
+            .in("screened_date", [fillDate, prevDay])
+            .order("screened_date", { ascending: false })
+            .limit(1);
+          const match = ((trackedRaw ?? []) as Array<Record<string, unknown>>)[0];
+          if (match) {
+            const { error: mErr } = await supabase
+              .from("positions")
+              .update({
+                entry_crush_grade: match.entry_crush_grade ?? null,
+                entry_opportunity_grade: match.entry_opportunity_grade ?? null,
+                entry_final_grade: match.entry_final_grade ?? null,
+                entry_iv_edge: match.entry_iv_edge ?? null,
+                entry_em_pct: match.entry_em_pct ?? null,
+                entry_vix: match.entry_vix ?? null,
+                entry_news_summary: match.entry_news_summary ?? null,
+                entry_stock_price: match.entry_stock_price ?? null,
+              })
+              .eq("id", positionId);
+            if (mErr) {
+              errors.push(`${input.symbol}: merge tracked grades failed — ${mErr.message}`);
+            }
+          }
+        }
+      }
+
       // 3. Recompute position aggregates from the full fill set.
       const { data: allFillsRaw, error: afErr } = await supabase
         .from("fills")

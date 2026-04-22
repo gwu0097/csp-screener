@@ -10,6 +10,8 @@ import {
   getMarketCap,
   EarningsMove,
 } from "@/lib/yahoo";
+import type { PerplexityNewsResult } from "@/lib/perplexity";
+import { createServerClient } from "@/lib/supabase";
 import {
   getAnalystEstimates,
   getEarningsSurpriseHistory,
@@ -121,6 +123,61 @@ export type ScreenerResult = {
   isWhitelisted: boolean;
   industryStatus: "pass" | "fail" | "unknown";
   spreadTooWide: boolean;
+  // Three-layer grade (industry standard + your trade history + current
+  // news/vix regime). Populated by runStagesThreeFour when the analyze
+  // route has news + personal context to feed in. Null when not computed
+  // yet (e.g. screen-only run, pre-analysis).
+  threeLayer: ThreeLayerGrade | null;
+};
+
+export type Grade = "A" | "B" | "C" | "F";
+
+// Output of calculateThreeLayerGrade. Consumed by the screener UI
+// expanded row and attached to the trade at log time.
+export type ThreeLayerGrade = {
+  industryGrade: Grade;
+  industryScore: number;
+  industryFactors: {
+    probabilityOfProfit: number;
+    ivRank: number | null;
+    ivEdge: number;
+    termStructure: number;
+    crushGrade: Grade;
+    opportunityGrade: Grade;
+    expectedValue: number;
+    breakevenPrice: number;
+  };
+  personalGrade: Grade | "INSUFFICIENT";
+  personalScore: number | null;
+  personalFactors: {
+    tickerWinRate: number | null;
+    tickerTradeCount: number;
+    tickerAvgRoc: number | null;
+    tickerCrushAccuracy: number | null;
+    dataInsufficient: boolean;
+  };
+  regimeGrade: Grade;
+  regimeScore: number;
+  regimeFactors: {
+    newsSentiment: "positive" | "negative" | "neutral";
+    hasActiveOverhang: boolean;
+    overhangDescription: string | null;
+    newsSummary: string;
+    gradePenalty: number;
+    vix: number | null;
+    vixRegime: "calm" | "elevated" | "panic" | null;
+  };
+  finalGrade: Grade;
+  finalScore: number;
+  recommendation: string;
+  recommendationReason: string;
+};
+
+export type PersonalHistory = {
+  tradeCount: number;
+  winRate: number | null;
+  avgRoc: number | null;
+  dataInsufficient: boolean;
 };
 
 // ---------- Helpers ----------
@@ -715,7 +772,7 @@ export async function evaluateStagesOneTwo(
   const stageOne = await runStageOne(candidate, context.chain, context.industryClass);
   const stageTwo = await runStageTwo(candidate, context.industryClass, { industryPenalty });
 
-  const baseResult: Omit<ScreenerResult, "recommendation" | "stoppedAt" | "stageThree" | "stageFour"> = {
+  const baseResult: Omit<ScreenerResult, "recommendation" | "stoppedAt" | "stageThree" | "stageFour" | "threeLayer"> = {
     symbol: candidate.symbol,
     price: candidate.price,
     earningsDate: candidate.earningsDate,
@@ -736,6 +793,7 @@ export async function evaluateStagesOneTwo(
     stageThree: null,
     stageFour: null,
     recommendation: "Needs analysis",
+    threeLayer: null,
   };
 }
 
@@ -760,6 +818,7 @@ export async function runStagesThreeFour(base: ScreenerResult): Promise<Screener
       stageFour: null,
       recommendation: "Cannot evaluate",
       errors: [...(base.errors ?? []), "Schwab chain unavailable for weekly expiry"],
+      threeLayer: null,
     };
   }
 
@@ -814,5 +873,238 @@ export async function runStagesThreeFour(base: ScreenerResult): Promise<Screener
     stageFour,
     recommendation,
     spreadTooWide,
+    threeLayer: base.threeLayer ?? null,
+  };
+}
+
+// ---------- Three-layer grade ----------
+
+function gradeScore(g: Grade | null | undefined, a: number, b: number, c: number): number {
+  if (g === "A") return a;
+  if (g === "B") return b;
+  if (g === "C") return c;
+  return 0;
+}
+
+function scoreToGrade(score: number): Grade {
+  if (score >= 80) return "A";
+  if (score >= 65) return "B";
+  if (score >= 50) return "C";
+  return "F";
+}
+
+// Returns closed-position stats for a ticker: count, win rate, avg ROC.
+// Used by Layer 2 of the three-layer grade. dataInsufficient=true when
+// we have fewer than 5 closed trades on the ticker — in that case the
+// grader treats Layer 2 as neutral rather than penalizing on noise.
+export async function getPersonalHistory(symbol: string): Promise<PersonalHistory> {
+  try {
+    const supabase = createServerClient();
+    const { data, error } = await supabase
+      .from("positions")
+      .select("avg_premium_sold, realized_pnl, total_contracts")
+      .eq("symbol", symbol.toUpperCase())
+      .eq("status", "closed");
+    if (error || !data) {
+      return { tradeCount: 0, winRate: null, avgRoc: null, dataInsufficient: true };
+    }
+    const rows = data as Array<{
+      avg_premium_sold: number | null;
+      realized_pnl: number | null;
+      total_contracts: number | null;
+    }>;
+    const tradeCount = rows.length;
+    if (tradeCount === 0) {
+      return { tradeCount: 0, winRate: null, avgRoc: null, dataInsufficient: true };
+    }
+    const wins = rows.filter((r) => Number(r.realized_pnl ?? 0) > 0).length;
+    const winRate = (wins / tradeCount) * 100;
+    const rocs = rows
+      .map((r) => {
+        const sold = Number(r.avg_premium_sold ?? 0);
+        const contracts = Number(r.total_contracts ?? 0);
+        const pnl = Number(r.realized_pnl ?? 0);
+        const capital = sold * contracts * 100;
+        return capital > 0 ? (pnl / capital) * 100 : null;
+      })
+      .filter((r): r is number => r !== null);
+    const avgRoc = rocs.length > 0 ? rocs.reduce((a, b) => a + b, 0) / rocs.length : null;
+    return {
+      tradeCount,
+      winRate,
+      avgRoc,
+      dataInsufficient: tradeCount < 5,
+    };
+  } catch {
+    return { tradeCount: 0, winRate: null, avgRoc: null, dataInsufficient: true };
+  }
+}
+
+// Combines the three independent signal streams into one grade:
+//   Layer 1 (industry): pure options metrics from Stage 3/4 (0-60 pts)
+//   Layer 2 (personal): your closed-position win rate + ROC (0-25 pts)
+//   Layer 3 (regime): news sentiment/overhang + VIX (0-15 pts, penalty up to -15)
+// Final score = L1 + L2 + L3 + penalty, then mapped to A/B/C/F.
+export function calculateThreeLayerGrade(
+  stageThreeResult: StageThreeResult,
+  stageFourResult: StageFourResult,
+  newsContext: PerplexityNewsResult,
+  personalHistory: PersonalHistory | null,
+  vix: number | null,
+): ThreeLayerGrade {
+  // ---- Layer 1: Industry standard (0-60 pts) ----
+  const crushGrade = stageThreeResult.crushGrade;
+  const opportunityGrade = stageFourResult.opportunityGrade;
+  const crushPts = gradeScore(crushGrade, 20, 14, 8);
+  const oppPts = gradeScore(opportunityGrade, 20, 14, 8);
+
+  // Term structure score is 0-5 in Stage 3 — scale to 0-10.
+  const termStructureRaw = stageThreeResult.details.termStructureScore;
+  const termPts = (termStructureRaw / 5) * 10;
+
+  // ivEdge sweet spot 1.3-1.6 → full 10 pts. Below or above falls off linearly.
+  const weeklyIv = stageThreeResult.details.weeklyIv ?? null;
+  const realizedVol = stageThreeResult.details.realizedVol30d ?? null;
+  const ivEdge =
+    weeklyIv !== null && realizedVol !== null && realizedVol > 0
+      ? weeklyIv / realizedVol
+      : 0;
+  let ivEdgePts = 0;
+  if (ivEdge >= 1.3 && ivEdge <= 1.6) ivEdgePts = 10;
+  else if (ivEdge > 1.0 && ivEdge < 1.3) ivEdgePts = ((ivEdge - 1.0) / 0.3) * 10;
+  else if (ivEdge > 1.6 && ivEdge <= 2.0) ivEdgePts = ((2.0 - ivEdge) / 0.4) * 10;
+  else ivEdgePts = 0;
+
+  const industryScore = crushPts + oppPts + termPts + ivEdgePts;
+  // Industry grade maps 0-60 to A/B/C/F proportionally (48/60=B, etc.).
+  const industryGrade = scoreToGrade((industryScore / 60) * 100);
+
+  const delta = stageFourResult.delta ?? 0;
+  const probabilityOfProfit = 1 - Math.abs(delta);
+  const premium = stageFourResult.premium ?? 0;
+  const strike = stageFourResult.suggestedStrike ?? 0;
+  const breakevenPrice = strike - premium;
+  // EV per contract (dollars): POP × premium − (1 − POP) × breakeven-to-zero loss.
+  // Rough proxy — assumes the put assigns and stock drops to 0 on the miss side.
+  const expectedValue = probabilityOfProfit * premium * 100 - (1 - probabilityOfProfit) * strike * 100;
+
+  // ---- Layer 2: Personal intelligence (0-25 pts, or null if insufficient) ----
+  let personalScore: number | null = null;
+  let personalGrade: Grade | "INSUFFICIENT" = "INSUFFICIENT";
+  const history = personalHistory ?? {
+    tradeCount: 0,
+    winRate: null,
+    avgRoc: null,
+    dataInsufficient: true,
+  };
+  if (!history.dataInsufficient && history.winRate !== null) {
+    let wrPts = 0;
+    if (history.winRate > 80) wrPts = 15;
+    else if (history.winRate >= 60) wrPts = 10;
+    else wrPts = 0;
+    let rocPts = 0;
+    const roc = history.avgRoc ?? 0;
+    if (roc > 0.5) rocPts = 10;
+    else if (roc >= 0.25) rocPts = 5;
+    else rocPts = 0;
+    personalScore = wrPts + rocPts;
+    personalGrade = scoreToGrade((personalScore / 25) * 100);
+  }
+
+  // ---- Layer 3: Current regime (0-15 pts, penalty up to -15) ----
+  let regimeScore = 15;
+  if (newsContext.sentiment === "negative" && !newsContext.hasActiveOverhang) regimeScore = 10;
+  if (newsContext.hasActiveOverhang) regimeScore = 0;
+
+  let vixRegime: "calm" | "elevated" | "panic" | null = null;
+  if (vix !== null) {
+    if (vix > 25) vixRegime = "panic";
+    else if (vix >= 20) vixRegime = "elevated";
+    else vixRegime = "calm";
+  }
+  let vixAdj = 0;
+  if (vixRegime === "elevated") vixAdj = -3;
+  else if (vixRegime === "panic") vixAdj = -8;
+  regimeScore = Math.max(0, regimeScore + vixAdj);
+  const regimeGrade = scoreToGrade((regimeScore / 15) * 100);
+
+  // ---- Final combined score ----
+  // Layer 2 contributes a neutral 12.5 when we don't have enough history,
+  // so the final grade isn't pulled down by ignorance.
+  const l2ForFinal = personalScore ?? 12.5;
+  const penalty = newsContext.gradePenalty ?? 0;
+  const finalScore = Math.max(0, industryScore + l2ForFinal + regimeScore + penalty);
+  const finalGrade = scoreToGrade(finalScore);
+
+  // Recommendation text: short verdict + the specific reason string.
+  let recommendation = "Skip";
+  if (finalGrade === "A") recommendation = "Strong - Take the trade";
+  else if (finalGrade === "B") recommendation = "Marginal - Size smaller";
+  else if (finalGrade === "C") recommendation = "Marginal - Size small";
+
+  const reasonParts: string[] = [];
+  reasonParts.push(
+    `Crush ${crushGrade}/opp ${opportunityGrade} → industry grade ${industryGrade} (${industryScore.toFixed(0)}/60).`,
+  );
+  if (personalScore !== null) {
+    reasonParts.push(
+      `${history.tradeCount} prior trades on this ticker: ${history.winRate?.toFixed(0)}% win rate, ${history.avgRoc?.toFixed(2)}% avg ROC → personal ${personalGrade}.`,
+    );
+  } else {
+    reasonParts.push(
+      `Insufficient history (${history.tradeCount} closed trades on this ticker; neutral 12.5 applied).`,
+    );
+  }
+  if (newsContext.hasActiveOverhang) {
+    reasonParts.push(
+      `Active overhang: ${newsContext.overhangDescription ?? "see news"}. Triggered ${penalty}-pt penalty.`,
+    );
+  } else if (newsContext.sentiment === "negative") {
+    reasonParts.push(`Negative news tone (${penalty}-pt penalty). ${newsContext.summary}`);
+  } else {
+    reasonParts.push(`News ${newsContext.sentiment}, no overhang.`);
+  }
+  if (vixRegime !== null && vixRegime !== "calm") {
+    reasonParts.push(`VIX ${vix?.toFixed(1)} = ${vixRegime} (${vixAdj}-pt adjustment).`);
+  }
+  reasonParts.push(`Final ${finalGrade} (${finalScore.toFixed(0)}/100).`);
+
+  return {
+    industryGrade,
+    industryScore,
+    industryFactors: {
+      probabilityOfProfit,
+      ivRank: null, // not computed yet — needs 52-wk IV history
+      ivEdge,
+      termStructure: termStructureRaw,
+      crushGrade,
+      opportunityGrade,
+      expectedValue,
+      breakevenPrice,
+    },
+    personalGrade,
+    personalScore,
+    personalFactors: {
+      tickerWinRate: history.winRate,
+      tickerTradeCount: history.tradeCount,
+      tickerAvgRoc: history.avgRoc,
+      tickerCrushAccuracy: null, // requires stored screener-grade-vs-outcome join; deferred
+      dataInsufficient: history.dataInsufficient,
+    },
+    regimeGrade,
+    regimeScore,
+    regimeFactors: {
+      newsSentiment: newsContext.sentiment,
+      hasActiveOverhang: newsContext.hasActiveOverhang,
+      overhangDescription: newsContext.overhangDescription,
+      newsSummary: newsContext.summary,
+      gradePenalty: newsContext.gradePenalty,
+      vix,
+      vixRegime,
+    },
+    finalGrade,
+    finalScore,
+    recommendation,
+    recommendationReason: reasonParts.join(" "),
   };
 }
