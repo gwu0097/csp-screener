@@ -47,7 +47,7 @@ async function findOpenParent(
   if (pErr || !parents || parents.length === 0) return null;
 
   // Sum close contracts per parent in one query.
-  const parentIds = parents.map((p) => (p as TradeRow).id);
+  const parentIds = parents.map((p: TradeRow) => p.id);
   const { data: closes } = await supabase
     .from("trades")
     .select("parent_trade_id, contracts")
