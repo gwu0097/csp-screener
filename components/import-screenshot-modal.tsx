@@ -20,7 +20,15 @@ type ParsedTrade = {
   optionType: "put" | "call";
   premium: number;
   broker: string;
+  // Actual trade date from the ToS "Time Placed" column. When the parser
+  // can't recover it we default to today so the review table always has a
+  // concrete date to show and edit.
+  timePlaced?: string; // YYYY-MM-DD
 };
+
+function todayIso(): string {
+  return new Date().toISOString().slice(0, 10);
+}
 
 type Props = {
   open: boolean;
@@ -131,8 +139,12 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
       });
       const json = (await res.json()) as { trades?: ParsedTrade[]; error?: string };
       if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
-      setParsed(json.trades ?? []);
-      if ((json.trades ?? []).length === 0) {
+      const trades = (json.trades ?? []).map((t) => ({
+        ...t,
+        timePlaced: t.timePlaced && t.timePlaced.length >= 10 ? t.timePlaced : todayIso(),
+      }));
+      setParsed(trades);
+      if (trades.length === 0) {
         setError("No trades detected — try a sharper image or a different broker view");
       }
     } catch (e) {
@@ -252,10 +264,11 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
             <div className="text-sm text-muted-foreground">
               Found {parsed.length} trade{parsed.length === 1 ? "" : "s"} — review and confirm
             </div>
-            <div className="overflow-x-auto rounded border border-border">
+            <div className="max-h-96 overflow-auto rounded border border-border">
               <table className="w-full">
-                <thead className="bg-muted/40 text-left">
+                <thead className="sticky top-0 z-10 bg-muted/40 text-left">
                   <tr>
+                    <th className="px-2 py-1">Date</th>
                     <th className="px-2 py-1">Symbol</th>
                     <th className="px-2 py-1">Action</th>
                     <th className="px-2 py-1">Qty</th>
@@ -269,6 +282,14 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
                 <tbody>
                   {parsed.map((t, idx) => (
                     <tr key={idx} className="border-t border-border">
+                      <td className="px-2 py-1">
+                        <input
+                          type="date"
+                          value={t.timePlaced ?? todayIso()}
+                          onChange={(e) => updateRow(idx, { timePlaced: e.target.value })}
+                          className="rounded border border-border bg-background px-1 py-0.5"
+                        />
+                      </td>
                       <td className="px-2 py-1">
                         <input
                           value={t.symbol}
