@@ -3,18 +3,12 @@ import { NextRequest, NextResponse } from "next/server";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60; // VLM calls can be slow
 
-// Endpoints to try in order. Some accounts are provisioned on .io, most on
-// .chat (note the trailing 'i' in minimaxi). We try both before giving up.
-const MINIMAX_ENDPOINTS = [
-  "https://api.minimaxi.chat/v1/chat/completions",
-  "https://api.minimax.io/v1/chat/completions",
-];
-// Models to try in order. MiniMax-M2.7 is the current vision-capable default;
-// M2.5 is the prior generation; abab6.5-chat is widely available on older
-// plans (text-only — will 400 on image_url content, but worth the attempt as
-// a last resort so the error message is unambiguous).
-const MINIMAX_MODELS = ["MiniMax-M2.7", "MiniMax-M2.5", "abab6.5-chat"];
-const MINIMAX_KEY = process.env.MINIMAX_API_KEY ?? "";
+// Screenshot parsing is powered by Anthropic Claude vision. MINIMAX_API_KEY
+// is retained in the env but intentionally unused here; we tried the Minimax
+// VLM and hit model-availability + JSON-format issues.
+const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
+const ANTHROPIC_MODEL = "claude-sonnet-4-20250514";
+const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY ?? "";
 
 // The exact field contract the caller will see. Mirrors the spec prompt so
 // the review table has predictable columns.
@@ -154,27 +148,23 @@ function coerceTrade(raw: unknown, fallbackBroker: string): ParsedTrade | null {
   };
 }
 
-// Accept either a full data URL (preferred — preserves mime) or a raw base64
-// string (legacy — we assume PNG). Minimax rejects mime/bytes mismatches
-// with 400 so the mime type must be truthful. Returns { dataUrl, mime, rawLen }
-// for logging without leaking the image data itself.
-function normalizeImage(input: string): { dataUrl: string; mime: string; rawLen: number } {
+// Anthropic's vision API takes mime + base64 data as separate fields (no
+// data URL prefix). Accept either a full data URL from the client or a raw
+// base64 string for backwards compat. Anthropic validates mime against the
+// bytes, so the declared mime must match the real image format.
+function normalizeImage(input: string): { mime: string; data: string; rawLen: number } {
   const match = input.match(/^data:(image\/[a-zA-Z+.-]+);base64,(.+)$/);
   if (match) {
-    return { dataUrl: input, mime: match[1], rawLen: match[2].length };
+    return { mime: match[1], data: match[2], rawLen: match[2].length };
   }
-  return {
-    dataUrl: `data:image/png;base64,${input}`,
-    mime: "image/png",
-    rawLen: input.length,
-  };
+  return { mime: "image/png", data: input, rawLen: input.length };
 }
 
 export async function POST(req: NextRequest) {
-  console.log(`[parse-screenshot] MINIMAX_API_KEY present: ${!!process.env.MINIMAX_API_KEY}`);
-  if (!MINIMAX_KEY) {
+  console.log(`[parse-screenshot] ANTHROPIC_API_KEY present: ${!!process.env.ANTHROPIC_API_KEY}`);
+  if (!ANTHROPIC_KEY) {
     return NextResponse.json(
-      { error: "MINIMAX_API_KEY is not configured on the server" },
+      { error: "ANTHROPIC_API_KEY is not configured on the server" },
       { status: 500 },
     );
   }
@@ -193,86 +183,63 @@ export async function POST(req: NextRequest) {
   console.log(`[parse-screenshot] image bytes: ${rawImage ? rawImage.length : 0}`);
   if (!rawImage) return NextResponse.json({ error: "Missing image" }, { status: 400 });
 
-  const { dataUrl, mime, rawLen } = normalizeImage(rawImage);
+  const { mime, data, rawLen } = normalizeImage(rawImage);
   console.log(
     `[parse-screenshot] broker=${broker} mime=${mime} base64_bytes=${rawLen}`,
   );
 
-  const buildBody = (model: string) => ({
-    model,
-    messages: [
-      {
-        role: "user",
-        content: [
-          { type: "image_url", image_url: { url: dataUrl } },
-          { type: "text", text: PROMPT },
-        ],
-      },
-    ],
-    max_tokens: 2000,
-  });
-
-  // Walk (model × endpoint) until one succeeds. On 401 we bail early —
-  // that's an auth problem no permutation will fix. On 400/403/404/429 we
-  // log and try the next combo. Network errors just get logged and we
-  // keep going to the next endpoint.
-  let res: Response | null = null;
-  const failures: string[] = [];
+  let res: Response;
   try {
-    outer: for (const model of MINIMAX_MODELS) {
-      for (const endpoint of MINIMAX_ENDPOINTS) {
-        console.log(`[parse-screenshot] trying model=${model} endpoint=${endpoint}`);
-        let attempt: Response;
-        try {
-          attempt = await fetch(endpoint, {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${MINIMAX_KEY}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify(buildBody(model)),
-            cache: "no-store",
-          });
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          failures.push(`${model}@${endpoint} network: ${msg}`);
-          console.warn(`[parse-screenshot] network error ${model}@${endpoint}: ${msg}`);
-          continue;
-        }
-        if (attempt.ok) {
-          console.log(`[parse-screenshot] ok model=${model} endpoint=${endpoint}`);
-          res = attempt;
-          break outer;
-        }
-        const errText = await attempt.text();
-        console.error(`Minimax error: ${attempt.status} ${errText}`);
-        failures.push(
-          `${model}@${endpoint} => ${attempt.status}: ${errText.slice(0, 200)}`,
-        );
-        if (attempt.status === 401) {
-          return NextResponse.json(
-            { error: `Minimax auth failed (401). Check MINIMAX_API_KEY. ${errText.slice(0, 300)}` },
-            { status: 502 },
-          );
-        }
-      }
-    }
+    res = await fetch(ANTHROPIC_URL, {
+      method: "POST",
+      headers: {
+        "x-api-key": ANTHROPIC_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: ANTHROPIC_MODEL,
+        max_tokens: 2000,
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "image", source: { type: "base64", media_type: mime, data } },
+              { type: "text", text: PROMPT },
+            ],
+          },
+        ],
+      }),
+      cache: "no-store",
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(`[parse-screenshot] anthropic network error: ${msg}`);
+    return NextResponse.json({ error: `Anthropic network error: ${msg}` }, { status: 502 });
+  }
 
-    if (!res) {
+  if (!res.ok) {
+    const errText = await res.text();
+    console.error(`Anthropic error: ${res.status} ${errText}`);
+    if (res.status === 401) {
       return NextResponse.json(
-        {
-          error: `All Minimax attempts failed. ${failures.join(" | ").slice(0, 800)}`,
-        },
+        { error: `Anthropic auth failed (401). Check ANTHROPIC_API_KEY. ${errText.slice(0, 300)}` },
         { status: 502 },
       );
     }
+    return NextResponse.json(
+      { error: `Anthropic HTTP ${res.status}: ${errText.slice(0, 500)}` },
+      { status: 502 },
+    );
+  }
 
+  try {
     const json = (await res.json()) as {
-      choices?: Array<{ message?: { content?: string } }>;
+      content?: Array<{ type?: string; text?: string }>;
     };
-    const content = json.choices?.[0]?.message?.content ?? "";
+    const content = json.content?.[0]?.text ?? "";
     if (!content) {
-      return NextResponse.json({ error: "Empty response from Minimax" }, { status: 502 });
+      return NextResponse.json({ error: "Empty response from Anthropic" }, { status: 502 });
     }
 
     // Log the raw model output so we can see exactly what format it used.
@@ -313,7 +280,7 @@ export async function POST(req: NextRequest) {
       .map((r) => coerceTrade(r, broker))
       .filter((t): t is ParsedTrade => t !== null);
 
-    // NB: model_trades is the array parsed from Minimax's response, not the
+    // NB: model_trades is the array parsed from the model's response, not the
     // count of bytes received. If model_trades=0 we got a valid response
     // with no trades — check the logged raw content to see what the model
     // actually produced.
