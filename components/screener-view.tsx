@@ -33,6 +33,7 @@ import {
 import { cn } from "@/lib/utils";
 import type { ScreenerResult } from "@/lib/screener";
 import { LogTradeDialog } from "@/components/log-trade-dialog";
+import type { MarketContext } from "@/lib/market";
 
 type Props = { connected: boolean };
 
@@ -170,6 +171,19 @@ export function ScreenerView({ connected }: Props) {
   // When `groupMode` is non-null, results render as two groups with a divider.
   // Clicking any column header switches to flat sort and sets groupMode=null.
   const [groupMode, setGroupMode] = useState<"stage2" | "grades" | null>(null);
+  // Daily context for the summary line (VIX + regime + open positions count).
+  // Fetched once on mount; no refresh on screen runs since these are slow-moving.
+  const [dailyContext, setDailyContext] = useState<
+    { market: MarketContext; openPositions: number } | null
+  >(null);
+
+  useEffect(() => {
+    // Fire-and-forget daily context fetch. Runs alongside the cache restore.
+    fetch("/api/context/daily", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((j) => setDailyContext(j))
+      .catch(() => setDailyContext(null));
+  }, []);
 
   useEffect(() => {
     try {
@@ -444,9 +458,48 @@ export function ScreenerView({ connected }: Props) {
     screenedAt && !busy ? Math.floor((Date.now() - screenedAt.getTime()) / (60 * 60 * 1000)) : 0;
   const showStaleNotice = staleAgeHours >= 4;
 
+  // "Best" candidate for the summary line — first actionable recommendation.
+  const bestCandidate = results?.find(
+    (r) =>
+      r.recommendation === "Strong - Take the trade" ||
+      r.recommendation === "Marginal - Size smaller" ||
+      r.recommendation === "Marginal - Crush unproven",
+  ) ?? null;
+  const vixRegimeColor =
+    dailyContext?.market.regime === "panic"
+      ? "text-rose-300"
+      : dailyContext?.market.regime === "elevated"
+        ? "text-amber-300"
+        : "text-emerald-300";
+
   return (
     <TooltipProvider>
       <div className="space-y-4">
+        {dailyContext && (
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+            <span>
+              VIX:{" "}
+              <span className={vixRegimeColor}>
+                {dailyContext.market.vix !== null ? dailyContext.market.vix.toFixed(2) : "—"}
+                {dailyContext.market.regime ? ` (${dailyContext.market.regime})` : ""}
+              </span>
+            </span>
+            <span>
+              <span className="text-foreground">{results?.length ?? 0}</span> candidates today
+            </span>
+            {bestCandidate && (
+              <span>
+                Best:{" "}
+                <span className="text-foreground">{bestCandidate.symbol}</span>{" "}
+                <span className="text-xs">({bestCandidate.recommendation})</span>
+              </span>
+            )}
+            <span>
+              Open positions:{" "}
+              <span className="text-foreground">{dailyContext.openPositions}</span>
+            </span>
+          </div>
+        )}
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-3 text-sm">
             <Badge variant={connected ? "default" : "destructive"}>
