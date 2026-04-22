@@ -29,33 +29,23 @@ export type ParsedTrade = {
   broker: string;
 };
 
-const PROMPT = `Extract all options trades from this brokerage screenshot. Return a JSON array only, no explanation. Each trade object must have these exact fields:
-- symbol: string (ticker like TSLA, NOW, GE)
-- action: 'open' or 'close' (SELL TO OPEN = open, BUY TO CLOSE = close)
-- contracts: number (quantity of contracts)
-- strike: number (strike price)
-- expiry: string (YYYY-MM-DD format)
-- optionType: 'put' or 'call'
-- premium: number (price per contract)
-- broker: string (infer from UI style if possible)
+const PROMPT = `This is a screenshot of a ThinkorSwim (ThinkOrSwim) brokerage order history table. The table has colored rows (red for SELL/open, green for BUY/close).
 
-For Schwab QtyPos Effect column:
-'-2 TO OPEN' means action=open, contracts=2
-'+2 TO CLOSE' means action=close, contracts=2
+Column headers are: Time Placed, Spread, Side, QtyPos Effect, Symbol, Exp, StrikeType, Price, TIF, Status
 
-Return ONLY a valid JSON array. Example:
-[
-  {
-    "symbol": "NOW",
-    "action": "open",
-    "contracts": 2,
-    "strike": 85,
-    "expiry": "2026-04-25",
-    "optionType": "put",
-    "premium": 0.27,
-    "broker": "schwab"
-  }
-]`;
+Extract every filled options trade row. Ignore stock trades (where StrikeType says 'STOCK' or 'ETF').
+
+For each options row:
+- action: if Side=SELL and QtyPos Effect contains 'TO OPEN' → 'open'
+         if Side=BUY and QtyPos Effect contains 'TO CLOSE' → 'close'
+- contracts: the number before 'TO OPEN' or 'TO CLOSE' (ignore the +/- sign)
+- symbol: the ticker in the Symbol column (e.g. NOW, GE, TSLA)
+- strike: the number before PUT or CALL in StrikeType column
+- optionType: 'put' or 'call' from StrikeType column
+- expiry: convert the Exp date to YYYY-MM-DD format
+- premium: the Price column value
+
+Return ONLY a JSON array, no explanation, no markdown.`;
 
 // Try to pull structured data out of an LLM response. Models wrap their
 // output inconsistently — plain JSON, ```json fences, generic ``` fences,
