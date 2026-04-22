@@ -9,6 +9,7 @@
 // payload drift does not trip the library's Zod validator.
 
 import YahooFinance from "yahoo-finance2";
+import { getFinnhubEarningsPeriods } from "./earnings";
 
 // yahoo-finance2 v3 changed the default export from a pre-instantiated client
 // to the class itself. Calling methods on the class throws
@@ -368,6 +369,29 @@ async function getYahooPastAnnouncements(symbol: string): Promise<Announcement[]
   return announcements;
 }
 
+// Largest single-session overnight gap between consecutive bars whose
+// "open-after" bar falls inside [startMs, endMs]. Used to locate an earnings
+// announcement when we only know the fiscal quarter end, not the press date.
+function findLargestOvernightGap(
+  bars: HistoricalRow[],
+  startMs: number,
+  endMs: number,
+): { closeBar: HistoricalRow; openBar: HistoricalRow; pct: number } | null {
+  let best: { closeBar: HistoricalRow; openBar: HistoricalRow; pct: number } | null = null;
+  for (let i = 1; i < bars.length; i++) {
+    const prev = bars[i - 1];
+    const cur = bars[i];
+    const t = cur.date.getTime();
+    if (t < startMs || t > endMs) continue;
+    if (!(prev.close > 0) || !Number.isFinite(cur.open)) continue;
+    const pct = (cur.open - prev.close) / prev.close;
+    if (!best || Math.abs(pct) > Math.abs(best.pct)) {
+      best = { closeBar: prev, openBar: cur, pct };
+    }
+  }
+  return best;
+}
+
 // Historical overnight earnings moves. Yahoo returns bar.date at the market
 // OPEN time (13:30 UTC in summer, 14:30 UTC in winter — i.e. 9:30 ET), not at
 // midnight. Session close is bar.date + 6.5h.
@@ -378,17 +402,43 @@ async function getYahooPastAnnouncements(symbol: string): Promise<Announcement[]
 //                  (i.e. bar's session closed before the announcement)
 //   open-after   = first bar where bar.date > announcementTs
 //                  (i.e. bar's session opened after the announcement)
+//
+// When Yahoo's `earnings` module returns fewer than 3 quarters (thin coverage
+// on some tickers), we fall back to Finnhub /stock/earnings for additional
+// fiscal quarter-end dates and infer each announcement by scanning for the
+// largest overnight gap in the 2-6 week window after quarter end.
 export async function getHistoricalEarningsMovements(symbol: string): Promise<EarningsMove[]> {
   try {
-    const announcements = await getYahooPastAnnouncements(symbol);
-    if (announcements.length === 0) {
-      console.warn(`[moves:${symbol}] no past announcements from Yahoo earnings module`);
+    const yahooAnnouncements = await getYahooPastAnnouncements(symbol);
+
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    let finnhubPeriods: string[] = [];
+    if (yahooAnnouncements.length < 3) {
+      console.log(
+        `[moves:${symbol}] Yahoo returned ${yahooAnnouncements.length} quarters (<3) — attempting Finnhub /stock/earnings fallback`,
+      );
+      finnhubPeriods = await getFinnhubEarningsPeriods(symbol);
+    }
+
+    if (yahooAnnouncements.length === 0 && finnhubPeriods.length === 0) {
+      console.warn(`[moves:${symbol}] no announcements from Yahoo OR Finnhub`);
       return [];
     }
 
-    const earliest = announcements[announcements.length - 1];
-    const from = new Date(earliest.tsMs - 10 * 24 * 60 * 60 * 1000);
-    const to = new Date(Date.now() + 5 * 24 * 60 * 60 * 1000);
+    // Earliest date we need price bars for: min of Yahoo earliest announcement
+    // and Finnhub earliest period (periods sort newest-first, so last entry).
+    let earliestMs = Date.now();
+    if (yahooAnnouncements.length > 0) {
+      earliestMs = Math.min(earliestMs, yahooAnnouncements[yahooAnnouncements.length - 1].tsMs);
+    }
+    if (finnhubPeriods.length > 0) {
+      const oldestPeriod = finnhubPeriods[finnhubPeriods.length - 1];
+      const t = new Date(oldestPeriod + "T00:00:00Z").getTime();
+      if (Number.isFinite(t)) earliestMs = Math.min(earliestMs, t);
+    }
+
+    const from = new Date(earliestMs - 10 * DAY_MS);
+    const to = new Date(Date.now() + 5 * DAY_MS);
 
     const prices = await getHistoricalPrices(symbol, from, to);
     console.log(
@@ -402,45 +452,103 @@ export async function getHistoricalEarningsMovements(symbol: string): Promise<Ea
     const sortedBars = [...prices].sort((a, b) => a.date.getTime() - b.date.getTime());
     const sessionLengthMs = Math.round(6.5 * 60 * 60 * 1000);
 
-    const moves: EarningsMove[] = [];
+    type TaggedMove = EarningsMove & { source: "yahoo" | "finnhub" };
+    const moves: TaggedMove[] = [];
     const details: string[] = [];
-    for (const ann of announcements) {
-      let closeBar: (typeof prices)[number] | null = null;
+
+    // --- 1. Yahoo-sourced moves (authoritative: real reportedDate) ---
+    for (const ann of yahooAnnouncements) {
+      let closeBar: HistoricalRow | null = null;
       for (const b of sortedBars) {
-        // bar's session close = bar.date + 6.5h; keep walking while that
-        // close was strictly before the announcement.
         if (b.date.getTime() + sessionLengthMs < ann.tsMs) closeBar = b;
         else break;
       }
-      let openBar: (typeof prices)[number] | null = null;
+      let openBar: HistoricalRow | null = null;
       for (const b of sortedBars) {
-        // bar.date IS the session open; the first bar whose open was after
-        // the announcement is our "open after" bar.
         if (b.date.getTime() > ann.tsMs) {
           openBar = b;
           break;
         }
       }
-
       if (closeBar && openBar && closeBar.close > 0) {
         const pct = (openBar.open - closeBar.close) / closeBar.close;
         moves.push({
           date: ann.iso,
           actualMovePct: Math.abs(pct),
           direction: pct > 0.001 ? "up" : pct < -0.001 ? "down" : "flat",
+          source: "yahoo",
         });
         details.push(
-          `${ann.iso}: close(${closeBar.date.toISOString().slice(0, 10)})=${closeBar.close.toFixed(2)} → ` +
+          `[yahoo] ${ann.iso}: close(${closeBar.date.toISOString().slice(0, 10)})=${closeBar.close.toFixed(2)} → ` +
             `open(${openBar.date.toISOString().slice(0, 10)})=${openBar.open.toFixed(2)} (${(pct * 100).toFixed(2)}%)`,
         );
       } else {
         details.push(
-          `${ann.iso}: closeBar=${closeBar ? closeBar.date.toISOString().slice(0, 10) : "null"} openBar=${openBar ? openBar.date.toISOString().slice(0, 10) : "null"} (skipped)`,
+          `[yahoo] ${ann.iso}: closeBar=${closeBar ? closeBar.date.toISOString().slice(0, 10) : "null"} openBar=${openBar ? openBar.date.toISOString().slice(0, 10) : "null"} (skipped)`,
         );
       }
     }
-    console.log(`[moves:${symbol}] produced ${moves.length} moves — ${details.join(" | ")}`);
-    return moves;
+
+    // --- 2. Finnhub fallback: infer move from largest overnight gap in the
+    // 2-6 week window after each fiscal quarter end. Skip any inferred
+    // announcement that falls within ±5 days of an existing Yahoo move.
+    for (const qeIso of finnhubPeriods) {
+      const qeMs = new Date(qeIso + "T00:00:00Z").getTime();
+      if (!Number.isFinite(qeMs)) continue;
+      const windowStart = qeMs + 14 * DAY_MS;
+      const windowEnd = qeMs + 42 * DAY_MS;
+
+      const gap = findLargestOvernightGap(sortedBars, windowStart, windowEnd);
+      if (!gap) {
+        details.push(`[finnhub] qe=${qeIso}: no gap in 2-6w window`);
+        continue;
+      }
+
+      const annIso = gap.closeBar.date.toISOString().slice(0, 10);
+      const annMs = gap.closeBar.date.getTime();
+      const overlapsYahoo = moves.some((m) => {
+        if (m.source !== "yahoo") return false;
+        const t = new Date(m.date + "T00:00:00Z").getTime();
+        return Math.abs(t - annMs) <= 5 * DAY_MS;
+      });
+      if (overlapsYahoo) {
+        details.push(`[finnhub] qe=${qeIso}: inferred ${annIso} overlaps Yahoo (skip)`);
+        continue;
+      }
+
+      moves.push({
+        date: annIso,
+        actualMovePct: Math.abs(gap.pct),
+        direction: gap.pct > 0.001 ? "up" : gap.pct < -0.001 ? "down" : "flat",
+        source: "finnhub",
+      });
+      details.push(
+        `[finnhub] qe=${qeIso}: largest-gap ${gap.closeBar.date.toISOString().slice(0, 10)}→${gap.openBar.date.toISOString().slice(0, 10)} (${(gap.pct * 100).toFixed(2)}%)`,
+      );
+    }
+
+    // Sort newest first, dedupe on ISO date, cap at 8.
+    const seen = new Set<string>();
+    const deduped: TaggedMove[] = [];
+    moves.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+    for (const m of moves) {
+      if (seen.has(m.date)) continue;
+      seen.add(m.date);
+      deduped.push(m);
+      if (deduped.length >= 8) break;
+    }
+
+    const yahooCount = deduped.filter((m) => m.source === "yahoo").length;
+    const finnhubCount = deduped.filter((m) => m.source === "finnhub").length;
+    console.log(
+      `[moves:${symbol}] produced ${deduped.length} moves (yahoo=${yahooCount} finnhub=${finnhubCount}) — ${details.join(" | ")}`,
+    );
+
+    return deduped.map((m) => ({
+      date: m.date,
+      actualMovePct: m.actualMovePct,
+      direction: m.direction,
+    }));
   } catch (e) {
     logYahooFailure(`getHistoricalEarningsMovements(${symbol})`, e);
     return [];

@@ -251,6 +251,32 @@ export async function getFinnhubPastEarningsDates(
   }
 }
 
+// Finnhub /stock/earnings fallback source: returns fiscal quarter-end dates
+// (ISO YYYY-MM-DD). The fiscal quarter end is NOT the announcement date —
+// announcements happen ~2-6 weeks later — so callers must map period → likely
+// announcement window before using these for overnight-move computation.
+export async function getFinnhubEarningsPeriods(symbol: string): Promise<string[]> {
+  try {
+    const rows = await finnhubGet<Array<{ period?: string }>>("/stock/earnings", {
+      symbol: symbol.toUpperCase(),
+    });
+    const periods = rows
+      .map((r) => r.period)
+      .filter((p): p is string => typeof p === "string" && /^\d{4}-\d{2}-\d{2}$/.test(p))
+      .sort((a, b) => (a < b ? 1 : a > b ? -1 : 0));
+    console.log(
+      `[finnhub] getFinnhubEarningsPeriods(${symbol}) rows=${rows.length} kept=${periods.length}: ${periods.join(", ")}`,
+    );
+    return periods;
+  } catch (e) {
+    console.warn(
+      `[finnhub] getFinnhubEarningsPeriods(${symbol}) failed:`,
+      e instanceof Error ? e.message : e,
+    );
+    return [];
+  }
+}
+
 export async function getEarningsSurpriseHistory(symbol: string): Promise<EarningsSurprise> {
   try {
     const rows = await finnhubGet<Array<{ actual: number | null; estimate: number | null; period: string }>>(
