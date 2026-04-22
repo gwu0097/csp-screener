@@ -3,12 +3,13 @@ import { NextRequest, NextResponse } from "next/server";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60; // VLM calls can be slow
 
-// Screenshot parsing is powered by Anthropic Claude vision. MINIMAX_API_KEY
-// is retained in the env but intentionally unused here; we tried the Minimax
-// VLM and hit model-availability + JSON-format issues.
-const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
-const ANTHROPIC_MODEL = "claude-sonnet-4-20250514";
-const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY ?? "";
+// Screenshot parsing is powered by Google Gemini vision. MINIMAX_API_KEY is
+// retained in the env but intentionally unused here (prior attempts hit
+// model-availability + JSON-format issues). Gemini's key lives in the URL
+// query string, not in a header.
+const GEMINI_MODEL = "gemini-2.0-flash";
+const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+const GEMINI_KEY = process.env.GEMINI_API_KEY ?? "";
 
 // The exact field contract the caller will see. Mirrors the spec prompt so
 // the review table has predictable columns.
@@ -148,9 +149,9 @@ function coerceTrade(raw: unknown, fallbackBroker: string): ParsedTrade | null {
   };
 }
 
-// Anthropic's vision API takes mime + base64 data as separate fields (no
+// Gemini's vision API takes mime + base64 data as separate fields (no
 // data URL prefix). Accept either a full data URL from the client or a raw
-// base64 string for backwards compat. Anthropic validates mime against the
+// base64 string for backwards compat. Vision APIs validate mime against the
 // bytes, so the declared mime must match the real image format.
 function normalizeImage(input: string): { mime: string; data: string; rawLen: number } {
   const match = input.match(/^data:(image\/[a-zA-Z+.-]+);base64,(.+)$/);
@@ -161,10 +162,10 @@ function normalizeImage(input: string): { mime: string; data: string; rawLen: nu
 }
 
 export async function POST(req: NextRequest) {
-  console.log(`[parse-screenshot] ANTHROPIC_API_KEY present: ${!!process.env.ANTHROPIC_API_KEY}`);
-  if (!ANTHROPIC_KEY) {
+  console.log(`[parse-screenshot] GEMINI_API_KEY present: ${!!process.env.GEMINI_API_KEY}`);
+  if (!GEMINI_KEY) {
     return NextResponse.json(
-      { error: "ANTHROPIC_API_KEY is not configured on the server" },
+      { error: "GEMINI_API_KEY is not configured on the server" },
       { status: 500 },
     );
   }
@@ -188,58 +189,75 @@ export async function POST(req: NextRequest) {
     `[parse-screenshot] broker=${broker} mime=${mime} base64_bytes=${rawLen}`,
   );
 
+  const url = `${GEMINI_ENDPOINT}?key=${encodeURIComponent(GEMINI_KEY)}`;
   let res: Response;
   try {
-    res = await fetch(ANTHROPIC_URL, {
+    res = await fetch(url, {
       method: "POST",
-      headers: {
-        "x-api-key": ANTHROPIC_KEY,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model: ANTHROPIC_MODEL,
-        max_tokens: 2000,
-        messages: [
+        contents: [
           {
-            role: "user",
-            content: [
-              { type: "image", source: { type: "base64", media_type: mime, data } },
-              { type: "text", text: PROMPT },
+            parts: [
+              { inline_data: { mime_type: mime, data } },
+              { text: PROMPT },
             ],
           },
         ],
+        generationConfig: {
+          temperature: 0,
+          maxOutputTokens: 2000,
+        },
       }),
       cache: "no-store",
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    console.error(`[parse-screenshot] anthropic network error: ${msg}`);
-    return NextResponse.json({ error: `Anthropic network error: ${msg}` }, { status: 502 });
+    console.error(`[parse-screenshot] gemini network error: ${msg}`);
+    return NextResponse.json({ error: `Gemini network error: ${msg}` }, { status: 502 });
   }
 
   if (!res.ok) {
     const errText = await res.text();
-    console.error(`Anthropic error: ${res.status} ${errText}`);
-    if (res.status === 401) {
+    console.error(`Gemini error: ${res.status} ${errText}`);
+    if (res.status === 401 || res.status === 403) {
       return NextResponse.json(
-        { error: `Anthropic auth failed (401). Check ANTHROPIC_API_KEY. ${errText.slice(0, 300)}` },
+        { error: `Gemini auth failed (${res.status}). Check GEMINI_API_KEY. ${errText.slice(0, 300)}` },
         { status: 502 },
       );
     }
     return NextResponse.json(
-      { error: `Anthropic HTTP ${res.status}: ${errText.slice(0, 500)}` },
+      { error: `Gemini HTTP ${res.status}: ${errText.slice(0, 500)}` },
       { status: 502 },
     );
   }
 
   try {
     const json = (await res.json()) as {
-      content?: Array<{ type?: string; text?: string }>;
+      candidates?: Array<{
+        content?: { parts?: Array<{ text?: string }> };
+        finishReason?: string;
+      }>;
+      promptFeedback?: { blockReason?: string };
     };
-    const content = json.content?.[0]?.text ?? "";
+    // Gemini can split text across multiple parts — concatenate all of them.
+    // Sometimes a safety block shows up as promptFeedback.blockReason instead
+    // of a candidate, so surface that explicitly.
+    if (json.promptFeedback?.blockReason) {
+      console.error(`[parse-screenshot] gemini blocked: ${json.promptFeedback.blockReason}`);
+      return NextResponse.json(
+        { error: `Gemini blocked the request: ${json.promptFeedback.blockReason}` },
+        { status: 502 },
+      );
+    }
+    const parts = json.candidates?.[0]?.content?.parts ?? [];
+    const content = parts.map((p) => p?.text ?? "").join("").trim();
     if (!content) {
-      return NextResponse.json({ error: "Empty response from Anthropic" }, { status: 502 });
+      const reason = json.candidates?.[0]?.finishReason ?? "no content";
+      return NextResponse.json(
+        { error: `Empty response from Gemini (${reason})` },
+        { status: 502 },
+      );
     }
 
     // Log the raw model output so we can see exactly what format it used.
