@@ -268,6 +268,10 @@ export async function POST(req: NextRequest) {
   });
 
   const results = await Promise.all(resultPromises);
+  // Candidates that actually produced a three-layer grade. This is what the
+  // user sees ranked on the board; stages 3/4 failures (e.g. missing chain)
+  // count as "returned" but not "scored".
+  const scoredCount = results.filter((r) => r.threeLayer !== null).length;
 
   // Upsert tracked_tickers + write snapshots in parallel AFTER scoring.
   // Both block the response per user directive (correctness > latency).
@@ -277,13 +281,14 @@ export async function POST(req: NextRequest) {
   ]);
 
   console.log(
-    `[analyze] ${results.length} candidates, tracked_upserted=${trackedResult.upserted}, snapshots_written=${snapshotResult.written}, errors: tracked=${trackedResult.errors.length} snapshots=${snapshotResult.errors.length}`,
+    `[analyze] ${results.length} candidates (${scoredCount} scored), tracked_upserted=${trackedResult.upserted}, snapshots_written=${snapshotResult.written}, errors: tracked=${trackedResult.errors.length} snapshots=${snapshotResult.errors.length}`,
   );
 
   return NextResponse.json({
     connected: true,
     results,
     prices,
+    scoredCount,
     trackedUpserted: trackedResult.upserted,
     snapshotsWritten: snapshotResult.written,
   });

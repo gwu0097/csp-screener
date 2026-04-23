@@ -502,6 +502,9 @@ export function ScreenerView({ connected }: Props) {
       const json = (await res.json()) as {
         results: ScreenerResult[];
         prices: Record<string, number>;
+        scoredCount?: number;
+        trackedUpserted?: number;
+        snapshotsWritten?: number;
       };
       const byKey = new Map(json.results.map((r) => [`${r.symbol}|${r.earningsDate}`, r]));
       const next = results.map((r) => byKey.get(`${r.symbol}|${r.earningsDate}`) ?? r);
@@ -518,7 +521,12 @@ export function ScreenerView({ connected }: Props) {
       setResults(next);
       setPrices(mergedPrices);
       setGroupMode(null);
-      setMessage(`Analyzed ${json.results.length} candidates`);
+      const scored = json.scoredCount ?? json.results.length;
+      const trackedCount = json.trackedUpserted ?? 0;
+      const snapshots = json.snapshotsWritten ?? 0;
+      setMessage(
+        `Analysis complete ✓\n📊 ${scored} candidates scored\n🎯 ${trackedCount} tracked tickers saved\n📸 ${snapshots} position snapshots taken`,
+      );
       setStatus("idle");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Analysis failed");
@@ -588,7 +596,11 @@ export function ScreenerView({ connected }: Props) {
                 {screenedAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: true })}
               </span>
             )}
-            {message && !error && <span className="text-xs text-emerald-300">{message}</span>}
+            {message && !error && (
+              <span className="whitespace-pre-line text-xs leading-snug text-emerald-300">
+                {message}
+              </span>
+            )}
             {trackToast && <span className="text-xs text-sky-300">{trackToast}</span>}
           </div>
           <div className="flex items-center gap-2">
