@@ -24,6 +24,13 @@ import {
   getCachedMarketCapBillions,
 } from "@/lib/classification";
 
+// ---------- Hard-kill thresholds ----------
+
+// Minimum stock price for a CSP candidate. Below this, strike granularity
+// gets too coarse and premium-to-capital ratios stop working for the
+// strategy. Enforced upstream in /api/screener/screen.
+export const MIN_STOCK_PRICE = 60;
+
 // ---------- Types ----------
 
 export type EarningsCandidate = {

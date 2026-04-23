@@ -9,6 +9,7 @@ import {
   chainHasWeeklyExpiry,
   evaluateStagesOneTwo,
   isLikelyCommonEquity,
+  MIN_STOCK_PRICE,
   safeGetChain,
   ScreenContext,
   ScreenerResult,
@@ -17,7 +18,6 @@ import {
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-const MIN_PRICE = 70;
 const MAX_RESULTS = 20;
 const YAHOO_FALLBACK_BUDGET = 10;
 
@@ -107,7 +107,7 @@ export async function POST() {
     const afterPrice: Survivor[] = [];
     for (const s of survivors) {
       const p = prices[s.symbol.toUpperCase()] ?? 0;
-      if (p >= MIN_PRICE) {
+      if (p >= MIN_STOCK_PRICE) {
         afterPrice.push(s);
       } else {
         stats.droppedByPrice.push(`${s.symbol.toUpperCase()}($${p.toFixed(2)})`);
@@ -115,7 +115,7 @@ export async function POST() {
     }
     stats.afterPriceFilter = afterPrice.length;
     console.log(
-      `[screen] after $${MIN_PRICE} price floor: ${afterPrice.length} ` +
+      `[screen] after $${MIN_STOCK_PRICE} price floor: ${afterPrice.length} ` +
         `(dropped=${stats.droppedByPrice.length}; examples=${stats.droppedByPrice.slice(0, 6).join(",")})`,
     );
 
@@ -189,7 +189,7 @@ export async function POST() {
 
     console.log(
       `[screen] SUMMARY finnhub=${stats.finnhub} afterEtfBlacklist=${stats.afterEtfAndBlacklist} ` +
-        `afterPrice(>=$${MIN_PRICE})=${stats.afterPriceFilter} afterChain=${stats.afterChainFilter} ` +
+        `afterPrice(>=$${MIN_STOCK_PRICE})=${stats.afterPriceFilter} afterChain=${stats.afterChainFilter} ` +
         `final=${stats.final} connected=${connected}`,
     );
 
