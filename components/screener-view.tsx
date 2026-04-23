@@ -784,13 +784,12 @@ export function ScreenerView({ connected }: Props) {
                   <SortableHeader label="Premium" active={sortKey === "premium"} dir={sortDir} onClick={() => onSort("premium")} />
                   <SortableHeader label="Delta" active={sortKey === "delta"} dir={sortDir} onClick={() => onSort("delta")} />
                   <SortableHeader label="Spread" active={sortKey === "spread"} dir={sortDir} onClick={() => onSort("spread")} />
-                  <TableHead className="w-8"></TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {sortedResults.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={16} className="py-10 text-center text-sm text-muted-foreground">
+                    <TableCell colSpan={15} className="py-10 text-center text-sm text-muted-foreground">
                       No qualifying earnings today or tomorrow after filters.
                     </TableCell>
                   </TableRow>
@@ -800,21 +799,13 @@ export function ScreenerView({ connected }: Props) {
                   const open = !!expanded[id];
                   const displayedPrice = prices[r.symbol.toUpperCase()] ?? r.price;
                   const analyzingRow = analyzingSymbols.has(r.symbol.toUpperCase());
-                  // Log Trade / Track button visibility now follows the
-                  // three-layer finalGrade when available, otherwise the
-                  // Stage-3/4 verdict for pre-analysis rows.
-                  const actionable = r.threeLayer
-                    ? r.threeLayer.finalGrade === "A" || r.threeLayer.finalGrade === "B"
-                    : r.recommendation === "Strong - Take the trade" ||
-                      r.recommendation === "Marginal - Size smaller" ||
-                      r.recommendation === "Marginal - Crush unproven";
                   const showDivider = group1Count !== null && idx === group1Count && idx > 0;
                   return (
                     <>
                       {showDivider && (
                         <TableRow key={`divider-${idx}`} className="hover:bg-transparent">
                           <TableCell
-                            colSpan={16}
+                            colSpan={15}
                             className="bg-amber-500/10 py-1.5 text-center text-xs italic text-amber-300/90"
                           >
                             <AlertTriangle className="mr-1.5 inline h-3 w-3" />
@@ -915,40 +906,10 @@ export function ScreenerView({ connected }: Props) {
                             ? `${fmtNum(r.stageFour.bidAskSpreadPct, 1)}%`
                             : "—"}
                         </TableCell>
-                        <TableCell onClick={(e) => e.stopPropagation()}>
-                          {actionable && r.stageFour?.suggestedStrike ? (
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <button
-                                  type="button"
-                                  className={cn(
-                                    "inline-flex h-6 w-6 items-center justify-center rounded border text-xs",
-                                    tracked.has(r.symbol.toUpperCase())
-                                      ? "border-emerald-500/40 bg-emerald-500/20 text-emerald-300"
-                                      : "border-border bg-background text-muted-foreground hover:text-foreground",
-                                  )}
-                                  onClick={() => toggleTracked(r.symbol)}
-                                  aria-label={
-                                    tracked.has(r.symbol.toUpperCase())
-                                      ? `Untrack ${r.symbol}`
-                                      : `Track ${r.symbol} for tonight`
-                                  }
-                                >
-                                  {tracked.has(r.symbol.toUpperCase()) ? "✓" : "+"}
-                                </button>
-                              </TooltipTrigger>
-                              <TooltipContent className="text-xs">
-                                {tracked.has(r.symbol.toUpperCase())
-                                  ? "Tracked — grades will be captured on next Run Analysis"
-                                  : "Log trade: mark as tracked so grades get captured on the next Run Analysis"}
-                              </TooltipContent>
-                            </Tooltip>
-                          ) : null}
-                        </TableCell>
                       </TableRow>
                       {open && (
                         <TableRow key={`${id}-detail`}>
-                          <TableCell colSpan={16} className="bg-muted/30">
+                          <TableCell colSpan={15} className="bg-muted/30">
                             <ExpandedDetail r={r} />
                           </TableCell>
                         </TableRow>
