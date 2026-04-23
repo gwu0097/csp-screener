@@ -40,7 +40,7 @@ For each options row:
          if Side=BUY and QtyPos Effect contains 'TO CLOSE' → 'close'
 - contracts: the number before 'TO OPEN' or 'TO CLOSE' (ignore the +/- sign)
 - symbol: the ticker in the Symbol column (e.g. NOW, GE, TSLA)
-- strike: the number before PUT or CALL in StrikeType column
+- strike: the number before PUT or CALL in StrikeType column. Strike prices are always 3-4 digits before the decimal for stocks trading above $100. If you see a strike like 47.5 or 47.50 for a stock trading above $100, it is likely 347.5 or 347.50 — re-read the full strike price carefully from the StrikeType column.
 - optionType: 'put' or 'call' from StrikeType column
 - expiry: convert the Exp date to YYYY-MM-DD format
 - premium: the Price column value
