@@ -65,55 +65,7 @@ type SortKey =
   | "delta"
   | "spread"
   | "stage2"
-  | "grade"
-  | "recommendation";
-
-function recColor(rec: ScreenerResult["recommendation"]) {
-  switch (rec) {
-    case "Strong - Take the trade":
-      return "bg-emerald-500/15 text-emerald-300 border-emerald-500/40";
-    case "Marginal - Size smaller":
-    case "Marginal - Crush unproven":
-      return "bg-amber-500/15 text-amber-300 border-amber-500/40";
-    case "Needs analysis":
-      return "bg-sky-500/15 text-sky-300 border-sky-500/40";
-    case "Skip":
-      return "bg-muted text-muted-foreground";
-    default:
-      return "bg-slate-700/30 text-slate-300";
-  }
-}
-
-// The Recommendation column in the main table is now driven by the
-// three-layer finalGrade (the holistic verdict). The old Stage-3/Stage-4
-// ScreenerResult.recommendation becomes the "options model signal" shown
-// in the expanded row for reference only.
-type DisplayRec = { label: string; className: string };
-function displayRecFromFinalGrade(
-  finalGrade: string | null | undefined,
-  fallback: ScreenerResult["recommendation"],
-): DisplayRec {
-  if (finalGrade === "A") {
-    return {
-      label: "Strong — Take the trade",
-      className: "bg-emerald-500/15 text-emerald-300 border-emerald-500/40",
-    };
-  }
-  if (finalGrade === "B") {
-    return {
-      label: "Marginal — Size smaller",
-      className: "bg-amber-500/15 text-amber-300 border-amber-500/40",
-    };
-  }
-  if (finalGrade === "C" || finalGrade === "F") {
-    return {
-      label: "Skip",
-      className: "bg-muted text-muted-foreground border-border",
-    };
-  }
-  // No threeLayer yet (pre-analysis) — fall back to the Stage-3/4 verdict.
-  return { label: fallback, className: recColor(fallback) };
-}
+  | "grade";
 
 function gradeColor(grade: string | null | undefined) {
   if (!grade) return "text-muted-foreground";
@@ -344,14 +296,6 @@ export function ScreenerView({ connected }: Props) {
     // Flat sort. Tracked rows always float to the top regardless of the
     // chosen sort key — they're the ones the user is actively deciding on.
     const copy = [...results];
-    const recOrder = (rec: ScreenerResult["recommendation"]): number => {
-      if (rec === "Strong - Take the trade") return 0;
-      if (rec === "Marginal - Size smaller") return 1;
-      if (rec === "Marginal - Crush unproven") return 2;
-      if (rec === "Needs analysis") return 3;
-      if (rec === "Cannot evaluate") return 4;
-      return 5; // Skip
-    };
     copy.sort((a, b) => {
       // 1. Tracked always first.
       const aT = tracked.has(a.symbol.toUpperCase()) ? 0 : 1;
@@ -411,10 +355,6 @@ export function ScreenerView({ connected }: Props) {
         case "grade":
           va = gradeOrder(a.threeLayer?.finalGrade);
           vb = gradeOrder(b.threeLayer?.finalGrade);
-          break;
-        case "recommendation":
-          va = recOrder(a.recommendation);
-          vb = recOrder(b.recommendation);
           break;
       }
       let primary: number;
@@ -781,72 +721,76 @@ export function ScreenerView({ connected }: Props) {
                 <TableRow>
                   <TableHead className="w-8"></TableHead>
                   <TableHead className="w-14 text-xs text-muted-foreground">Track</TableHead>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <span>
-                        <SortableHeader label="Grade" active={sortKey === "grade"} dir={sortDir} onClick={() => onSort("grade")} />
-                      </span>
-                    </TooltipTrigger>
-                    <TooltipContent className="max-w-sm text-xs">
-                      Three-layer final grade: Industry (POP, IV edge, term, opp) +
-                      Your history (win rate, ROC) + Regime (news, VIX). A ≥ 80,
-                      B ≥ 65, C ≥ 50, F &lt; 50.
-                    </TooltipContent>
-                  </Tooltip>
+                  <SortableHeader
+                    label="Grade"
+                    active={sortKey === "grade"}
+                    dir={sortDir}
+                    onClick={() => onSort("grade")}
+                    tooltip={
+                      <>
+                        Three-layer final grade: Industry (POP, IV edge, term, opp) +
+                        Your history (win rate, ROC) + Regime (news, VIX). A ≥ 80,
+                        B ≥ 65, C ≥ 50, F &lt; 50.
+                      </>
+                    }
+                  />
                   <SortableHeader label="Symbol" active={sortKey === "symbol"} dir={sortDir} onClick={() => onSort("symbol")} />
                   <SortableHeader label="Price" active={sortKey === "price"} dir={sortDir} onClick={() => onSort("price")} />
                   <TableHead>Earnings</TableHead>
                   <SortableHeader label="DTE" active={sortKey === "dte"} dir={sortDir} onClick={() => onSort("dte")} />
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <span>
-                        <SortableHeader label="EM%" active={sortKey === "em"} dir={sortDir} onClick={() => onSort("em")} />
-                      </span>
-                    </TooltipTrigger>
-                    <TooltipContent className="max-w-sm text-xs">
-                      Expected move used for strike calculation: IV-implied
-                      weekly EM (weeklyIV × √(DTE/365)), or &ldquo;~X%&rdquo;
-                      historical median when IV data is unavailable. 2× EM
-                      is the strike distance below spot.
-                    </TooltipContent>
-                  </Tooltip>
+                  <SortableHeader
+                    label="EM%"
+                    active={sortKey === "em"}
+                    dir={sortDir}
+                    onClick={() => onSort("em")}
+                    tooltip={
+                      <>
+                        Expected move used for strike calculation: IV-implied
+                        weekly EM (weeklyIV × √(DTE/365)), or &ldquo;~X%&rdquo;
+                        historical median when IV data is unavailable. 2× EM
+                        is the strike distance below spot.
+                      </>
+                    }
+                  />
                   <SortableHeader label="Q" active={sortKey === "stage2"} dir={sortDir} onClick={() => onSort("stage2")} />
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <span>
-                        <SortableHeader label="Crush" active={sortKey === "crush"} dir={sortDir} onClick={() => onSort("crush")} />
-                      </span>
-                    </TooltipTrigger>
-                    <TooltipContent className="max-w-sm text-xs">
-                      Stage 3 crush grade — quality of the IV-crush setup
-                      (historical moves, consistency, term structure, IV edge,
-                      surprise reliability). &ldquo;?&rdquo; = fewer than 3 historical
-                      earnings moves available.
-                    </TooltipContent>
-                  </Tooltip>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <span>
-                        <SortableHeader label="Opp." active={sortKey === "opportunity"} dir={sortDir} onClick={() => onSort("opportunity")} />
-                      </span>
-                    </TooltipTrigger>
-                    <TooltipContent className="max-w-sm text-xs">
-                      Stage 4 opportunity grade — premium yield, delta, and
-                      bid-ask spread. F = spread &gt; {`${20}%`} (untradeable).
-                    </TooltipContent>
-                  </Tooltip>
+                  <SortableHeader
+                    label="Crush"
+                    active={sortKey === "crush"}
+                    dir={sortDir}
+                    onClick={() => onSort("crush")}
+                    tooltip={
+                      <>
+                        Stage 3 crush grade — quality of the IV-crush setup
+                        (historical moves, consistency, term structure, IV edge,
+                        surprise reliability). &ldquo;?&rdquo; = fewer than 3
+                        historical earnings moves available.
+                      </>
+                    }
+                  />
+                  <SortableHeader
+                    label="Opp."
+                    active={sortKey === "opportunity"}
+                    dir={sortDir}
+                    onClick={() => onSort("opportunity")}
+                    tooltip={
+                      <>
+                        Stage 4 opportunity grade — premium yield + delta.
+                        Spread is no longer part of the score; shown as
+                        informational only.
+                      </>
+                    }
+                  />
                   <SortableHeader label="Strike" active={sortKey === "strike"} dir={sortDir} onClick={() => onSort("strike")} />
                   <SortableHeader label="Premium" active={sortKey === "premium"} dir={sortDir} onClick={() => onSort("premium")} />
                   <SortableHeader label="Delta" active={sortKey === "delta"} dir={sortDir} onClick={() => onSort("delta")} />
                   <SortableHeader label="Spread" active={sortKey === "spread"} dir={sortDir} onClick={() => onSort("spread")} />
-                  <SortableHeader label="Recommendation" active={sortKey === "recommendation"} dir={sortDir} onClick={() => onSort("recommendation")} />
-                  <TableHead></TableHead>
+                  <TableHead className="w-8"></TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {sortedResults.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={17} className="py-10 text-center text-sm text-muted-foreground">
+                    <TableCell colSpan={16} className="py-10 text-center text-sm text-muted-foreground">
                       No qualifying earnings today or tomorrow after filters.
                     </TableCell>
                   </TableRow>
@@ -870,7 +814,7 @@ export function ScreenerView({ connected }: Props) {
                       {showDivider && (
                         <TableRow key={`divider-${idx}`} className="hover:bg-transparent">
                           <TableCell
-                            colSpan={17}
+                            colSpan={16}
                             className="bg-amber-500/10 py-1.5 text-center text-xs italic text-amber-300/90"
                           >
                             <AlertTriangle className="mr-1.5 inline h-3 w-3" />
@@ -971,38 +915,40 @@ export function ScreenerView({ connected }: Props) {
                             ? `${fmtNum(r.stageFour.bidAskSpreadPct, 1)}%`
                             : "—"}
                         </TableCell>
-                        <TableCell>
-                          {(() => {
-                            const d = displayRecFromFinalGrade(
-                              r.threeLayer?.finalGrade,
-                              r.recommendation,
-                            );
-                            return (
-                              <span
-                                className={cn("rounded-md border px-3 py-1 text-sm", d.className)}
-                              >
-                                {d.label}
-                              </span>
-                            );
-                          })()}
-                        </TableCell>
                         <TableCell onClick={(e) => e.stopPropagation()}>
                           {actionable && r.stageFour?.suggestedStrike ? (
-                            <Button
-                              size="sm"
-                              variant={tracked.has(r.symbol.toUpperCase()) ? "default" : "secondary"}
-                              onClick={() => {
-                                if (!tracked.has(r.symbol.toUpperCase())) toggleTracked(r.symbol);
-                              }}
-                            >
-                              {tracked.has(r.symbol.toUpperCase()) ? "Tracked" : "Log trade"}
-                            </Button>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <button
+                                  type="button"
+                                  className={cn(
+                                    "inline-flex h-6 w-6 items-center justify-center rounded border text-xs",
+                                    tracked.has(r.symbol.toUpperCase())
+                                      ? "border-emerald-500/40 bg-emerald-500/20 text-emerald-300"
+                                      : "border-border bg-background text-muted-foreground hover:text-foreground",
+                                  )}
+                                  onClick={() => toggleTracked(r.symbol)}
+                                  aria-label={
+                                    tracked.has(r.symbol.toUpperCase())
+                                      ? `Untrack ${r.symbol}`
+                                      : `Track ${r.symbol} for tonight`
+                                  }
+                                >
+                                  {tracked.has(r.symbol.toUpperCase()) ? "✓" : "+"}
+                                </button>
+                              </TooltipTrigger>
+                              <TooltipContent className="text-xs">
+                                {tracked.has(r.symbol.toUpperCase())
+                                  ? "Tracked — grades will be captured on next Run Analysis"
+                                  : "Log trade: mark as tracked so grades get captured on the next Run Analysis"}
+                              </TooltipContent>
+                            </Tooltip>
                           ) : null}
                         </TableCell>
                       </TableRow>
                       {open && (
                         <TableRow key={`${id}-detail`}>
-                          <TableCell colSpan={17} className="bg-muted/30">
+                          <TableCell colSpan={16} className="bg-muted/30">
                             <ExpandedDetail r={r} />
                           </TableCell>
                         </TableRow>
@@ -1025,21 +971,38 @@ function SortableHeader({
   active,
   dir,
   onClick,
+  tooltip,
 }: {
   label: string;
   active: boolean;
   dir: "asc" | "desc";
   onClick: () => void;
+  tooltip?: React.ReactNode;
 }) {
+  const inner = (
+    <span className="inline-flex items-center gap-1">
+      {label}
+      {active && (dir === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />)}
+    </span>
+  );
   return (
     <TableHead
       onClick={onClick}
-      className="cursor-pointer select-none hover:text-foreground"
+      className="cursor-pointer select-none whitespace-nowrap hover:text-foreground"
     >
-      <span className="inline-flex items-center gap-1">
-        {label}
-        {active && (dir === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />)}
-      </span>
+      {tooltip ? (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className="inline-flex cursor-help items-center gap-1">
+              {label}
+              {active && (dir === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />)}
+            </span>
+          </TooltipTrigger>
+          <TooltipContent className="max-w-sm text-xs">{tooltip}</TooltipContent>
+        </Tooltip>
+      ) : (
+        inner
+      )}
     </TableHead>
   );
 }
