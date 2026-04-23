@@ -39,22 +39,98 @@ export type SnapshotRow = {
   close_snapshot: boolean;
 };
 
-// Pull the put at the given strike out of a Schwab chain. Snapshots
-// work on the existing position's strike, so this is effectively an
-// exact-match lookup with a fallback to the closest strike in case
-// Schwab normalizes the key differently (e.g. "68" vs "68.0").
+// Pull the put at the given strike out of a Schwab chain.
+//
+// Resilient matching, because two kinds of drift show up in the wild:
+//   - Stored expiry can land on a Sat/Sun (settlement date parsed off a
+//     broker screenshot instead of the Friday expiry). We tolerate up to
+//     ±7 days and pick the closest available expiry.
+//   - Stored strike can be an integer ("310") while Schwab keys are
+//     "310.0". We try several string formats, then fuzzy-match to the
+//     closest strike within $0.50.
+//
+// Warns on every fallback so we can spot systemic drift in the logs.
+const EXPIRY_TOLERANCE_DAYS = 7;
+const STRIKE_TOLERANCE = 0.5;
+
+function parseExpiryKeyDate(expKey: string): number | null {
+  // Schwab keys look like "2026-04-24:1" — strip the ":DTE" suffix.
+  const iso = expKey.slice(0, 10);
+  const ms = new Date(iso + "T00:00:00Z").getTime();
+  return Number.isFinite(ms) ? ms : null;
+}
+
 export function pickPutContract(
   chain: SchwabOptionsChain,
   strike: number,
   expiry: string,
 ): SchwabOptionContract | null {
   const keys = Object.keys(chain.putExpDateMap ?? {});
-  const expKey = keys.find((k) => k.startsWith(expiry));
-  if (!expKey) return null;
+  if (keys.length === 0) return null;
+
+  // 1. Expiry match. Order:
+  //    a) exact startsWith
+  //    b) if requested date is Sat/Sun, snap to preceding Friday and retry
+  //       (broker screenshots sometimes show "settlement date" = Fri + 2)
+  //    c) nearest expiry within ±7 days as a last-resort fuzzy match
+  let expKey = keys.find((k) => k.startsWith(expiry));
+  if (!expKey) {
+    const d = new Date(expiry + "T00:00:00Z");
+    const day = Number.isNaN(d.getTime()) ? -1 : d.getUTCDay();
+    if (day === 6 || day === 0) {
+      const snap = new Date(d);
+      snap.setUTCDate(snap.getUTCDate() - (day === 6 ? 1 : 2));
+      const fridayIso = snap.toISOString().slice(0, 10);
+      expKey = keys.find((k) => k.startsWith(fridayIso));
+      if (expKey) {
+        console.warn(
+          `[snapshots] weekend expiry ${expiry} → snapping to preceding Friday ${fridayIso} (${expKey})`,
+        );
+      }
+    }
+  }
+  if (!expKey) {
+    const targetMs = new Date(expiry + "T00:00:00Z").getTime();
+    if (!Number.isFinite(targetMs)) return null;
+    let bestKey: string | null = null;
+    let bestDiff = Infinity;
+    for (const k of keys) {
+      const ms = parseExpiryKeyDate(k);
+      if (ms === null) continue;
+      const diff = Math.abs(ms - targetMs);
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        bestKey = k;
+      }
+    }
+    if (!bestKey || bestDiff > EXPIRY_TOLERANCE_DAYS * 86400000) {
+      console.warn(
+        `[snapshots] no expiry within ±${EXPIRY_TOLERANCE_DAYS}d of ${expiry}; available=[${keys.slice(0, 5).join(",")}...]`,
+      );
+      return null;
+    }
+    console.warn(
+      `[snapshots] expiry drift: requested=${expiry} → using=${bestKey} (Δ ${Math.round(bestDiff / 86400000)}d)`,
+    );
+    expKey = bestKey;
+  }
+
   const strikes = chain.putExpDateMap[expKey];
-  const direct =
-    strikes[String(Number(strike))] ?? strikes[strike.toFixed(2)] ?? null;
-  if (direct && direct.length > 0) return direct[0];
+
+  // 2. Strike match — try several string formats before falling back to
+  // a numeric scan. Schwab uses "345.0" / "347.5" for half-strikes, and
+  // positions stored with integer strikes produce "310" via String(Number(...)).
+  const candidates = [
+    String(Number(strike)),
+    Number(strike).toFixed(1),
+    Number(strike).toFixed(2),
+  ];
+  for (const key of candidates) {
+    const arr = strikes[key];
+    if (arr && arr.length > 0) return arr[0];
+  }
+
+  // 3. Fuzzy match within the $0.50 tolerance window.
   let best: SchwabOptionContract | null = null;
   let bestDiff = Infinity;
   for (const arr of Object.values(strikes)) {
@@ -66,21 +142,31 @@ export function pickPutContract(
       }
     }
   }
+  if (!best || bestDiff > STRIKE_TOLERANCE) {
+    console.warn(
+      `[snapshots] no strike within $${STRIKE_TOLERANCE.toFixed(2)} of ${strike} at ${expKey}; closest=${best?.strikePrice ?? "none"} Δ=${bestDiff.toFixed(2)}`,
+    );
+    return null;
+  }
+  console.warn(
+    `[snapshots] strike drift: requested=${strike} → using=${best.strikePrice} (Δ $${bestDiff.toFixed(2)})`,
+  );
   return best;
 }
 
-// Fetch the chain for a single (symbol, expiry) with graceful fallback.
-// Callers above this layer (analyze route) prefer a batched parallel fetch;
-// bulk-create close snapshots only ever need one chain per click.
+// Fetch the full chain for a symbol with graceful fallback. Deliberately
+// does NOT filter by expiry at the Schwab level — a stored expiry that's
+// slightly off (e.g. Sunday settlement date) would cause Schwab to return
+// an empty putExpDateMap. pickPutContract handles expiry matching in-memory
+// with tolerance, so we fetch everything and let it pick.
 export async function fetchChainSafe(
   symbol: string,
-  expiry: string,
 ): Promise<SchwabOptionsChain | null> {
   try {
-    return await getOptionsChain(symbol, expiry);
+    return await getOptionsChain(symbol);
   } catch (e) {
     console.warn(
-      `[snapshots] chain(${symbol},${expiry}) failed: ${e instanceof Error ? e.message : e}`,
+      `[snapshots] chain(${symbol}) failed: ${e instanceof Error ? e.message : e}`,
     );
     return null;
   }

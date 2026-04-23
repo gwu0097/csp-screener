@@ -76,25 +76,26 @@ async function writePositionSnapshots(): Promise<{ written: number; errors: stri
       fillsByPosition.set(f.position_id, arr);
     }
 
-    // One chain fetch per unique (symbol, expiry) pair — positions can share.
-    const chainKey = (sym: string, exp: string) => `${sym}|${exp}`;
+    // One chain fetch per unique symbol. Multiple positions on the same
+    // ticker (different strikes/expiries) share a single chain fetch;
+    // pickPutContract picks the right expiry in-memory with tolerance,
+    // which is resilient to stored-expiry drift (weekend settlement dates).
     const chainCache = new Map<string, Awaited<ReturnType<typeof getOptionsChain>> | null>();
     await Promise.all(
-      Array.from(new Set(positions.map((p) => chainKey(p.symbol, p.expiry)))).map(async (k) => {
-        const [sym, exp] = k.split("|");
+      Array.from(new Set(positions.map((p) => p.symbol))).map(async (sym) => {
         try {
-          const chain = await getOptionsChain(sym, exp);
-          chainCache.set(k, chain);
+          const chain = await getOptionsChain(sym);
+          chainCache.set(sym, chain);
         } catch (e) {
-          console.warn(`[snapshots] chain(${sym},${exp}) failed: ${e instanceof Error ? e.message : e}`);
-          chainCache.set(k, null);
+          console.warn(`[snapshots] chain(${sym}) failed: ${e instanceof Error ? e.message : e}`);
+          chainCache.set(sym, null);
         }
       }),
     );
 
     const nowIso = new Date().toISOString();
     for (const p of positions) {
-      const chain = chainCache.get(chainKey(p.symbol, p.expiry)) ?? null;
+      const chain = chainCache.get(p.symbol) ?? null;
       const row = buildSnapshotRow(p, chain, fillsByPosition.get(p.id) ?? [], {
         nowIso,
         closeSnapshot: false,

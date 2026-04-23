@@ -42,6 +42,26 @@ function normalizeBroker(b?: string | null): string {
   return (b ?? "schwab").toLowerCase();
 }
 
+// Options never expire on Sat/Sun. Broker screenshots (ThinkOrSwim, etc.)
+// sometimes display weekly settlement dates (the Sunday after expiry) or
+// the model parses "APR 24 '26" ambiguously and lands on 04-26. Snap any
+// weekend expiry back to the preceding Friday so the stored value is a
+// real Schwab expiry key and every downstream chain lookup hits cleanly.
+function normalizeExpiryToWeekday(expiry: string): {
+  normalized: string;
+  wasWeekend: boolean;
+} {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(expiry);
+  if (!match) return { normalized: expiry, wasWeekend: false };
+  const d = new Date(expiry + "T00:00:00Z");
+  if (Number.isNaN(d.getTime())) return { normalized: expiry, wasWeekend: false };
+  const day = d.getUTCDay(); // 0 = Sun, 6 = Sat
+  if (day !== 0 && day !== 6) return { normalized: expiry, wasWeekend: false };
+  const subtract = day === 6 ? 1 : 2;
+  d.setUTCDate(d.getUTCDate() - subtract);
+  return { normalized: d.toISOString().slice(0, 10), wasWeekend: true };
+}
+
 // For each incoming fill, find (or create) the matching position, then
 // insert a fills row and rebuild the position's aggregates from scratch
 // off its full fill set.
@@ -92,6 +112,13 @@ export async function POST(req: NextRequest) {
     const broker = normalizeBroker(input.broker);
     const fillDate = input.timePlaced ?? input.trade_date ?? todayIso();
 
+    const { normalized: expiry, wasWeekend } = normalizeExpiryToWeekday(input.expiry);
+    if (wasWeekend) {
+      console.warn(
+        `[bulk-create] ${symbol}: normalized weekend expiry ${input.expiry} → ${expiry}`,
+      );
+    }
+
     try {
       // 1. Find or create the position.
       const { data: findData, error: fErr } = await supabase
@@ -99,7 +126,7 @@ export async function POST(req: NextRequest) {
         .select("*")
         .eq("symbol", symbol)
         .eq("strike", input.strike)
-        .eq("expiry", input.expiry)
+        .eq("expiry", expiry)
         .eq("broker", broker)
         .limit(1);
       if (fErr) {
@@ -119,7 +146,7 @@ export async function POST(req: NextRequest) {
           .insert({
             symbol,
             strike: input.strike,
-            expiry: input.expiry,
+            expiry,
             option_type: input.optionType ?? "put",
             broker,
             total_contracts: 0,
@@ -186,7 +213,7 @@ export async function POST(req: NextRequest) {
               .select("fill_type, contracts, premium, fill_date")
               .eq("position_id", positionId);
             const preFills = (preFillsRaw ?? []) as Fill[];
-            const chain = await fetchChainSafe(position.symbol, position.expiry);
+            const chain = await fetchChainSafe(position.symbol);
             const snapshotRow = buildSnapshotRow(position, chain, preFills, {
               nowIso: new Date().toISOString(),
               closeSnapshot: true,
@@ -226,7 +253,7 @@ export async function POST(req: NextRequest) {
             .from("tracked_tickers")
             .select("*")
             .eq("symbol", symbol)
-            .eq("expiry", input.expiry)
+            .eq("expiry", expiry)
             .in("screened_date", [fillDate, prevDay])
             .order("screened_date", { ascending: false })
             .limit(1);
