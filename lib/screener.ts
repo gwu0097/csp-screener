@@ -1118,50 +1118,121 @@ export function calculateThreeLayerGrade(
   else if (finalGrade === "B") recommendation = "Marginal - Size smaller";
   else if (finalGrade === "C") recommendation = "Marginal - Size small";
 
-  const reasonParts: string[] = [];
-  // Lead with POP + strike: the dominant signal for a 2x-EM CSP strategy.
+  // Build a labeled multi-paragraph reason. Sections: STRENGTH, CAUTION,
+  // NEWS, HISTORY, BOTTOM LINE. Each "\n\n" boundary is rendered as a
+  // paragraph break by the UI.
   const popPct = (probabilityOfProfit * 100).toFixed(0);
-  // Framing notes: IV edge > 1.9 still only scores 5 pts (high IV
-  // correlates with larger realized moves) but from a seller's
-  // perspective it's fat premium to collect — we describe it as a
-  // tradeoff, not a warning.
   const ivEdgeBand =
     ivEdge >= 1.3 && ivEdge < 1.6
       ? "ideal range — fat premium, normal event risk"
       : ivEdge >= 1.6 && ivEdge < 1.9
-        ? "elevated premium — good for sellers, slightly higher event risk"
+        ? "elevated premium, slightly higher event risk"
         : ivEdge >= 1.2 && ivEdge < 1.3
           ? "modest premium"
           : ivEdge >= 1.9
-            ? "very elevated premium — excellent collection, verify strike safety"
+            ? "very elevated premium, verify strike safety"
             : ivEdge > 0
-              ? "thin premium — limited crush opportunity"
+              ? "thin premium, limited crush opportunity"
               : "n/a";
-  reasonParts.push(
-    `${popPct}% probability of profit at $${strike.toFixed(2)} strike. IV edge ${ivEdge.toFixed(2)} ${ivEdgeBand}. Opp ${opportunityGrade}, crush ${crushGrade} — industry ${industryGrade} (${industryScore.toFixed(0)}/60).`,
+
+  // --- STRENGTH ---
+  const strengths: string[] = [];
+  strengths.push(
+    `${popPct}% probability of profit at $${strike.toFixed(2)} strike (2x EM).`,
   );
-  if (personalScore !== null) {
-    reasonParts.push(
-      `${history.tradeCount} prior trades on this ticker: ${history.winRate?.toFixed(0)}% win rate, ${history.avgRoc?.toFixed(2)}% avg ROC → personal ${personalGrade}.`,
-    );
-  } else {
-    reasonParts.push(
-      `Insufficient history (${history.tradeCount} closed trades on this ticker; neutral 12.5 applied).`,
+  if (crushGrade === "A" || crushGrade === "B") {
+    strengths.push(
+      `Crush ${crushGrade} — historical moves stay well inside the implied move; strong IV crush expected.`,
     );
   }
+  if (ivEdge >= 1.3 && ivEdge < 1.9) {
+    strengths.push(`IV edge ${ivEdge.toFixed(2)} — ${ivEdgeBand}.`);
+  }
+
+  // --- CAUTION ---
+  const cautions: string[] = [];
+  if (opportunityGrade === "C" || opportunityGrade === "F") {
+    cautions.push(
+      `Opportunity ${opportunityGrade} — premium at $${premium.toFixed(2)} is thin for the capital required.`,
+    );
+  }
+  if (ivEdge >= 1.9) {
+    cautions.push(
+      `IV edge ${ivEdge.toFixed(2)} — very elevated premium, but verify strike safety against the larger implied move.`,
+    );
+  }
+  if (probabilityOfProfit < 0.85) {
+    cautions.push(
+      `POP ${popPct}% is below the 85% comfort threshold — limited cushion if the stock gaps toward strike.`,
+    );
+  }
+  if (crushGrade === "F" && !stageThreeResult.insufficientData) {
+    cautions.push(
+      `Crush F — historical moves have consistently exceeded expectations, implied-vol crush less reliable.`,
+    );
+  }
+  if (cautions.length === 0) {
+    cautions.push("None flagged at this strike.");
+  }
+
+  // --- NEWS ---
+  const newsLines: string[] = [];
+  const sentimentWord =
+    newsContext.sentiment === "positive"
+      ? "Positive"
+      : newsContext.sentiment === "negative"
+        ? "Negative"
+        : "Neutral";
+  newsLines.push(`${sentimentWord} — ${newsContext.summary}`);
   if (newsContext.hasActiveOverhang) {
-    reasonParts.push(
-      `Active overhang: ${newsContext.overhangDescription ?? "see news"}. Triggered ${penalty}-pt penalty.`,
+    newsLines.push(
+      `⚠ Active overhang: ${newsContext.overhangDescription ?? "see news"}. ${penalty}-pt penalty.`,
     );
   } else if (newsContext.sentiment === "negative") {
-    reasonParts.push(`Negative news tone (${penalty}-pt penalty). ${newsContext.summary}`);
+    newsLines.push(`Negative tone carries a ${penalty}-pt penalty.`);
   } else {
-    reasonParts.push(`News ${newsContext.sentiment}, no overhang.`);
+    newsLines.push("No active risks detected.");
   }
   if (vixRegime !== null && vixRegime !== "calm") {
-    reasonParts.push(`VIX ${vix?.toFixed(1)} = ${vixRegime} (${vixAdj}-pt adjustment).`);
+    newsLines.push(
+      `VIX ${vix?.toFixed(1)} (${vixRegime}) — ${vixAdj}-pt regime adjustment.`,
+    );
   }
-  reasonParts.push(`Final ${finalGrade} (${finalScore.toFixed(0)}/100).`);
+  newsLines.push(
+    `Regime points: ${regimeScore}/15${penalty !== 0 ? ` (penalty ${penalty})` : ""}.`,
+  );
+
+  // --- HISTORY ---
+  const historyLines: string[] = [];
+  if (personalScore !== null && !history.dataInsufficient) {
+    historyLines.push(
+      `${history.tradeCount} prior trades on this ticker: ${history.winRate?.toFixed(0)}% win rate, ${history.avgRoc?.toFixed(2)}% avg ROC → personal ${personalGrade} (${personalScore}/25).`,
+    );
+  } else {
+    historyLines.push(
+      `Insufficient history — ${history.tradeCount} closed trades on this ticker (need 5+). Neutral weighting applied (12.5/25).`,
+    );
+  }
+
+  // --- BOTTOM LINE ---
+  let bottomLine: string;
+  if (finalGrade === "A") {
+    bottomLine = `Strong setup (${finalScore.toFixed(0)}/100). Take the trade.`;
+  } else if (finalGrade === "B") {
+    bottomLine = `Solid setup (${finalScore.toFixed(0)}/100). ${cautions[0] && cautions[0] !== "None flagged at this strike." ? "Size normally, with the caution above in mind." : "Size normally."}`;
+  } else if (finalGrade === "C") {
+    bottomLine = `Marginal (${finalScore.toFixed(0)}/100). Size smaller or pass if there's a better setup tonight.`;
+  } else {
+    bottomLine = `Skip (${finalScore.toFixed(0)}/100). ${newsContext.hasActiveOverhang ? "Active overhang is the primary reason." : "Industry score is below the C threshold."}`;
+  }
+
+  const recommendationReason = [
+    `STRENGTH: ${strengths.join(" ")}`,
+    `CAUTION: ${cautions.join(" ")}`,
+    `NEWS: ${newsLines.join(" ")}`,
+    `HISTORY: ${historyLines.join(" ")}`,
+    `BOTTOM LINE: ${bottomLine}`,
+  ].join("\n\n");
 
   return {
     industryGrade,
@@ -1199,6 +1270,6 @@ export function calculateThreeLayerGrade(
     finalGrade,
     finalScore,
     recommendation,
-    recommendationReason: reasonParts.join(" "),
+    recommendationReason,
   };
 }

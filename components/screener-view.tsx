@@ -57,6 +57,7 @@ type SortKey =
   | "symbol"
   | "price"
   | "dte"
+  | "em"
   | "crush"
   | "opportunity"
   | "strike"
@@ -372,6 +373,12 @@ export function ScreenerView({ connected }: Props) {
         case "dte":
           va = a.daysToExpiry;
           vb = b.daysToExpiry;
+          break;
+        case "em":
+          va = a.stageThree?.details?.expectedMovePct ??
+            a.stageThree?.details?.medianHistoricalMovePct ?? -1;
+          vb = b.stageThree?.details?.expectedMovePct ??
+            b.stageThree?.details?.medianHistoricalMovePct ?? -1;
           break;
         case "crush":
           va = gradeOrder(a.stageThree?.crushGrade);
@@ -790,6 +797,19 @@ export function ScreenerView({ connected }: Props) {
                   <SortableHeader label="Price" active={sortKey === "price"} dir={sortDir} onClick={() => onSort("price")} />
                   <TableHead>Earnings</TableHead>
                   <SortableHeader label="DTE" active={sortKey === "dte"} dir={sortDir} onClick={() => onSort("dte")} />
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span>
+                        <SortableHeader label="EM%" active={sortKey === "em"} dir={sortDir} onClick={() => onSort("em")} />
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent className="max-w-sm text-xs">
+                      Expected move used for strike calculation: IV-implied
+                      weekly EM (weeklyIV × √(DTE/365)), or &ldquo;~X%&rdquo;
+                      historical median when IV data is unavailable. 2× EM
+                      is the strike distance below spot.
+                    </TooltipContent>
+                  </Tooltip>
                   <SortableHeader label="Q" active={sortKey === "stage2"} dir={sortDir} onClick={() => onSort("stage2")} />
                   <Tooltip>
                     <TooltipTrigger asChild>
@@ -826,7 +846,7 @@ export function ScreenerView({ connected }: Props) {
               <TableBody>
                 {sortedResults.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={16} className="py-10 text-center text-sm text-muted-foreground">
+                    <TableCell colSpan={17} className="py-10 text-center text-sm text-muted-foreground">
                       No qualifying earnings today or tomorrow after filters.
                     </TableCell>
                   </TableRow>
@@ -850,7 +870,7 @@ export function ScreenerView({ connected }: Props) {
                       {showDivider && (
                         <TableRow key={`divider-${idx}`} className="hover:bg-transparent">
                           <TableCell
-                            colSpan={16}
+                            colSpan={17}
                             className="bg-amber-500/10 py-1.5 text-center text-xs italic text-amber-300/90"
                           >
                             <AlertTriangle className="mr-1.5 inline h-3 w-3" />
@@ -914,6 +934,23 @@ export function ScreenerView({ connected }: Props) {
                         </TableCell>
                         <TableCell className="text-sm">{r.daysToExpiry}</TableCell>
                         <TableCell className="font-mono text-sm">
+                          {(() => {
+                            const em = r.stageThree?.details?.expectedMovePct;
+                            if (em !== null && em !== undefined) {
+                              return `${(em * 100).toFixed(1)}%`;
+                            }
+                            const hist = r.stageThree?.details?.medianHistoricalMovePct;
+                            if (hist !== null && hist !== undefined) {
+                              return (
+                                <span className="text-muted-foreground">
+                                  ~{(hist * 100).toFixed(1)}%
+                                </span>
+                              );
+                            }
+                            return "—";
+                          })()}
+                        </TableCell>
+                        <TableCell className="font-mono text-sm">
                           {r.stageTwo ? `${r.stageTwo.score}` : "—"}
                         </TableCell>
                         <TableCell className={cn("font-mono text-sm", gradeColor(displayCrushGrade(r.stageThree)))}>
@@ -965,7 +1002,7 @@ export function ScreenerView({ connected }: Props) {
                       </TableRow>
                       {open && (
                         <TableRow key={`${id}-detail`}>
-                          <TableCell colSpan={16} className="bg-muted/30">
+                          <TableCell colSpan={17} className="bg-muted/30">
                             <ExpandedDetail r={r} />
                           </TableCell>
                         </TableRow>
@@ -1299,9 +1336,19 @@ function ExpandedDetail({ r }: { r: ScreenerResult }) {
             ({tl.finalScore.toFixed(0)}/100)
           </span>
         </div>
-        <div className="mt-2 text-xs text-muted-foreground">{tl.recommendationReason}</div>
-        <div className="mt-2 text-[11px] text-muted-foreground">
-          Options model signal: <span className="text-foreground">{r.recommendation}</span>
+        <div className="mt-3 space-y-2 text-xs leading-relaxed text-muted-foreground">
+          {tl.recommendationReason.split("\n\n").map((para, i) => {
+            const sep = para.indexOf(": ");
+            if (sep === -1) return <div key={i}>{para}</div>;
+            return (
+              <div key={i}>
+                <span className="font-semibold text-foreground">
+                  {para.slice(0, sep + 1)}
+                </span>{" "}
+                <span>{para.slice(sep + 2)}</span>
+              </div>
+            );
+          })}
         </div>
       </div>
     </div>
