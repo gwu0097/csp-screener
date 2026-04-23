@@ -6,9 +6,7 @@ import { getWatchlistSymbols } from "@/lib/watchlist";
 import { getIndustryClassification } from "@/lib/classification";
 import {
   buildCandidateFromEarnings,
-  chainHasWeeklyExpiry,
   evaluateStagesOneTwo,
-  isLikelyCommonEquity,
   safeGetChain,
   ScreenContext,
   ScreenerResult,
@@ -17,7 +15,6 @@ import {
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-const MIN_PRICE = 70;
 const YAHOO_FALLBACK_BUDGET = 10;
 
 type Body = { currentSymbols?: unknown };
@@ -49,14 +46,15 @@ export async function POST(req: NextRequest) {
   );
 
   // Filter whitelist candidates to those with earnings today-AMC / tomorrow-BMO.
+  // That's the only gate besides blacklist — whitelist tickers bypass the ETF
+  // check, price floor, and weekly-chain kill. Chain is still fetched so
+  // Stage 3/4 have data when the user clicks Run Analysis, but a missing chain
+  // no longer removes the ticker from the board.
   const earnings = await getTodayEarnings();
   const earningsMap = new Map(earnings.map((e) => [e.symbol.toUpperCase(), e]));
-  let additionEntries = whitelistCandidates
+  const additionEntries = whitelistCandidates
     .map((s) => earningsMap.get(s))
     .filter((e): e is NonNullable<typeof e> => !!e);
-
-  // Apply ETF kill (shouldn't happen for whitelist but defensive).
-  additionEntries = additionEntries.filter((e) => isLikelyCommonEquity(e.symbol));
 
   // Fetch prices for potential additions + all existing survivors, in one batch.
   const priceSymbols = Array.from(
@@ -64,12 +62,6 @@ export async function POST(req: NextRequest) {
   );
   const allPrices = await getBatchPrices(priceSymbols);
 
-  // Price floor on additions only.
-  additionEntries = additionEntries.filter(
-    (e) => (allPrices[e.symbol.toUpperCase()] ?? 0) >= MIN_PRICE,
-  );
-
-  // Chain check on additions when Schwab is connected.
   const added: ScreenerResult[] = [];
   let yahooBudget = YAHOO_FALLBACK_BUDGET;
   for (const e of additionEntries) {
@@ -79,11 +71,9 @@ export async function POST(req: NextRequest) {
       { symbol: e.symbol, date: e.date, timing: e.timing as "BMO" | "AMC" },
       price,
     );
-    let chain = null;
-    if (connected) {
-      chain = await safeGetChain(e.symbol, candidate.expiry, candidate.expiry);
-      if (!chain || !chainHasWeeklyExpiry(chain, candidate.expiry)) continue; // kill
-    }
+    const chain = connected
+      ? await safeGetChain(e.symbol, candidate.expiry, candidate.expiry)
+      : null;
 
     const cls = await getIndustryClassification(upper, { yahooAllowed: yahooBudget > 0 });
     if (cls.source === "yahoo") yahooBudget -= 1;

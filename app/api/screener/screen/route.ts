@@ -75,20 +75,34 @@ export async function POST() {
     );
 
     // Step 2: hard kill ETFs + blacklist. Also narrow the timing type to BMO|AMC.
-    type Survivor = { symbol: string; date: string; timing: "BMO" | "AMC" };
+    // Whitelist tickers bypass the ETF/fund classifier (which has false
+    // positives on legit common stock) but still get removed if explicitly
+    // blacklisted.
+    type Survivor = {
+      symbol: string;
+      date: string;
+      timing: "BMO" | "AMC";
+      isWhitelisted: boolean;
+    };
     const survivors: Survivor[] = [];
     for (const e of earnings) {
       if (e.timing !== "AMC" && e.timing !== "BMO") continue;
       const upper = e.symbol.toUpperCase();
-      if (!isLikelyCommonEquity(e.symbol)) {
-        stats.droppedByEtf.push(upper);
-        continue;
-      }
       if (blacklist.has(upper)) {
         stats.droppedByBlacklist.push(upper);
         continue;
       }
-      survivors.push({ symbol: e.symbol, date: e.date, timing: e.timing as "BMO" | "AMC" });
+      const isWhitelisted = whitelist.has(upper);
+      if (!isWhitelisted && !isLikelyCommonEquity(e.symbol)) {
+        stats.droppedByEtf.push(upper);
+        continue;
+      }
+      survivors.push({
+        symbol: e.symbol,
+        date: e.date,
+        timing: e.timing as "BMO" | "AMC",
+        isWhitelisted,
+      });
     }
     stats.afterEtfAndBlacklist = survivors.length;
     console.log(
@@ -103,11 +117,12 @@ export async function POST() {
       `[screen] priced ${survivors.length} symbols, ${priceHits} with non-zero price`,
     );
 
-    // Step 4: price floor
+    // Step 4: price floor. Whitelist tickers bypass the floor — the user has
+    // explicitly opted them in and we trust that signal over a generic price cut.
     const afterPrice: Survivor[] = [];
     for (const s of survivors) {
       const p = prices[s.symbol.toUpperCase()] ?? 0;
-      if (p >= MIN_STOCK_PRICE) {
+      if (s.isWhitelisted || p >= MIN_STOCK_PRICE) {
         afterPrice.push(s);
       } else {
         stats.droppedByPrice.push(`${s.symbol.toUpperCase()}($${p.toFixed(2)})`);
@@ -119,7 +134,10 @@ export async function POST() {
         `(dropped=${stats.droppedByPrice.length}; examples=${stats.droppedByPrice.slice(0, 6).join(",")})`,
     );
 
-    // Step 5: chain check (only when Schwab connected — skip otherwise)
+    // Step 5: chain check (only when Schwab connected — skip otherwise).
+    // Whitelist tickers bypass the chain-presence kill; if Stage 3/4 later
+    // can't find a usable chain they'll surface "Cannot evaluate", but we
+    // don't drop the ticker from the board at screen time.
     type WithChain = Survivor & { expiry: string; price: number };
     const afterChain: WithChain[] = [];
     for (const row of afterPrice) {
@@ -134,6 +152,8 @@ export async function POST() {
       }
       const chain = await safeGetChain(row.symbol, candidate.expiry, candidate.expiry);
       if (chain && chainHasWeeklyExpiry(chain, candidate.expiry)) {
+        afterChain.push({ ...row, expiry: candidate.expiry, price });
+      } else if (row.isWhitelisted) {
         afterChain.push({ ...row, expiry: candidate.expiry, price });
       } else {
         stats.droppedByChain.push(row.symbol.toUpperCase());
