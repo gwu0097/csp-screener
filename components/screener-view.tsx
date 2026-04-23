@@ -1002,15 +1002,48 @@ function GradeBadge({
   );
 }
 
-// Pure client-side replica of Layer 1 POP scoring — used for the custom
-// strike "grade impact" preview so we don't have to round-trip the
-// server. Mirrors the bucket table in lib/screener.ts.
-function layer1PopPts(pop: number): number {
-  if (pop >= 0.9) return 25;
-  if (pop >= 0.85) return 20;
-  if (pop >= 0.8) return 15;
-  if (pop >= 0.75) return 8;
-  return 0;
+// Client-side replica of the rule cascade in lib/screener.ts so the
+// CustomStrikeAnalyzer can preview a grade impact without round-tripping
+// the server. Keep in sync with calculateThreeLayerGrade().
+function dropGradeClient(g: "A" | "B" | "C" | "F"): "A" | "B" | "C" | "F" {
+  if (g === "A") return "B";
+  if (g === "B") return "C";
+  return "F";
+}
+function boostGradeClient(g: "A" | "B" | "C" | "F"): "A" | "B" | "C" | "F" {
+  if (g === "F") return "C";
+  if (g === "C") return "B";
+  return "A";
+}
+
+function gradeFromRulesClient(params: {
+  pop: number;
+  crushGrade: "A" | "B" | "C" | "F";
+  opportunityGrade: "A" | "B" | "C" | "F";
+  hasOverhang: boolean;
+  vix: number | null;
+  penalty: number;
+  personalModifier: "boost" | "drop" | null;
+}): "A" | "B" | "C" | "F" {
+  const { pop, crushGrade, opportunityGrade, hasOverhang, vix, penalty, personalModifier } = params;
+  const crushOk = crushGrade === "A" || crushGrade === "B";
+  let grade: "A" | "B" | "C" | "F";
+  if (crushOk && pop >= 0.9 && opportunityGrade !== "F" && !hasOverhang && (vix === null || vix < 25)) {
+    grade = "A";
+  } else if (pop >= 0.83 && (crushOk || pop >= 0.95) && !hasOverhang) {
+    grade = "B";
+  } else if (pop >= 0.75 && penalty > -15) {
+    grade = "C";
+  } else {
+    grade = "F";
+  }
+  if (hasOverhang) grade = "F";
+  else if (vix !== null && vix > 30) grade = dropGradeClient(grade);
+  if (!hasOverhang) {
+    if (personalModifier === "boost") grade = boostGradeClient(grade);
+    else if (personalModifier === "drop") grade = dropGradeClient(grade);
+  }
+  return grade;
 }
 
 type CustomStrikeAnalysis = {
@@ -1020,19 +1053,8 @@ type CustomStrikeAnalysis = {
   premium: number;
   delta: number;
   breakeven: number;
-  // Layer-1 only moves on POP when we swap strikes — other factors
-  // (ivEdge, term, opp) are held constant. We show the resulting
-  // finalScore + finalGrade for the user to eyeball the impact.
-  finalScoreNew: number;
   finalGradeNew: "A" | "B" | "C" | "F";
 };
-
-function scoreToGradeClient(score: number): "A" | "B" | "C" | "F" {
-  if (score >= 80) return "A";
-  if (score >= 65) return "B";
-  if (score >= 50) return "C";
-  return "F";
-}
 
 function ExpandedDetail({ r }: { r: ScreenerResult }) {
   const tl = r.threeLayer;
@@ -1069,22 +1091,17 @@ function ExpandedDetail({ r }: { r: ScreenerResult }) {
     );
   }
 
-  // Layer 1 score pieces excluding POP (stay constant across strike
-  // changes). industryScore = popPts + ivEdgePts + termPts + oppPts
-  // — so when we swap strike, only popPts moves. Compute the non-POP
-  // sum once; the custom-strike analysis adds the new POP pts on top.
-  const currentPopPts = layer1PopPts(tl.industryFactors.probabilityOfProfit);
-  const nonPopIndustry = tl.industryScore - currentPopPts;
-  const termPts = Math.round((tl.industryFactors.termStructure / 5) * 10);
-  const oppPts =
-    tl.industryFactors.opportunityGrade === "A"
-      ? 10
-      : tl.industryFactors.opportunityGrade === "B"
-        ? 7
-        : tl.industryFactors.opportunityGrade === "C"
-          ? 3
-          : 0;
-  const ivEdgePts = Math.max(0, Math.round(nonPopIndustry - termPts - oppPts));
+  // Derive the personal-history modifier (needed by the custom-strike
+  // analyzer to re-run the rule cascade client-side).
+  const pf = tl.personalFactors;
+  const personalModifier: "boost" | "drop" | null = (() => {
+    if (pf.dataInsufficient || pf.tickerWinRate === null) return null;
+    const wr = pf.tickerWinRate;
+    const roc = pf.tickerAvgRoc ?? 0;
+    if (wr > 80 && roc > 0.4) return "boost";
+    if (wr < 50) return "drop";
+    return null;
+  })();
 
   return (
     <div className="space-y-3 p-3">
@@ -1094,9 +1111,9 @@ function ExpandedDetail({ r }: { r: ScreenerResult }) {
           grade={tl.industryGrade}
           tooltip={
             <div className="space-y-1">
-              <div className="font-semibold">Layer 1 breakdown ({tl.industryScore.toFixed(0)}/60)</div>
-              <div>POP {currentPopPts}/25 · IV edge {ivEdgePts}/15</div>
-              <div>Term {termPts}/10 · Opp {oppPts}/10</div>
+              <div className="font-semibold">Industry factors</div>
+              <div>POP {(tl.industryFactors.probabilityOfProfit * 100).toFixed(0)}% · Crush {tl.industryFactors.crushGrade}</div>
+              <div>IV edge {tl.industryFactors.ivEdge.toFixed(2)} · Opp {tl.industryFactors.opportunityGrade}</div>
             </div>
           }
         >
@@ -1122,11 +1139,18 @@ function ExpandedDetail({ r }: { r: ScreenerResult }) {
             tl.personalFactors.dataInsufficient ? (
               <div>
                 Insufficient history — need 5+ closed trades on {r.symbol} (you have{" "}
-                {tl.personalFactors.tickerTradeCount}). Neutral 12.5 applied to final score.
+                {tl.personalFactors.tickerTradeCount}). No modifier applied.
               </div>
             ) : (
               <div className="space-y-1">
-                <div className="font-semibold">Layer 2 breakdown ({tl.personalScore ?? 0}/25)</div>
+                <div className="font-semibold">
+                  Personal history
+                  {personalModifier === "boost"
+                    ? " → +1 grade"
+                    : personalModifier === "drop"
+                      ? " → −1 grade"
+                      : ""}
+                </div>
                 <div>
                   {tl.personalFactors.tickerTradeCount} prior trades ·
                   {" "}
@@ -1139,6 +1163,9 @@ function ExpandedDetail({ r }: { r: ScreenerResult }) {
                   {tl.personalFactors.tickerAvgRoc !== null
                     ? `${tl.personalFactors.tickerAvgRoc.toFixed(2)}%`
                     : "n/a"}
+                </div>
+                <div className="pt-1 text-muted-foreground">
+                  Boost if wr &gt;80% & roc &gt;0.4%. Drop if wr &lt;50%.
                 </div>
               </div>
             )
@@ -1180,7 +1207,7 @@ function ExpandedDetail({ r }: { r: ScreenerResult }) {
           grade={tl.regimeGrade}
           tooltip={
             <div className="space-y-1">
-              <div className="font-semibold">Layer 3 breakdown ({tl.regimeScore}/15)</div>
+              <div className="font-semibold">Regime factors</div>
               <div>Sentiment: {tl.regimeFactors.newsSentiment}</div>
               <div>
                 VIX{" "}
@@ -1189,11 +1216,11 @@ function ExpandedDetail({ r }: { r: ScreenerResult }) {
               </div>
               {tl.regimeFactors.hasActiveOverhang && (
                 <div className="text-rose-300">
-                  Overhang: {tl.regimeFactors.overhangDescription} ({tl.regimeFactors.gradePenalty}pts)
+                  Overhang: {tl.regimeFactors.overhangDescription} (forces F)
                 </div>
               )}
-              {tl.regimeFactors.gradePenalty !== 0 && !tl.regimeFactors.hasActiveOverhang && (
-                <div className="text-amber-300">Penalty: {tl.regimeFactors.gradePenalty}pts</div>
+              {tl.regimeFactors.vix !== null && tl.regimeFactors.vix > 30 && (
+                <div className="text-amber-300">VIX &gt; 30 → drops final grade one level.</div>
               )}
             </div>
           }
@@ -1232,12 +1259,13 @@ function ExpandedDetail({ r }: { r: ScreenerResult }) {
         suggestedStrike={tl.industryFactors.breakevenPrice + (r.stageFour?.premium ?? 0)}
         currentPrice={r.price}
         availableStrikes={r.stageFour?.availableStrikes}
-        nonPopIndustry={nonPopIndustry}
-        l2ForFinal={tl.personalScore ?? 12.5}
-        regimeScore={tl.regimeScore}
+        crushGrade={tl.industryFactors.crushGrade}
+        opportunityGrade={tl.industryFactors.opportunityGrade}
+        hasOverhang={tl.regimeFactors.hasActiveOverhang}
+        vix={tl.regimeFactors.vix}
         penalty={tl.regimeFactors.gradePenalty}
+        personalModifier={personalModifier}
         currentFinalGrade={tl.finalGrade}
-        currentFinalScore={tl.finalScore}
       />
 
       <div className="rounded-md border border-border bg-background/40 p-3">
@@ -1248,17 +1276,16 @@ function ExpandedDetail({ r }: { r: ScreenerResult }) {
             size="md"
             tooltip={
               <div className="space-y-1">
-                <div className="font-semibold">Final: {tl.finalGrade} ({tl.finalScore.toFixed(0)}/100)</div>
-                <div>Industry {tl.industryScore.toFixed(0)} + Personal {tl.personalScore ?? 12.5} + Regime {tl.regimeScore} + Penalty {tl.regimeFactors.gradePenalty} = {tl.finalScore.toFixed(0)}</div>
+                <div className="font-semibold">Rule-based grade</div>
+                <div>A: crush A/B · POP ≥ 90% · opp ≠ F · no overhang · VIX &lt; 25</div>
+                <div>B: POP ≥ 83% and (crush A/B or POP ≥ 95%), no overhang</div>
+                <div>C: POP ≥ 75% and penalty &gt; −15</div>
                 <div className="pt-1 text-muted-foreground">
-                  Thresholds: A ≥ 80, B ≥ 65, C ≥ 50, F &lt; 50
+                  Overrides: overhang → F · VIX &gt; 30 drops one level · personal wr &gt;80%+roc &gt;0.4% boosts · wr &lt;50% drops
                 </div>
               </div>
             }
           />
-          <span className="text-xs text-muted-foreground">
-            ({tl.finalScore.toFixed(0)}/100)
-          </span>
         </div>
         <div className="mt-3 space-y-2 text-xs leading-relaxed text-muted-foreground">
           {tl.recommendationReason.split("\n\n").map((para, i) => {
@@ -1283,22 +1310,24 @@ function CustomStrikeAnalyzer({
   suggestedStrike,
   currentPrice,
   availableStrikes,
-  nonPopIndustry,
-  l2ForFinal,
-  regimeScore,
+  crushGrade,
+  opportunityGrade,
+  hasOverhang,
+  vix,
   penalty,
+  personalModifier,
   currentFinalGrade,
-  currentFinalScore,
 }: {
   suggestedStrike: number;
   currentPrice: number;
   availableStrikes: StageFourResult["availableStrikes"];
-  nonPopIndustry: number;
-  l2ForFinal: number;
-  regimeScore: number;
+  crushGrade: "A" | "B" | "C" | "F";
+  opportunityGrade: "A" | "B" | "C" | "F";
+  hasOverhang: boolean;
+  vix: number | null;
   penalty: number;
+  personalModifier: "boost" | "drop" | null;
   currentFinalGrade: "A" | "B" | "C" | "F";
-  currentFinalScore: number;
 }) {
   const [input, setInput] = useState("");
   const [result, setResult] = useState<CustomStrikeAnalysis | null>(null);
@@ -1327,9 +1356,15 @@ function CustomStrikeAnalyzer({
     const distancePct =
       currentPrice > 0 ? ((currentPrice - nearest.strike) / currentPrice) * 100 : 0;
 
-    const newPopPts = layer1PopPts(pop);
-    const newIndustry = nonPopIndustry + newPopPts;
-    const newFinal = Math.max(0, newIndustry + l2ForFinal + regimeScore + penalty);
+    const finalGradeNew = gradeFromRulesClient({
+      pop,
+      crushGrade,
+      opportunityGrade,
+      hasOverhang,
+      vix,
+      penalty,
+      personalModifier,
+    });
     setResult({
       strike: nearest.strike,
       distancePct,
@@ -1337,8 +1372,7 @@ function CustomStrikeAnalyzer({
       premium,
       delta: nearest.delta,
       breakeven,
-      finalScoreNew: newFinal,
-      finalGradeNew: scoreToGradeClient(newFinal),
+      finalGradeNew,
     });
   }
 
@@ -1385,9 +1419,6 @@ function CustomStrikeAnalyzer({
             <GradeBadge grade={currentFinalGrade} />
             <span className="text-muted-foreground">→</span>
             <GradeBadge grade={result.finalGradeNew} />
-            <span className="text-muted-foreground">
-              (score {currentFinalScore.toFixed(0)} → {result.finalScoreNew.toFixed(0)})
-            </span>
           </div>
         </div>
       )}

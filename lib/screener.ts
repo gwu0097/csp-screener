@@ -929,18 +929,43 @@ export async function runStagesThreeFour(base: ScreenerResult): Promise<Screener
 
 // ---------- Three-layer grade ----------
 
-function gradeScore(g: Grade | null | undefined, a: number, b: number, c: number): number {
-  if (g === "A") return a;
-  if (g === "B") return b;
-  if (g === "C") return c;
-  return 0;
+function dropGrade(g: Grade): Grade {
+  if (g === "A") return "B";
+  if (g === "B") return "C";
+  return "F";
 }
 
-function scoreToGrade(score: number): Grade {
-  if (score >= 80) return "A";
-  if (score >= 65) return "B";
-  if (score >= 50) return "C";
-  return "F";
+function boostGrade(g: Grade): Grade {
+  if (g === "F") return "C";
+  if (g === "C") return "B";
+  return "A";
+}
+
+// Grade → illustrative score (for display + sort stability only — the
+// rule cascade is the source of truth).
+function gradeToFinalScore(g: Grade): number {
+  if (g === "A") return 90;
+  if (g === "B") return 72;
+  if (g === "C") return 55;
+  return 30;
+}
+function gradeToL1Score(g: Grade): number {
+  if (g === "A") return 54;
+  if (g === "B") return 43;
+  if (g === "C") return 33;
+  return 18;
+}
+function gradeToL2Score(g: Grade): number {
+  if (g === "A") return 22;
+  if (g === "B") return 18;
+  if (g === "C") return 13;
+  return 8;
+}
+function gradeToL3Score(g: Grade): number {
+  if (g === "A") return 14;
+  if (g === "B") return 11;
+  if (g === "C") return 8;
+  return 4;
 }
 
 // Returns closed-position stats for a ticker: count, win rate, avg ROC.
@@ -990,11 +1015,11 @@ export async function getPersonalHistory(symbol: string): Promise<PersonalHistor
   }
 }
 
-// Combines the three independent signal streams into one grade:
-//   Layer 1 (industry): pure options metrics from Stage 3/4 (0-60 pts)
-//   Layer 2 (personal): your closed-position win rate + ROC (0-25 pts)
-//   Layer 3 (regime): news sentiment/overhang + VIX (0-15 pts, penalty up to -15)
-// Final score = L1 + L2 + L3 + penalty, then mapped to A/B/C/F.
+// Rule-based grade cascade. No weighted points — the grade is assigned
+// by a small ladder of explicit conditions, with overrides for
+// hasActiveOverhang / high VIX and a boost/drop modifier from personal
+// history. Scores returned on the result are illustrative buckets
+// derived from the assigned grade; the rule is the source of truth.
 export function calculateThreeLayerGrade(
   stageThreeResult: StageThreeResult,
   stageFourResult: StageFourResult,
@@ -1002,15 +1027,9 @@ export function calculateThreeLayerGrade(
   personalHistory: PersonalHistory | null,
   vix: number | null,
 ): ThreeLayerGrade {
-  // ---- Layer 1: Industry standard (0-60 pts) ----
-  // For a 2x-EM CSP strategy, strike-survival probability is the dominant
-  // signal — weight POP heavily. Crush grade is still shown in its own
-  // column and Layer 2/3 factors; it isn't re-scored here.
   const crushGrade = stageThreeResult.crushGrade;
   const opportunityGrade = stageFourResult.opportunityGrade;
 
-  // POP = 1 − |delta|. Compute before scoring so we can feed it into
-  // Layer 1 directly.
   const delta = stageFourResult.delta ?? 0;
   const probabilityOfProfit = 1 - Math.abs(delta);
   const premium = stageFourResult.premium ?? 0;
@@ -1020,77 +1039,13 @@ export function calculateThreeLayerGrade(
   // Rough proxy — assumes the put assigns and stock drops to 0 on the miss side.
   const expectedValue = probabilityOfProfit * premium * 100 - (1 - probabilityOfProfit) * strike * 100;
 
-  // Probability of profit (25 pts max).
-  let popPts = 0;
-  if (probabilityOfProfit >= 0.9) popPts = 25;
-  else if (probabilityOfProfit >= 0.85) popPts = 20;
-  else if (probabilityOfProfit >= 0.8) popPts = 15;
-  else if (probabilityOfProfit >= 0.75) popPts = 8;
-  else popPts = 0;
-
-  // IV edge sweet-spot buckets (15 pts max). Note the bucket at >1.9
-  // still scores only 5 pts — empirically very high IV edge correlates
-  // with larger realized moves — but from a premium-seller's perspective
-  // this is elevated premium that's *good* to collect, just worth
-  // verifying strike safety for. Nothing in the UI phrases high IV
-  // edge as a warning; it's framed as a tradeoff.
-  //   1.3-1.6 → 15 (ideal range — fat premium, normal event risk)
-  //   1.6-1.9 → 10 (elevated premium, slightly higher event risk)
-  //   1.2-1.3 → 8  (modest)
-  //   ≥ 1.9   → 5  (very elevated premium, verify strike safety)
-  //   < 1.2   → 0  (thin premium)
   const weeklyIv = stageThreeResult.details.weeklyIv ?? null;
   const realizedVol = stageThreeResult.details.realizedVol30d ?? null;
   const ivEdge =
     weeklyIv !== null && realizedVol !== null && realizedVol > 0
       ? weeklyIv / realizedVol
       : 0;
-  let ivEdgePts = 0;
-  if (ivEdge >= 1.3 && ivEdge < 1.6) ivEdgePts = 15;
-  else if (ivEdge >= 1.6 && ivEdge < 1.9) ivEdgePts = 10;
-  else if (ivEdge >= 1.2 && ivEdge < 1.3) ivEdgePts = 8;
-  else if (ivEdge >= 1.9) ivEdgePts = 5;
-  else ivEdgePts = 0;
-
-  // Term structure raw score 0-5 → 0-10.
   const termStructureRaw = stageThreeResult.details.termStructureScore;
-  const termPts = (termStructureRaw / 5) * 10;
-
-  // Opportunity grade (10 pts max).
-  const oppPts = gradeScore(opportunityGrade, 10, 7, 3);
-
-  const industryScore = popPts + ivEdgePts + termPts + oppPts;
-  // Industry grade maps 0-60 to A/B/C/F on the 80/65/50 score thresholds
-  // (same as final-score bucketing).
-  const industryGrade = scoreToGrade((industryScore / 60) * 100);
-
-  // ---- Layer 2: Personal intelligence (0-25 pts, or null if insufficient) ----
-  let personalScore: number | null = null;
-  let personalGrade: Grade | "INSUFFICIENT" = "INSUFFICIENT";
-  const history = personalHistory ?? {
-    tradeCount: 0,
-    winRate: null,
-    avgRoc: null,
-    dataInsufficient: true,
-  };
-  if (!history.dataInsufficient && history.winRate !== null) {
-    let wrPts = 0;
-    if (history.winRate > 80) wrPts = 15;
-    else if (history.winRate >= 60) wrPts = 10;
-    else wrPts = 0;
-    let rocPts = 0;
-    const roc = history.avgRoc ?? 0;
-    if (roc > 0.5) rocPts = 10;
-    else if (roc >= 0.25) rocPts = 5;
-    else rocPts = 0;
-    personalScore = wrPts + rocPts;
-    personalGrade = scoreToGrade((personalScore / 25) * 100);
-  }
-
-  // ---- Layer 3: Current regime (0-15 pts, penalty up to -15) ----
-  let regimeScore = 15;
-  if (newsContext.sentiment === "negative" && !newsContext.hasActiveOverhang) regimeScore = 10;
-  if (newsContext.hasActiveOverhang) regimeScore = 0;
 
   let vixRegime: "calm" | "elevated" | "panic" | null = null;
   if (vix !== null) {
@@ -1098,29 +1053,113 @@ export function calculateThreeLayerGrade(
     else if (vix >= 20) vixRegime = "elevated";
     else vixRegime = "calm";
   }
-  let vixAdj = 0;
-  if (vixRegime === "elevated") vixAdj = -3;
-  else if (vixRegime === "panic") vixAdj = -8;
-  regimeScore = Math.max(0, regimeScore + vixAdj);
-  const regimeGrade = scoreToGrade((regimeScore / 15) * 100);
 
-  // ---- Final combined score ----
-  // Layer 2 contributes a neutral 12.5 when we don't have enough history,
-  // so the final grade isn't pulled down by ignorance.
-  const l2ForFinal = personalScore ?? 12.5;
+  const crushOk = crushGrade === "A" || crushGrade === "B";
+  const hasOverhang = newsContext.hasActiveOverhang;
   const penalty = newsContext.gradePenalty ?? 0;
-  const finalScore = Math.max(0, industryScore + l2ForFinal + regimeScore + penalty);
-  const finalGrade = scoreToGrade(finalScore);
 
-  // Recommendation text: short verdict + the specific reason string.
+  // ---- Layer grades (display only — shown on each LayerCard) ----
+  let industryGrade: Grade;
+  if (crushOk && probabilityOfProfit >= 0.9 && opportunityGrade !== "F") {
+    industryGrade = "A";
+  } else if (probabilityOfProfit >= 0.83 && (crushOk || probabilityOfProfit >= 0.95)) {
+    industryGrade = "B";
+  } else if (probabilityOfProfit >= 0.75) {
+    industryGrade = "C";
+  } else {
+    industryGrade = "F";
+  }
+
+  let regimeGrade: Grade;
+  if (hasOverhang) regimeGrade = "F";
+  else if (vix !== null && vix > 30) regimeGrade = "F";
+  else if (newsContext.sentiment === "negative" || (vix !== null && vix > 25)) regimeGrade = "C";
+  else if (vix !== null && vix >= 20) regimeGrade = "B";
+  else regimeGrade = "A";
+
+  const history = personalHistory ?? {
+    tradeCount: 0,
+    winRate: null,
+    avgRoc: null,
+    dataInsufficient: true,
+  };
+  let personalGrade: Grade | "INSUFFICIENT" = "INSUFFICIENT";
+  if (!history.dataInsufficient && history.winRate !== null) {
+    const wr = history.winRate;
+    const roc = history.avgRoc ?? 0;
+    if (wr > 80 && roc > 0.4) personalGrade = "A";
+    else if (wr >= 60) personalGrade = "B";
+    else if (wr >= 50) personalGrade = "C";
+    else personalGrade = "F";
+  }
+
+  // ---- Final grade: rule cascade ----
+  let finalGrade: Grade;
+  let matchedRule: "A" | "B" | "C" | "F";
+  if (
+    crushOk &&
+    probabilityOfProfit >= 0.9 &&
+    opportunityGrade !== "F" &&
+    !hasOverhang &&
+    (vix === null || vix < 25)
+  ) {
+    finalGrade = "A";
+    matchedRule = "A";
+  } else if (
+    probabilityOfProfit >= 0.83 &&
+    (crushOk || probabilityOfProfit >= 0.95) &&
+    !hasOverhang
+  ) {
+    finalGrade = "B";
+    matchedRule = "B";
+  } else if (probabilityOfProfit >= 0.75 && penalty > -15) {
+    finalGrade = "C";
+    matchedRule = "C";
+  } else {
+    finalGrade = "F";
+    matchedRule = "F";
+  }
+
+  // Overrides: overhang always pins to F; VIX > 30 drops one level.
+  let vixDropped = false;
+  if (hasOverhang) {
+    finalGrade = "F";
+  } else if (vix !== null && vix > 30) {
+    const dropped = dropGrade(finalGrade);
+    if (dropped !== finalGrade) vixDropped = true;
+    finalGrade = dropped;
+  }
+
+  // Personal history modifier: only when we have 5+ trades.
+  let personalModifier: "boost" | "drop" | null = null;
+  if (!history.dataInsufficient && history.winRate !== null && !hasOverhang) {
+    const wr = history.winRate;
+    const roc = history.avgRoc ?? 0;
+    if (wr > 80 && roc > 0.4) {
+      personalModifier = "boost";
+      finalGrade = boostGrade(finalGrade);
+    } else if (wr < 50) {
+      personalModifier = "drop";
+      finalGrade = dropGrade(finalGrade);
+    }
+  }
+
+  // Derived illustrative scores (for sort order + display compatibility).
+  const industryScore = gradeToL1Score(industryGrade);
+  const regimeScore = gradeToL3Score(regimeGrade);
+  const personalScore =
+    personalGrade === "INSUFFICIENT" ? null : gradeToL2Score(personalGrade);
+  const finalScore = gradeToFinalScore(finalGrade);
+
   let recommendation = "Skip";
   if (finalGrade === "A") recommendation = "Strong - Take the trade";
   else if (finalGrade === "B") recommendation = "Marginal - Size smaller";
   else if (finalGrade === "C") recommendation = "Marginal - Size small";
 
-  // Build a labeled multi-paragraph reason. Sections: STRENGTH, CAUTION,
-  // NEWS, HISTORY, BOTTOM LINE. Each "\n\n" boundary is rendered as a
-  // paragraph break by the UI.
+  // Build the explanation sections. STRENGTH/CAUTION/NEWS/HISTORY still
+  // describe the raw factors (that's what the user wants to see). BOTTOM
+  // LINE names the rule that matched and any overrides/modifiers that
+  // fired.
   const popPct = (probabilityOfProfit * 100).toFixed(0);
   const ivEdgeBand =
     ivEdge >= 1.3 && ivEdge < 1.6
@@ -1135,12 +1174,11 @@ export function calculateThreeLayerGrade(
               ? "thin premium, limited crush opportunity"
               : "n/a";
 
-  // --- STRENGTH ---
   const strengths: string[] = [];
   strengths.push(
     `${popPct}% probability of profit at $${strike.toFixed(2)} strike (2x EM).`,
   );
-  if (crushGrade === "A" || crushGrade === "B") {
+  if (crushOk) {
     strengths.push(
       `Crush ${crushGrade} — historical moves stay well inside the implied move; strong IV crush expected.`,
     );
@@ -1149,7 +1187,6 @@ export function calculateThreeLayerGrade(
     strengths.push(`IV edge ${ivEdge.toFixed(2)} — ${ivEdgeBand}.`);
   }
 
-  // --- CAUTION ---
   const cautions: string[] = [];
   if (opportunityGrade === "C" || opportunityGrade === "F") {
     cautions.push(
@@ -1175,7 +1212,6 @@ export function calculateThreeLayerGrade(
     cautions.push("None flagged at this strike.");
   }
 
-  // --- NEWS ---
   const newsLines: string[] = [];
   const sentimentWord =
     newsContext.sentiment === "positive"
@@ -1184,54 +1220,77 @@ export function calculateThreeLayerGrade(
         ? "Negative"
         : "Neutral";
   newsLines.push(`${sentimentWord} — ${newsContext.summary}`);
-  if (newsContext.hasActiveOverhang) {
+  if (hasOverhang) {
     newsLines.push(
-      `⚠ Active overhang: ${newsContext.overhangDescription ?? "see news"}. ${penalty}-pt penalty.`,
+      `⚠ Active overhang: ${newsContext.overhangDescription ?? "see news"}. Hard override → grade F.`,
     );
   } else if (newsContext.sentiment === "negative") {
-    newsLines.push(`Negative tone carries a ${penalty}-pt penalty.`);
+    newsLines.push(`Negative tone (penalty ${penalty}).`);
   } else {
     newsLines.push("No active risks detected.");
   }
   if (vixRegime !== null && vixRegime !== "calm") {
-    newsLines.push(
-      `VIX ${vix?.toFixed(1)} (${vixRegime}) — ${vixAdj}-pt regime adjustment.`,
-    );
+    newsLines.push(`VIX ${vix?.toFixed(1)} (${vixRegime}).`);
   }
-  newsLines.push(
-    `Regime points: ${regimeScore}/15${penalty !== 0 ? ` (penalty ${penalty})` : ""}.`,
-  );
 
-  // --- HISTORY ---
   const historyLines: string[] = [];
-  if (personalScore !== null && !history.dataInsufficient) {
+  if (!history.dataInsufficient && history.winRate !== null) {
+    const wr = history.winRate;
+    const roc = history.avgRoc ?? 0;
+    const mod =
+      personalModifier === "boost"
+        ? " → boosts grade one level (winRate >80% & avgRoc >0.4%)"
+        : personalModifier === "drop"
+          ? " → drops grade one level (winRate <50%)"
+          : " → no modifier (between boost/drop thresholds)";
     historyLines.push(
-      `${history.tradeCount} prior trades on this ticker: ${history.winRate?.toFixed(0)}% win rate, ${history.avgRoc?.toFixed(2)}% avg ROC → personal ${personalGrade} (${personalScore}/25).`,
+      `${history.tradeCount} prior trades: ${wr.toFixed(0)}% win rate, ${roc.toFixed(2)}% avg ROC${mod}.`,
     );
   } else {
     historyLines.push(
-      `Insufficient history — ${history.tradeCount} closed trades on this ticker (need 5+). Neutral weighting applied (12.5/25).`,
+      `Insufficient history — ${history.tradeCount} closed trades on this ticker (need 5+). No modifier applied.`,
     );
   }
 
-  // --- BOTTOM LINE ---
+  // Explain which rule matched, then note any override/modifier that
+  // changed the grade after the cascade.
+  const ruleExplain: Record<"A" | "B" | "C" | "F", string> = {
+    A: `Rule A matched: crush ${crushGrade}, POP ${popPct}% ≥ 90%, opportunity ${opportunityGrade} (not F), no overhang, VIX ${vix !== null ? vix.toFixed(1) : "n/a"} < 25.`,
+    B: `Rule B matched: POP ${popPct}% ≥ 83%${crushOk ? ` and crush ${crushGrade}` : " and POP ≥ 95% (crush F allowed)"}, no overhang.`,
+    C: `Rule C matched: POP ${popPct}% ≥ 75%, penalty ${penalty} > −15.`,
+    F: `No rule matched${probabilityOfProfit < 0.75 ? ` (POP ${popPct}% < 75%)` : penalty <= -15 ? ` (penalty ${penalty} ≤ −15)` : ""}.`,
+  };
+  const overrideBits: string[] = [];
+  if (hasOverhang && matchedRule !== "F") {
+    overrideBits.push(`Active overhang override → final F (was ${matchedRule}).`);
+  }
+  if (vixDropped) {
+    overrideBits.push(`VIX ${vix?.toFixed(1)} > 30 override → dropped one level.`);
+  }
+  if (personalModifier === "boost") {
+    overrideBits.push("Personal history boost (win rate >80%, avg ROC >0.4%) → +1 level.");
+  } else if (personalModifier === "drop") {
+    overrideBits.push("Personal history drop (win rate <50%) → −1 level.");
+  }
+
   let bottomLine: string;
   if (finalGrade === "A") {
-    bottomLine = `Strong setup (${finalScore.toFixed(0)}/100). Take the trade.`;
+    bottomLine = `Grade A. Take the trade.`;
   } else if (finalGrade === "B") {
-    bottomLine = `Solid setup (${finalScore.toFixed(0)}/100). ${cautions[0] && cautions[0] !== "None flagged at this strike." ? "Size normally, with the caution above in mind." : "Size normally."}`;
+    bottomLine = `Grade B. Size normally${cautions[0] && cautions[0] !== "None flagged at this strike." ? ", with the caution above in mind" : ""}.`;
   } else if (finalGrade === "C") {
-    bottomLine = `Marginal (${finalScore.toFixed(0)}/100). Size smaller or pass if there's a better setup tonight.`;
+    bottomLine = `Grade C. Size smaller or pass if there's a better setup tonight.`;
   } else {
-    bottomLine = `Skip (${finalScore.toFixed(0)}/100). ${newsContext.hasActiveOverhang ? "Active overhang is the primary reason." : "Industry score is below the C threshold."}`;
+    bottomLine = `Grade F. Skip${hasOverhang ? " — active overhang." : probabilityOfProfit < 0.75 ? " — POP too low." : penalty <= -15 ? " — news penalty too severe." : "."}`;
   }
+  const bottomLineFull = [ruleExplain[matchedRule], ...overrideBits, bottomLine].join(" ");
 
   const recommendationReason = [
     `STRENGTH: ${strengths.join(" ")}`,
     `CAUTION: ${cautions.join(" ")}`,
     `NEWS: ${newsLines.join(" ")}`,
     `HISTORY: ${historyLines.join(" ")}`,
-    `BOTTOM LINE: ${bottomLine}`,
+    `BOTTOM LINE: ${bottomLineFull}`,
   ].join("\n\n");
 
   return {
@@ -1239,7 +1298,7 @@ export function calculateThreeLayerGrade(
     industryScore,
     industryFactors: {
       probabilityOfProfit,
-      ivRank: null, // not computed yet — needs 52-wk IV history
+      ivRank: null,
       ivEdge,
       termStructure: termStructureRaw,
       crushGrade,
@@ -1253,17 +1312,17 @@ export function calculateThreeLayerGrade(
       tickerWinRate: history.winRate,
       tickerTradeCount: history.tradeCount,
       tickerAvgRoc: history.avgRoc,
-      tickerCrushAccuracy: null, // requires stored screener-grade-vs-outcome join; deferred
+      tickerCrushAccuracy: null,
       dataInsufficient: history.dataInsufficient,
     },
     regimeGrade,
     regimeScore,
     regimeFactors: {
       newsSentiment: newsContext.sentiment,
-      hasActiveOverhang: newsContext.hasActiveOverhang,
+      hasActiveOverhang: hasOverhang,
       overhangDescription: newsContext.overhangDescription,
       newsSummary: newsContext.summary,
-      gradePenalty: newsContext.gradePenalty,
+      gradePenalty: penalty,
       vix,
       vixRegime,
     },
