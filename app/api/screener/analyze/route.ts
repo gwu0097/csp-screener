@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getBatchPrices } from "@/lib/price";
-import { getOptionsChain, isSchwabConnected, SchwabOptionContract } from "@/lib/schwab";
+import { getOptionsChain, isSchwabConnected } from "@/lib/schwab";
 import {
   runStagesThreeFour,
   calculateThreeLayerGrade,
@@ -10,7 +10,8 @@ import {
 import { getEarningsNewsContext } from "@/lib/perplexity";
 import { getMarketContext } from "@/lib/market";
 import { createServerClient } from "@/lib/supabase";
-import { remainingContracts, type Fill } from "@/lib/positions";
+import { type Fill } from "@/lib/positions";
+import { buildSnapshotRow } from "@/lib/snapshots";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -26,40 +27,11 @@ function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-// Pull the option at the provided strike from a put chain. Used when we
-// snapshot open positions so we can price the mark + greeks off Schwab.
-function pickContract(
-  chain: Awaited<ReturnType<typeof getOptionsChain>>,
-  strike: number,
-  expiry: string,
-): SchwabOptionContract | null {
-  const keys = Object.keys(chain.putExpDateMap ?? {});
-  const expKey = keys.find((k) => k.startsWith(expiry));
-  if (!expKey) return null;
-  const strikes = chain.putExpDateMap[expKey];
-  const direct = strikes[String(Number(strike))] ?? strikes[strike.toFixed(2)] ?? null;
-  if (direct && direct.length > 0) return direct[0];
-  let best: SchwabOptionContract | null = null;
-  let bestDiff = Infinity;
-  for (const arr of Object.values(strikes)) {
-    for (const c of arr) {
-      const d = Math.abs(c.strikePrice - strike);
-      if (d < bestDiff) {
-        best = c;
-        bestDiff = d;
-      }
-    }
-  }
-  return best;
-}
-
-// Snapshots current option price + P&L for every open position. Writes
-// one row per position into position_snapshots. Called synchronously
+// Snapshots current option price + P&L + Greeks for every open position.
+// Writes one row per position into position_snapshots. Called synchronously
 // after candidate scoring per user directive (correctness > latency).
-// Also captures the live Greeks (IV/delta/theta), the realized move
-// vs. the entry expected-move, days-since-entry, and percent-of-premium
-// still outstanding. Together these build a time series per position for
-// post-hoc analysis (did IV actually crush, how fast did theta bleed).
+// Per-field math lives in lib/snapshots.ts so the close-time snapshot path
+// in /api/trades/bulk-create produces identical rows.
 async function writePositionSnapshots(): Promise<{ written: number; errors: string[] }> {
   const errors: string[] = [];
   let written = 0;
@@ -87,7 +59,6 @@ async function writePositionSnapshots(): Promise<{ written: number; errors: stri
     }>;
     if (positions.length === 0) return { written: 0, errors: [] };
 
-    // Fetch fills to compute remaining contracts (P&L applies to remaining).
     const positionIds = positions.map((p) => p.id);
     const { data: fillsRaw } = await supabase
       .from("fills")
@@ -105,8 +76,7 @@ async function writePositionSnapshots(): Promise<{ written: number; errors: stri
       fillsByPosition.set(f.position_id, arr);
     }
 
-    // One chain fetch per unique (symbol, expiry) pair — a position might
-    // share chain with another position on the same expiry.
+    // One chain fetch per unique (symbol, expiry) pair — positions can share.
     const chainKey = (sym: string, exp: string) => `${sym}|${exp}`;
     const chainCache = new Map<string, Awaited<ReturnType<typeof getOptionsChain>> | null>();
     await Promise.all(
@@ -123,81 +93,13 @@ async function writePositionSnapshots(): Promise<{ written: number; errors: stri
     );
 
     const nowIso = new Date().toISOString();
-    const todayMs = new Date(nowIso.slice(0, 10) + "T00:00:00Z").getTime();
     for (const p of positions) {
-      const chain = chainCache.get(chainKey(p.symbol, p.expiry));
-      const contract = chain ? pickContract(chain, Number(p.strike), p.expiry) : null;
-      const optionPrice = contract?.mark ?? null;
-      const stockPrice =
-        chain?.underlying?.mark ??
-        chain?.underlying?.last ??
-        chain?.underlyingPrice ??
-        null;
-      const remaining = remainingContracts(fillsByPosition.get(p.id) ?? []);
-      const soldPremium = Number(p.avg_premium_sold ?? 0);
-      let pnlDollars: number | null = null;
-      let pnlPct: number | null = null;
-      if (optionPrice !== null && soldPremium > 0 && remaining > 0) {
-        pnlDollars = (soldPremium - optionPrice) * remaining * 100;
-        pnlPct = (soldPremium - optionPrice) / soldPremium;
-      }
-
-      // Schwab returns volatility as a percent (e.g. 193.2 for 193.2% IV).
-      // Store as a decimal to match entry_iv_edge / entry_em_pct conventions
-      // so downstream time-series math doesn't have to special-case units.
-      const currentIv = contract && Number.isFinite(contract.volatility)
-        ? contract.volatility / 100
-        : null;
-      const currentDelta =
-        contract && Number.isFinite(contract.delta) ? contract.delta : null;
-      const currentTheta =
-        contract && Number.isFinite(contract.theta) ? contract.theta : null;
-
-      // Realized underlying move since entry, absolute magnitude. Null-safe
-      // on both legs — an old position with no entry_stock_price just gets
-      // null here rather than blowing up the snapshot.
-      const entryPx = Number(p.entry_stock_price ?? 0);
-      const actualMovePct =
-        stockPrice !== null && entryPx > 0
-          ? Math.abs(stockPrice - entryPx) / entryPx
-          : null;
-      const entryEm = Number(p.entry_em_pct ?? 0);
-      const moveRatio =
-        actualMovePct !== null && entryEm > 0 ? actualMovePct / entryEm : null;
-
-      // Days the position has been open. opened_date is a YYYY-MM-DD
-      // string; parse as UTC midnight to avoid TZ-based off-by-one.
-      let daysSinceEntry: number | null = null;
-      if (p.opened_date) {
-        const openedMs = new Date(p.opened_date + "T00:00:00Z").getTime();
-        if (Number.isFinite(openedMs)) {
-          daysSinceEntry = Math.max(
-            0,
-            Math.floor((todayMs - openedMs) / 86400000),
-          );
-        }
-      }
-
-      // Fraction of premium still outstanding. 1.0 = no decay, 0.0 = fully
-      // decayed, >1.0 = option re-priced above entry (stock moved against us).
-      const pctPremiumRemaining =
-        optionPrice !== null && soldPremium > 0 ? optionPrice / soldPremium : null;
-
-      const { error: iErr } = await supabase.from("position_snapshots").insert({
-        position_id: p.id,
-        snapshot_time: nowIso,
-        stock_price: stockPrice,
-        option_price: optionPrice,
-        pnl_pct: pnlPct,
-        pnl_dollars: pnlDollars,
-        current_iv: currentIv,
-        current_delta: currentDelta,
-        current_theta: currentTheta,
-        actual_move_pct: actualMovePct,
-        move_ratio: moveRatio,
-        days_since_entry: daysSinceEntry,
-        pct_premium_remaining: pctPremiumRemaining,
+      const chain = chainCache.get(chainKey(p.symbol, p.expiry)) ?? null;
+      const row = buildSnapshotRow(p, chain, fillsByPosition.get(p.id) ?? [], {
+        nowIso,
+        closeSnapshot: false,
       });
+      const { error: iErr } = await supabase.from("position_snapshots").insert(row);
       if (iErr) {
         errors.push(`${p.symbol}: ${iErr.message}`);
         continue;

@@ -7,6 +7,7 @@ import {
   type Fill,
   type PositionRow,
 } from "@/lib/positions";
+import { buildSnapshotRow, fetchChainSafe } from "@/lib/snapshots";
 
 export const dynamic = "force-dynamic";
 
@@ -23,6 +24,12 @@ export type TradeInput = {
   timePlaced?: string; // YYYY-MM-DD preferred from ToS "Time Placed"
   trade_date?: string;
   notes?: string | null;
+  // Set by the position-card UI on live "Close all" / "Close partial"
+  // clicks. Triggers a position_snapshots row tagged close_snapshot=true,
+  // capturing the live Greeks + stock price at the moment of close. The
+  // screenshot-parser path leaves this undefined — those closes already
+  // happened historically and a live snapshot would be meaningless.
+  captureCloseSnapshot?: boolean;
 };
 
 type BulkBody = { trades?: TradeInput[] };
@@ -147,6 +154,58 @@ export async function POST(req: NextRequest) {
       }
       fillsInserted += 1;
       positionsTouched.add(positionId);
+
+      // 2a. Close-time snapshot. Live market conditions at the moment
+      // the user pulled the trigger — IV/delta/theta from the chain,
+      // move-since-entry, and pct-premium-remaining. Tagged
+      // close_snapshot=true so analytics can separate final readings
+      // from intraday ones. Failures are logged but don't block the
+      // close — the fill itself has already been recorded.
+      if (input.action === "close" && input.captureCloseSnapshot) {
+        try {
+          const { data: posRow } = await supabase
+            .from("positions")
+            .select(
+              "id, symbol, strike, expiry, avg_premium_sold, opened_date, entry_stock_price, entry_em_pct",
+            )
+            .eq("id", positionId)
+            .single();
+          const position = posRow as {
+            id: string;
+            symbol: string;
+            strike: number;
+            expiry: string;
+            avg_premium_sold: number | null;
+            opened_date: string | null;
+            entry_stock_price: number | null;
+            entry_em_pct: number | null;
+          } | null;
+          if (position) {
+            const { data: preFillsRaw } = await supabase
+              .from("fills")
+              .select("fill_type, contracts, premium, fill_date")
+              .eq("position_id", positionId);
+            const preFills = (preFillsRaw ?? []) as Fill[];
+            const chain = await fetchChainSafe(position.symbol, position.expiry);
+            const snapshotRow = buildSnapshotRow(position, chain, preFills, {
+              nowIso: new Date().toISOString(),
+              closeSnapshot: true,
+            });
+            const { error: sErr } = await supabase
+              .from("position_snapshots")
+              .insert(snapshotRow);
+            if (sErr) {
+              console.warn(
+                `[bulk-create] close snapshot insert failed for ${input.symbol}: ${sErr.message}`,
+              );
+            }
+          }
+        } catch (e) {
+          console.warn(
+            `[bulk-create] close snapshot capture failed for ${input.symbol}: ${e instanceof Error ? e.message : e}`,
+          );
+        }
+      }
 
       // 2b. If this is an OPEN fill and the position doesn't yet have
       // entry grades, try to find a tracked_tickers row captured during
