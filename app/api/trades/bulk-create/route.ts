@@ -24,12 +24,6 @@ export type TradeInput = {
   timePlaced?: string; // YYYY-MM-DD preferred from ToS "Time Placed"
   trade_date?: string;
   notes?: string | null;
-  // Set by the position-card UI on live "Close all" / "Close partial"
-  // clicks. Triggers a position_snapshots row tagged close_snapshot=true,
-  // capturing the live Greeks + stock price at the moment of close. The
-  // screenshot-parser path leaves this undefined — those closes already
-  // happened historically and a live snapshot would be meaningless.
-  captureCloseSnapshot?: boolean;
 };
 
 type BulkBody = { trades?: TradeInput[] };
@@ -182,13 +176,15 @@ export async function POST(req: NextRequest) {
       fillsInserted += 1;
       positionsTouched.add(positionId);
 
-      // 2a. Close-time snapshot. Live market conditions at the moment
-      // the user pulled the trigger — IV/delta/theta from the chain,
-      // move-since-entry, and pct-premium-remaining. Tagged
-      // close_snapshot=true so analytics can separate final readings
-      // from intraday ones. Failures are logged but don't block the
-      // close — the fill itself has already been recorded.
-      if (input.action === "close" && input.captureCloseSnapshot) {
+      // 2a. Close-time snapshot. Fires when a close fill is dated today,
+      // regardless of entry point (position-card Close button OR same-day
+      // screenshot upload). Captures live market conditions — IV/delta/
+      // theta from the chain, move-since-entry, pct-premium-remaining —
+      // tagged close_snapshot=true so analytics can separate final
+      // readings from intraday ones. Historical backfills (fill_date in
+      // the past) skip this to avoid writing "now" Greeks onto old
+      // trades. Failures are logged but don't block the close fill.
+      if (input.action === "close" && fillDate === todayIso()) {
         try {
           const { data: posRow } = await supabase
             .from("positions")

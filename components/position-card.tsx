@@ -109,9 +109,6 @@ export function PositionCard({ position: p, onCloseSubmitted }: Props) {
               optionType: p.optionType,
               premium,
               broker: p.broker,
-              // Tell bulk-create to snapshot live market conditions
-              // into position_snapshots with close_snapshot=true.
-              captureCloseSnapshot: true,
             },
           ],
         }),
