@@ -550,25 +550,23 @@ export async function runStageThree(
 
 // ---------- Stage 4 ----------
 
+// Opportunity scoring is premium + delta only (20 pts max). Spread was
+// removed — it's an execution-cost concern for day trades and doesn't
+// affect overnight CSP holds. We still track bidAskSpreadPct for
+// informational display in the expanded row, but it does not influence
+// any grade, recommendation, or hard-kill.
 function scorePremiumYield(yieldPct: number): number {
-  if (yieldPct > 0.5) return 8;
-  if (yieldPct >= 0.3) return 5;
-  if (yieldPct >= 0.15) return 2;
+  if (yieldPct > 0.5) return 12;
+  if (yieldPct >= 0.3) return 8;
+  if (yieldPct >= 0.15) return 3;
   return 0;
 }
 
 function scoreDelta(delta: number): number {
   const abs = Math.abs(delta);
-  if (abs >= 0.08 && abs <= 0.12) return 6;
-  if (abs > 0.12 && abs <= 0.18) return 4;
+  if (abs >= 0.08 && abs <= 0.12) return 8;
+  if (abs > 0.12 && abs <= 0.18) return 5;
   if (abs > 0.18 && abs <= 0.25) return 2;
-  return 0;
-}
-
-function scoreSpread(spreadPctOfMid: number): number {
-  if (spreadPctOfMid < 5) return 6;
-  if (spreadPctOfMid < 10) return 4;
-  if (spreadPctOfMid < 20) return 2;
   return 0;
 }
 
@@ -659,13 +657,12 @@ export function runStageFour(
 
   const premiumYieldScore = scorePremiumYield(yieldPct);
   const deltaScore = scoreDelta(delta);
-  const spreadScore = scoreSpread(spreadPctOfMid);
-  const rawScore = premiumYieldScore + deltaScore + spreadScore;
+  const rawScore = premiumYieldScore + deltaScore;
 
-  const spreadTooWide = spreadPctOfMid > SPREAD_KILL_PCT;
-  // Spread-too-wide is a hard kill: force grade F regardless of other scores.
-  const opportunityGrade = spreadTooWide ? "F" : gradeFromOpportunityScore(rawScore);
-  const note = spreadTooWide ? "Spread too wide to trade" : null;
+  // Spread is no longer a hard-kill or scoring input. We still surface
+  // bidAskSpreadPct as informational display in the expanded row.
+  const opportunityGrade = gradeFromOpportunityScore(rawScore);
+  const note: string | null = null;
 
   // Compact snapshot of the weekly put chain — the UI uses it to let
   // users try a custom strike without another API round-trip.
@@ -703,15 +700,18 @@ export function runStageFour(
     details: {
       premiumYieldScore,
       deltaScore,
-      spreadScore,
+      // Kept at 0 for type compatibility — spread no longer scored.
+      spreadScore: 0,
       contractSymbol: contract.symbol,
     },
   };
 }
 
-function isSpreadTooWide(stageFour: StageFourResult | null): boolean {
-  if (!stageFour) return false;
-  return stageFour.bidAskSpreadPct !== null && stageFour.bidAskSpreadPct > SPREAD_KILL_PCT;
+// Spread is no longer a hard-kill; retained as a display-only field on
+// StageFourResult.bidAskSpreadPct. Helper always returns false so any
+// remaining call short-circuits harmlessly.
+function isSpreadTooWide(): boolean {
+  return false;
 }
 
 // ---------- Final recommendation ----------
@@ -896,7 +896,7 @@ export async function runStagesThreeFour(base: ScreenerResult): Promise<Screener
     stageThree.details.expectedMovePct,
   );
 
-  const spreadTooWide = isSpreadTooWide(stageFour);
+  const spreadTooWide = isSpreadTooWide();
   // Spread-too-wide is a hard kill regardless of any other signal.
   // Otherwise: if Stage 3 passes, use the normal crush×opportunity matrix.
   // If Stage 3 fails only because history is thin (insufficientData) AND the
@@ -1028,12 +1028,17 @@ export function calculateThreeLayerGrade(
   else if (probabilityOfProfit >= 0.75) popPts = 8;
   else popPts = 0;
 
-  // IV edge sweet-spot buckets (15 pts max).
-  //   1.3-1.6 → 15 (ideal)
-  //   1.6-1.9 → 10 (real event risk priced in)
+  // IV edge sweet-spot buckets (15 pts max). Note the bucket at >1.9
+  // still scores only 5 pts — empirically very high IV edge correlates
+  // with larger realized moves — but from a premium-seller's perspective
+  // this is elevated premium that's *good* to collect, just worth
+  // verifying strike safety for. Nothing in the UI phrases high IV
+  // edge as a warning; it's framed as a tradeoff.
+  //   1.3-1.6 → 15 (ideal range — fat premium, normal event risk)
+  //   1.6-1.9 → 10 (elevated premium, slightly higher event risk)
   //   1.2-1.3 → 8  (modest)
-  //   > 1.9   → 5  (market pricing a real move)
-  //   < 1.2   → 0
+  //   ≥ 1.9   → 5  (very elevated premium, verify strike safety)
+  //   < 1.2   → 0  (thin premium)
   const weeklyIv = stageThreeResult.details.weeklyIv ?? null;
   const realizedVol = stageThreeResult.details.realizedVol30d ?? null;
   const ivEdge =
@@ -1116,17 +1121,21 @@ export function calculateThreeLayerGrade(
   const reasonParts: string[] = [];
   // Lead with POP + strike: the dominant signal for a 2x-EM CSP strategy.
   const popPct = (probabilityOfProfit * 100).toFixed(0);
+  // Framing notes: IV edge > 1.9 still only scores 5 pts (high IV
+  // correlates with larger realized moves) but from a seller's
+  // perspective it's fat premium to collect — we describe it as a
+  // tradeoff, not a warning.
   const ivEdgeBand =
     ivEdge >= 1.3 && ivEdge < 1.6
-      ? "in ideal range"
+      ? "ideal range — fat premium, normal event risk"
       : ivEdge >= 1.6 && ivEdge < 1.9
-        ? "slightly elevated but within range"
+        ? "elevated premium — good for sellers, slightly higher event risk"
         : ivEdge >= 1.2 && ivEdge < 1.3
-          ? "modest"
+          ? "modest premium"
           : ivEdge >= 1.9
-            ? "market pricing a real move"
+            ? "very elevated premium — excellent collection, verify strike safety"
             : ivEdge > 0
-              ? "below crush-setup threshold"
+              ? "thin premium — limited crush opportunity"
               : "n/a";
   reasonParts.push(
     `${popPct}% probability of profit at $${strike.toFixed(2)} strike. IV edge ${ivEdge.toFixed(2)} ${ivEdgeBand}. Opp ${opportunityGrade}, crush ${crushGrade} — industry ${industryGrade} (${industryScore.toFixed(0)}/60).`,
