@@ -17,7 +17,7 @@ type FinnhubCalendarEntry = {
   epsActual?: number | null;
 };
 
-async function finnhubGet<T>(path: string, params: Record<string, string | number | undefined> = {}): Promise<T> {
+export async function finnhubGet<T>(path: string, params: Record<string, string | number | undefined> = {}): Promise<T> {
   if (!FINNHUB_KEY) throw new Error("FINNHUB_API_KEY is not set");
   const url = new URL(`${FINNHUB_BASE}${path}`);
   for (const [k, v] of Object.entries(params)) {

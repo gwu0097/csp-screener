@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { LineChart, BookOpen, Briefcase, Settings, Star } from "lucide-react";
+import { BookMarked, LineChart, BookOpen, Briefcase, Settings, Star } from "lucide-react";
 
 export function Nav() {
   return (
@@ -22,6 +22,9 @@ export function Nav() {
             </Link>
             <Link href="/watchlist" className="inline-flex items-center gap-1 hover:text-foreground">
               <Star className="h-4 w-4" /> Watchlist
+            </Link>
+            <Link href="/encyclopedia" className="inline-flex items-center gap-1 hover:text-foreground">
+              <BookMarked className="h-4 w-4" /> Encyclopedia
             </Link>
             <Link href="/settings" className="inline-flex items-center gap-1 hover:text-foreground">
               <Settings className="h-4 w-4" /> Settings
