@@ -18,11 +18,12 @@
 //     screener has actually watched a position through earnings.
 //   - sector_performance_pct, analyst_sentiment, news_summary (Phase 2).
 import { createServerClient } from "@/lib/supabase";
-import { finnhubGet } from "@/lib/earnings";
+import { finnhubGet, getTodayEarnings } from "@/lib/earnings";
 import { getHistoricalPrices } from "@/lib/yahoo";
 import {
   getOptionsChain,
   isSchwabConnected,
+  type SchwabOptionContract,
   type SchwabOptionsChain,
 } from "@/lib/schwab";
 
@@ -549,4 +550,841 @@ export async function updateEncyclopedia(symbol: string): Promise<UpdateSummary>
     updatedRecords,
     isComplete: (recalculated?.total_earnings_records ?? 0) > 0,
   };
+}
+
+// ---------- Phase 2A: live capture + backfill ----------
+//
+// Design principle: every capture function is idempotent. Callers can
+// safely invoke them every Run Analysis — they gate on the relevant
+// column being NULL and bail out if data already exists. Nothing
+// overwrites. Partial writes are forbidden — either we have all the
+// fields for a given stage or we skip the row entirely.
+
+type HistoryRow = {
+  symbol: string;
+  earnings_date: string;
+  price_before: number | null;
+  price_after: number | null;
+  implied_move_pct: number | null;
+  two_x_em_strike: number | null;
+  iv_before: number | null;
+  iv_after: number | null;
+  actual_move_pct: number | null;
+  move_ratio: number | null;
+  iv_crushed: boolean | null;
+  iv_crush_magnitude: number | null;
+  breached_two_x_em: boolean | null;
+  price_at_expiry: number | null;
+  recovered_by_expiry: boolean | null;
+  perplexity_pulled_at: string | null;
+  analyst_sentiment: string | null;
+  news_summary: string | null;
+  eps_estimate: number | null;
+  eps_actual: number | null;
+  eps_surprise_pct: number | null;
+  revenue_estimate: number | null;
+  revenue_actual: number | null;
+  revenue_surprise_pct: number | null;
+};
+
+async function readHistoryRow(
+  symbol: string,
+  earningsDate: string,
+): Promise<HistoryRow | null> {
+  const sb = createServerClient();
+  const r = await sb
+    .from("earnings_history")
+    .select("*")
+    .eq("symbol", symbol.toUpperCase())
+    .eq("earnings_date", earningsDate)
+    .limit(1);
+  if (r.error) return null;
+  const rows = (r.data ?? []) as HistoryRow[];
+  return rows[0] ?? null;
+}
+
+async function upsertHistoryStub(
+  symbol: string,
+  earningsDate: string,
+): Promise<void> {
+  const sb = createServerClient();
+  const existing = await readHistoryRow(symbol, earningsDate);
+  if (existing) return;
+  await sb
+    .from("earnings_history")
+    .upsert(
+      {
+        symbol: symbol.toUpperCase(),
+        earnings_date: earningsDate,
+        data_source: "encyclopedia-live",
+        is_complete: false,
+      },
+      { onConflict: "symbol,earnings_date" },
+    );
+}
+
+// Picks the strike closest to spot and returns the ATM call + ATM put
+// contract objects for a given expiry key match. Returns null if either
+// leg is missing. Shares the strike-lookup pattern used by lib/snapshots.ts.
+function atmLegs(
+  chain: SchwabOptionsChain,
+  expiryIso: string,
+): { call: SchwabOptionContract; put: SchwabOptionContract; strike: number; spot: number } | null {
+  const spot =
+    chain.underlying?.mark ??
+    chain.underlying?.last ??
+    chain.underlyingPrice ??
+    null;
+  if (!spot || spot <= 0) return null;
+  const putKeys = Object.keys(chain.putExpDateMap ?? {});
+  const callKeys = Object.keys(chain.callExpDateMap ?? {});
+  const putKey = putKeys.find((k) => k.startsWith(expiryIso));
+  const callKey = callKeys.find((k) => k.startsWith(expiryIso));
+  if (!putKey || !callKey) return null;
+  const puts = chain.putExpDateMap[putKey];
+  const calls = chain.callExpDateMap[callKey];
+  const strikes = Object.keys(puts)
+    .map((k) => Number(k))
+    .filter((n) => Number.isFinite(n));
+  if (strikes.length === 0) return null;
+  const atm = strikes.reduce((best, k) =>
+    Math.abs(k - spot) < Math.abs(best - spot) ? k : best,
+  );
+  const putArr = puts[String(atm)] ?? puts[atm.toFixed(1)] ?? puts[atm.toFixed(2)] ?? [];
+  const callArr = calls[String(atm)] ?? calls[atm.toFixed(1)] ?? calls[atm.toFixed(2)] ?? [];
+  const put = putArr[0];
+  const call = callArr[0];
+  if (!put || !call) return null;
+  return { call, put, strike: atm, spot };
+}
+
+// ---------- T0: pre-earnings capture ----------
+
+export type T0Result =
+  | {
+      captured: true;
+      implied_move_pct: number;
+      iv_before: number;
+      price_before: number;
+      two_x_em_strike: number;
+    }
+  | { captured: false; skipped: true; reason: string };
+
+export async function captureEarningsT0(
+  symbol: string,
+  earningsDate: string,
+): Promise<T0Result> {
+  const sym = symbol.toUpperCase();
+  await upsertHistoryStub(sym, earningsDate);
+  const row = await readHistoryRow(sym, earningsDate);
+  if (!row) return { captured: false, skipped: true, reason: "row_not_found" };
+  if (row.implied_move_pct !== null) {
+    return { captured: false, skipped: true, reason: "already_captured" };
+  }
+
+  const connected = await isSchwabConnected()
+    .then((r) => r.connected)
+    .catch(() => false);
+  if (!connected) {
+    return { captured: false, skipped: true, reason: "schwab_disconnected" };
+  }
+
+  // Nearest weekly expiry on or after earningsDate+1. For an AMC today,
+  // that lands on the same-week Friday; for a pre-weekend announcement,
+  // the following Friday.
+  const expiryIso = nextFridayOnOrAfterIso(addDaysIso(earningsDate, 1));
+  let chain: SchwabOptionsChain;
+  try {
+    chain = await getOptionsChain(sym, expiryIso);
+  } catch (e) {
+    console.warn(
+      `[encyclopedia:T0] chain(${sym}, ${expiryIso}) failed: ${e instanceof Error ? e.message : e}`,
+    );
+    return { captured: false, skipped: true, reason: "chain_fetch_failed" };
+  }
+
+  const legs = atmLegs(chain, expiryIso);
+  if (!legs) {
+    return { captured: false, skipped: true, reason: "no_options_data" };
+  }
+  const callMid = legs.call.mark;
+  const putMid = legs.put.mark;
+  if (!Number.isFinite(callMid) || !Number.isFinite(putMid)) {
+    return { captured: false, skipped: true, reason: "no_options_data" };
+  }
+  const price_before = legs.spot;
+  const straddle = callMid + putMid;
+  const implied_move_pct = straddle / price_before;
+  // Schwab returns volatility as a percent (e.g. 45.6). Store decimal to
+  // match every other *_pct / iv field convention in the project.
+  const callIv = Number.isFinite(legs.call.volatility) ? legs.call.volatility / 100 : null;
+  const putIv = Number.isFinite(legs.put.volatility) ? legs.put.volatility / 100 : null;
+  const iv_before =
+    callIv !== null && putIv !== null
+      ? (callIv + putIv) / 2
+      : callIv ?? putIv ?? null;
+  if (iv_before === null) {
+    return { captured: false, skipped: true, reason: "no_iv_data" };
+  }
+  const two_x_em_strike = price_before * (1 - 2 * implied_move_pct);
+
+  const sb = createServerClient();
+  const up = await sb
+    .from("earnings_history")
+    .update({
+      price_before,
+      implied_move_pct,
+      iv_before,
+      two_x_em_strike,
+    })
+    .eq("symbol", sym)
+    .eq("earnings_date", earningsDate);
+  if (up.error) {
+    console.warn(`[encyclopedia:T0] update(${sym}, ${earningsDate}) failed: ${up.error.message}`);
+    return { captured: false, skipped: true, reason: `db_error:${up.error.message}` };
+  }
+  return { captured: true, implied_move_pct, iv_before, price_before, two_x_em_strike };
+}
+
+// ---------- T1: post-earnings capture ----------
+
+export type T1Result =
+  | {
+      captured: true;
+      actual_move_pct: number;
+      move_ratio: number;
+      iv_crushed: boolean;
+      iv_crush_magnitude: number;
+      breached_two_x_em: boolean;
+    }
+  | { captured: false; skipped: true; reason: string };
+
+export async function captureEarningsT1(
+  symbol: string,
+  earningsDate: string,
+): Promise<T1Result> {
+  const sym = symbol.toUpperCase();
+  const row = await readHistoryRow(sym, earningsDate);
+  if (!row) return { captured: false, skipped: true, reason: "row_not_found" };
+  if (row.iv_after !== null) {
+    return { captured: false, skipped: true, reason: "already_captured" };
+  }
+  if (
+    row.price_before === null ||
+    row.implied_move_pct === null ||
+    row.iv_before === null ||
+    row.two_x_em_strike === null
+  ) {
+    return { captured: false, skipped: true, reason: "no_t0_data" };
+  }
+
+  const connected = await isSchwabConnected()
+    .then((r) => r.connected)
+    .catch(() => false);
+  if (!connected) {
+    return { captured: false, skipped: true, reason: "schwab_disconnected" };
+  }
+
+  const expiryIso = nextFridayOnOrAfterIso(addDaysIso(earningsDate, 1));
+  let chain: SchwabOptionsChain;
+  try {
+    chain = await getOptionsChain(sym, expiryIso);
+  } catch (e) {
+    console.warn(
+      `[encyclopedia:T1] chain(${sym}, ${expiryIso}) failed: ${e instanceof Error ? e.message : e}`,
+    );
+    return { captured: false, skipped: true, reason: "chain_fetch_failed" };
+  }
+  const legs = atmLegs(chain, expiryIso);
+  if (!legs) {
+    return { captured: false, skipped: true, reason: "no_options_data" };
+  }
+  const price_after = legs.spot;
+  const callIv = Number.isFinite(legs.call.volatility) ? legs.call.volatility / 100 : null;
+  const putIv = Number.isFinite(legs.put.volatility) ? legs.put.volatility / 100 : null;
+  const iv_after =
+    callIv !== null && putIv !== null
+      ? (callIv + putIv) / 2
+      : callIv ?? putIv ?? null;
+  if (iv_after === null) {
+    return { captured: false, skipped: true, reason: "no_iv_data" };
+  }
+
+  const price_before = row.price_before;
+  const implied_move_pct = row.implied_move_pct;
+  const iv_before = row.iv_before;
+  const two_x_em_strike = row.two_x_em_strike;
+  const actual_move_pct = (price_after - price_before) / price_before;
+  const move_ratio = Math.abs(actual_move_pct) / implied_move_pct;
+  const iv_crushed = iv_after < iv_before * 0.7;
+  const iv_crush_magnitude = (iv_before - iv_after) / iv_before;
+  const breached_two_x_em = price_after < two_x_em_strike;
+
+  const sb = createServerClient();
+  const up = await sb
+    .from("earnings_history")
+    .update({
+      price_after,
+      iv_after,
+      actual_move_pct,
+      move_ratio,
+      iv_crushed,
+      iv_crush_magnitude,
+      breached_two_x_em,
+      is_complete: true,
+    })
+    .eq("symbol", sym)
+    .eq("earnings_date", earningsDate);
+  if (up.error) {
+    console.warn(`[encyclopedia:T1] update(${sym}, ${earningsDate}) failed: ${up.error.message}`);
+    return { captured: false, skipped: true, reason: `db_error:${up.error.message}` };
+  }
+  return {
+    captured: true,
+    actual_move_pct,
+    move_ratio,
+    iv_crushed,
+    iv_crush_magnitude,
+    breached_two_x_em,
+  };
+}
+
+// ---------- Price at expiry backfill ----------
+
+// Quarter-end dates from Phase 1's /stock/earnings ingestion always land
+// on the last day of Mar/Jun/Sep/Dec. Those aren't announcement dates, so
+// "next Friday after earnings" computes a wildly wrong expiry. Skip them.
+function isQuarterEndDate(iso: string): boolean {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
+  if (!m) return false;
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  if (![3, 6, 9, 12].includes(month)) return false;
+  // Last day of Mar/Jun/Sep/Dec: 31 / 30 / 30 / 31.
+  return (month === 3 && day === 31) ||
+    (month === 6 && day === 30) ||
+    (month === 9 && day === 30) ||
+    (month === 12 && day === 31);
+}
+
+export type ExpiryResult =
+  | {
+      captured: true;
+      price_at_expiry: number;
+      recovered_by_expiry: boolean | null;
+    }
+  | { captured: false; skipped: true; reason: string };
+
+export async function ensurePriceAtExpiry(
+  symbol: string,
+  earningsDate: string,
+): Promise<ExpiryResult> {
+  const sym = symbol.toUpperCase();
+  const row = await readHistoryRow(sym, earningsDate);
+  if (!row) return { captured: false, skipped: true, reason: "row_not_found" };
+  if (row.price_at_expiry !== null) {
+    return { captured: false, skipped: true, reason: "already_captured" };
+  }
+  if (isQuarterEndDate(earningsDate)) {
+    // Phase 1 legacy row keyed by fiscal quarter end, not announcement.
+    // Computing Friday-after would give a meaningless date.
+    return { captured: false, skipped: true, reason: "quarter_end_legacy_row" };
+  }
+
+  const expiryIso = nextFridayOnOrAfterIso(earningsDate);
+  if (expiryIso > todayIso()) {
+    return { captured: false, skipped: true, reason: "not_yet_expired" };
+  }
+
+  // Widen window a few days each side so holidays/weekends don't leave us
+  // with zero bars to pick from.
+  const fromD = new Date(addDaysIso(expiryIso, -5) + "T00:00:00Z");
+  const toD = new Date(addDaysIso(expiryIso, 5) + "T00:00:00Z");
+  const bars = await getHistoricalPrices(sym, fromD, toD);
+  if (bars.length === 0) {
+    return { captured: false, skipped: true, reason: "yahoo_no_bars" };
+  }
+  const toIso = (d: unknown): string => {
+    if (d instanceof Date) return d.toISOString().slice(0, 10);
+    if (typeof d === "string") return d.slice(0, 10);
+    return "";
+  };
+  const normalized = bars
+    .map((b) => ({
+      iso: toIso((b as { date?: unknown }).date),
+      close: Number((b as { close?: unknown }).close ?? 0),
+    }))
+    .filter((b) => b.iso && Number.isFinite(b.close) && b.close > 0)
+    .sort((a, b) => a.iso.localeCompare(b.iso));
+  let price_at_expiry: number | null = null;
+  for (const b of normalized) {
+    if (b.iso <= expiryIso) price_at_expiry = b.close;
+    else break;
+  }
+  if (price_at_expiry === null) {
+    return { captured: false, skipped: true, reason: "no_close_on_or_before_expiry" };
+  }
+
+  const recovered_by_expiry =
+    row.two_x_em_strike !== null ? price_at_expiry > row.two_x_em_strike : null;
+
+  const sb = createServerClient();
+  const up = await sb
+    .from("earnings_history")
+    .update({
+      price_at_expiry,
+      recovered_by_expiry,
+    })
+    .eq("symbol", sym)
+    .eq("earnings_date", earningsDate);
+  if (up.error) {
+    console.warn(`[encyclopedia:expiry] update(${sym}, ${earningsDate}) failed: ${up.error.message}`);
+    return { captured: false, skipped: true, reason: `db_error:${up.error.message}` };
+  }
+  return { captured: true, price_at_expiry, recovered_by_expiry };
+}
+
+// ---------- Perplexity narrative backfill ----------
+
+export type PerplexityPayload = {
+  analyst_sentiment: "positive" | "negative" | "mixed" | "neutral";
+  primary_reason_for_move: string;
+  sector_context: string;
+  guidance_assessment: "positive" | "negative" | "neutral" | "not_mentioned";
+  key_risks: string[];
+  recovery_likelihood: "high" | "medium" | "low";
+  summary: string;
+};
+
+export type PerplexityResult =
+  | { captured: true; sentiment: string }
+  | { captured: false; skipped: true; reason: string };
+
+const PERPLEXITY_URL = "https://api.perplexity.ai/chat/completions";
+
+function buildEncyclopediaPrompt(symbol: string, row: HistoryRow): string {
+  const lines: string[] = [`${symbol} reported earnings on ${row.earnings_date}.`];
+  if (row.eps_actual !== null && row.eps_estimate !== null) {
+    const surprisePct =
+      row.eps_surprise_pct !== null ? (row.eps_surprise_pct * 100).toFixed(1) : "?";
+    lines.push(
+      `EPS: ${row.eps_actual} vs ${row.eps_estimate} estimate (${surprisePct}% surprise)`,
+    );
+  }
+  if (row.revenue_actual !== null && row.revenue_estimate !== null) {
+    const revSurprise =
+      row.revenue_surprise_pct !== null ? (row.revenue_surprise_pct * 100).toFixed(1) : "?";
+    lines.push(
+      `Revenue: ${row.revenue_actual} vs ${row.revenue_estimate} estimate (${revSurprise}% surprise)`,
+    );
+  }
+  if (row.actual_move_pct !== null) {
+    lines.push(`Stock reaction: ${(row.actual_move_pct * 100).toFixed(2)}% overnight`);
+  }
+  lines.push("");
+  lines.push("Research:");
+  lines.push("1. What did analysts say about these earnings? Upgrades/downgrades/price targets.");
+  lines.push("2. Primary reason for the stock's reaction.");
+  lines.push("3. Was this company-specific or sector-wide?");
+  lines.push("4. Any key risks or positive catalysts mentioned?");
+  lines.push("5. Guidance commentary if applicable.");
+  lines.push("");
+  lines.push("Return ONLY a JSON object, no markdown:");
+  lines.push(
+    `{"analyst_sentiment":"positive|negative|mixed|neutral","primary_reason_for_move":"one-sentence explanation","sector_context":"one sentence on peers and sector","guidance_assessment":"positive|negative|neutral|not_mentioned","key_risks":["risk1","risk2"],"recovery_likelihood":"high|medium|low","summary":"2-3 sentence analyst digest"}`,
+  );
+  return lines.join("\n");
+}
+
+function unwrapJsonBlock(raw: string): string {
+  return raw.replace(/```(?:json)?/gi, "").replace(/```/g, "").trim();
+}
+
+// Parse cascade: direct → fence-strip → regex object match. Mirrors the
+// approach used by the ToS screenshot parser — Perplexity responses are
+// mostly clean but the occasional prose-wrapped response needs extraction.
+function extractPerplexityJson(raw: string): unknown | null {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    /* fallthrough */
+  }
+  const unwrapped = unwrapJsonBlock(raw);
+  try {
+    return JSON.parse(unwrapped);
+  } catch {
+    /* fallthrough */
+  }
+  const match = unwrapped.match(/\{[\s\S]*\}/);
+  if (match) {
+    try {
+      return JSON.parse(match[0]);
+    } catch {
+      /* fallthrough */
+    }
+  }
+  return null;
+}
+
+function normalizePerplexityPayload(obj: unknown): PerplexityPayload | null {
+  if (!obj || typeof obj !== "object") return null;
+  const o = obj as Record<string, unknown>;
+  const sentiment = o.analyst_sentiment;
+  const validSentiments = ["positive", "negative", "mixed", "neutral"] as const;
+  const validGuidance = ["positive", "negative", "neutral", "not_mentioned"] as const;
+  const validRecovery = ["high", "medium", "low"] as const;
+  const coerceEnum = <T extends string>(v: unknown, valid: readonly T[], fallback: T): T =>
+    typeof v === "string" && (valid as readonly string[]).includes(v) ? (v as T) : fallback;
+  const risksRaw = Array.isArray(o.key_risks) ? (o.key_risks as unknown[]) : [];
+  const key_risks = risksRaw.filter((x): x is string => typeof x === "string").slice(0, 10);
+  const str = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
+  return {
+    analyst_sentiment: coerceEnum(sentiment, validSentiments, "neutral"),
+    primary_reason_for_move: str(o.primary_reason_for_move),
+    sector_context: str(o.sector_context),
+    guidance_assessment: coerceEnum(o.guidance_assessment, validGuidance, "not_mentioned"),
+    key_risks,
+    recovery_likelihood: coerceEnum(o.recovery_likelihood, validRecovery, "medium"),
+    summary: str(o.summary),
+  };
+}
+
+export async function ensurePerplexityData(
+  symbol: string,
+  earningsDate: string,
+): Promise<PerplexityResult> {
+  const sym = symbol.toUpperCase();
+  const row = await readHistoryRow(sym, earningsDate);
+  if (!row) return { captured: false, skipped: true, reason: "row_not_found" };
+  if (row.perplexity_pulled_at !== null) {
+    return { captured: false, skipped: true, reason: "already_captured" };
+  }
+
+  const key = process.env.PERPLEXITY_API_KEY;
+  if (!key) return { captured: false, skipped: true, reason: "no_api_key" };
+
+  const prompt = buildEncyclopediaPrompt(sym, row);
+  let res: Response;
+  try {
+    res = await fetch(PERPLEXITY_URL, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "sonar",
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0,
+        max_tokens: 600,
+      }),
+      cache: "no-store",
+    });
+  } catch (e) {
+    console.warn(
+      `[encyclopedia:perplexity] network error ${sym}/${earningsDate}: ${e instanceof Error ? e.message : e}`,
+    );
+    return { captured: false, skipped: true, reason: "network_error" };
+  }
+  if (!res.ok) {
+    console.warn(
+      `[encyclopedia:perplexity] ${sym}/${earningsDate} HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`,
+    );
+    return { captured: false, skipped: true, reason: `http_${res.status}` };
+  }
+
+  let parsed: unknown;
+  try {
+    const json = (await res.json()) as {
+      choices?: Array<{ message?: { content?: string } }>;
+    };
+    const text = json.choices?.[0]?.message?.content ?? "";
+    parsed = extractPerplexityJson(text);
+  } catch {
+    return { captured: false, skipped: true, reason: "response_parse_failed" };
+  }
+  const payload = normalizePerplexityPayload(parsed);
+  if (!payload) {
+    return { captured: false, skipped: true, reason: "payload_invalid" };
+  }
+
+  const sb = createServerClient();
+  const up = await sb
+    .from("earnings_history")
+    .update({
+      analyst_sentiment: payload.analyst_sentiment,
+      // Store the full structured payload as a JSON string so future
+      // features can parse out primary_reason / key_risks / etc.
+      news_summary: JSON.stringify(payload),
+      perplexity_pulled_at: new Date().toISOString(),
+    })
+    .eq("symbol", sym)
+    .eq("earnings_date", earningsDate);
+  if (up.error) {
+    console.warn(
+      `[encyclopedia:perplexity] update(${sym}, ${earningsDate}) failed: ${up.error.message}`,
+    );
+    return { captured: false, skipped: true, reason: `db_error:${up.error.message}` };
+  }
+  return { captured: true, sentiment: payload.analyst_sentiment };
+}
+
+// ---------- Orchestrator ----------
+
+export type MaintenanceReport = {
+  symbolsProcessed: number;
+  t0Captured: Array<{ symbol: string; earnings_date: string }>;
+  t1Captured: Array<{ symbol: string; earnings_date: string }>;
+  expiryBackfilled: Array<{ symbol: string; earnings_date: string }>;
+  perplexityBackfilled: Array<{ symbol: string; earnings_date: string }>;
+  errors: Array<{ symbol: string; earnings_date: string | null; stage: string; reason: string }>;
+};
+
+// Builds the set of symbols relevant to encyclopedia maintenance:
+//   - open positions
+//   - today's tracked_tickers
+//   - every symbol already in the encyclopedia
+async function buildRelevantSymbols(): Promise<Set<string>> {
+  const sb = createServerClient();
+  const result = new Set<string>();
+  const [opens, tracked, encs] = await Promise.all([
+    sb.from("positions").select("symbol").eq("status", "open"),
+    sb.from("tracked_tickers").select("symbol").eq("screened_date", todayIso()),
+    sb.from("stock_encyclopedia").select("symbol"),
+  ]);
+  for (const r of (opens.data ?? []) as Array<{ symbol: string }>) {
+    result.add(r.symbol.toUpperCase());
+  }
+  for (const r of (tracked.data ?? []) as Array<{ symbol: string }>) {
+    result.add(r.symbol.toUpperCase());
+  }
+  for (const r of (encs.data ?? []) as Array<{ symbol: string }>) {
+    result.add(r.symbol.toUpperCase());
+  }
+  return result;
+}
+
+const PERPLEXITY_GAP_MS = 1000;
+const ENCYCLOPEDIA_STALENESS_DAYS = 7;
+
+export async function runEncyclopediaMaintenance(): Promise<MaintenanceReport> {
+  const report: MaintenanceReport = {
+    symbolsProcessed: 0,
+    t0Captured: [],
+    t1Captured: [],
+    expiryBackfilled: [],
+    perplexityBackfilled: [],
+    errors: [],
+  };
+
+  const relevant = await buildRelevantSymbols();
+  report.symbolsProcessed = relevant.size;
+  if (relevant.size === 0) return report;
+
+  const sb = createServerClient();
+  const todayStr = todayIso();
+
+  // 1. Refresh Phase-1 ingestion for any stale symbols so Perplexity has
+  // EPS/revenue context to enrich the prompt. Stale = never pulled or
+  // >7d since last pull.
+  const encRes = await sb
+    .from("stock_encyclopedia")
+    .select("symbol,last_historical_pull_date")
+    .in("symbol", Array.from(relevant));
+  const encMap = new Map(
+    ((encRes.data ?? []) as Array<{ symbol: string; last_historical_pull_date: string | null }>).map(
+      (r) => [r.symbol, r.last_historical_pull_date],
+    ),
+  );
+  for (const sym of Array.from(relevant)) {
+    const lastPull = encMap.get(sym) ?? null;
+    const stale =
+      !lastPull ||
+      (new Date(todayStr + "T00:00:00Z").getTime() -
+        new Date(lastPull + "T00:00:00Z").getTime()) /
+        86400000 >=
+        ENCYCLOPEDIA_STALENESS_DAYS;
+    if (stale) {
+      try {
+        await updateEncyclopedia(sym);
+      } catch (e) {
+        report.errors.push({
+          symbol: sym,
+          earnings_date: null,
+          stage: "updateEncyclopedia",
+          reason: e instanceof Error ? e.message : String(e),
+        });
+      }
+    }
+  }
+
+  // 2. T0 pass — fires for today-AMC / tomorrow-BMO announcements in
+  // relevant symbols. captureEarningsT0 inserts the stub row if needed.
+  let todayAnnouncements: Array<{ symbol: string; date: string }> = [];
+  try {
+    const list = await getTodayEarnings();
+    todayAnnouncements = list.map((e) => ({ symbol: e.symbol.toUpperCase(), date: e.date }));
+  } catch (e) {
+    report.errors.push({
+      symbol: "",
+      earnings_date: null,
+      stage: "getTodayEarnings",
+      reason: e instanceof Error ? e.message : String(e),
+    });
+  }
+  for (const a of todayAnnouncements) {
+    if (!relevant.has(a.symbol)) continue;
+    try {
+      const r = await captureEarningsT0(a.symbol, a.date);
+      if (r.captured) report.t0Captured.push({ symbol: a.symbol, earnings_date: a.date });
+      else if (
+        r.reason &&
+        !["already_captured", "schwab_disconnected", "no_options_data", "no_iv_data", "chain_fetch_failed"].includes(
+          r.reason,
+        )
+      ) {
+        // Silent skip on the expected after-hours / weekend noise; only
+        // real anomalies (db errors, etc.) get logged as errors.
+        report.errors.push({
+          symbol: a.symbol,
+          earnings_date: a.date,
+          stage: "T0",
+          reason: r.reason,
+        });
+      }
+    } catch (e) {
+      report.errors.push({
+        symbol: a.symbol,
+        earnings_date: a.date,
+        stage: "T0",
+        reason: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+
+  // 3. T1 pass — rows where T0 ran in the last 3 days but T1 hasn't.
+  // REST wrapper has no .not() helper, so we fetch the date window +
+  // null-iv_after filter and reject missing-implied_move_pct in memory.
+  const threeDaysAgo = addDaysIso(todayStr, -3);
+  const t1Raw = await sb
+    .from("earnings_history")
+    .select("symbol,earnings_date,implied_move_pct")
+    .in("symbol", Array.from(relevant))
+    .gte("earnings_date", threeDaysAgo)
+    .lte("earnings_date", todayStr)
+    .is("iv_after", null);
+  const t1Candidates = ((t1Raw.data ?? []) as Array<{
+    symbol: string;
+    earnings_date: string;
+    implied_move_pct: number | null;
+  }>).filter((r) => r.implied_move_pct !== null);
+  for (const c of t1Candidates) {
+    try {
+      const r = await captureEarningsT1(c.symbol, c.earnings_date);
+      if (r.captured) report.t1Captured.push(c);
+      else if (
+        r.reason &&
+        !["already_captured", "schwab_disconnected", "no_options_data", "no_iv_data", "chain_fetch_failed"].includes(
+          r.reason,
+        )
+      ) {
+        report.errors.push({
+          symbol: c.symbol,
+          earnings_date: c.earnings_date,
+          stage: "T1",
+          reason: r.reason,
+        });
+      }
+    } catch (e) {
+      report.errors.push({
+        symbol: c.symbol,
+        earnings_date: c.earnings_date,
+        stage: "T1",
+        reason: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+
+  // 4. Price-at-expiry — every row missing it. ensurePriceAtExpiry
+  // internally skips not-yet-expired + quarter-end legacy rows.
+  const expiryCandidates = await sb
+    .from("earnings_history")
+    .select("symbol,earnings_date")
+    .in("symbol", Array.from(relevant))
+    .is("price_at_expiry", null);
+  for (const c of (expiryCandidates.data ?? []) as Array<{ symbol: string; earnings_date: string }>) {
+    try {
+      const r = await ensurePriceAtExpiry(c.symbol, c.earnings_date);
+      if (r.captured) report.expiryBackfilled.push(c);
+      else if (
+        r.reason &&
+        !["already_captured", "not_yet_expired", "quarter_end_legacy_row"].includes(r.reason)
+      ) {
+        report.errors.push({
+          symbol: c.symbol,
+          earnings_date: c.earnings_date,
+          stage: "expiry",
+          reason: r.reason,
+        });
+      }
+    } catch (e) {
+      report.errors.push({
+        symbol: c.symbol,
+        earnings_date: c.earnings_date,
+        stage: "expiry",
+        reason: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+
+  // 5. Perplexity backfill — 1s gap between calls per spec.
+  const pplxCandidates = await sb
+    .from("earnings_history")
+    .select("symbol,earnings_date")
+    .in("symbol", Array.from(relevant))
+    .is("perplexity_pulled_at", null);
+  for (const c of (pplxCandidates.data ?? []) as Array<{ symbol: string; earnings_date: string }>) {
+    try {
+      const r = await ensurePerplexityData(c.symbol, c.earnings_date);
+      if (r.captured) report.perplexityBackfilled.push(c);
+      else if (r.reason && r.reason !== "already_captured") {
+        report.errors.push({
+          symbol: c.symbol,
+          earnings_date: c.earnings_date,
+          stage: "perplexity",
+          reason: r.reason,
+        });
+      }
+    } catch (e) {
+      report.errors.push({
+        symbol: c.symbol,
+        earnings_date: c.earnings_date,
+        stage: "perplexity",
+        reason: e instanceof Error ? e.message : String(e),
+      });
+    }
+    await sleep(PERPLEXITY_GAP_MS);
+  }
+
+  // 6. Recompute rollup stats for every touched symbol.
+  const touched = new Set<string>();
+  for (const x of [
+    ...report.t0Captured,
+    ...report.t1Captured,
+    ...report.expiryBackfilled,
+    ...report.perplexityBackfilled,
+  ]) {
+    touched.add(x.symbol);
+  }
+  for (const sym of Array.from(touched)) {
+    try {
+      await recalculateStats(sym);
+    } catch (e) {
+      report.errors.push({
+        symbol: sym,
+        earnings_date: null,
+        stage: "recalculateStats",
+        reason: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+
+  return report;
 }

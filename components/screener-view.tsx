@@ -505,6 +505,7 @@ export function ScreenerView({ connected }: Props) {
         scoredCount?: number;
         trackedUpserted?: number;
         snapshotsWritten?: number;
+        encyclopediaUpdates?: number;
       };
       const byKey = new Map(json.results.map((r) => [`${r.symbol}|${r.earningsDate}`, r]));
       const next = results.map((r) => byKey.get(`${r.symbol}|${r.earningsDate}`) ?? r);
@@ -524,8 +525,9 @@ export function ScreenerView({ connected }: Props) {
       const scored = json.scoredCount ?? json.results.length;
       const trackedCount = json.trackedUpserted ?? 0;
       const snapshots = json.snapshotsWritten ?? 0;
+      const encyclopedia = json.encyclopediaUpdates ?? 0;
       setMessage(
-        `Analysis complete ✓\n📊 ${scored} candidates scored\n🎯 ${trackedCount} tracked tickers saved\n📸 ${snapshots} position snapshots taken`,
+        `Analysis complete ✓\n📊 ${scored} candidates scored\n🎯 ${trackedCount} tracked tickers saved\n📸 ${snapshots} position snapshots taken\n📚 ${encyclopedia} encyclopedia updates`,
       );
       setStatus("idle");
     } catch (e) {

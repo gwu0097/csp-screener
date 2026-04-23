@@ -12,6 +12,7 @@ import { getMarketContext } from "@/lib/market";
 import { createServerClient } from "@/lib/supabase";
 import { type Fill } from "@/lib/positions";
 import { buildSnapshotRow } from "@/lib/snapshots";
+import { runEncyclopediaMaintenance } from "@/lib/encyclopedia";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -242,8 +243,30 @@ export async function POST(req: NextRequest) {
     writePositionSnapshots(),
   ]);
 
+  // Encyclopedia maintenance: T0/T1 capture for today-AMC / tomorrow-BMO
+  // announcements on relevant symbols, price-at-expiry backfill, and
+  // Perplexity narrative backfill. Every step is idempotent — skips rows
+  // that already have the target column populated. Errors surface in the
+  // report but never block the analyze response.
+  let encyclopediaUpdates = 0;
+  try {
+    const report = await runEncyclopediaMaintenance();
+    encyclopediaUpdates =
+      report.t0Captured.length +
+      report.t1Captured.length +
+      report.expiryBackfilled.length +
+      report.perplexityBackfilled.length;
+    console.log(
+      `[analyze:encyclopedia] symbols=${report.symbolsProcessed} t0=${report.t0Captured.length} t1=${report.t1Captured.length} expiry=${report.expiryBackfilled.length} perplexity=${report.perplexityBackfilled.length} errors=${report.errors.length}`,
+    );
+  } catch (e) {
+    console.warn(
+      `[analyze:encyclopedia] runEncyclopediaMaintenance threw: ${e instanceof Error ? e.message : e}`,
+    );
+  }
+
   console.log(
-    `[analyze] ${results.length} candidates (${scoredCount} scored), tracked_upserted=${trackedResult.upserted}, snapshots_written=${snapshotResult.written}, errors: tracked=${trackedResult.errors.length} snapshots=${snapshotResult.errors.length}`,
+    `[analyze] ${results.length} candidates (${scoredCount} scored), tracked_upserted=${trackedResult.upserted}, snapshots_written=${snapshotResult.written}, encyclopedia_updates=${encyclopediaUpdates}, errors: tracked=${trackedResult.errors.length} snapshots=${snapshotResult.errors.length}`,
   );
 
   return NextResponse.json({
@@ -253,5 +276,6 @@ export async function POST(req: NextRequest) {
     scoredCount,
     trackedUpserted: trackedResult.upserted,
     snapshotsWritten: snapshotResult.written,
+    encyclopediaUpdates,
   });
 }

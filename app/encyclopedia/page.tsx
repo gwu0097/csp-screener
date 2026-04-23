@@ -42,8 +42,42 @@ type EarningsHistory = {
   breached_two_x_em: boolean | null;
   recovered_by_expiry: boolean | null;
   analyst_sentiment: string | null;
+  news_summary: string | null;
+  perplexity_pulled_at: string | null;
   is_complete: boolean;
 };
+
+type PerplexityPayload = {
+  analyst_sentiment?: string;
+  primary_reason_for_move?: string;
+  sector_context?: string;
+  guidance_assessment?: string;
+  key_risks?: string[];
+  recovery_likelihood?: string;
+  summary?: string;
+};
+
+function parsePerplexity(raw: string | null): PerplexityPayload | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as PerplexityPayload;
+  } catch {
+    return null;
+  }
+}
+
+function sentimentColor(s: string | null | undefined): string {
+  switch (s) {
+    case "positive":
+      return "bg-emerald-500/20 text-emerald-300 border-emerald-500/40";
+    case "negative":
+      return "bg-rose-500/20 text-rose-300 border-rose-500/40";
+    case "mixed":
+      return "bg-amber-500/20 text-amber-300 border-amber-500/40";
+    default:
+      return "bg-muted/40 text-muted-foreground border-border";
+  }
+}
 
 function fmtPct(v: number | null, digits = 1): string {
   if (v === null || !Number.isFinite(v)) return "—";
@@ -345,6 +379,7 @@ function DetailView({
             <Table>
               <TableHeader>
                 <TableRow>
+                  <TableHead className="w-8" />
                   <TableHead>Date</TableHead>
                   <TableHead className="text-right">EPS Surprise</TableHead>
                   <TableHead className="text-right">Move %</TableHead>
@@ -356,23 +391,9 @@ function DetailView({
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {history.map((r) => {
-                  const rowClass = rowColor(r);
-                  return (
-                    <TableRow key={r.id} className={rowClass}>
-                      <TableCell className="font-mono text-xs">{r.earnings_date}</TableCell>
-                      <TableCell className="text-right">{fmtPct(r.eps_surprise_pct, 1)}</TableCell>
-                      <TableCell className="text-right">{fmtPct(r.actual_move_pct, 2)}</TableCell>
-                      <TableCell className="text-right">{fmt(r.move_ratio, 2)}</TableCell>
-                      <TableCell className="text-center">{fmtBool(r.iv_crushed)}</TableCell>
-                      <TableCell className="text-center">{fmtBool(r.breached_two_x_em)}</TableCell>
-                      <TableCell className="text-center">{fmtBool(r.recovered_by_expiry)}</TableCell>
-                      <TableCell className="text-xs text-muted-foreground">
-                        {r.analyst_sentiment ?? "—"}
-                      </TableCell>
-                    </TableRow>
-                  );
-                })}
+                {history.map((r) => (
+                  <HistoryRowView key={r.id} row={r} />
+                ))}
               </TableBody>
             </Table>
           </div>
@@ -395,4 +416,90 @@ function rowColor(r: EarningsHistory): string {
   if (r.iv_crushed === true && (r.move_ratio ?? Infinity) < 1.0) return "bg-emerald-500/10";
   if ((r.move_ratio ?? 0) > 1.0) return "bg-amber-500/10";
   return "";
+}
+
+function HistoryRowView({ row }: { row: EarningsHistory }) {
+  const [expanded, setExpanded] = useState(false);
+  const payload = parsePerplexity(row.news_summary);
+  const rowClass = rowColor(row);
+  const hasDetail = payload !== null;
+  return (
+    <>
+      <TableRow
+        className={`${rowClass} ${hasDetail ? "cursor-pointer" : ""}`}
+        onClick={hasDetail ? () => setExpanded((v) => !v) : undefined}
+      >
+        <TableCell className="text-xs text-muted-foreground">
+          {hasDetail ? (expanded ? "▾" : "▸") : ""}
+        </TableCell>
+        <TableCell className="font-mono text-xs">{row.earnings_date}</TableCell>
+        <TableCell className="text-right">{fmtPct(row.eps_surprise_pct, 1)}</TableCell>
+        <TableCell className="text-right">{fmtPct(row.actual_move_pct, 2)}</TableCell>
+        <TableCell className="text-right">{fmt(row.move_ratio, 2)}</TableCell>
+        <TableCell className="text-center">{fmtBool(row.iv_crushed)}</TableCell>
+        <TableCell className="text-center">{fmtBool(row.breached_two_x_em)}</TableCell>
+        <TableCell className="text-center">{fmtBool(row.recovered_by_expiry)}</TableCell>
+        <TableCell>
+          {row.perplexity_pulled_at === null ? (
+            <span className="text-xs text-muted-foreground">—</span>
+          ) : (
+            <span
+              className={`inline-block rounded border px-2 py-0.5 text-[11px] font-medium ${sentimentColor(row.analyst_sentiment)}`}
+            >
+              {row.analyst_sentiment ?? "neutral"}
+            </span>
+          )}
+        </TableCell>
+      </TableRow>
+      {expanded && payload && (
+        <TableRow className="bg-background/40">
+          <TableCell />
+          <TableCell colSpan={8}>
+            <div className="space-y-2 py-2 text-xs">
+              {payload.summary && (
+                <div>
+                  <span className="font-semibold text-foreground">Summary:</span>{" "}
+                  <span className="text-muted-foreground">{payload.summary}</span>
+                </div>
+              )}
+              {payload.primary_reason_for_move && (
+                <div>
+                  <span className="font-semibold text-foreground">Why it moved:</span>{" "}
+                  <span className="text-muted-foreground">{payload.primary_reason_for_move}</span>
+                </div>
+              )}
+              {payload.sector_context && (
+                <div>
+                  <span className="font-semibold text-foreground">Sector:</span>{" "}
+                  <span className="text-muted-foreground">{payload.sector_context}</span>
+                </div>
+              )}
+              {payload.recovery_likelihood && (
+                <div>
+                  <span className="font-semibold text-foreground">Recovery likelihood:</span>{" "}
+                  <span className="text-muted-foreground">{payload.recovery_likelihood}</span>
+                </div>
+              )}
+              {payload.guidance_assessment && payload.guidance_assessment !== "not_mentioned" && (
+                <div>
+                  <span className="font-semibold text-foreground">Guidance:</span>{" "}
+                  <span className="text-muted-foreground">{payload.guidance_assessment}</span>
+                </div>
+              )}
+              {payload.key_risks && payload.key_risks.length > 0 && (
+                <div>
+                  <span className="font-semibold text-foreground">Key risks:</span>
+                  <ul className="ml-4 list-disc text-muted-foreground">
+                    {payload.key_risks.map((k, i) => (
+                      <li key={i}>{k}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          </TableCell>
+        </TableRow>
+      )}
+    </>
+  );
 }
