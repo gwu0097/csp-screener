@@ -11,6 +11,7 @@ type UpdateBody = {
   symbol?: unknown;
   catalyst?: unknown;
   user_thesis?: unknown;
+  exit_condition?: unknown;
   timeframe?: unknown;
   conviction?: unknown;
   analyst_sentiment?: unknown;
@@ -54,6 +55,10 @@ export async function PATCH(
   }
   if (body.user_thesis !== undefined) {
     patch.user_thesis = typeof body.user_thesis === "string" ? body.user_thesis : null;
+  }
+  if (body.exit_condition !== undefined) {
+    patch.exit_condition =
+      typeof body.exit_condition === "string" ? body.exit_condition : null;
   }
   if (body.timeframe !== undefined) {
     if (

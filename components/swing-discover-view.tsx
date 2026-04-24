@@ -67,6 +67,34 @@ type DeepDive = {
   verdict_reasoning: string;
 };
 
+type NewsItem = {
+  title: string;
+  url: string;
+  publisher: string;
+  publishedAt: string; // human-readable
+};
+
+type Fundamentals = {
+  revenueGrowth: number | null;
+  earningsGrowth: number | null;
+  numberOfAnalystOpinions: number | null;
+  recommendationMean: number | null;
+  recommendationKey: string | null;
+  targetHighPrice: number | null;
+  targetLowPrice: number | null;
+  targetMeanPrice: number | null;
+  heldPercentInsiders: number | null;
+  heldPercentInstitutions: number | null;
+  shortPercentOfFloat: number | null;
+  trailingEps: number | null;
+  forwardEps: number | null;
+};
+
+type ResearchData = {
+  news: NewsItem[];
+  fundamentals: Fundamentals | null;
+};
+
 function fmtMoney(n: number | null): string {
   if (n === null || !Number.isFinite(n)) return "—";
   return `$${n.toFixed(2)}`;
@@ -320,12 +348,12 @@ export function SwingDiscoverView() {
   const [deepDiveError, setDeepDiveError] = useState<Record<string, string>>({});
   const [activeDeepDive, setActiveDeepDive] = useState<Candidate | null>(null);
 
-  // Per-URL source summary cache, lazily filled when the user opens the
-  // Sources & Summary tab. Survives drawer open/close cycles so the
-  // summary doesn't re-fetch the second time you look at the same URL.
-  const [sourceSummaries, setSourceSummaries] = useState<
-    Record<string, { summary: string | null; loading: boolean; error: string | null }>
-  >({});
+  // Per-symbol research cache (Yahoo news + fundamentals for the
+  // Research tab in the deep-dive drawer). Lazily populated the first
+  // time the user opens that tab on a candidate.
+  const [research, setResearch] = useState<Record<string, ResearchData>>({});
+  const [researchLoading, setResearchLoading] = useState<Set<string>>(new Set());
+  const [researchError, setResearchError] = useState<Record<string, string>>({});
 
   async function loadLatest() {
     setLoading(true);
@@ -533,38 +561,46 @@ export function SwingDiscoverView() {
     setActiveDeepDive(null);
   }
 
-  // Lazy summary fetch — fired by the drawer when the Sources tab is
-  // opened for the first time on a candidate. Cache hits short-circuit.
-  async function summarizeSource(url: string, symbol: string) {
-    if (!url) return;
-    const existing = sourceSummaries[url];
-    if (existing && (existing.summary || existing.loading)) return;
-    setSourceSummaries((prev) => ({
-      ...prev,
-      [url]: { summary: null, loading: true, error: null },
-    }));
+  // Lazy fetch for the Research tab — Yahoo news + fundamentals for the
+  // active candidate's symbol. Cached per-symbol so re-opening the tab
+  // (or the drawer on the same symbol) is instant.
+  async function loadResearch(symbol: string) {
+    if (!symbol) return;
+    if (research[symbol]) return;
+    if (researchLoading.has(symbol)) return;
+    setResearchLoading((prev) => {
+      const next = new Set(prev);
+      next.add(symbol);
+      return next;
+    });
+    setResearchError((prev) => {
+      const next = { ...prev };
+      delete next[symbol];
+      return next;
+    });
     try {
-      const res = await fetch("/api/swings/discover/summarize-source", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url, symbol }),
-      });
+      const res = await fetch(
+        `/api/swings/discover/research?symbol=${encodeURIComponent(symbol)}`,
+        { cache: "no-store" },
+      );
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
-      setSourceSummaries((prev) => ({
+      setResearch((prev) => ({
         ...prev,
-        [url]: {
-          summary: typeof json.summary === "string" ? json.summary : null,
-          loading: false,
-          error: null,
+        [symbol]: {
+          news: Array.isArray(json.news) ? (json.news as NewsItem[]) : [],
+          fundamentals: (json.fundamentals as Fundamentals | null) ?? null,
         },
       }));
     } catch (e) {
-      const msg = e instanceof Error ? e.message : "Summary failed";
-      setSourceSummaries((prev) => ({
-        ...prev,
-        [url]: { summary: null, loading: false, error: msg },
-      }));
+      const msg = e instanceof Error ? e.message : "Research load failed";
+      setResearchError((prev) => ({ ...prev, [symbol]: msg }));
+    } finally {
+      setResearchLoading((prev) => {
+        const next = new Set(prev);
+        next.delete(symbol);
+        return next;
+      });
     }
   }
 
@@ -802,8 +838,16 @@ export function SwingDiscoverView() {
           activeDeepDive ? ideasSymbols.has(activeDeepDive.symbol) : false
         }
         adding={activeDeepDive ? adding.has(activeDeepDive.symbol) : false}
-        sourceSummaries={sourceSummaries}
-        onSummarizeSource={summarizeSource}
+        research={
+          activeDeepDive ? (research[activeDeepDive.symbol] ?? null) : null
+        }
+        researchLoading={
+          activeDeepDive ? researchLoading.has(activeDeepDive.symbol) : false
+        }
+        researchError={
+          activeDeepDive ? (researchError[activeDeepDive.symbol] ?? null) : null
+        }
+        onLoadResearch={loadResearch}
         onAdd={() => activeDeepDive && addToIdeas(activeDeepDive)}
         onClose={closeDeepDive}
       />
@@ -1100,11 +1144,7 @@ function CandidateCard({
   );
 }
 
-type SourceSummaryState = {
-  summary: string | null;
-  loading: boolean;
-  error: string | null;
-};
+type DrawerTab = "analysis" | "research" | "sources";
 
 function DeepDiveDrawer({
   candidate: c,
@@ -1113,8 +1153,10 @@ function DeepDiveDrawer({
   error,
   inIdeas,
   adding,
-  sourceSummaries,
-  onSummarizeSource,
+  research,
+  researchLoading,
+  researchError,
+  onLoadResearch,
   onAdd,
   onClose,
 }: {
@@ -1124,28 +1166,27 @@ function DeepDiveDrawer({
   error: string | null;
   inIdeas: boolean;
   adding: boolean;
-  sourceSummaries: Record<string, SourceSummaryState>;
-  onSummarizeSource: (url: string, symbol: string) => void;
+  research: ResearchData | null;
+  researchLoading: boolean;
+  researchError: string | null;
+  onLoadResearch: (symbol: string) => void;
   onAdd: () => void;
   onClose: () => void;
 }) {
   const open = c !== null;
-  const [drawerTab, setDrawerTab] = useState<"analysis" | "sources">("analysis");
+  const [drawerTab, setDrawerTab] = useState<DrawerTab>("analysis");
 
   // Reset to Analysis whenever a new candidate is opened so the user
-  // doesn't land on the Sources tab from the previous symbol.
+  // doesn't land on the Sources / Research tab from the previous symbol.
   useEffect(() => {
     if (c) setDrawerTab("analysis");
   }, [c?.symbol]);
 
-  // When the user moves to the Sources tab, fire summary fetches for any
-  // sources we don't have cached yet. Cache hits short-circuit inside
-  // onSummarizeSource.
+  // Lazy-fetch research the first time the user opens that tab on this
+  // candidate. Cache hits short-circuit inside onLoadResearch.
   useEffect(() => {
-    if (!c || drawerTab !== "sources") return;
-    for (const src of c.sources) {
-      onSummarizeSource(ensureHttp(src), c.symbol);
-    }
+    if (!c || drawerTab !== "research") return;
+    onLoadResearch(c.symbol);
   }, [c?.symbol, drawerTab]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const changeColor =
@@ -1234,8 +1275,9 @@ function DeepDiveDrawer({
           <div className="border-b border-border px-6 pt-3">
             <TabsList>
               <TabsTrigger value="analysis">📊 Analysis</TabsTrigger>
+              <TabsTrigger value="research">🔬 Research</TabsTrigger>
               <TabsTrigger value="sources">
-                🔗 Sources &amp; Summary
+                🔗 Sources
                 {c && c.sources.length > 0 && (
                   <span className="ml-2 rounded bg-white/10 px-1.5 py-0.5 text-[10px]">
                     {c.sources.length}
@@ -1358,6 +1400,18 @@ function DeepDiveDrawer({
           </TabsContent>
 
           <TabsContent
+            value="research"
+            className="min-h-0 flex-1 overflow-y-auto px-6 py-6 text-base"
+          >
+            <ResearchPanel
+              candidate={c}
+              data={research}
+              loading={researchLoading}
+              error={researchError}
+            />
+          </TabsContent>
+
+          <TabsContent
             value="sources"
             className="min-h-0 flex-1 overflow-y-auto px-6 py-6 text-base"
           >
@@ -1366,20 +1420,27 @@ function DeepDiveDrawer({
                 No sources attached to this candidate.
               </div>
             ) : (
-              <div className="space-y-3">
+              <ol className="space-y-2 pl-5 text-sm leading-relaxed text-foreground/90">
                 {c.sources.map((rawSrc, i) => {
                   const src = ensureHttp(rawSrc);
-                  const state = sourceSummaries[src] ?? null;
                   return (
-                    <SourceCard
-                      key={i}
-                      index={i + 1}
-                      url={src}
-                      state={state}
-                    />
+                    <li key={i} className="list-decimal">
+                      <a
+                        href={src}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 text-sky-300 underline-offset-2 hover:underline"
+                      >
+                        <span className="font-medium">{domainOf(src)}</span>
+                        <ExternalLink className="h-3 w-3 opacity-60" />
+                      </a>
+                      <div className="ml-1 truncate text-[11px] text-muted-foreground">
+                        {src}
+                      </div>
+                    </li>
                   );
                 })}
-              </div>
+              </ol>
             )}
           </TabsContent>
         </Tabs>
@@ -1422,60 +1483,299 @@ function DeepDiveDrawer({
   );
 }
 
-function SourceCard({
-  index,
-  url,
-  state,
+// ----- Research panel (Yahoo news + fundamentals + quick links) -----
+
+function ResearchPanel({
+  candidate: c,
+  data,
+  loading,
+  error,
 }: {
-  index: number;
-  url: string;
-  state: SourceSummaryState | null;
+  candidate: Candidate | null;
+  data: ResearchData | null;
+  loading: boolean;
+  error: string | null;
 }) {
-  const loading = state?.loading ?? false;
-  const summary = state?.summary ?? null;
-  const error = state?.error ?? null;
+  if (!c) return null;
   return (
-    <div className="rounded-md border border-border bg-background/40 p-3">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2 text-sm">
-            <span className="text-muted-foreground">{index}.</span>
-            <span className="font-medium text-foreground">{domainOf(url)}</span>
-          </div>
-          <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
-            {url}
-          </div>
+    <div className="space-y-6">
+      <ResearchNews data={data} loading={loading} error={error} />
+      <ResearchFundamentals
+        candidate={c}
+        data={data}
+        loading={loading}
+      />
+      <ResearchQuickLinks candidate={c} />
+    </div>
+  );
+}
+
+function ResearchNews({
+  data,
+  loading,
+  error,
+}: {
+  data: ResearchData | null;
+  loading: boolean;
+  error: string | null;
+}) {
+  return (
+    <DeepSection title="📰 Recent news (last 7)">
+      {loading && !data && <SkeletonList rows={4} />}
+      {!loading && error && !data && (
+        <div className="rounded border border-rose-500/40 bg-rose-500/10 p-2 text-xs text-rose-300">
+          {error}
         </div>
-        <a
-          href={url}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="inline-flex shrink-0 items-center gap-1 rounded border border-border bg-white/5 px-2 py-1 text-[11px] text-foreground hover:bg-white/10"
-        >
-          <ExternalLink className="h-3 w-3" />
-          Open
-        </a>
-      </div>
-      <div className="mt-3 border-t border-border/60 pt-3 text-sm">
-        <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-          AI Summary
+      )}
+      {data && data.news.length === 0 && (
+        <div className="text-sm text-muted-foreground">
+          No recent news found.
         </div>
-        {loading && (
-          <div className="flex items-center gap-2 text-muted-foreground">
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            <span>Summarizing…</span>
-          </div>
-        )}
-        {!loading && summary && (
-          <p className="leading-relaxed text-foreground/90">{summary}</p>
-        )}
-        {!loading && !summary && error && (
-          <div className="text-rose-300">{error}</div>
-        )}
-        {!loading && !summary && !error && (
-          <div className="text-muted-foreground">Waiting…</div>
-        )}
+      )}
+      {data && data.news.length > 0 && (
+        <ul className="space-y-2">
+          {data.news.map((n, i) => (
+            <li
+              key={i}
+              className="flex items-start justify-between gap-3 rounded-md border border-border bg-background/40 p-2.5"
+            >
+              <div className="min-w-0 flex-1">
+                <div className="line-clamp-2 text-sm leading-relaxed text-foreground/90">
+                  {n.title}
+                </div>
+                <div className="mt-1 text-[11px] text-muted-foreground">
+                  {[n.publisher, n.publishedAt].filter(Boolean).join(" · ")}
+                </div>
+              </div>
+              <a
+                href={ensureHttp(n.url)}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex shrink-0 items-center gap-1 rounded border border-border bg-white/5 px-2 py-1 text-[11px] text-foreground hover:bg-white/10"
+              >
+                <ExternalLink className="h-3 w-3" />
+                Open
+              </a>
+            </li>
+          ))}
+        </ul>
+      )}
+    </DeepSection>
+  );
+}
+
+// ----- Fundamentals grid -----
+
+function ResearchFundamentals({
+  candidate: c,
+  data,
+  loading,
+}: {
+  candidate: Candidate;
+  data: ResearchData | null;
+  loading: boolean;
+}) {
+  const f = data?.fundamentals ?? null;
+
+  return (
+    <DeepSection title="💰 Key fundamentals">
+      {loading && !f && <SkeletonList rows={4} />}
+      {!loading && !f && (
+        <div className="text-sm text-muted-foreground">
+          Yahoo did not return fundamentals for {c.symbol}.
+        </div>
+      )}
+      {f && (
+        <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+          <FundRow
+            label="Revenue Growth"
+            value={fmtGrowth(f.revenueGrowth)}
+            tone={growthTone(f.revenueGrowth)}
+          />
+          <FundRow
+            label="Earnings Growth"
+            value={fmtGrowth(f.earningsGrowth)}
+            tone={growthTone(f.earningsGrowth)}
+          />
+          <FundRow
+            label="EPS (TTM)"
+            value={f.trailingEps !== null ? `$${f.trailingEps.toFixed(2)}` : "—"}
+          />
+          <FundRow
+            label="EPS (Fwd)"
+            value={f.forwardEps !== null ? `$${f.forwardEps.toFixed(2)}` : "—"}
+          />
+          <FundRow
+            label="Analyst Rating"
+            value={fmtRating(f.recommendationKey, f.recommendationMean)}
+            tone={ratingTone(f.recommendationMean)}
+          />
+          <FundRow
+            label="# Analysts"
+            value={
+              f.numberOfAnalystOpinions !== null
+                ? String(f.numberOfAnalystOpinions)
+                : "—"
+            }
+          />
+          <FundRow
+            label="Target Range"
+            value={fmtTargetRange(f.targetLowPrice, f.targetHighPrice)}
+          />
+          <FundRow
+            label="Target Mean"
+            value={
+              f.targetMeanPrice !== null
+                ? `$${f.targetMeanPrice.toFixed(2)}`
+                : "—"
+            }
+          />
+          <FundRow
+            label="Insider Owned"
+            value={fmtPctDecimal(f.heldPercentInsiders)}
+          />
+          <FundRow
+            label="Institution Owned"
+            value={fmtPctDecimal(f.heldPercentInstitutions)}
+          />
+          <FundRow
+            label="Short Float"
+            value={fmtPctDecimal(f.shortPercentOfFloat)}
+            tone={shortTone(f.shortPercentOfFloat)}
+          />
+        </div>
+      )}
+    </DeepSection>
+  );
+}
+
+function FundRow({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: string;
+  tone?: "good" | "warn" | "bad";
+}) {
+  const cls =
+    tone === "good"
+      ? "text-emerald-300"
+      : tone === "warn"
+        ? "text-amber-300"
+        : tone === "bad"
+          ? "text-rose-300"
+          : "text-foreground/90";
+  return (
+    <div className="flex items-center justify-between border-b border-border/40 pb-1">
+      <span className="text-muted-foreground">{label}</span>
+      <span className={`font-mono ${cls}`}>{value}</span>
+    </div>
+  );
+}
+
+function fmtGrowth(v: number | null): string {
+  if (v === null || !Number.isFinite(v)) return "—";
+  const sign = v > 0 ? "+" : "";
+  return `${sign}${(v * 100).toFixed(0)}% YoY`;
+}
+function growthTone(v: number | null): "good" | "warn" | "bad" | undefined {
+  if (v === null || !Number.isFinite(v)) return undefined;
+  const pct = v * 100;
+  if (pct > 15) return "good";
+  if (pct >= 5) return "warn";
+  return "bad";
+}
+function fmtPctDecimal(v: number | null): string {
+  if (v === null || !Number.isFinite(v)) return "—";
+  return `${(v * 100).toFixed(1)}%`;
+}
+function shortTone(v: number | null): "good" | "warn" | "bad" | undefined {
+  if (v === null || !Number.isFinite(v)) return undefined;
+  const pct = v * 100;
+  if (pct < 5) return "good";
+  if (pct < 15) return "warn";
+  return "bad";
+}
+function fmtRating(key: string | null, mean: number | null): string {
+  const label = (() => {
+    if (!key) return null;
+    if (key === "strong_buy") return "Strong Buy";
+    if (key === "buy") return "Buy";
+    if (key === "hold") return "Hold";
+    if (key === "sell") return "Sell";
+    if (key === "strong_sell") return "Strong Sell";
+    return key;
+  })();
+  if (label && mean !== null) return `${label} (${mean.toFixed(1)}/5)`;
+  if (label) return label;
+  if (mean !== null) return `${mean.toFixed(1)}/5`;
+  return "—";
+}
+function ratingTone(mean: number | null): "good" | "warn" | "bad" | undefined {
+  if (mean === null || !Number.isFinite(mean)) return undefined;
+  if (mean < 2) return "good";
+  if (mean <= 3) return "warn";
+  return "bad";
+}
+function fmtTargetRange(low: number | null, high: number | null): string {
+  if (low === null && high === null) return "—";
+  const l = low !== null ? `$${low.toFixed(0)}` : "—";
+  const h = high !== null ? `$${high.toFixed(0)}` : "—";
+  return `${l} - ${h}`;
+}
+
+// ----- Quick research links -----
+
+function ResearchQuickLinks({ candidate: c }: { candidate: Candidate }) {
+  const sym = encodeURIComponent(c.symbol);
+  const links: Array<{ label: string; href: string }> = [
+    {
+      label: `▶ YouTube · "${c.symbol} stock analysis"`,
+      href: `https://www.youtube.com/results?search_query=${sym}+stock+analysis`,
+    },
+    {
+      label: `𝕏 · $${c.symbol}`,
+      href: `https://x.com/search?q=%24${sym}&src=typed_query&f=live`,
+    },
+    {
+      label: `📋 SEC filings`,
+      href: `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&company=${sym}&type=10-K`,
+    },
+    {
+      label: `📖 Encyclopedia`,
+      href: `/encyclopedia?symbol=${sym}`,
+    },
+  ];
+  return (
+    <DeepSection title="🔍 Research links">
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+        {links.map((l) => (
+          <a
+            key={l.href}
+            href={l.href}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center justify-between gap-2 rounded-md border border-border bg-background/40 px-3 py-2 text-sm text-foreground/90 hover:bg-background/60"
+          >
+            <span className="truncate">{l.label}</span>
+            <ExternalLink className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          </a>
+        ))}
       </div>
+    </DeepSection>
+  );
+}
+
+function SkeletonList({ rows }: { rows: number }) {
+  return (
+    <div className="space-y-2">
+      {Array.from({ length: rows }).map((_, i) => (
+        <div
+          key={i}
+          className="h-10 animate-pulse rounded-md border border-border bg-background/40"
+        />
+      ))}
     </div>
   );
 }

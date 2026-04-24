@@ -39,6 +39,7 @@ export type SwingIdea = {
   week_52_high: number | null;
   price_at_discovery: number | null;
   user_thesis: string | null;
+  exit_condition: string | null;
   timeframe: string | null;
   conviction: number | null;
   status: string;

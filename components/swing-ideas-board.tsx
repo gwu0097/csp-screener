@@ -9,6 +9,7 @@ import {
   StarRating,
   type SwingIdea,
 } from "@/components/swing-idea-dialog";
+import { SwingConvictionGate } from "@/components/swing-conviction-gate";
 
 type Status = "watching" | "conviction" | "entered" | "exited";
 
@@ -81,6 +82,12 @@ export function SwingIdeasBoard() {
 
   const [dragOverCol, setDragOverCol] = useState<Status | null>(null);
   const [draggingId, setDraggingId] = useState<string | null>(null);
+
+  // The conviction gate intercepts every watching → conviction move
+  // (Move button or DnD) so the user has to articulate a thesis + exit
+  // before promoting. Setting this opens the modal; the modal patches
+  // the idea itself on confirm.
+  const [convictionFor, setConvictionFor] = useState<SwingIdea | null>(null);
 
   async function load() {
     setLoading(true);
@@ -214,6 +221,13 @@ export function SwingIdeasBoard() {
     if (!idea) return;
     if (!MANUAL_STAGES.includes(idea.status as Status)) return;
     if (idea.status === col) return;
+    // Promotion to CONVICTION always goes through the gate so the user
+    // has to write a thesis first. Other moves (back to watching) don't
+    // need the ceremony.
+    if (col === "conviction" && idea.status === "watching") {
+      setConvictionFor(idea);
+      return;
+    }
     await changeStatus(idea, col);
   }
 
@@ -298,7 +312,7 @@ export function SwingIdeasBoard() {
                         dragging={draggingId === idea.id}
                         onDragStart={(e) => onCardDragStart(e, idea)}
                         onDragEnd={onCardDragEnd}
-                        onForward={() => changeStatus(idea, "conviction")}
+                        onForward={() => setConvictionFor(idea)}
                         onBackward={() => changeStatus(idea, "watching")}
                         onEdit={() => setEditing(idea)}
                         onDelete={() => deleteIdea(idea)}
@@ -334,6 +348,12 @@ export function SwingIdeasBoard() {
         onOpenChange={(v) => !v && setEditing(null)}
         mode={editing ? { kind: "edit", idea: editing } : { kind: "create" }}
         onSaved={load}
+      />
+      <SwingConvictionGate
+        idea={convictionFor}
+        open={convictionFor !== null}
+        onOpenChange={(v) => !v && setConvictionFor(null)}
+        onConfirmed={load}
       />
     </div>
   );
@@ -415,9 +435,9 @@ function ManualCard({
   onEdit: () => void;
   onDelete: () => void;
 }) {
-  const summary =
-    idea.catalyst?.trim() || idea.user_thesis?.trim() || idea.ai_summary?.trim() || "";
   const isWatching = idea.status === "watching";
+  const watchingSummary =
+    idea.catalyst?.trim() || idea.user_thesis?.trim() || idea.ai_summary?.trim() || "";
   return (
     <div
       draggable
@@ -429,26 +449,47 @@ function ManualCard({
     >
       <CardHeader idea={idea} />
 
-      <div className="mb-1 flex gap-3 text-[11px] text-muted-foreground">
-        {idea.price_at_discovery !== null && (
-          <span className="text-foreground">{fmtMoney(idea.price_at_discovery)}</span>
-        )}
-        {idea.forward_pe !== null && (
-          <span>
-            Fwd P/E: <span className="text-foreground">{idea.forward_pe}x</span>
-          </span>
-        )}
-        {idea.analyst_target !== null && (
-          <span>
-            Tgt: <span className="text-foreground">{fmtMoney(idea.analyst_target)}</span>
-          </span>
-        )}
-      </div>
+      {isWatching ? (
+        <>
+          <div className="mb-1 flex gap-3 text-[11px] text-muted-foreground">
+            {idea.price_at_discovery !== null && (
+              <span className="text-foreground">{fmtMoney(idea.price_at_discovery)}</span>
+            )}
+            {idea.forward_pe !== null && (
+              <span>
+                Fwd P/E: <span className="text-foreground">{idea.forward_pe}x</span>
+              </span>
+            )}
+            {idea.analyst_target !== null && (
+              <span>
+                Tgt: <span className="text-foreground">{fmtMoney(idea.analyst_target)}</span>
+              </span>
+            )}
+          </div>
 
-      {summary && (
-        <div className="mb-2 line-clamp-1 italic text-muted-foreground">
-          &ldquo;{summary}&rdquo;
-        </div>
+          {watchingSummary && (
+            <div className="mb-2 line-clamp-1 italic text-muted-foreground">
+              &ldquo;{watchingSummary}&rdquo;
+            </div>
+          )}
+        </>
+      ) : (
+        // CONVICTION card: lead with the user-articulated thesis +
+        // exit condition that the gate captured. Fundamentals are
+        // less load-bearing here than the trader's own framing.
+        <>
+          {idea.user_thesis?.trim() && (
+            <div className="mb-1 line-clamp-3 italic text-foreground/90">
+              &ldquo;{idea.user_thesis}&rdquo;
+            </div>
+          )}
+          {idea.exit_condition?.trim() && (
+            <div className="mb-2 line-clamp-2 text-[11px] text-muted-foreground">
+              <span className="font-medium text-foreground/80">Exit:</span>{" "}
+              {idea.exit_condition}
+            </div>
+          )}
+        </>
       )}
 
       <div className="mb-2 flex items-center justify-between">

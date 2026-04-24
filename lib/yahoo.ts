@@ -91,6 +91,11 @@ type YFClient = {
     opts: { modules: string[] },
     m?: { validateResult?: boolean },
   ) => Promise<QuoteSummaryResult>;
+  search: (
+    s: string,
+    opts: { newsCount?: number; quotesCount?: number },
+    m?: { validateResult?: boolean },
+  ) => Promise<unknown>;
 };
 
 const yf = yahooFinance as unknown as YFClient;
@@ -178,6 +183,117 @@ export async function getQuoteEnrichment(
     marketCap: pickNumber(record, "marketCap"),
     companyName: pickString(record, "shortName") ?? pickString(record, "longName"),
   };
+}
+
+// ---------- Research snapshot (Deep Dive) ----------
+
+// Used by /api/swings/discover/research. Pulled via quoteSummary so
+// fields like analyst recommendations + ownership are reliable. Kept
+// separate from getQuoteEnrichment because the bulk-scan path doesn't
+// need them and a quoteSummary call is heavier than a plain quote.
+export type ResearchSnapshot = {
+  revenueGrowth: number | null;
+  earningsGrowth: number | null;
+  numberOfAnalystOpinions: number | null;
+  recommendationMean: number | null;
+  recommendationKey: string | null;
+  targetHighPrice: number | null;
+  targetLowPrice: number | null;
+  targetMeanPrice: number | null;
+  heldPercentInsiders: number | null;
+  heldPercentInstitutions: number | null;
+  shortPercentOfFloat: number | null;
+  trailingEps: number | null;
+  forwardEps: number | null;
+};
+
+// yahoo-finance2 sometimes returns numbers wrapped as { raw, fmt }.
+// Unwrap defensively before coercing.
+function unwrapNumber(v: unknown): number | null {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (v && typeof v === "object" && "raw" in (v as Record<string, unknown>)) {
+    const raw = (v as { raw?: unknown }).raw;
+    if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+  }
+  return null;
+}
+
+function unwrapString(v: unknown): string | null {
+  if (typeof v === "string" && v.trim().length > 0) return v.trim();
+  return null;
+}
+
+export async function getResearchSnapshot(
+  symbol: string,
+): Promise<ResearchSnapshot | null> {
+  try {
+    const result = await yf.quoteSummary(
+      symbol,
+      { modules: ["financialData", "defaultKeyStatistics"] },
+      MODULE_OPTS,
+    );
+    const r = result as unknown as Record<string, unknown>;
+    const fd = (r.financialData ?? {}) as Record<string, unknown>;
+    const dks = (r.defaultKeyStatistics ?? {}) as Record<string, unknown>;
+    return {
+      revenueGrowth: unwrapNumber(fd.revenueGrowth),
+      earningsGrowth: unwrapNumber(fd.earningsGrowth),
+      numberOfAnalystOpinions: unwrapNumber(fd.numberOfAnalystOpinions),
+      recommendationMean: unwrapNumber(fd.recommendationMean),
+      recommendationKey: unwrapString(fd.recommendationKey),
+      targetHighPrice: unwrapNumber(fd.targetHighPrice),
+      targetLowPrice: unwrapNumber(fd.targetLowPrice),
+      targetMeanPrice: unwrapNumber(fd.targetMeanPrice),
+      heldPercentInsiders: unwrapNumber(dks.heldPercentInsiders),
+      heldPercentInstitutions: unwrapNumber(dks.heldPercentInstitutions),
+      shortPercentOfFloat: unwrapNumber(dks.shortPercentOfFloat),
+      trailingEps: unwrapNumber(dks.trailingEps),
+      forwardEps: unwrapNumber(dks.forwardEps),
+    };
+  } catch (e) {
+    logYahooFailure(`research(${symbol})`, e);
+    return null;
+  }
+}
+
+// ---------- News search ----------
+
+export type YahooNewsItem = {
+  title: string;
+  link: string;
+  publisher: string;
+  publishedAt: number; // unix seconds
+};
+
+// yahoo-finance2's search endpoint returns both `news` and `quotes`
+// items; we only want news for the research panel.
+export async function getYahooNews(
+  symbol: string,
+  count = 7,
+): Promise<YahooNewsItem[]> {
+  try {
+    const result = await yf.search(
+      symbol,
+      { newsCount: count, quotesCount: 0 },
+      MODULE_OPTS,
+    );
+    const news = (result as { news?: unknown }).news;
+    if (!Array.isArray(news)) return [];
+    return (news as Array<Record<string, unknown>>)
+      .map((n) => ({
+        title: typeof n.title === "string" ? n.title : "",
+        link: typeof n.link === "string" ? n.link : "",
+        publisher: typeof n.publisher === "string" ? n.publisher : "",
+        publishedAt:
+          typeof n.providerPublishTime === "number"
+            ? (n.providerPublishTime as number)
+            : 0,
+      }))
+      .filter((n) => n.title.length > 0 && n.link.length > 0);
+  } catch (e) {
+    logYahooFailure(`search(${symbol})`, e);
+    return [];
+  }
 }
 
 export async function getCurrentPrice(symbol: string): Promise<number | null> {
