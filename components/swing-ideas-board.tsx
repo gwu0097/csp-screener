@@ -24,6 +24,10 @@ const NEXT_STATUS: Partial<Record<Status, Status>> = {
   entered: "exited",
 };
 
+// DnD payload MIME — keeps us from reacting to arbitrary drags (e.g. a
+// file dragged onto the column from outside the page).
+const DND_MIME = "application/x-swing-idea-id";
+
 function sentimentColor(s: string | null): string {
   if (s === "bullish") return "bg-emerald-500/20 text-emerald-300 border-emerald-500/40";
   if (s === "bearish") return "bg-rose-500/20 text-rose-300 border-rose-500/40";
@@ -47,9 +51,13 @@ export function SwingIdeasBoard() {
   const [ideas, setIdeas] = useState<SwingIdea[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const [createOpen, setCreateOpen] = useState(false);
   const [editing, setEditing] = useState<SwingIdea | null>(null);
+
+  const [dragOverCol, setDragOverCol] = useState<Status | null>(null);
+  const [draggingId, setDraggingId] = useState<string | null>(null);
 
   async function load() {
     setLoading(true);
@@ -70,9 +78,11 @@ export function SwingIdeasBoard() {
     load();
   }, []);
 
-  async function moveIdea(idea: SwingIdea) {
-    const next = NEXT_STATUS[idea.status as Status];
-    if (!next) return;
+  // PATCH status and reload. Errors surface to the persistent banner
+  // (not a toast/alert) so they stay visible until the user acts or a
+  // follow-up action clears them.
+  async function changeStatus(idea: SwingIdea, next: Status): Promise<boolean> {
+    setActionError(null);
     try {
       const res = await fetch(`/api/swings/ideas/${idea.id}`, {
         method: "PATCH",
@@ -83,25 +93,40 @@ export function SwingIdeasBoard() {
         const j = await res.json().catch(() => ({}));
         throw new Error(j.error ?? `HTTP ${res.status}`);
       }
-      await load();
-      // When an idea moves to ENTERED, nudge the user to log the trade.
-      if (next === "entered") {
-        const go = window.confirm(
-          `${idea.symbol} moved to Entered. Log a trade now?`,
-        );
-        if (go) {
-          window.location.href = `/swings/journal/trades?prefill=${encodeURIComponent(
-            idea.symbol,
-          )}&ideaId=${idea.id}`;
-        }
-      }
+      // Optimistic local update — avoids a full refetch flicker. A
+      // full load() happens for consistency in the background.
+      setIdeas((prev) =>
+        prev.map((i) => (i.id === idea.id ? { ...i, status: next } : i)),
+      );
+      load();
+      return true;
     } catch (e) {
-      alert(e instanceof Error ? e.message : "Failed to move");
+      const msg = e instanceof Error ? e.message : "Failed to update";
+      console.error("[swing-ideas] status change failed:", e);
+      setActionError(`Could not move ${idea.symbol}: ${msg}`);
+      return false;
+    }
+  }
+
+  async function moveIdea(idea: SwingIdea) {
+    const next = NEXT_STATUS[idea.status as Status];
+    if (!next) return;
+    const ok = await changeStatus(idea, next);
+    if (ok && next === "entered") {
+      const go = window.confirm(
+        `${idea.symbol} moved to Entered. Log a trade now?`,
+      );
+      if (go) {
+        window.location.href = `/swings/journal/trades?prefill=${encodeURIComponent(
+          idea.symbol,
+        )}&ideaId=${idea.id}`;
+      }
     }
   }
 
   async function deleteIdea(idea: SwingIdea) {
     if (!window.confirm(`Delete swing idea ${idea.symbol}?`)) return;
+    setActionError(null);
     try {
       const res = await fetch(`/api/swings/ideas/${idea.id}`, {
         method: "DELETE",
@@ -112,8 +137,44 @@ export function SwingIdeasBoard() {
       }
       await load();
     } catch (e) {
-      alert(e instanceof Error ? e.message : "Failed to delete");
+      const msg = e instanceof Error ? e.message : "Failed to delete";
+      console.error("[swing-ideas] delete failed:", e);
+      setActionError(`Could not delete ${idea.symbol}: ${msg}`);
     }
+  }
+
+  // DnD handlers — event targets are the column container, data is the
+  // idea id. dataTransfer is read-only during dragover, so we track the
+  // dragging id in React state alongside the transfer payload.
+  function onCardDragStart(e: React.DragEvent<HTMLDivElement>, idea: SwingIdea) {
+    e.dataTransfer.setData(DND_MIME, idea.id);
+    e.dataTransfer.setData("text/plain", idea.id);
+    e.dataTransfer.effectAllowed = "move";
+    setDraggingId(idea.id);
+  }
+  function onCardDragEnd() {
+    setDraggingId(null);
+    setDragOverCol(null);
+  }
+  function onColumnDragOver(e: React.DragEvent<HTMLDivElement>, col: Status) {
+    // preventDefault is required to signal "this element is a drop target".
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    if (dragOverCol !== col) setDragOverCol(col);
+  }
+  function onColumnDragLeave(col: Status) {
+    setDragOverCol((cur) => (cur === col ? null : cur));
+  }
+  async function onColumnDrop(e: React.DragEvent<HTMLDivElement>, col: Status) {
+    e.preventDefault();
+    const id = e.dataTransfer.getData(DND_MIME) || e.dataTransfer.getData("text/plain");
+    setDragOverCol(null);
+    setDraggingId(null);
+    if (!id) return;
+    const idea = ideas.find((i) => i.id === id);
+    if (!idea) return;
+    if (idea.status === col) return; // same column — no-op
+    await changeStatus(idea, col);
   }
 
   const byStatus: Record<Status, SwingIdea[]> = {
@@ -134,16 +195,37 @@ export function SwingIdeasBoard() {
           {error}
         </div>
       )}
+      {actionError && (
+        <div className="flex items-start justify-between gap-3 rounded border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-300">
+          <span>{actionError}</span>
+          <button
+            type="button"
+            onClick={() => setActionError(null)}
+            className="text-xs text-rose-200 hover:text-white"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {loading && ideas.length === 0 ? (
         <div className="text-sm text-muted-foreground">Loading ideas…</div>
       ) : (
         <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
           {COLUMNS.map((col) => {
             const list = byStatus[col.key];
+            const isDropTarget = dragOverCol === col.key;
             return (
               <div
                 key={col.key}
-                className="flex min-h-[400px] flex-col rounded-md border border-border bg-background/40"
+                onDragOver={(e) => onColumnDragOver(e, col.key)}
+                onDragLeave={() => onColumnDragLeave(col.key)}
+                onDrop={(e) => onColumnDrop(e, col.key)}
+                className={`flex min-h-[400px] flex-col rounded-md border bg-background/40 transition-colors ${
+                  isDropTarget
+                    ? "border-2 border-blue-500 bg-blue-500/5"
+                    : "border border-border"
+                }`}
               >
                 <div className="flex items-center justify-between border-b border-border px-3 py-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                   <span>
@@ -163,6 +245,9 @@ export function SwingIdeasBoard() {
                       <IdeaCard
                         key={idea.id}
                         idea={idea}
+                        dragging={draggingId === idea.id}
+                        onDragStart={(e) => onCardDragStart(e, idea)}
+                        onDragEnd={onCardDragEnd}
                         onMove={() => moveIdea(idea)}
                         onEdit={() => setEditing(idea)}
                         onDelete={() => deleteIdea(idea)}
@@ -205,11 +290,17 @@ export function SwingIdeasBoard() {
 
 function IdeaCard({
   idea,
+  dragging,
+  onDragStart,
+  onDragEnd,
   onMove,
   onEdit,
   onDelete,
 }: {
   idea: SwingIdea;
+  dragging: boolean;
+  onDragStart: (e: React.DragEvent<HTMLDivElement>) => void;
+  onDragEnd: () => void;
   onMove: () => void;
   onEdit: () => void;
   onDelete: () => void;
@@ -218,7 +309,14 @@ function IdeaCard({
   const summary =
     idea.catalyst?.trim() || idea.user_thesis?.trim() || idea.ai_summary?.trim() || "";
   return (
-    <div className="rounded-md border border-border bg-zinc-900/60 p-3 text-xs">
+    <div
+      draggable
+      onDragStart={onDragStart}
+      onDragEnd={onDragEnd}
+      className={`cursor-grab rounded-md border border-border bg-zinc-900/60 p-3 text-xs active:cursor-grabbing ${
+        dragging ? "opacity-40" : ""
+      }`}
+    >
       <div className="mb-1 flex items-center justify-between gap-2">
         <span className="font-mono text-sm font-semibold text-foreground">
           {idea.symbol}

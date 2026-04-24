@@ -27,6 +27,18 @@ export type ParsedTrade = {
   timePlaced?: string; // YYYY-MM-DD
 };
 
+// Stock trades are a distinct shape — no strike / expiry / optionType, and
+// action is 'buy' or 'sell' rather than 'open' / 'close'. Used by the
+// swing trading flow.
+export type ParsedStockTrade = {
+  symbol: string;
+  action: "buy" | "sell";
+  shares: number;
+  price: number;
+  date: string; // YYYY-MM-DD
+  broker: string;
+};
+
 const PROMPT_SCHWAB = `This is a screenshot of a ThinkorSwim (ThinkOrSwim) brokerage order history table. The table has colored rows (red for SELL/open, green for BUY/close).
 
 Column headers are: Time Placed, Spread, Side, QtyPos Effect, Symbol, Exp, StrikeType, Price, TIF, Status
@@ -85,6 +97,48 @@ For each card:
 - broker: always "robinhood".
 
 Return ONLY a JSON array, no explanation, no markdown. One object per card.`;
+
+// Stock-trade prompts. These target STOCK fills, not options — used by the
+// swing trading import flow. The shape is intentionally narrower so
+// downstream code doesn't have to guard against missing option fields.
+const PROMPT_STOCK_SCHWAB = `Extract all FILLED stock trades from this ThinkorSwim / Schwab order history screenshot.
+
+Column headers are: Time Placed, Spread, Side, QtyPos Effect, Symbol, Exp, StrikeType, Price, TIF, Status.
+
+For each FILLED stock row (StrikeType = 'STOCK' or 'ETF', not options):
+  symbol: the ticker (e.g. AMD, HOOD, CRM)
+  action: 'buy' if Side=BUY, 'sell' if Side=SELL
+  shares: the absolute number before 'TO OPEN' / 'TO CLOSE' (or the Qty column)
+  price: the numeric value in the Price column — strip ' LMT' / ' MKT' suffix. '.60 LMT' becomes 0.60.
+  date: YYYY-MM-DD from the Time Placed column (date only, drop the time)
+
+Ignore: options rows (any row with a strike price or expiry), CANCELED orders, WORKING orders.
+Only include rows with Status exactly FILLED and StrikeType STOCK/ETF.
+
+Return ONLY a JSON array, no explanation, no markdown:
+[{"symbol": "AMD", "action": "buy", "shares": 100, "price": 175.40, "date": "2026-04-22"}]
+
+Extract EVERY stock row. Do not stop early.`;
+
+const PROMPT_STOCK_ROBINHOOD = `Extract the stock position(s) from this Robinhood position card screenshot.
+
+Each card shows:
+- 'Current {SYMBOL} price' label — the ticker appears here
+- 'Date bought' or 'Date sold' — the trade date
+- 'Shares' — position size (may be negative for short sells; take absolute value)
+- 'Average cost' (for buys) or 'Average sell price' (for sells) — the per-share price
+
+For each card:
+  symbol: from the 'Current {SYMBOL} price' label (e.g. "Current AMD price" → "AMD")
+  action: 'buy' if the card shows 'Date bought', 'sell' if it shows 'Date sold'
+  shares: absolute value of the Shares field (e.g. "-10" → 10)
+  price: 'Average cost' for buys, 'Average sell price' for sells. Strip '$' prefix.
+  date: 'Date bought' or 'Date sold', converted to YYYY-MM-DD. If year is missing (e.g. "4/23"), use current year ${currentYear}.
+
+Return ONLY a JSON array, no explanation, no markdown:
+[{"symbol": "AMD", "action": "buy", "shares": 100, "price": 175.40, "date": "${currentYear}-04-22"}]
+
+Include every visible card as a separate entry.`;
 
 // Try to pull structured data out of an LLM response. Models wrap their
 // output inconsistently — plain JSON, ```json fences, generic ``` fences,
@@ -236,6 +290,26 @@ function coerceTrade(raw: unknown, fallbackBroker: string): ParsedTrade | null {
   };
 }
 
+function coerceStockTrade(raw: unknown, fallbackBroker: string): ParsedStockTrade | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const symbol = typeof r.symbol === "string" ? r.symbol.toUpperCase().trim() : "";
+  const rawAction = typeof r.action === "string" ? r.action.toLowerCase() : "";
+  const action = rawAction === "buy" || rawAction === "sell" ? rawAction : null;
+  const shares = Math.abs(Number(r.shares));
+  const price = Number(r.price);
+  const broker =
+    typeof r.broker === "string" && r.broker.trim()
+      ? r.broker.toLowerCase()
+      : fallbackBroker;
+  const date = typeof r.date === "string" ? normalizeExpiry(r.date) : "";
+  if (!symbol || !action) return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+  if (!Number.isFinite(shares) || shares <= 0) return null;
+  if (!Number.isFinite(price) || price <= 0) return null;
+  return { symbol, action, shares, price, date, broker };
+}
+
 // Gemini's vision API takes mime + base64 data as separate fields (no
 // data URL prefix). Accept either a full data URL from the client or a raw
 // base64 string for backwards compat. Vision APIs validate mime against the
@@ -257,15 +331,16 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  let body: { image?: string; broker?: string };
+  let body: { image?: string; broker?: string; tradeType?: string };
   try {
-    body = (await req.json()) as { image?: string; broker?: string };
+    body = (await req.json()) as { image?: string; broker?: string; tradeType?: string };
   } catch {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
   const rawImage = body.image ?? "";
   const broker = (body.broker ?? "schwab").toLowerCase();
+  const tradeType = body.tradeType === "stock" ? "stock" : "options";
   // Distinct from base64 length: the raw JSON field as received. If this
   // is 0/undefined, the client isn't actually sending anything.
   console.log(`[parse-screenshot] image bytes: ${rawImage ? rawImage.length : 0}`);
@@ -276,11 +351,19 @@ export async function POST(req: NextRequest) {
     `[parse-screenshot] broker=${broker} mime=${mime} base64_bytes=${rawLen}`,
   );
 
-  // Select prompt by broker. Schwab (ThinkorSwim) uses the existing
-  // order-history table prompt; Robinhood uses the position-card prompt
-  // which computes strike from breakeven + average credit.
-  const prompt = broker === "robinhood" ? PROMPT_ROBINHOOD : PROMPT_SCHWAB;
-  console.log(`[parse-screenshot] gemini url: ${GEMINI_URL}  prompt=${broker === "robinhood" ? "robinhood" : "schwab"}`);
+  // Select prompt by (tradeType, broker). Stock mode uses narrower
+  // prompts that extract only symbol/shares/price/date. Options mode
+  // uses the existing ToS / Robinhood option prompts.
+  let prompt: string;
+  let promptName: string;
+  if (tradeType === "stock") {
+    prompt = broker === "robinhood" ? PROMPT_STOCK_ROBINHOOD : PROMPT_STOCK_SCHWAB;
+    promptName = broker === "robinhood" ? "stock-robinhood" : "stock-schwab";
+  } else {
+    prompt = broker === "robinhood" ? PROMPT_ROBINHOOD : PROMPT_SCHWAB;
+    promptName = broker === "robinhood" ? "robinhood" : "schwab";
+  }
+  console.log(`[parse-screenshot] gemini url: ${GEMINI_URL}  prompt=${promptName}`);
   let res: Response;
   try {
     res = await fetch(GEMINI_URL, {
@@ -392,16 +475,23 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const trades = parsed
-      .map((r) => coerceTrade(r, broker))
-      .filter((t): t is ParsedTrade => t !== null);
+    let trades: ParsedTrade[] | ParsedStockTrade[];
+    if (tradeType === "stock") {
+      trades = parsed
+        .map((r) => coerceStockTrade(r, broker))
+        .filter((t): t is ParsedStockTrade => t !== null);
+    } else {
+      trades = parsed
+        .map((r) => coerceTrade(r, broker))
+        .filter((t): t is ParsedTrade => t !== null);
+    }
 
     // NB: model_trades is the array parsed from the model's response, not the
     // count of bytes received. If model_trades=0 we got a valid response
     // with no trades — check the logged raw content to see what the model
     // actually produced.
     console.log(
-      `[parse-screenshot] broker=${broker} model_trades=${parsed.length} accepted=${trades.length}`,
+      `[parse-screenshot] broker=${broker} tradeType=${tradeType} model_trades=${parsed.length} accepted=${trades.length}`,
     );
     return NextResponse.json({ trades });
   } catch (e) {

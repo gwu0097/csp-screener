@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { Plus } from "lucide-react";
+import { Camera, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Table,
@@ -16,6 +16,7 @@ import {
   SwingTradeDialog,
   type SwingTrade,
 } from "@/components/swing-trade-dialog";
+import { ImportStockScreenshotModal } from "@/components/import-stock-screenshot-modal";
 
 function fmtMoney(n: number | null, signed = false): string {
   if (n === null || !Number.isFinite(n)) return "—";
@@ -45,6 +46,8 @@ export function SwingTradesView() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
 
   async function load() {
     setLoading(true);
@@ -73,14 +76,25 @@ export function SwingTradesView() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="text-sm text-muted-foreground">
           {trades.length} {trades.length === 1 ? "trade" : "trades"}
         </div>
-        <Button onClick={() => setDialogOpen(true)}>
-          <Plus className="mr-1 h-4 w-4" /> Log Trade
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button onClick={() => setImportOpen(true)}>
+            <Camera className="mr-1 h-4 w-4" /> Import from screenshot
+          </Button>
+          <Button variant="outline" onClick={() => setDialogOpen(true)}>
+            <Plus className="mr-1 h-4 w-4" /> Log Trade
+          </Button>
+        </div>
       </div>
+
+      {toast && (
+        <div className="rounded border border-emerald-500/40 bg-emerald-500/10 p-2 text-xs text-emerald-200">
+          {toast}
+        </div>
+      )}
 
       {error && (
         <div className="rounded border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-300">
@@ -155,6 +169,15 @@ export function SwingTradesView() {
           swing_idea_id: prefillIdeaId ?? undefined,
         }}
         onSaved={load}
+      />
+      <ImportStockScreenshotModal
+        open={importOpen}
+        onOpenChange={setImportOpen}
+        onSuccess={(msg) => {
+          setToast(msg);
+          setTimeout(() => setToast(null), 5000);
+          load();
+        }}
       />
     </div>
   );
