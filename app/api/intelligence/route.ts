@@ -91,12 +91,16 @@ export async function GET(req: NextRequest) {
 
   // Closed positions — unfiltered first (we need both the windowed set for
   // stats AND the full set for "all-time" ticker rankings per spec).
+  // All completed trades regardless of how they closed: user-initiated
+  // ('closed'), auto-expired worthless ('expired_worthless'), or assigned
+  // ('assigned'). Win rate + expectancy + ROC all roll up over the same
+  // set so the page reflects reality.
   const allClosedRes = await sb
     .from("positions")
     .select(
       "id,symbol,strike,expiry,total_contracts,avg_premium_sold,opened_date,closed_date,realized_pnl,entry_final_grade,entry_crush_grade,entry_opportunity_grade,entry_iv_edge,entry_em_pct,entry_vix,status",
     )
-    .eq("status", "closed")
+    .in("status", ["closed", "expired_worthless", "assigned"])
     .order("closed_date", { ascending: true });
   if (allClosedRes.error) {
     return NextResponse.json({ error: allClosedRes.error.message }, { status: 500 });

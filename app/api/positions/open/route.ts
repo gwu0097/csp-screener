@@ -14,6 +14,7 @@ import {
   type Fill,
   type PositionRow,
 } from "@/lib/positions";
+import { runAutoExpire, type AutoExpireReport } from "@/lib/expire-positions";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -61,6 +62,15 @@ type OpenPosition = {
   recommendationReason: string;
   postEarningsRec: PostEarningsRecView | null;
   fills: Fill[];
+  // Expiry classification (from runAutoExpire):
+  //   active             — expiry >= today, normal open position
+  //   needs_verification — expiry < today, within 2% of strike —
+  //                        user must decide expired vs. assigned
+  //   pending            — expiry < today but no snapshot to classify
+  expiryStatus: "active" | "needs_verification" | "pending";
+  // Only populated when expiryStatus != "active".
+  expiryPctFromStrike: number | null;
+  expiryLastStockPrice: number | null;
   // Entry snapshot — populated at position-open time from the screener's
   // three-layer grade. Used by the expanded position card for the
   // left-column "what did we see at entry" panel.
@@ -132,6 +142,27 @@ export async function GET(req: NextRequest) {
     req.nextUrl.searchParams.get("opportunityAvailable") === "true";
   const live = req.nextUrl.searchParams.get("live") === "true";
 
+  // Auto-expire sweep BEFORE fetching open positions. Clearly-worthless
+  // expired positions flip to status='expired_worthless' in place; the
+  // subsequent open-list query then correctly excludes them. The report
+  // is also returned to the caller so the UI can toast the auto-expired
+  // names and surface the remaining needs_verification positions.
+  let expireReport: AutoExpireReport;
+  try {
+    expireReport = await runAutoExpire();
+  } catch (e) {
+    console.warn(
+      `[positions] runAutoExpire failed: ${e instanceof Error ? e.message : e}`,
+    );
+    expireReport = {
+      auto_expired: [],
+      needs_verification: [],
+      pending: [],
+      skipped: false,
+      skipReason: e instanceof Error ? e.message : "unknown",
+    };
+  }
+
   const supabase = createServerClient();
 
   // 1. Open positions + all their fills.
@@ -166,6 +197,34 @@ export async function GET(req: NextRequest) {
   }
 
   const now = new Date();
+
+  // Build a lookup of (positionId → expiry classification) from the
+  // auto-expire report. Positions in auto_expired are already flipped
+  // to expired_worthless in the DB and won't reach the open list, so
+  // they're not in this map. Remaining expired open positions get
+  // 'needs_verification' or 'pending' annotations that the UI surfaces.
+  const expiryByPosition = new Map<
+    string,
+    {
+      status: "needs_verification" | "pending";
+      pctFromStrike: number | null;
+      stockPrice: number | null;
+    }
+  >();
+  for (const e of expireReport.needs_verification) {
+    expiryByPosition.set(e.positionId, {
+      status: "needs_verification",
+      pctFromStrike: e.pctFromStrike,
+      stockPrice: e.stockPrice,
+    });
+  }
+  for (const e of expireReport.pending) {
+    expiryByPosition.set(e.positionId, {
+      status: "pending",
+      pctFromStrike: e.pctFromStrike,
+      stockPrice: e.stockPrice,
+    });
+  }
 
   // Fetch the latest post-earnings recommendation per position in one
   // query. We take the newest row per position (by analysis_date desc)
@@ -322,6 +381,9 @@ export async function GET(req: NextRequest) {
       urgency: rec.urgency,
       recommendationReason: rec.reason,
       postEarningsRec: recsByPosition.get(p.id) ?? null,
+      expiryStatus: expiryByPosition.get(p.id)?.status ?? "active",
+      expiryPctFromStrike: expiryByPosition.get(p.id)?.pctFromStrike ?? null,
+      expiryLastStockPrice: expiryByPosition.get(p.id)?.stockPrice ?? null,
       fills: fills
         .slice()
         .sort((a, b) => a.fill_date.localeCompare(b.fill_date)),
@@ -358,5 +420,6 @@ export async function GET(req: NextRequest) {
     positions,
     opportunityAvailable,
     live,
+    expireReport,
   });
 }

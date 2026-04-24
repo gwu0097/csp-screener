@@ -67,6 +67,9 @@ export type OpenPositionClientView = {
   recommendationReason: string;
   postEarningsRec: PostEarningsRecView | null;
   fills: Fill[];
+  expiryStatus: "active" | "needs_verification" | "pending";
+  expiryPctFromStrike: number | null;
+  expiryLastStockPrice: number | null;
   entryFinalGrade: string | null;
   entryCrushGrade: string | null;
   entryOpportunityGrade: string | null;
@@ -91,6 +94,10 @@ export type ClosedPositionClientView = {
   openedDate: string;
   closedDate: string | null;
   realizedPnl: number | null;
+  // One of 'closed' | 'expired_worthless' | 'assigned'. Drives the
+  // status-badge label on the row (WIN/LOSS for 'closed', EXPIRED for
+  // 'expired_worthless', ASSIGNED for 'assigned').
+  status: "closed" | "expired_worthless" | "assigned";
   entryFinalGrade: string | null;
   entryCrushGrade: string | null;
   entryOpportunityGrade: string | null;
@@ -156,11 +163,39 @@ function statusBadgeOpen(u: Urgency): { label: string; className: string } {
       return { label: "HOLD", className: "border-emerald-500/40 bg-emerald-500/10 text-emerald-200" };
   }
 }
-function statusBadgeClosed(pnl: number | null): { label: string; className: string } {
+function statusBadgeClosed(
+  status: "closed" | "expired_worthless" | "assigned",
+  pnl: number | null,
+): { label: string; className: string } {
+  if (status === "expired_worthless") {
+    return {
+      label: "EXPIRED",
+      className: "border-emerald-500/40 bg-emerald-500/15 text-emerald-200",
+    };
+  }
+  if (status === "assigned") {
+    return {
+      label: "ASSIGNED",
+      className: "border-amber-500/50 bg-amber-500/15 text-amber-200",
+    };
+  }
   if (pnl === null || pnl === 0) return { label: "—", className: "border-border text-muted-foreground" };
   return pnl > 0
     ? { label: "WIN", className: "border-emerald-500/40 bg-emerald-500/15 text-emerald-200" }
     : { label: "LOSS", className: "border-rose-500/40 bg-rose-500/15 text-rose-200" };
+}
+
+// Warning badge shown on expired-but-open rows where the classifier
+// couldn't auto-close (too close to strike, or no snapshot data).
+// Replaces the normal urgency badge so the user sees the "decide" state
+// at a glance.
+function statusBadgeExpiryWarning(
+  expiryStatus: "needs_verification" | "pending",
+): { label: string; className: string } {
+  return {
+    label: expiryStatus === "needs_verification" ? "⚠ VERIFY ASSIGNMENT" : "⚠ PENDING",
+    className: "border-amber-500/60 bg-amber-500/20 text-amber-100",
+  };
 }
 
 // Post-earnings indicator — a tiny colored dot whose hover tooltip
@@ -189,10 +224,23 @@ export function PositionCard(props: Props) {
   const closed = props.kind === "closed" ? props.position : null;
   const p = props.position;
   const pop = open && open.currentDelta !== null ? 1 - Math.abs(open.currentDelta) : null;
-  const rowTint = open ? rowTintOpen(open.urgency) : rowTintClosed(closed?.realizedPnl ?? null);
-  const status = open
-    ? statusBadgeOpen(open.urgency)
-    : statusBadgeClosed(closed?.realizedPnl ?? null);
+  // Expired-open positions surface an amber warning badge in the row,
+  // overriding the urgency badge. Closed positions pick EXPIRED /
+  // ASSIGNED / WIN / LOSS based on the stored status + realized P&L.
+  const openExpiryWarning =
+    open && open.expiryStatus !== "active"
+      ? statusBadgeExpiryWarning(open.expiryStatus)
+      : null;
+  const rowTint = open
+    ? openExpiryWarning
+      ? "bg-amber-500/[0.08]"
+      : rowTintOpen(open.urgency)
+    : rowTintClosed(closed?.realizedPnl ?? null);
+  const status = openExpiryWarning
+    ? openExpiryWarning
+    : open
+      ? statusBadgeOpen(open.urgency)
+      : statusBadgeClosed(closed?.status ?? "closed", closed?.realizedPnl ?? null);
   const pnlDollars = open ? open.pnlDollars : (closed?.realizedPnl ?? null);
   const pnlPct = open ? open.pnlPct : null;
   const pnlColor =
@@ -284,6 +332,15 @@ export function PositionCard(props: Props) {
             <PositionDetailsColumn p={p} kind={props.kind} pnlPct={pnlPct} />
             {open ? <LiveDataColumn p={open} /> : <div />}
           </div>
+
+          {props.kind === "open" && props.position.expiryStatus !== "active" && (
+            <div className="mt-4">
+              <VerifyAssignmentPanel
+                position={props.position}
+                onResolved={props.onCloseSubmitted}
+              />
+            </div>
+          )}
 
           {p.postEarningsRec && (
             <div className="mt-4">
@@ -471,6 +528,150 @@ function PostEarningsPanel({ rec }: { rec: PostEarningsRecView }) {
         {rec.analystSentiment && <span>Sentiment: {rec.analystSentiment}</span>}
         {rec.recoveryLikelihood && <span>Recovery: {rec.recoveryLikelihood}</span>}
       </div>
+    </div>
+  );
+}
+
+// Shown in the expanded row of an expired-but-open position. Lets the
+// user confirm the outcome: expired worthless OR assigned at some
+// price. Both branches POST to /api/positions/{expire-manual,assign}
+// and reload the list.
+function VerifyAssignmentPanel({
+  position,
+  onResolved,
+}: {
+  position: OpenPositionClientView;
+  onResolved: (msg: string) => void;
+}) {
+  const [assignMode, setAssignMode] = useState(false);
+  const [assignPrice, setAssignPrice] = useState<string>(
+    position.expiryLastStockPrice !== null ? position.expiryLastStockPrice.toFixed(2) : "",
+  );
+  const [submitting, setSubmitting] = useState<"worthless" | "assigned" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const pctStr =
+    position.expiryPctFromStrike !== null
+      ? `${(position.expiryPctFromStrike * 100).toFixed(2)}%`
+      : "unknown";
+  const stockStr =
+    position.expiryLastStockPrice !== null
+      ? `$${position.expiryLastStockPrice.toFixed(2)}`
+      : "unknown";
+
+  async function confirmWorthless() {
+    setSubmitting("worthless");
+    setError(null);
+    try {
+      const res = await fetch("/api/positions/expire-manual", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ positionId: position.id }),
+      });
+      const json = (await res.json()) as { ok?: boolean; realized_pnl?: number; error?: string };
+      if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
+      onResolved(`${position.symbol} expired worthless: +$${json.realized_pnl?.toFixed(2)}`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed");
+    } finally {
+      setSubmitting(null);
+    }
+  }
+
+  async function confirmAssigned() {
+    const price = Number(assignPrice);
+    if (!Number.isFinite(price) || price <= 0) {
+      setError("Enter a valid stock price");
+      return;
+    }
+    setSubmitting("assigned");
+    setError(null);
+    try {
+      const res = await fetch("/api/positions/assign", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ positionId: position.id, stockPriceAtExpiry: price }),
+      });
+      const json = (await res.json()) as { ok?: boolean; realized_pnl?: number; error?: string };
+      if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
+      const pnl = json.realized_pnl ?? 0;
+      const sign = pnl >= 0 ? "+" : "";
+      onResolved(
+        `${position.symbol} assigned at $${price.toFixed(2)}: ${sign}$${pnl.toFixed(2)}`,
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed");
+    } finally {
+      setSubmitting(null);
+    }
+  }
+
+  return (
+    <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs">
+      <div className="mb-2 font-semibold text-amber-200">
+        ⚠ Expired — verify outcome
+      </div>
+      <div className="mb-3 text-amber-100/80">
+        {position.expiryStatus === "pending"
+          ? "No snapshot data available to auto-classify. Confirm the actual outcome."
+          : `Stock was ${pctStr} from strike at last snapshot (${stockStr}). Assignment possible — confirm the outcome below.`}
+      </div>
+      {!assignMode ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            size="sm"
+            onClick={confirmWorthless}
+            disabled={submitting !== null}
+            className="bg-emerald-500/80 hover:bg-emerald-500"
+          >
+            {submitting === "worthless" ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              "Expire Worthless"
+            )}
+          </Button>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() => setAssignMode(true)}
+            disabled={submitting !== null}
+          >
+            Record Assignment
+          </Button>
+        </div>
+      ) : (
+        <div className="flex flex-wrap items-center gap-2">
+          <label className="text-amber-100/80">Stock price at expiry:</label>
+          <span className="text-foreground">$</span>
+          <input
+            type="number"
+            step="0.01"
+            value={assignPrice}
+            onChange={(e) => setAssignPrice(e.target.value)}
+            className="w-20 rounded border border-border bg-background px-2 py-1"
+          />
+          <Button size="sm" onClick={confirmAssigned} disabled={submitting !== null}>
+            {submitting === "assigned" ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              "Confirm Assignment"
+            )}
+          </Button>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() => setAssignMode(false)}
+            disabled={submitting !== null}
+          >
+            Cancel
+          </Button>
+        </div>
+      )}
+      {error && (
+        <div className="mt-2 rounded border border-rose-500/40 bg-rose-500/10 px-2 py-1 text-rose-200">
+          {error}
+        </div>
+      )}
     </div>
   );
 }

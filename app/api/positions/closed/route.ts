@@ -26,6 +26,7 @@ type ClosedPositionView = {
   openedDate: string;
   closedDate: string | null;
   realizedPnl: number | null;
+  status: "closed" | "expired_worthless" | "assigned";
   entryFinalGrade: string | null;
   entryCrushGrade: string | null;
   entryOpportunityGrade: string | null;
@@ -68,10 +69,13 @@ type PositionRowFull = PositionRow & {
 export async function GET() {
   const supabase = createServerClient();
 
+  // Includes auto-expired-worthless and assigned positions so the
+  // closed section surfaces every completed trade, not just the ones
+  // the user explicitly closed.
   const { data: posRows, error } = await supabase
     .from<PositionRowFull>("positions")
     .select("*")
-    .eq("status", "closed")
+    .in("status", ["closed", "expired_worthless", "assigned"])
     .order("closed_date", { ascending: false });
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
@@ -155,6 +159,9 @@ export async function GET() {
       openedDate: p.opened_date,
       closedDate: p.closed_date,
       realizedPnl: p.realized_pnl,
+      status:
+        (p.status as "closed" | "expired_worthless" | "assigned" | undefined) ??
+        "closed",
       entryFinalGrade: p.entry_final_grade,
       entryCrushGrade: p.entry_crush_grade,
       entryOpportunityGrade: p.entry_opportunity_grade,

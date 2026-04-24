@@ -14,11 +14,24 @@ import { ChevronDown, ChevronRight } from "lucide-react";
 import { fmtDollarsSigned } from "@/lib/format";
 import type { MarketContext } from "@/lib/market";
 
+type ExpireReport = {
+  auto_expired: Array<{
+    symbol: string;
+    strike: number;
+    realized_pnl: number;
+  }>;
+  needs_verification: unknown[];
+  pending: unknown[];
+  skipped: boolean;
+  skipReason?: string;
+};
+
 type PositionsResponse = {
   market: MarketContext;
   positions: OpenPositionClientView[];
   opportunityAvailable: boolean;
   live: boolean;
+  expireReport?: ExpireReport;
 };
 
 type BestOpportunity = { symbol: string; recommendation: string } | null;
@@ -78,6 +91,17 @@ export function PositionsView() {
       const json = (await res.json()) as PositionsResponse & { error?: string };
       if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
       setData(json);
+      // Surface the auto-expire toast once per load if anything got
+      // auto-closed. One green message, every auto-expired position
+      // listed inline with its realized P&L.
+      const expired = json.expireReport?.auto_expired ?? [];
+      if (expired.length > 0) {
+        const bits = expired.map((e) => {
+          const sign = e.realized_pnl >= 0 ? "+" : "";
+          return `${e.symbol} ${sign}$${e.realized_pnl.toFixed(0)}`;
+        });
+        setMessage(`✓ Expired worthless: ${bits.join(" | ")}`);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load positions");
     } finally {
