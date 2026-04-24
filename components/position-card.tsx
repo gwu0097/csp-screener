@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { ExternalLink, Loader2 } from "lucide-react";
+import { ChevronRight, ExternalLink, Loader2 } from "lucide-react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import {
@@ -65,6 +65,14 @@ export type OpenPositionClientView = {
   momentum: Momentum | null;
   urgency: Urgency;
   recommendationReason: string;
+  // Priority-cascade status badge (replaces the urgency-derived badge
+  // for the collapsed-row status column). See lib/positions.ts
+  // computePositionBadge for the rule cascade.
+  badge: string;
+  badgeLabel: string;
+  badgeColor: "green" | "amber" | "red";
+  badgeTooltip: string;
+  ruleFired: string;
   postEarningsRec: PostEarningsRecView | null;
   fills: Fill[];
   expiryStatus: "active" | "needs_verification" | "pending";
@@ -169,12 +177,23 @@ function gradeColor(g: string | null | undefined): string {
   return "bg-muted/40 text-muted-foreground border-border";
 }
 
-// Row tint per the spec: subtle color wash by urgency / close outcome so
-// a glance down the list groups by risk.
-function rowTintOpen(u: Urgency): string {
-  if (u === "EMERGENCY_CUT" || u === "CUT") return "bg-rose-500/[0.06]";
-  if (u === "MONITOR") return "bg-amber-500/[0.06]";
-  if (u === "HOLD") return "";
+// Badge tint classes — wraps the new computePositionBadge output for
+// both the status pill and the row background tint. Spec:
+//   green  → bg-emerald-900/40 text-emerald-400 border-emerald-700
+//   amber  → bg-amber-900/40   text-amber-400   border-amber-700
+//   red    → bg-red-900/40     text-red-400     border-red-700
+function badgePillClass(color: "green" | "amber" | "red"): string {
+  if (color === "red") return "bg-red-900/40 text-red-400 border-red-700";
+  if (color === "amber") return "bg-amber-900/40 text-amber-400 border-amber-700";
+  return "bg-emerald-900/40 text-emerald-400 border-emerald-700";
+}
+// Row background tint driven by badge type:
+//   EMERGENCY_CUT / CLOSE → red wash
+//   PIN_RISK / MONITOR    → amber wash
+//   EXPIRING / MAX_PROFIT / HOLD → default dark (no wash)
+function rowTintFromBadge(badge: string): string {
+  if (badge === "EMERGENCY_CUT" || badge === "CLOSE") return "bg-red-950/20";
+  if (badge === "PIN_RISK" || badge === "MONITOR") return "bg-amber-950/20";
   return "";
 }
 function rowTintClosed(pnl: number | null): string {
@@ -182,18 +201,6 @@ function rowTintClosed(pnl: number | null): string {
   return pnl >= 0 ? "bg-emerald-500/[0.05]" : "bg-rose-500/[0.05]";
 }
 
-function statusBadgeOpen(u: Urgency): { label: string; className: string } {
-  switch (u) {
-    case "EMERGENCY_CUT":
-      return { label: "EMERGENCY CUT", className: "border-rose-500/50 bg-rose-500/20 text-rose-200" };
-    case "CUT":
-      return { label: "CUT", className: "border-amber-500/50 bg-amber-500/15 text-amber-200" };
-    case "MONITOR":
-      return { label: "MONITOR", className: "border-sky-500/40 bg-sky-500/10 text-sky-200" };
-    case "HOLD":
-      return { label: "HOLD", className: "border-emerald-500/40 bg-emerald-500/10 text-emerald-200" };
-  }
-}
 function statusBadgeClosed(
   status: "closed" | "expired_worthless" | "assigned",
   pnl: number | null,
@@ -214,19 +221,6 @@ function statusBadgeClosed(
   return pnl > 0
     ? { label: "WIN", className: "border-emerald-500/40 bg-emerald-500/15 text-emerald-200" }
     : { label: "LOSS", className: "border-rose-500/40 bg-rose-500/15 text-rose-200" };
-}
-
-// Warning badge shown on expired-but-open rows where the classifier
-// couldn't auto-close (too close to strike, or no snapshot data).
-// Replaces the normal urgency badge so the user sees the "decide" state
-// at a glance.
-function statusBadgeExpiryWarning(
-  expiryStatus: "needs_verification" | "pending",
-): { label: string; className: string } {
-  return {
-    label: expiryStatus === "needs_verification" ? "⚠ VERIFY ASSIGNMENT" : "⚠ PENDING",
-    className: "border-amber-500/60 bg-amber-500/20 text-amber-100",
-  };
 }
 
 // Post-earnings indicator — a tiny colored dot whose hover tooltip
@@ -255,23 +249,24 @@ export function PositionCard(props: Props) {
   const closed = props.kind === "closed" ? props.position : null;
   const p = props.position;
   const pop = open && open.currentDelta !== null ? 1 - Math.abs(open.currentDelta) : null;
-  // Expired-open positions surface an amber warning badge in the row,
-  // overriding the urgency badge. Closed positions pick EXPIRED /
-  // ASSIGNED / WIN / LOSS based on the stored status + realized P&L.
-  const openExpiryWarning =
-    open && open.expiryStatus !== "active"
-      ? statusBadgeExpiryWarning(open.expiryStatus)
-      : null;
+  // Open rows use the priority-cascade badge from computePositionBadge
+  // (served by the API as badge* fields). Closed rows keep the
+  // EXPIRED / ASSIGNED / WIN / LOSS derivation — the badge engine is
+  // open-position-specific (expiry day, live snapshots, post-earnings
+  // recs — all meaningless on a closed trade).
   const rowTint = open
-    ? openExpiryWarning
-      ? "bg-amber-500/[0.08]"
-      : rowTintOpen(open.urgency)
+    ? rowTintFromBadge(open.badge)
     : rowTintClosed(closed?.realizedPnl ?? null);
-  const status = openExpiryWarning
-    ? openExpiryWarning
-    : open
-      ? statusBadgeOpen(open.urgency)
-      : statusBadgeClosed(closed?.status ?? "closed", closed?.realizedPnl ?? null);
+  const status = open
+    ? {
+        label: open.badgeLabel,
+        className: badgePillClass(open.badgeColor),
+        tooltip: open.badgeTooltip,
+      }
+    : {
+        ...statusBadgeClosed(closed?.status ?? "closed", closed?.realizedPnl ?? null),
+        tooltip: "",
+      };
   const pnlDollars = open ? open.pnlDollars : (closed?.realizedPnl ?? null);
   const pnlPct = open ? open.pnlPct : null;
   const pnlColor =
@@ -290,7 +285,7 @@ export function PositionCard(props: Props) {
   return (
     <div
       className={cn(
-        "rounded-md border border-border transition-colors",
+        "group rounded-md border border-border transition-colors",
         rowTint,
         expanded && "border-foreground/20",
       )}
@@ -365,14 +360,45 @@ export function PositionCard(props: Props) {
             <span className="text-xs text-muted-foreground">—</span>
           )}
         </div>
-        {/* 13. Status */}
-        <div
-          className={cn(
-            "justify-self-end rounded border px-2 py-0.5 text-[10px] font-semibold whitespace-nowrap",
-            status.className,
+        {/* 13. Status — badge + hover chevron share the cell via flex.
+              Chevron: always visible on mobile (no hover on touch),
+              opacity-0 on desktop until the row is hovered. */}
+        <div className="flex items-center justify-end gap-1.5">
+          {status.tooltip ? (
+            <TooltipProvider delayDuration={150}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span
+                    className={cn(
+                      "rounded border px-2 py-0.5 text-[10px] font-semibold whitespace-nowrap",
+                      status.className,
+                    )}
+                  >
+                    {status.label}
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent className="max-w-xs text-xs">
+                  {status.tooltip}
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          ) : (
+            <span
+              className={cn(
+                "rounded border px-2 py-0.5 text-[10px] font-semibold whitespace-nowrap",
+                status.className,
+              )}
+            >
+              {status.label}
+            </span>
           )}
-        >
-          {status.label}
+          <ChevronRight
+            className={cn(
+              "h-3 w-3 text-muted-foreground transition-[opacity,transform] duration-150",
+              "opacity-100 sm:opacity-0 sm:group-hover:opacity-100",
+              expanded && "rotate-90",
+            )}
+          />
         </div>
       </button>
 

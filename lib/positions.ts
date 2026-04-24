@@ -202,3 +202,256 @@ export function isTwoDayDrop(closes: number[]): boolean {
   const [c3, c2, c1] = closes.slice(-3);
   return c1 < c2 && c2 < c3;
 }
+
+// ---------- Priority-based status badge ----------
+//
+// Replaces the mechanical urgency enum with a priority cascade that reads
+// every intelligence signal we have (expiry date, latest snapshot, most
+// recent post-earnings rec, live stock price) and emits a single status
+// badge + tooltip. First matching rule wins.
+//
+// Priority order:
+//   1. Expiry day — ITM / PIN RISK / EXPIRING / MONITOR variants
+//   2. Post-earnings recommendation (HIGH/MEDIUM confidence only)
+//   3. Max profit (pct_premium_remaining < 10% OR deep OTM fallback)
+//   4. Move-ratio danger (realized > 1.2× implied, still has DTE)
+//   5. Delta health check (>|0.35| emergency, >|0.20| monitor)
+//   6. Default: HOLD
+//
+// Pure function — no DB, no I/O. Callers pass the already-fetched
+// snapshot + rec so this stays cheap to call in a tight loop.
+
+export type BadgeColor = "green" | "amber" | "red";
+export type BadgeResult = {
+  badge: string;
+  label: string;
+  color: BadgeColor;
+  tooltip: string;
+  ruleFired: string;
+};
+
+export type PositionBadgeInput = {
+  position: { strike: number; expiry: string };
+  latestSnapshot: {
+    stock_price: number | null;
+    option_price: number | null;
+    current_delta: number | null;
+    move_ratio: number | null;
+    pct_premium_remaining: number | null;
+  } | null;
+  postEarningsRec: {
+    recommendation: "CLOSE" | "HOLD" | "PARTIAL" | "MONITOR";
+    confidence: "HIGH" | "MEDIUM" | "LOW";
+    reasoning: string;
+  } | null;
+  currentStockPrice: number | null;
+};
+
+function todayUtcIso(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function firstSentence(s: string): string {
+  const idx = s.indexOf(".");
+  if (idx < 0) return s.trim();
+  return s.slice(0, idx + 1).trim();
+}
+
+export function computePositionBadge(input: PositionBadgeInput): BadgeResult {
+  const { position, latestSnapshot, postEarningsRec, currentStockPrice } = input;
+  const today = todayUtcIso();
+  const isExpiryDay = position.expiry === today;
+
+  const stockPrice =
+    currentStockPrice ?? latestSnapshot?.stock_price ?? null;
+  const optionPrice = latestSnapshot?.option_price ?? null;
+  const pctFromStrike =
+    stockPrice !== null && position.strike > 0
+      ? (stockPrice - position.strike) / position.strike
+      : null;
+
+  // ---------- PRIORITY 1: expiry day ----------
+  if (isExpiryDay) {
+    // ITM — real danger on expiry day
+    if (pctFromStrike !== null && pctFromStrike < -0.005) {
+      return {
+        badge: "EMERGENCY_CUT",
+        label: "EMERGENCY CUT",
+        color: "red",
+        tooltip:
+          "Position is ITM on expiry day. Assignment risk is real. Close immediately.",
+        ruleFired: "EXPIRY_ITM",
+      };
+    }
+    // Pin risk — within 1% OTM
+    if (
+      pctFromStrike !== null &&
+      pctFromStrike >= -0.005 &&
+      pctFromStrike < 0.01
+    ) {
+      return {
+        badge: "PIN_RISK",
+        label: "PIN RISK",
+        color: "amber",
+        tooltip: `Stock is ${(pctFromStrike * 100).toFixed(1)}% from strike on expiry day. Pin risk possible — monitor closely until market close.`,
+        ruleFired: "EXPIRY_PIN_RISK",
+      };
+    }
+    // Clearly expiring worthless:
+    //  - Deep OTM (>= 20%) regardless of option price
+    //  - Normal OTM (>= 2%) with option near zero (< $0.15) or unknown
+    if (
+      pctFromStrike !== null &&
+      (pctFromStrike >= 0.2 ||
+        (pctFromStrike >= 0.02 && (optionPrice === null || optionPrice < 0.15)))
+    ) {
+      return {
+        badge: "EXPIRING",
+        label: "EXPIRING ✓",
+        color: "green",
+        tooltip: `${(pctFromStrike * 100).toFixed(1)}% OTM on expiry day — expires worthless. Closing costs exceed remaining risk.`,
+        ruleFired: "EXPIRY_WORTHLESS",
+      };
+    }
+    // OTM but option still has residual value — monitor through close.
+    if (pctFromStrike !== null && pctFromStrike >= 0.01) {
+      return {
+        badge: "MONITOR",
+        label: "MONITOR",
+        color: "amber",
+        tooltip:
+          "Expiry today. OTM but option still has residual value. Watch through close.",
+        ruleFired: "EXPIRY_MONITOR",
+      };
+    }
+    // Expiry day but no price data — fall through to lower priorities.
+  }
+
+  // ---------- PRIORITY 2: post-earnings rec (HIGH/MEDIUM only) ----------
+  if (
+    postEarningsRec &&
+    (postEarningsRec.confidence === "HIGH" || postEarningsRec.confidence === "MEDIUM")
+  ) {
+    const r = postEarningsRec.recommendation;
+    const c = postEarningsRec.confidence;
+    const sentence = firstSentence(postEarningsRec.reasoning);
+    if (r === "CLOSE" && c === "HIGH") {
+      return {
+        badge: "CLOSE",
+        label: "CLOSE",
+        color: "red",
+        tooltip: `Post-earnings: ${sentence}`,
+        ruleFired: "POST_EARNINGS_CLOSE_HIGH",
+      };
+    }
+    if (r === "HOLD" && c === "HIGH") {
+      return {
+        badge: "HOLD",
+        label: "HOLD",
+        color: "green",
+        tooltip: `Post-earnings: ${sentence}`,
+        ruleFired: "POST_EARNINGS_HOLD_HIGH",
+      };
+    }
+    if (r === "CLOSE" && c === "MEDIUM") {
+      return {
+        badge: "MONITOR",
+        label: "MONITOR",
+        color: "amber",
+        tooltip: `Post-earnings leans close (medium confidence): ${sentence}`,
+        ruleFired: "POST_EARNINGS_CLOSE_MEDIUM",
+      };
+    }
+    if (r === "HOLD" && c === "MEDIUM") {
+      return {
+        badge: "HOLD",
+        label: "HOLD",
+        color: "green",
+        tooltip: `Post-earnings leans hold (medium confidence): ${sentence}`,
+        ruleFired: "POST_EARNINGS_HOLD_MEDIUM",
+      };
+    }
+    if (r === "PARTIAL") {
+      return {
+        badge: "MONITOR",
+        label: "PARTIAL",
+        color: "amber",
+        tooltip: `Post-earnings: consider closing 50%. ${sentence}`,
+        ruleFired: "POST_EARNINGS_PARTIAL",
+      };
+    }
+    // LOW confidence and anything else falls through.
+  }
+
+  // ---------- PRIORITY 3: max profit (premium captured) ----------
+  const pctPremiumRemaining = latestSnapshot?.pct_premium_remaining ?? null;
+  // Deep OTM fallback when we don't have pct_premium_remaining —
+  // stock >20% above strike on a put means the option is functionally
+  // worthless even without an option price to confirm.
+  const deepOtm =
+    pctFromStrike !== null && pctFromStrike > 0.2;
+  if (
+    (pctPremiumRemaining !== null && pctPremiumRemaining < 0.1) ||
+    (pctPremiumRemaining === null && deepOtm)
+  ) {
+    const captured =
+      pctPremiumRemaining !== null
+        ? `${Math.round((1 - pctPremiumRemaining) * 100)}%`
+        : ">90%";
+    return {
+      badge: "MAX_PROFIT",
+      label: "MAX PROFIT",
+      color: "green",
+      tooltip: `${captured} of premium captured. Closing costs exceed remaining value — let it expire.`,
+      ruleFired: "MAX_PROFIT",
+    };
+  }
+
+  // ---------- PRIORITY 4: move ratio danger ----------
+  const moveRatio = latestSnapshot?.move_ratio ?? null;
+  const daysToExpiry = (() => {
+    const t = new Date(today + "T00:00:00Z").getTime();
+    const e = new Date(position.expiry + "T00:00:00Z").getTime();
+    if (!Number.isFinite(t) || !Number.isFinite(e)) return 0;
+    return Math.floor((e - t) / 86400000);
+  })();
+  if (moveRatio !== null && moveRatio > 1.2 && daysToExpiry > 0) {
+    return {
+      badge: "CLOSE",
+      label: "CLOSE",
+      color: "red",
+      tooltip: `Stock moved ${moveRatio.toFixed(2)}x the implied move. Premium likely expanded — consider closing.`,
+      ruleFired: "MOVE_RATIO_EXCEEDED",
+    };
+  }
+
+  // ---------- PRIORITY 5: delta health ----------
+  const delta = latestSnapshot?.current_delta ?? null;
+  if (delta !== null && Math.abs(delta) > 0.35) {
+    return {
+      badge: "EMERGENCY_CUT",
+      label: "EMERGENCY CUT",
+      color: "red",
+      tooltip: `Delta ${delta.toFixed(2)} — high assignment risk. Position has moved significantly against you.`,
+      ruleFired: "DELTA_HIGH",
+    };
+  }
+  if (delta !== null && Math.abs(delta) > 0.2) {
+    return {
+      badge: "MONITOR",
+      label: "MONITOR",
+      color: "amber",
+      tooltip: `Delta ${delta.toFixed(2)} — position needs monitoring. Watch for further movement toward strike.`,
+      ruleFired: "DELTA_ELEVATED",
+    };
+  }
+
+  // ---------- DEFAULT ----------
+  return {
+    badge: "HOLD",
+    label: "HOLD",
+    color: "green",
+    tooltip: "Position looks healthy. No action needed.",
+    ruleFired: "DEFAULT_HOLD",
+  };
+}

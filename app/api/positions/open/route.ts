@@ -4,11 +4,13 @@ import { getOptionsChain, SchwabOptionContract } from "@/lib/schwab";
 import { getCurrentPrice, getHistoricalPrices } from "@/lib/yahoo";
 import { getMarketContext } from "@/lib/market";
 import {
+  computePositionBadge,
   recommendPosition,
   postEarningsMomentum,
   isTwoDayDrop,
   remainingContracts,
   URGENCY_ORDER,
+  type BadgeColor,
   type Urgency,
   type Momentum,
   type Fill,
@@ -61,6 +63,15 @@ type OpenPosition = {
   momentum: Momentum | null;
   urgency: Urgency;
   recommendationReason: string;
+  // Priority-cascade status badge — supersedes the urgency enum for
+  // the collapsed-row status column. urgency is retained for the
+  // (soft-deprecated) existing consumers. Fields come straight from
+  // computePositionBadge().
+  badge: string;
+  badgeLabel: string;
+  badgeColor: BadgeColor;
+  badgeTooltip: string;
+  ruleFired: string;
   postEarningsRec: PostEarningsRecView | null;
   fills: Fill[];
   // Expiry classification (from runAutoExpire):
@@ -254,6 +265,47 @@ export async function GET(req: NextRequest) {
     }
   }
 
+  // Latest position_snapshot per position — feeds computePositionBadge
+  // (pct_premium_remaining, move_ratio, current_delta, last known
+  // stock / option prices). One query, dedupe in memory to keep the
+  // latest row per position_id.
+  type LatestSnapshot = {
+    stock_price: number | null;
+    option_price: number | null;
+    current_delta: number | null;
+    move_ratio: number | null;
+    pct_premium_remaining: number | null;
+  };
+  const latestSnapshotByPosition = new Map<string, LatestSnapshot>();
+  if (positionIds.length > 0) {
+    const snapRes = await supabase
+      .from("position_snapshots")
+      .select(
+        "position_id,snapshot_time,stock_price,option_price,current_delta,move_ratio,pct_premium_remaining",
+      )
+      .in("position_id", positionIds)
+      .order("snapshot_time", { ascending: false });
+    const snapRows = (snapRes.data ?? []) as Array<{
+      position_id: string;
+      snapshot_time: string;
+      stock_price: number | null;
+      option_price: number | null;
+      current_delta: number | null;
+      move_ratio: number | null;
+      pct_premium_remaining: number | null;
+    }>;
+    for (const row of snapRows) {
+      if (latestSnapshotByPosition.has(row.position_id)) continue;
+      latestSnapshotByPosition.set(row.position_id, {
+        stock_price: row.stock_price,
+        option_price: row.option_price,
+        current_delta: row.current_delta,
+        move_ratio: row.move_ratio,
+        pct_premium_remaining: row.pct_premium_remaining,
+      });
+    }
+  }
+
   // Fetch the latest post-earnings recommendation per position in one
   // query. We take the newest row per position (by analysis_date desc)
   // and dedupe in memory, so a same-day rerun still shows today's rec.
@@ -382,6 +434,21 @@ export async function GET(req: NextRequest) {
     const thetaDecayTotal =
       theta !== null && dte > 0 ? theta * dte * remaining * 100 : null;
 
+    // Priority-cascade badge — replaces the mechanical urgency-derived
+    // status for the collapsed row.
+    const badgeResult = computePositionBadge({
+      position: { strike, expiry },
+      latestSnapshot: latestSnapshotByPosition.get(p.id) ?? null,
+      postEarningsRec: recsByPosition.get(p.id)
+        ? {
+            recommendation: (recsByPosition.get(p.id) as PostEarningsRecView).recommendation,
+            confidence: (recsByPosition.get(p.id) as PostEarningsRecView).confidence,
+            reasoning: (recsByPosition.get(p.id) as PostEarningsRecView).reasoning,
+          }
+        : null,
+      currentStockPrice,
+    });
+
     const out: OpenPosition = {
       id: p.id,
       symbol: p.symbol,
@@ -408,6 +475,11 @@ export async function GET(req: NextRequest) {
       momentum,
       urgency: rec.urgency,
       recommendationReason: rec.reason,
+      badge: badgeResult.badge,
+      badgeLabel: badgeResult.label,
+      badgeColor: badgeResult.color,
+      badgeTooltip: badgeResult.tooltip,
+      ruleFired: badgeResult.ruleFired,
       postEarningsRec: recsByPosition.get(p.id) ?? null,
       expiryStatus: expiryByPosition.get(p.id)?.status ?? "active",
       expiryPctFromStrike: expiryByPosition.get(p.id)?.pctFromStrike ?? null,
