@@ -583,14 +583,13 @@ export type CalendarEntry = {
 // reportedDate (unix timestamp) keyed to (fiscalQuarter, calendarQuarter)
 // — exactly what the re-key needs.
 //
-// Limitations: Yahoo returns ~4 quarters. No explicit bmo/amc hour
-// field, so we heuristic-infer from reportedDate's time-of-day:
+// Limitations: Yahoo returns ~4 quarters and takes no date range, so
+// the function only accepts a symbol. No explicit bmo/amc hour field
+// either; we heuristic-infer from reportedDate's time-of-day:
 // timestamps >= 20:00 UTC (roughly >= 4pm ET) → AMC, earlier → BMO.
 // Imperfect but close enough for price_before/after selection.
 export async function fetchFinnhubEarningsCalendar(
   symbol: string,
-  _from: string,
-  _to: string,
 ): Promise<CalendarEntry[]> {
   const sym = symbol.toUpperCase();
   try {
@@ -804,11 +803,6 @@ export type ReingestReport = {
   changes: ReingestChange[];
 };
 
-// Earliest quarter-end date we'll try to re-key. 5 years back per spec.
-function fiveYearsBackIso(): string {
-  return addDaysIso(todayIso(), -5 * 365);
-}
-
 type ExistingHistoryRowPartial = HistoryRow & {
   id: string;
   eps_estimate: number | null;
@@ -853,7 +847,7 @@ export async function reingestHistoricalDates(
     return report;
   }
 
-  const calendar = await fetchFinnhubEarningsCalendar(sym, fiveYearsBackIso(), todayIso());
+  const calendar = await fetchFinnhubEarningsCalendar(sym);
   if (calendar.length === 0) {
     for (const r of quarterEndRows) {
       report.unmatched_rows.push({
