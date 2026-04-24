@@ -176,6 +176,53 @@ export default function EncyclopediaPage() {
     }
   }
 
+  async function reingestSymbol(symbol: string) {
+    setRefreshing(true);
+    setMessage(null);
+    setError(null);
+    try {
+      const res = await fetch("/api/encyclopedia/reingest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ symbols: [symbol] }),
+      });
+      const json = (await res.json()) as {
+        results?: Array<{
+          symbol: string;
+          reingested: number;
+          merged_with_existing: number;
+          unmatched_rows: Array<{ oldDate: string; reason: string }>;
+          already_clean: boolean;
+        }>;
+        errors?: Array<{ symbol: string; error: string }>;
+        error?: string;
+      };
+      if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+      const r = json.results?.[0];
+      if (r) {
+        const unmatched =
+          r.unmatched_rows.length > 0
+            ? ` · ${r.unmatched_rows.length} unmatched`
+            : "";
+        setMessage(
+          r.already_clean
+            ? `${r.symbol}: already clean — no quarter-end rows.`
+            : `Re-ingested ${r.symbol}: ${r.reingested} re-keyed, ${r.merged_with_existing} merged${unmatched}`,
+        );
+      } else {
+        setMessage(
+          `Errors: ${(json.errors ?? []).map((e) => `${e.symbol}: ${e.error}`).join("; ")}`,
+        );
+      }
+      await loadDetail(symbol);
+      await loadList();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "re-ingest failed");
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
   useEffect(() => {
     loadList();
   }, []);
@@ -243,6 +290,7 @@ export default function EncyclopediaPage() {
           loading={loadingDetail}
           refreshing={refreshing}
           onRefresh={() => refreshSymbol(selected)}
+          onReingest={() => reingestSymbol(selected)}
         />
       ) : (
         <ListView entries={filteredEntries} loading={loadingList} onSelect={setSelected} />
@@ -311,12 +359,14 @@ function DetailView({
   loading,
   refreshing,
   onRefresh,
+  onReingest,
 }: {
   symbol: string;
   detail: { encyclopedia: StockEncyclopedia | null; history: EarningsHistory[] } | null;
   loading: boolean;
   refreshing: boolean;
   onRefresh: () => void;
+  onReingest: () => void;
 }) {
   if (loading && !detail) {
     return (
@@ -362,10 +412,16 @@ function DetailView({
               </div>
             )}
           </div>
-          <Button onClick={onRefresh} disabled={refreshing} size="sm">
-            {refreshing ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
-            <span className="ml-1">Refresh data</span>
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button onClick={onRefresh} disabled={refreshing} size="sm">
+              {refreshing ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+              <span className="ml-1">Refresh data</span>
+            </Button>
+            <Button onClick={onReingest} disabled={refreshing} size="sm" variant="outline">
+              {refreshing ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+              <span className="ml-1">Re-ingest historical dates</span>
+            </Button>
+          </div>
         </div>
       </div>
 

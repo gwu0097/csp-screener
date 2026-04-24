@@ -26,6 +26,7 @@ import {
   type SchwabOptionContract,
   type SchwabOptionsChain,
 } from "@/lib/schwab";
+import YahooFinance from "yahoo-finance2";
 
 const FINNHUB_RATE_DELAY_MS = 200;
 
@@ -552,6 +553,488 @@ export async function updateEncyclopedia(symbol: string): Promise<UpdateSummary>
   };
 }
 
+// ---------- Phase 2C: historical re-key ----------
+//
+// Phase 1 used Finnhub /stock/earnings which keys rows by fiscal
+// quarter end (e.g. 2025-09-30). The actual TSLA Q3 2025 announcement
+// was Oct 22. Every downstream calculation that depends on
+// earnings_date is wrong on those rows. This section fixes them in
+// place: fetches the real calendar, matches quarter→announcement,
+// UPDATEs the earnings_date, re-fetches Yahoo prices with correct
+// BMO/AMC timing, and preserves any Perplexity narrative that was
+// attached to the old row.
+
+export type CalendarEntry = {
+  announcementDate: string; // YYYY-MM-DD
+  hour: "bmo" | "amc" | "dmh" | null;
+  year: number | null;
+  quarter: number | null;
+  epsEstimate: number | null;
+  epsActual: number | null;
+  revenueEstimate: number | null;
+  revenueActual: number | null;
+};
+
+// Fetches historical announcement dates for a symbol. Named for the
+// original Finnhub intent but implemented via Yahoo because Finnhub's
+// free tier /calendar/earnings only returns the next upcoming entry for
+// symbol-filtered queries and zero rows for historical windows without
+// a symbol. Yahoo's earningsChart.quarterly gives us the real
+// reportedDate (unix timestamp) keyed to (fiscalQuarter, calendarQuarter)
+// — exactly what the re-key needs.
+//
+// Limitations: Yahoo returns ~4 quarters. No explicit bmo/amc hour
+// field, so we heuristic-infer from reportedDate's time-of-day:
+// timestamps >= 20:00 UTC (roughly >= 4pm ET) → AMC, earlier → BMO.
+// Imperfect but close enough for price_before/after selection.
+export async function fetchFinnhubEarningsCalendar(
+  symbol: string,
+  _from: string,
+  _to: string,
+): Promise<CalendarEntry[]> {
+  const sym = symbol.toUpperCase();
+  try {
+    const yf = new YahooFinance({
+      suppressNotices: ["ripHistorical", "yahooSurvey"],
+    });
+    const res = (await yf.quoteSummary(sym, {
+      modules: ["earnings"],
+    })) as {
+      earnings?: {
+        earningsChart?: {
+          quarterly?: Array<{
+            date?: string | number;
+            periodEndDate?: string | number | Date;
+            reportedDate?: string | number | Date;
+            fiscalQuarter?: string;
+            calendarQuarter?: string;
+            actual?: number;
+            estimate?: number;
+          }>;
+        };
+      };
+    };
+    const quarterly = res.earnings?.earningsChart?.quarterly ?? [];
+    const entries: CalendarEntry[] = [];
+    for (const q of quarterly) {
+      const reportedMs =
+        typeof q.reportedDate === "number"
+          ? q.reportedDate * 1000
+          : q.reportedDate instanceof Date
+            ? q.reportedDate.getTime()
+            : typeof q.reportedDate === "string"
+              ? new Date(q.reportedDate).getTime()
+              : NaN;
+      if (!Number.isFinite(reportedMs)) continue;
+      const date = new Date(reportedMs);
+      const announcementDate = date.toISOString().slice(0, 10);
+      const utcHour = date.getUTCHours();
+      const hour: CalendarEntry["hour"] = utcHour >= 20 ? "amc" : "bmo";
+
+      // Parse fiscalQuarter like "3Q2025" → { year: 2025, quarter: 3 }.
+      let year: number | null = null;
+      let quarter: number | null = null;
+      const fq = q.fiscalQuarter ?? q.calendarQuarter ?? q.date;
+      if (typeof fq === "string") {
+        const m = /^(\d)Q(\d{4})$/.exec(fq);
+        if (m) {
+          quarter = Number(m[1]);
+          year = Number(m[2]);
+        }
+      }
+
+      entries.push({
+        announcementDate,
+        hour,
+        year,
+        quarter,
+        epsEstimate: q.estimate ?? null,
+        epsActual: q.actual ?? null,
+        revenueEstimate: null,
+        revenueActual: null,
+      });
+    }
+    return entries;
+  } catch (e) {
+    console.warn(
+      `[encyclopedia:calendar] ${sym} failed: ${e instanceof Error ? e.message : e}`,
+    );
+    return [];
+  }
+}
+
+// Given a quarter-end date, derive (year, quarter). "2025-09-30" → {2025, 3}.
+function quarterFromEndDate(
+  iso: string,
+): { year: number; quarter: number } | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
+  if (!m) return null;
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const qMap: Record<number, number | undefined> = { 3: 1, 6: 2, 9: 3, 12: 4 };
+  const quarter = qMap[month];
+  if (!quarter) return null;
+  return { year, quarter };
+}
+
+function diffDays(aIso: string, bIso: string): number {
+  const aMs = new Date(aIso + "T00:00:00Z").getTime();
+  const bMs = new Date(bIso + "T00:00:00Z").getTime();
+  return Math.abs(aMs - bMs) / 86400000;
+}
+
+// Map a quarter-end-keyed row to its real announcement date.
+// Primary: calendar entry matching (year, quarter). Fallback: calendar
+// entry within ±60 days of the quarter-end date (handles entries where
+// Finnhub didn't populate year/quarter).
+export function matchQuarterToAnnouncement(
+  quarterEndIso: string,
+  entries: CalendarEntry[],
+): CalendarEntry | null {
+  const q = quarterFromEndDate(quarterEndIso);
+  if (q) {
+    const byQuarter = entries.filter(
+      (e) => e.year === q.year && e.quarter === q.quarter,
+    );
+    if (byQuarter.length > 0) {
+      // Most common: one hit. If multiple (rare), pick the one closest
+      // in time to the quarter-end.
+      byQuarter.sort(
+        (a, b) =>
+          diffDays(a.announcementDate, quarterEndIso) -
+          diffDays(b.announcementDate, quarterEndIso),
+      );
+      return byQuarter[0];
+    }
+  }
+  let best: CalendarEntry | null = null;
+  let bestDiff = Infinity;
+  for (const e of entries) {
+    const d = diffDays(e.announcementDate, quarterEndIso);
+    if (d <= 60 && d < bestDiff) {
+      best = e;
+      bestDiff = d;
+    }
+  }
+  return best;
+}
+
+// Timing-aware price action fetch.
+//   BMO announcement on date D → market hasn't opened, so D-1 close is
+//     the pre-earnings baseline and D close is the post-reaction.
+//   AMC announcement on date D → D close is pre-announcement baseline
+//     (market closed before the 4pm print), D+1 close is the reaction.
+// Falls back to AMC semantics when timing is unknown — same as what
+// fetchYahooPriceAction did in Phase 1.
+export async function fetchYahooPriceActionTimed(
+  symbol: string,
+  announcementDate: string,
+  hour: CalendarEntry["hour"],
+): Promise<PriceAction> {
+  const fromDate = new Date(addDaysIso(announcementDate, -7) + "T00:00:00Z");
+  const expiryIso = nextFridayOnOrAfterIso(addDaysIso(announcementDate, 1));
+  const toDate = new Date(addDaysIso(expiryIso, 3) + "T00:00:00Z");
+  const bars = await getHistoricalPrices(symbol, fromDate, toDate);
+  if (bars.length === 0) {
+    return {
+      price_before: null,
+      price_after: null,
+      price_at_expiry: null,
+      actual_move_pct: null,
+    };
+  }
+  const toIso = (d: unknown): string => {
+    if (d instanceof Date) return d.toISOString().slice(0, 10);
+    if (typeof d === "string") return d.slice(0, 10);
+    return "";
+  };
+  const normalized = bars
+    .map((b) => ({
+      iso: toIso((b as { date?: unknown }).date),
+      close: Number((b as { close?: unknown }).close ?? 0),
+    }))
+    .filter((b) => b.iso && Number.isFinite(b.close) && b.close > 0)
+    .sort((a, b) => a.iso.localeCompare(b.iso));
+
+  const lastOnOrBefore = (target: string): number | null => {
+    let best: number | null = null;
+    for (const b of normalized) {
+      if (b.iso <= target) best = b.close;
+      else break;
+    }
+    return best;
+  };
+  const firstOnOrAfter = (target: string): number | null => {
+    for (const b of normalized) if (b.iso >= target) return b.close;
+    return null;
+  };
+
+  let price_before: number | null;
+  let price_after: number | null;
+  if (hour === "bmo") {
+    price_before = lastOnOrBefore(addDaysIso(announcementDate, -1));
+    price_after = lastOnOrBefore(announcementDate);
+  } else {
+    // AMC or unknown — treat as after-close.
+    price_before = lastOnOrBefore(announcementDate);
+    price_after = firstOnOrAfter(addDaysIso(announcementDate, 1));
+  }
+  const price_at_expiry = lastOnOrBefore(expiryIso);
+  const actual_move_pct =
+    price_before !== null && price_after !== null && price_before > 0
+      ? (price_after - price_before) / price_before
+      : null;
+  return { price_before, price_after, price_at_expiry, actual_move_pct };
+}
+
+export type ReingestChange = {
+  oldDate: string;
+  newDate: string;
+  action: "update" | "merge" | "unmatched";
+  hour: CalendarEntry["hour"];
+};
+
+export type ReingestReport = {
+  symbol: string;
+  reingested: number;
+  merged_with_existing: number;
+  unmatched_rows: Array<{ oldDate: string; reason: string }>;
+  already_clean: boolean;
+  dryRun: boolean;
+  changes: ReingestChange[];
+};
+
+// Earliest quarter-end date we'll try to re-key. 5 years back per spec.
+function fiveYearsBackIso(): string {
+  return addDaysIso(todayIso(), -5 * 365);
+}
+
+type ExistingHistoryRowPartial = HistoryRow & {
+  id: string;
+  eps_estimate: number | null;
+  eps_actual: number | null;
+  eps_surprise_pct: number | null;
+  revenue_estimate: number | null;
+  revenue_actual: number | null;
+  revenue_surprise_pct: number | null;
+};
+
+async function fetchHistoryRowsForSymbol(
+  symbol: string,
+): Promise<ExistingHistoryRowPartial[]> {
+  const sb = createServerClient();
+  const r = await sb
+    .from("earnings_history")
+    .select("*")
+    .eq("symbol", symbol.toUpperCase());
+  return (r.data ?? []) as ExistingHistoryRowPartial[];
+}
+
+export async function reingestHistoricalDates(
+  symbol: string,
+  opts: { dryRun?: boolean } = {},
+): Promise<ReingestReport> {
+  const dryRun = opts.dryRun === true;
+  const sym = symbol.toUpperCase();
+  const report: ReingestReport = {
+    symbol: sym,
+    reingested: 0,
+    merged_with_existing: 0,
+    unmatched_rows: [],
+    already_clean: false,
+    dryRun,
+    changes: [],
+  };
+
+  const allRows = await fetchHistoryRowsForSymbol(sym);
+  const quarterEndRows = allRows.filter((r) => isQuarterEndDate(r.earnings_date));
+  if (quarterEndRows.length === 0) {
+    report.already_clean = true;
+    return report;
+  }
+
+  const calendar = await fetchFinnhubEarningsCalendar(sym, fiveYearsBackIso(), todayIso());
+  if (calendar.length === 0) {
+    for (const r of quarterEndRows) {
+      report.unmatched_rows.push({
+        oldDate: r.earnings_date,
+        reason: "calendar_empty",
+      });
+    }
+    return report;
+  }
+
+  const sb = createServerClient();
+  const existingByDate = new Map(allRows.map((r) => [r.earnings_date, r]));
+
+  for (const row of quarterEndRows) {
+    const match = matchQuarterToAnnouncement(row.earnings_date, calendar);
+    if (!match) {
+      report.unmatched_rows.push({
+        oldDate: row.earnings_date,
+        reason: "no_calendar_match",
+      });
+      continue;
+    }
+    const announcementDate = match.announcementDate;
+    if (announcementDate === row.earnings_date) {
+      // Already correct (not really a quarter-end then — defensive).
+      continue;
+    }
+
+    const existingAtAnnouncement = existingByDate.get(announcementDate);
+
+    if (dryRun) {
+      report.changes.push({
+        oldDate: row.earnings_date,
+        newDate: announcementDate,
+        action: existingAtAnnouncement ? "merge" : "update",
+        hour: match.hour,
+      });
+      continue;
+    }
+
+    // Re-fetch Yahoo prices against the correct date + timing.
+    const price = await fetchYahooPriceActionTimed(
+      sym,
+      announcementDate,
+      match.hour,
+    );
+
+    // Use calendar EPS/revenue if available; fall back to what the old
+    // row already had. The /calendar endpoint is more authoritative per
+    // spec notes.
+    const merged = {
+      eps_estimate: match.epsEstimate ?? row.eps_estimate,
+      eps_actual: match.epsActual ?? row.eps_actual,
+      revenue_estimate: match.revenueEstimate ?? row.revenue_estimate,
+      revenue_actual: match.revenueActual ?? row.revenue_actual,
+    };
+    const eps_surprise_pct =
+      merged.eps_actual !== null &&
+      merged.eps_estimate !== null &&
+      merged.eps_estimate !== 0
+        ? (merged.eps_actual - merged.eps_estimate) / Math.abs(merged.eps_estimate)
+        : row.eps_surprise_pct;
+    const revenue_surprise_pct =
+      merged.revenue_actual !== null &&
+      merged.revenue_estimate !== null &&
+      merged.revenue_estimate !== 0
+        ? (merged.revenue_actual - merged.revenue_estimate) / Math.abs(merged.revenue_estimate)
+        : row.revenue_surprise_pct;
+
+    if (existingAtAnnouncement) {
+      // MERGE: the T0-inserted row at the announcement date keeps its
+      // live-captured implied_move_pct / iv_before / etc. We copy in
+      // EPS, revenue, and Perplexity narrative from the old row where
+      // the newer row has null. Yahoo price re-fetch runs regardless so
+      // actual_move_pct reflects the correct pre/post dates.
+      const newerRow = existingAtAnnouncement;
+      const updatePayload = {
+        eps_estimate: newerRow.eps_estimate ?? merged.eps_estimate,
+        eps_actual: newerRow.eps_actual ?? merged.eps_actual,
+        eps_surprise_pct: newerRow.eps_surprise_pct ?? eps_surprise_pct,
+        revenue_estimate: newerRow.revenue_estimate ?? merged.revenue_estimate,
+        revenue_actual: newerRow.revenue_actual ?? merged.revenue_actual,
+        revenue_surprise_pct: newerRow.revenue_surprise_pct ?? revenue_surprise_pct,
+        analyst_sentiment: newerRow.analyst_sentiment ?? row.analyst_sentiment,
+        news_summary: newerRow.news_summary ?? row.news_summary,
+        perplexity_pulled_at: newerRow.perplexity_pulled_at ?? row.perplexity_pulled_at,
+        price_before: price.price_before,
+        price_after: price.price_after,
+        actual_move_pct: price.actual_move_pct,
+        // Only recompute move_ratio when we have both legs in hand; a
+        // newer row with implied_move_pct and a freshly-recomputed
+        // actual_move_pct yields the correct ratio.
+        move_ratio:
+          price.actual_move_pct !== null &&
+          newerRow.implied_move_pct !== null &&
+          newerRow.implied_move_pct > 0
+            ? Math.abs(price.actual_move_pct) / newerRow.implied_move_pct
+            : newerRow.move_ratio,
+        data_source: "finnhub+calendar-rekey",
+      };
+      const u = await sb
+        .from("earnings_history")
+        .update(updatePayload)
+        .eq("id", newerRow.id);
+      if (u.error) {
+        report.unmatched_rows.push({
+          oldDate: row.earnings_date,
+          reason: `merge_update_failed: ${u.error.message}`,
+        });
+        continue;
+      }
+      const d = await sb.from("earnings_history").delete().eq("id", row.id);
+      if (d.error) {
+        report.unmatched_rows.push({
+          oldDate: row.earnings_date,
+          reason: `merge_delete_failed: ${d.error.message}`,
+        });
+        continue;
+      }
+      report.merged_with_existing += 1;
+      report.changes.push({
+        oldDate: row.earnings_date,
+        newDate: announcementDate,
+        action: "merge",
+        hour: match.hour,
+      });
+      await ensurePriceAtExpiry(sym, announcementDate);
+      continue;
+    }
+
+    // No existing row at the announcement date — simply UPDATE in place.
+    const updatePayload = {
+      earnings_date: announcementDate,
+      eps_estimate: merged.eps_estimate,
+      eps_actual: merged.eps_actual,
+      eps_surprise_pct,
+      revenue_estimate: merged.revenue_estimate,
+      revenue_actual: merged.revenue_actual,
+      revenue_surprise_pct,
+      price_before: price.price_before,
+      price_after: price.price_after,
+      actual_move_pct: price.actual_move_pct,
+      price_at_expiry: null, // cleared — ensurePriceAtExpiry refills below
+      recovered_by_expiry: null,
+      data_source: "finnhub+calendar-rekey",
+    };
+    const u = await sb
+      .from("earnings_history")
+      .update(updatePayload)
+      .eq("id", row.id);
+    if (u.error) {
+      report.unmatched_rows.push({
+        oldDate: row.earnings_date,
+        reason: `update_failed: ${u.error.message}`,
+      });
+      continue;
+    }
+    report.reingested += 1;
+    report.changes.push({
+      oldDate: row.earnings_date,
+      newDate: announcementDate,
+      action: "update",
+      hour: match.hour,
+    });
+    existingByDate.set(announcementDate, {
+      ...row,
+      earnings_date: announcementDate,
+      price_before: price.price_before,
+      price_after: price.price_after,
+      actual_move_pct: price.actual_move_pct,
+    });
+    existingByDate.delete(row.earnings_date);
+    await ensurePriceAtExpiry(sym, announcementDate);
+  }
+
+  if (!dryRun) {
+    await recalculateStats(sym);
+  }
+  return report;
+}
+
 // ---------- Phase 2A: live capture + backfill ----------
 //
 // Design principle: every capture function is idempotent. Callers can
@@ -887,7 +1370,11 @@ export async function ensurePriceAtExpiry(
   }
   if (isQuarterEndDate(earningsDate)) {
     // Phase 1 legacy row keyed by fiscal quarter end, not announcement.
-    // Computing Friday-after would give a meaningless date.
+    // Computing Friday-after would give a meaningless date. Logged so
+    // we can spot rows the re-key pass (Phase 2C) couldn't match.
+    console.warn(
+      `[encyclopedia:expiry] Skipping price_at_expiry for ${sym} ${earningsDate}: quarter-end date indicates unmatched calendar entry.`,
+    );
     return { captured: false, skipped: true, reason: "quarter_end_legacy_row" };
   }
 
