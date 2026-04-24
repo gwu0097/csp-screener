@@ -95,17 +95,30 @@ async function writePositionSnapshots(): Promise<{ written: number; errors: stri
     );
 
     const nowIso = new Date().toISOString();
+    const todayStr = nowIso.slice(0, 10);
+    console.log(`[snapshots] processing ${positions.length} open positions`);
     for (const p of positions) {
       const chain = chainCache.get(p.symbol) ?? null;
+      // On expiry day the position is about to resolve one way or the
+      // other — flag the snapshot as close_snapshot so the intelligence
+      // layer can separate "final reading" from intraday captures even
+      // when the user never manually closes (auto-expire / assignment).
+      const isExpiryDay = (p.expiry ?? "") <= todayStr;
       const row = buildSnapshotRow(p, chain, fillsByPosition.get(p.id) ?? [], {
         nowIso,
-        closeSnapshot: false,
+        closeSnapshot: isExpiryDay,
       });
       const { error: iErr } = await supabase.from("position_snapshots").insert(row);
       if (iErr) {
+        console.warn(
+          `[snapshots] ${p.symbol} $${p.strike} exp=${p.expiry}: insert failed — ${iErr.message}`,
+        );
         errors.push(`${p.symbol}: ${iErr.message}`);
         continue;
       }
+      console.log(
+        `[snapshots] ${p.symbol} $${p.strike} exp=${p.expiry}: written close=${isExpiryDay} chain=${chain ? "ok" : "null"} stock=${row.stock_price} opt=${row.option_price} iv=${row.current_iv} delta=${row.current_delta}`,
+      );
       written += 1;
     }
   } catch (e) {
@@ -183,9 +196,11 @@ export async function POST(req: NextRequest) {
     (body.trackedSymbols ?? []).map((s) => String(s).toUpperCase()),
   );
 
-  if (candidates.length === 0) {
-    return NextResponse.json({ connected: true, results: [], prices: {} });
-  }
+  // Deliberately NOT early-returning on empty candidates. Run Analysis on
+  // a day with no screener candidates still needs to snapshot open
+  // positions (Greeks/IV/delta time series) and run encyclopedia
+  // maintenance. Skipping those would lose the intraday data we use
+  // for pattern learning.
 
   // Shared context: batch prices + VIX/SPY. These are cheap to fetch and
   // shared across every candidate.
