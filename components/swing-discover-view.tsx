@@ -1144,7 +1144,7 @@ function CandidateCard({
   );
 }
 
-type DrawerTab = "analysis" | "research" | "sources";
+type DrawerTab = "analysis" | "news" | "research" | "sources";
 
 function DeepDiveDrawer({
   candidate: c,
@@ -1182,10 +1182,13 @@ function DeepDiveDrawer({
     if (c) setDrawerTab("analysis");
   }, [c?.symbol]);
 
-  // Lazy-fetch research the first time the user opens that tab on this
-  // candidate. Cache hits short-circuit inside onLoadResearch.
+  // Lazy-fetch the Yahoo research payload the first time the user opens
+  // either the News or Research tab on this candidate. Both tabs read
+  // from the same cached response — cache hits short-circuit inside
+  // onLoadResearch.
   useEffect(() => {
-    if (!c || drawerTab !== "research") return;
+    if (!c) return;
+    if (drawerTab !== "news" && drawerTab !== "research") return;
     onLoadResearch(c.symbol);
   }, [c?.symbol, drawerTab]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1275,6 +1278,7 @@ function DeepDiveDrawer({
           <div className="border-b border-border px-6 pt-3">
             <TabsList>
               <TabsTrigger value="analysis">📊 Analysis</TabsTrigger>
+              <TabsTrigger value="news">📰 News</TabsTrigger>
               <TabsTrigger value="research">🔬 Research</TabsTrigger>
               <TabsTrigger value="sources">
                 🔗 Sources
@@ -1400,15 +1404,30 @@ function DeepDiveDrawer({
           </TabsContent>
 
           <TabsContent
-            value="research"
+            value="news"
             className="min-h-0 flex-1 overflow-y-auto px-6 py-6 text-base"
           >
-            <ResearchPanel
-              candidate={c}
+            <ResearchNews
               data={research}
               loading={researchLoading}
               error={researchError}
             />
+          </TabsContent>
+
+          <TabsContent
+            value="research"
+            className="min-h-0 flex-1 overflow-y-auto px-6 py-6 text-base"
+          >
+            {c && (
+              <div className="space-y-6">
+                <ResearchFundamentals
+                  candidate={c}
+                  data={research}
+                  loading={researchLoading}
+                />
+                <ResearchQuickLinks candidate={c} />
+              </div>
+            )}
           </TabsContent>
 
           <TabsContent
@@ -1483,32 +1502,7 @@ function DeepDiveDrawer({
   );
 }
 
-// ----- Research panel (Yahoo news + fundamentals + quick links) -----
-
-function ResearchPanel({
-  candidate: c,
-  data,
-  loading,
-  error,
-}: {
-  candidate: Candidate | null;
-  data: ResearchData | null;
-  loading: boolean;
-  error: string | null;
-}) {
-  if (!c) return null;
-  return (
-    <div className="space-y-6">
-      <ResearchNews data={data} loading={loading} error={error} />
-      <ResearchFundamentals
-        candidate={c}
-        data={data}
-        loading={loading}
-      />
-      <ResearchQuickLinks candidate={c} />
-    </div>
-  );
-}
+// ----- News tab content (lazy-loaded Yahoo Finance headlines) -----
 
 function ResearchNews({
   data,
@@ -1737,6 +1731,10 @@ function ResearchQuickLinks({ candidate: c }: { candidate: Candidate }) {
     {
       label: `𝕏 · $${c.symbol}`,
       href: `https://x.com/search?q=%24${sym}&src=typed_query&f=live`,
+    },
+    {
+      label: `👥 Reddit · r/stocks + WSB`,
+      href: `https://www.reddit.com/search/?q=${sym}&sort=new`,
     },
     {
       label: `📋 SEC filings`,
