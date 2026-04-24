@@ -17,8 +17,8 @@ export function Nav() {
             <Link href="/positions" className="inline-flex items-center gap-1 hover:text-foreground">
               <Briefcase className="h-4 w-4" /> Positions
             </Link>
-            <Link href="/journal" className="inline-flex items-center gap-1 hover:text-foreground">
-              <BookOpen className="h-4 w-4" /> Journal
+            <Link href="/intelligence" className="inline-flex items-center gap-1 hover:text-foreground">
+              <BookOpen className="h-4 w-4" /> Intelligence
             </Link>
             <Link href="/watchlist" className="inline-flex items-center gap-1 hover:text-foreground">
               <Star className="h-4 w-4" /> Watchlist
