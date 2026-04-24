@@ -7,13 +7,15 @@ import type { LucideIcon } from "lucide-react";
 import {
   BarChart3,
   BookMarked,
+  BookOpen,
   Briefcase,
   ChevronDown,
   ChevronRight,
+  Layers,
   Lightbulb,
   Menu,
+  Search,
   Settings,
-  Star,
   X,
 } from "lucide-react";
 import {
@@ -25,51 +27,120 @@ import {
 import { cn } from "@/lib/utils";
 
 type NavItem = { href: string; label: string; icon: LucideIcon };
+type SubItem = { href: string; label: string };
 
-// Top-of-nav items. Screener uses "/" per existing app routing.
-const MAIN_ITEMS: NavItem[] = [
-  { href: "/", label: "Screener", icon: BarChart3 },
-  { href: "/positions", label: "Positions", icon: Briefcase },
-];
+// Collapsible group: a top-level entry that expands to show sub-items on
+// desktop, and collapses to a single tablet icon that links to the first
+// sub-item when there's no room for the expanded list.
+type NavGroup = {
+  key: string;
+  icon: LucideIcon;
+  label: string;
+  basePath: string;
+  subItems: SubItem[];
+};
 
-const INTELLIGENCE_BASE = "/intelligence";
-const INTELLIGENCE_SUB_ITEMS: { href: string; label: string }[] = [
-  { href: "/intelligence/performance", label: "Performance" },
-  { href: "/intelligence/efficiency", label: "Efficiency" },
-  { href: "/intelligence/patterns", label: "Patterns" },
-];
+// ------------ OPTIONS ------------
+const SCREENER_GROUP: NavGroup = {
+  key: "screener",
+  icon: BarChart3,
+  label: "Screener",
+  basePath: "/screener-group", // virtual — no route of its own
+  subItems: [
+    { href: "/", label: "Candidates" },
+    { href: "/watchlist", label: "CSP Watchlist" },
+  ],
+};
 
-const SECONDARY_ITEMS: NavItem[] = [
-  { href: "/encyclopedia", label: "Encyclopedia", icon: BookMarked },
-  { href: "/watchlist", label: "Watchlist", icon: Star },
-];
+const POSITIONS: NavItem = { href: "/positions", label: "Positions", icon: Briefcase };
 
-function isActive(pathname: string, href: string): boolean {
+const INTELLIGENCE_GROUP: NavGroup = {
+  key: "intelligence",
+  icon: Lightbulb,
+  label: "Intelligence",
+  basePath: "/intelligence",
+  subItems: [
+    { href: "/intelligence/performance", label: "Performance" },
+    { href: "/intelligence/efficiency", label: "Efficiency" },
+    { href: "/intelligence/patterns", label: "Patterns" },
+  ],
+};
+
+// ------------ SWINGS ------------
+const SWINGS_DISCOVER: NavItem = {
+  href: "/swings/discover",
+  label: "Discover",
+  icon: Search,
+};
+const SWINGS_IDEAS: NavItem = {
+  href: "/swings/ideas",
+  label: "Ideas",
+  icon: Layers,
+};
+
+const SWINGS_JOURNAL_GROUP: NavGroup = {
+  key: "swings-journal",
+  icon: BookOpen,
+  label: "Journal",
+  basePath: "/swings/journal",
+  subItems: [
+    { href: "/swings/journal/performance", label: "Performance" },
+    { href: "/swings/journal/trades", label: "Trades" },
+  ],
+};
+
+// ------------ TOOLS ------------
+const ENCYCLOPEDIA: NavItem = {
+  href: "/encyclopedia",
+  label: "Encyclopedia",
+  icon: BookMarked,
+};
+const SETTINGS: NavItem = { href: "/settings", label: "Settings", icon: Settings };
+
+function itemActive(pathname: string, href: string): boolean {
   if (href === "/") return pathname === "/";
   return pathname === href || pathname.startsWith(`${href}/`);
+}
+
+// A sub-item is active only on an exact path match — otherwise two
+// siblings inside the same group would both highlight.
+function subActive(pathname: string, href: string): boolean {
+  return pathname === href;
+}
+
+function groupActive(pathname: string, group: NavGroup): boolean {
+  // Active if any sub-item matches. Prefer exact/prefix check on sub hrefs
+  // over basePath so "Candidates" (href "/") doesn't leak into unrelated
+  // root-relative routes.
+  return group.subItems.some((s) => itemActive(pathname, s.href));
 }
 
 export function Sidebar() {
   const pathname = usePathname() ?? "/";
   const [mobileOpen, setMobileOpen] = useState(false);
-  const [intelOpen, setIntelOpen] = useState(false);
+  const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
 
-  // Auto-expand the Intelligence section when navigating into it. Don't
-  // collapse it when navigating away — respect whatever the user last
-  // toggled. Mobile drawer closes on any pathname change so navigation
-  // feels snappy.
+  // Auto-expand any group whose sub-item is currently active. Don't
+  // collapse groups on navigation away — respect the user's last toggle.
   useEffect(() => {
-    if (pathname.startsWith(INTELLIGENCE_BASE)) setIntelOpen(true);
+    for (const g of [SCREENER_GROUP, INTELLIGENCE_GROUP, SWINGS_JOURNAL_GROUP]) {
+      if (groupActive(pathname, g)) {
+        setOpenGroups((prev) => (prev[g.key] ? prev : { ...prev, [g.key]: true }));
+      }
+    }
   }, [pathname]);
+
   useEffect(() => {
     setMobileOpen(false);
   }, [pathname]);
 
-  const inIntelligence = pathname.startsWith(INTELLIGENCE_BASE);
+  function toggleGroup(key: string) {
+    setOpenGroups((prev) => ({ ...prev, [key]: !prev[key] }));
+  }
 
   return (
     <TooltipProvider delayDuration={150}>
-      {/* Mobile: hamburger button (hidden on md+) */}
+      {/* Mobile hamburger */}
       <button
         type="button"
         onClick={() => setMobileOpen(true)}
@@ -79,7 +150,6 @@ export function Sidebar() {
         <Menu className="h-5 w-5" />
       </button>
 
-      {/* Mobile: overlay behind the drawer */}
       {mobileOpen && (
         <div
           className="fixed inset-0 z-40 bg-black/60 md:hidden"
@@ -87,22 +157,15 @@ export function Sidebar() {
         />
       )}
 
-      {/* Sidebar. Mobile: fixed-position drawer that slides in.
-          md (tablet): static, 56px icon-only.
-          lg (desktop): 240px with labels visible. */}
       <aside
         className={cn(
           "flex shrink-0 flex-col border-r border-white/10 bg-zinc-900 transition-transform",
-          // Mobile drawer baseline
           "fixed inset-y-0 left-0 z-50 w-60",
           mobileOpen ? "translate-x-0" : "-translate-x-full",
-          // Tablet+: static, icon-only
           "md:static md:translate-x-0 md:w-14",
-          // Desktop: wider with labels
           "lg:w-60",
         )}
       >
-        {/* Logo / app name. On tablet (md → lg) the label is hidden. */}
         <div className="flex h-14 items-center justify-between border-b border-white/10 px-3">
           <Link
             href="/"
@@ -111,7 +174,6 @@ export function Sidebar() {
             <BarChart3 className="h-5 w-5 shrink-0 text-emerald-400" />
             <span className="text-sm md:hidden lg:inline">CSP Screener</span>
           </Link>
-          {/* Mobile-only close button */}
           <button
             type="button"
             onClick={() => setMobileOpen(false)}
@@ -122,107 +184,178 @@ export function Sidebar() {
           </button>
         </div>
 
-        {/* Scrolling nav body */}
         <nav className="flex flex-1 flex-col gap-0.5 overflow-y-auto p-2">
-          {MAIN_ITEMS.map((item) => (
-            <SidebarLink key={item.href} item={item} pathname={pathname} />
-          ))}
-
-          <Divider />
-
-          {/* Intelligence (collapsible). Desktop renders a toggle +
-              inline sub-items. Tablet renders a single icon that
-              links directly to the default sub-page since there's no
-              room for the sub-list. */}
-          <div className="hidden lg:block">
-            <button
-              type="button"
-              onClick={() => setIntelOpen((v) => !v)}
-              className={cn(
-                "group flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm",
-                inIntelligence
-                  ? "bg-white/10 text-white"
-                  : "text-gray-400 hover:bg-white/5 hover:text-white",
-              )}
-            >
-              <Lightbulb className="h-4 w-4 shrink-0" />
-              <span className="flex-1 text-left">Intelligence</span>
-              {intelOpen ? (
-                <ChevronDown className="h-3.5 w-3.5" />
-              ) : (
-                <ChevronRight className="h-3.5 w-3.5" />
-              )}
-            </button>
-            {intelOpen && (
-              <div className="mt-0.5 space-y-0.5">
-                {INTELLIGENCE_SUB_ITEMS.map((sub) => {
-                  const active = pathname === sub.href;
-                  return (
-                    <Link
-                      key={sub.href}
-                      href={sub.href}
-                      className={cn(
-                        "block rounded-md py-1.5 pl-11 pr-3 text-sm",
-                        active
-                          ? "bg-white/5 font-medium text-white"
-                          : "text-gray-500 hover:text-gray-200",
-                      )}
-                    >
-                      {sub.label}
-                    </Link>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-          {/* Tablet: single icon linking to the default sub-page */}
-          <div className="block lg:hidden">
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Link
-                  href="/intelligence/performance"
-                  className={cn(
-                    "flex items-center justify-center rounded-md px-3 py-2",
-                    inIntelligence
-                      ? "bg-white/10 text-white"
-                      : "text-gray-400 hover:bg-white/5 hover:text-white",
-                  )}
-                  aria-label="Intelligence"
-                >
-                  <Lightbulb className="h-4 w-4" />
-                </Link>
-              </TooltipTrigger>
-              <TooltipContent side="right">Intelligence</TooltipContent>
-            </Tooltip>
-          </div>
-
-          <Divider />
-
-          {SECONDARY_ITEMS.map((item) => (
-            <SidebarLink key={item.href} item={item} pathname={pathname} />
-          ))}
-        </nav>
-
-        {/* Settings pinned to the bottom */}
-        <div className="border-t border-white/5 p-2">
-          <SidebarLink
-            item={{ href: "/settings", label: "Settings", icon: Settings }}
+          <SectionHeader label="Options" />
+          <CollapsibleGroup
+            group={SCREENER_GROUP}
             pathname={pathname}
+            open={openGroups[SCREENER_GROUP.key] ?? false}
+            onToggle={() => toggleGroup(SCREENER_GROUP.key)}
           />
-        </div>
+          <SidebarLink item={POSITIONS} pathname={pathname} />
+          <CollapsibleGroup
+            group={INTELLIGENCE_GROUP}
+            pathname={pathname}
+            open={openGroups[INTELLIGENCE_GROUP.key] ?? false}
+            onToggle={() => toggleGroup(INTELLIGENCE_GROUP.key)}
+          />
+
+          <SectionHeader label="Swings" />
+          <SidebarLink item={SWINGS_DISCOVER} pathname={pathname} />
+          <SidebarLink item={SWINGS_IDEAS} pathname={pathname} />
+          <CollapsibleGroup
+            group={SWINGS_JOURNAL_GROUP}
+            pathname={pathname}
+            open={openGroups[SWINGS_JOURNAL_GROUP.key] ?? false}
+            onToggle={() => toggleGroup(SWINGS_JOURNAL_GROUP.key)}
+          />
+
+          <SectionHeader label="Tools" />
+          <SidebarLink item={ENCYCLOPEDIA} pathname={pathname} />
+          <SidebarLink item={SETTINGS} pathname={pathname} />
+        </nav>
       </aside>
     </TooltipProvider>
   );
 }
 
-function Divider() {
-  return <div className="my-2 border-t border-white/5" />;
+function SectionHeader({ label }: { label: string }) {
+  // Hidden on tablet (56px icon-only) — the uppercase label is too long
+  // to fit. Replaced by a thin divider instead so groups stay visually
+  // separated at that width.
+  return (
+    <>
+      <div className="mt-4 block px-3 py-2 text-xs uppercase tracking-wider text-gray-500 md:hidden lg:block">
+        {label}
+      </div>
+      <div className="my-2 hidden border-t border-white/5 md:block lg:hidden" />
+    </>
+  );
+}
+
+function CollapsibleGroup({
+  group,
+  pathname,
+  open,
+  onToggle,
+}: {
+  group: NavGroup;
+  pathname: string;
+  open: boolean;
+  onToggle: () => void;
+}) {
+  const active = groupActive(pathname, group);
+  const Icon = group.icon;
+
+  return (
+    <>
+      {/* Desktop: expandable toggle with inline sub-items */}
+      <div className="hidden lg:block">
+        <button
+          type="button"
+          onClick={onToggle}
+          className={cn(
+            "flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm",
+            active
+              ? "bg-white/10 text-white"
+              : "text-gray-400 hover:bg-white/5 hover:text-white",
+          )}
+        >
+          <Icon className="h-4 w-4 shrink-0" />
+          <span className="flex-1 text-left">{group.label}</span>
+          {open ? (
+            <ChevronDown className="h-3.5 w-3.5" />
+          ) : (
+            <ChevronRight className="h-3.5 w-3.5" />
+          )}
+        </button>
+        {open && (
+          <div className="mt-0.5 space-y-0.5">
+            {group.subItems.map((sub) => (
+              <Link
+                key={sub.href}
+                href={sub.href}
+                className={cn(
+                  "block rounded-md py-1.5 pl-11 pr-3 text-sm",
+                  subActive(pathname, sub.href)
+                    ? "bg-white/5 font-medium text-white"
+                    : "text-gray-500 hover:text-gray-200",
+                )}
+              >
+                {sub.label}
+              </Link>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Tablet: single icon → first sub-item */}
+      <div className="hidden md:block lg:hidden">
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Link
+              href={group.subItems[0].href}
+              className={cn(
+                "flex items-center justify-center rounded-md px-3 py-2",
+                active
+                  ? "bg-white/10 text-white"
+                  : "text-gray-400 hover:bg-white/5 hover:text-white",
+              )}
+              aria-label={group.label}
+            >
+              <Icon className="h-4 w-4" />
+            </Link>
+          </TooltipTrigger>
+          <TooltipContent side="right">{group.label}</TooltipContent>
+        </Tooltip>
+      </div>
+
+      {/* Mobile drawer: same as desktop (drawer is wide enough) */}
+      <div className="md:hidden">
+        <button
+          type="button"
+          onClick={onToggle}
+          className={cn(
+            "flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm",
+            active
+              ? "bg-white/10 text-white"
+              : "text-gray-400 hover:bg-white/5 hover:text-white",
+          )}
+        >
+          <Icon className="h-4 w-4 shrink-0" />
+          <span className="flex-1 text-left">{group.label}</span>
+          {open ? (
+            <ChevronDown className="h-3.5 w-3.5" />
+          ) : (
+            <ChevronRight className="h-3.5 w-3.5" />
+          )}
+        </button>
+        {open && (
+          <div className="mt-0.5 space-y-0.5">
+            {group.subItems.map((sub) => (
+              <Link
+                key={sub.href}
+                href={sub.href}
+                className={cn(
+                  "block rounded-md py-1.5 pl-11 pr-3 text-sm",
+                  subActive(pathname, sub.href)
+                    ? "bg-white/5 font-medium text-white"
+                    : "text-gray-500 hover:text-gray-200",
+                )}
+              >
+                {sub.label}
+              </Link>
+            ))}
+          </div>
+        )}
+      </div>
+    </>
+  );
 }
 
 function SidebarLink({ item, pathname }: { item: NavItem; pathname: string }) {
-  const active = isActive(pathname, item.href);
+  const active = itemActive(pathname, item.href);
   const Icon = item.icon;
-  // Hide label at md (56px icon-only), show again at lg.
   const linkClasses = cn(
     "flex items-center gap-3 rounded-md px-3 py-2 text-sm",
     active
@@ -231,12 +364,10 @@ function SidebarLink({ item, pathname }: { item: NavItem; pathname: string }) {
   );
   return (
     <>
-      {/* Desktop + mobile drawer: icon + label */}
       <Link href={item.href} className={cn(linkClasses, "hidden lg:flex")}>
         <Icon className="h-4 w-4 shrink-0" />
         <span>{item.label}</span>
       </Link>
-      {/* Tablet: icon only, tooltip on hover */}
       <Tooltip>
         <TooltipTrigger asChild>
           <Link
@@ -252,7 +383,6 @@ function SidebarLink({ item, pathname }: { item: NavItem; pathname: string }) {
         </TooltipTrigger>
         <TooltipContent side="right">{item.label}</TooltipContent>
       </Tooltip>
-      {/* Mobile drawer: full label (drawer is 240px wide so labels fit) */}
       <Link href={item.href} className={cn(linkClasses, "md:hidden")}>
         <Icon className="h-4 w-4 shrink-0" />
         <span>{item.label}</span>
