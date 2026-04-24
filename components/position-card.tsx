@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronDown, ChevronRight, ExternalLink, Loader2 } from "lucide-react";
+import { ExternalLink, Loader2 } from "lucide-react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import {
@@ -117,27 +117,34 @@ type Props =
 
 // Grid template shared between the collapsed row and the column-header
 // row in positions-view. Keeping both on the same template guarantees
-// the header labels sit directly above their data. If you add/remove a
-// column here, update PositionsTableHeader too.
+// header labels sit directly above their data. If you add/remove a
+// column here, update PositionsTableHeader + the data-row cells too.
 //
-// Desktop columns (sm+):
-//   1. 16px                  post-earnings dot indicator
-//   2. minmax(60px, 80px)    symbol — clamped so it doesn't hog extra
-//                            row width; that space goes to status
-//                            instead (prevents a gap between Symbol
-//                            and Strike when viewport is wide)
-//   3. 70px                  strike (e.g. "$312.5P")
-//   4. 60px                  expiry ("Apr 24")
-//   5. 40px                  qty ("×4")
-//   6. 70px                  P&L ("-$42")
-//   7. 50px                  POP% ("91%")
-//   8. 36px                  grade badge ("A")
-//   9. 1fr                   status — absorbs extra row width; the
-//                            badge inside uses justify-self-end so
-//                            it sits flush to the right edge
-//  10. 16px                  expand chevron
+// Every column except the dot is fractional (fr) with a min floor via
+// minmax() — resize the browser and columns scale proportionally
+// instead of leaving a fixed-width row in the middle of a wider page.
+//
+// Desktop (sm+, 13 cols, left → right):
+//   1.  24px               post-earnings dot indicator (only fixed col)
+//   2.  minmax(40px, 1fr)     SYMBOL
+//   3.  minmax(60px, 1.2fr)   STRIKE
+//   4.  minmax(50px, 1fr)     EXPIRY         — hidden on mobile
+//   5.  minmax(30px, 0.6fr)   QTY
+//   6.  minmax(60px, 1.2fr)   STOCK
+//   7.  minmax(60px, 1.2fr)   P&L
+//   8.  minmax(40px, 0.8fr)   POP
+//   9.  minmax(60px, 1fr)     % OTM          — hidden on mobile
+//  10.  minmax(40px, 0.8fr)   IV             — hidden on mobile
+//  11.  minmax(40px, 0.8fr)   θ (theta)      — hidden on mobile
+//  12.  minmax(30px, 0.6fr)   GRADE
+//  13.  minmax(80px, 1.5fr)   STATUS
+//
+// Mobile (< sm, 9 cols): drops EXPIRY / % OTM / IV / θ. Those four
+// cells use `hidden sm:block` so they're pulled out of the grid flow
+// on mobile, leaving only the 9 visible cells which fit the mobile
+// template precisely.
 export const COLLAPSED_ROW_GRID =
-  "grid w-full grid-cols-[16px_1fr_auto_auto_auto_auto_auto_auto_auto] items-center gap-2 px-3 text-sm sm:grid-cols-[16px_minmax(60px,80px)_70px_60px_40px_70px_50px_36px_1fr_16px]";
+  "grid w-full grid-cols-[24px_1fr_1.2fr_0.6fr_1.2fr_1.2fr_0.8fr_0.6fr_1.5fr] items-center gap-2 px-3 text-sm sm:grid-cols-[24px_minmax(40px,1fr)_minmax(60px,1.2fr)_minmax(50px,1fr)_minmax(30px,0.6fr)_minmax(60px,1.2fr)_minmax(60px,1.2fr)_minmax(40px,0.8fr)_minmax(60px,1fr)_minmax(40px,0.8fr)_minmax(40px,0.8fr)_minmax(30px,0.6fr)_minmax(80px,1.5fr)]";
 
 // ---------- small helpers ----------
 
@@ -273,6 +280,12 @@ export function PositionCard(props: Props) {
       : pnlDollars >= 0
         ? "text-emerald-300"
         : "text-rose-300";
+  // Live-only fields; closed rows render as "—" since these are
+  // meaningful at a moment-in-time only.
+  const stockPrice = open ? open.currentStockPrice : null;
+  const distancePct = open ? open.distanceToStrikePct : null;
+  const iv = open ? open.currentIv : null;
+  const theta = open ? open.currentTheta : null;
 
   return (
     <div
@@ -287,31 +300,58 @@ export function PositionCard(props: Props) {
         onClick={() => setExpanded((v) => !v)}
         className={cn(COLLAPSED_ROW_GRID, "py-2")}
       >
-        {/* Post-earnings dot */}
+        {/* 1. Post-earnings dot */}
         <div className="flex h-4 w-4 items-center justify-center">
           {p.postEarningsRec ? <RecDot rec={p.postEarningsRec} /> : null}
         </div>
-        {/* Symbol */}
+        {/* 2. Symbol */}
         <div className="truncate text-left font-semibold">{p.symbol}</div>
-        {/* Strike */}
-        <div className="text-left font-mono text-xs text-muted-foreground">
+        {/* 3. Strike */}
+        <div className="truncate text-left font-mono text-xs text-muted-foreground">
           ${p.strike}
           {p.optionType === "put" ? "P" : "C"}
         </div>
-        {/* Expiry */}
-        <div className="text-left text-xs text-muted-foreground">{shortExpiry(p.expiry)}</div>
-        {/* Contracts */}
+        {/* 4. Expiry — hidden on mobile */}
+        <div className="hidden truncate text-left text-xs text-muted-foreground sm:block">
+          {shortExpiry(p.expiry)}
+        </div>
+        {/* 5. Qty */}
         <div className="text-right text-xs text-muted-foreground">×{p.remainingContracts}</div>
-        {/* P&L */}
+        {/* 6. Stock */}
+        <div className="text-right font-mono text-xs text-muted-foreground">
+          {stockPrice !== null ? `$${stockPrice.toFixed(2)}` : "—"}
+        </div>
+        {/* 7. P&L */}
         <div className={cn("text-right font-mono text-xs", pnlColor)}>
           {fmtDollarsSigned(pnlDollars)}
         </div>
-        {/* POP% — hidden on mobile */}
-        <div className={cn("hidden text-right text-xs sm:block", popColor(pop))}>
+        {/* 8. POP% */}
+        <div className={cn("text-right text-xs", popColor(pop))}>
           {pop !== null ? `${Math.round(pop * 100)}%` : "—"}
         </div>
-        {/* Grade — hidden on mobile */}
-        <div className="hidden sm:block">
+        {/* 9. % OTM — hidden on mobile */}
+        <div
+          className={cn(
+            "hidden text-right text-xs sm:block",
+            distancePct === null
+              ? "text-muted-foreground"
+              : distancePct >= 0
+                ? "text-emerald-300"
+                : "text-rose-300",
+          )}
+        >
+          {distancePct !== null ? `${distancePct.toFixed(1)}%` : "—"}
+        </div>
+        {/* 10. IV — hidden on mobile */}
+        <div className="hidden text-right text-xs text-muted-foreground sm:block">
+          {iv !== null ? `${(iv * 100).toFixed(0)}%` : "—"}
+        </div>
+        {/* 11. θ (theta) — hidden on mobile */}
+        <div className="hidden text-right font-mono text-xs text-muted-foreground sm:block">
+          {theta !== null ? theta.toFixed(2) : "—"}
+        </div>
+        {/* 12. Grade */}
+        <div className="text-left">
           {p.entryFinalGrade ? (
             <span
               className={cn(
@@ -325,7 +365,7 @@ export function PositionCard(props: Props) {
             <span className="text-xs text-muted-foreground">—</span>
           )}
         </div>
-        {/* Status */}
+        {/* 13. Status */}
         <div
           className={cn(
             "justify-self-end rounded border px-2 py-0.5 text-[10px] font-semibold whitespace-nowrap",
@@ -333,14 +373,6 @@ export function PositionCard(props: Props) {
           )}
         >
           {status.label}
-        </div>
-        {/* Chevron */}
-        <div className="hidden justify-self-end sm:block">
-          {expanded ? (
-            <ChevronDown className="h-4 w-4 text-muted-foreground" />
-          ) : (
-            <ChevronRight className="h-4 w-4 text-muted-foreground" />
-          )}
         </div>
       </button>
 

@@ -26,16 +26,32 @@ function PositionsTableHeader() {
         "hidden py-1 text-[10px] font-semibold uppercase text-muted-foreground sm:grid",
       )}
     >
+      {/* 1 dot */}
       <div />
+      {/* 2 */}
       <div>Symbol</div>
+      {/* 3 */}
       <div>Strike</div>
-      <div>Expiry</div>
+      {/* 4 — hidden mobile */}
+      <div className="hidden sm:block">Expiry</div>
+      {/* 5 */}
       <div className="text-right">Qty</div>
+      {/* 6 */}
+      <div className="text-right">Stock</div>
+      {/* 7 */}
       <div className="text-right">P&amp;L</div>
+      {/* 8 */}
       <div className="text-right">POP</div>
+      {/* 9 — hidden mobile */}
+      <div className="hidden text-right sm:block">% OTM</div>
+      {/* 10 — hidden mobile */}
+      <div className="hidden text-right sm:block">IV</div>
+      {/* 11 — hidden mobile */}
+      <div className="hidden text-right sm:block">θ</div>
+      {/* 12 */}
       <div>Grade</div>
+      {/* 13 */}
       <div className="text-right">Status</div>
-      <div />
     </div>
   );
 }
