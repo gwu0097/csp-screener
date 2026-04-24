@@ -48,8 +48,7 @@ export type PresetKey =
   | "last_month"
   | "last_quarter"
   | "ytd"
-  | "all"
-  | "custom";
+  | "all";
 
 export type BrokerFilter = "all" | "schwab" | "robinhood";
 
@@ -129,7 +128,6 @@ export const PRESET_OPTIONS: Array<{ value: PresetKey; label: string }> = [
   { value: "last_quarter", label: "Quarter" },
   { value: "ytd", label: "YTD" },
   { value: "all", label: "All Time" },
-  { value: "custom", label: "Custom" },
 ];
 
 export const BROKER_OPTIONS: Array<{ value: BrokerFilter; label: string }> = [
@@ -188,11 +186,8 @@ export function presetToRange(key: PresetKey, today: Date = new Date()): DateRan
   if (key === "ytd") {
     return { from: `${t.getUTCFullYear()}-01-01`, to: todayStr };
   }
-  if (key === "all") {
-    return { from: "2020-01-01", to: todayStr };
-  }
-  // custom — caller handles this via state; fall back to month.
-  return { from: iso(startOfMonth(t)), to: todayStr };
+  // key === "all"
+  return { from: "2020-01-01", to: todayStr };
 }
 
 // -------- Formatters + color helpers --------
@@ -272,36 +267,45 @@ export function useIntelligenceData(
 
 export function DateRangeControls({
   range,
-  preset,
   onChange,
 }: {
   range: DateRange;
-  preset: PresetKey;
-  onChange: (next: { preset: PresetKey; range: DateRange }) => void;
+  onChange: (r: DateRange) => void;
 }) {
-  // Local state for the custom date inputs, so the user can type a
-  // partial date without triggering a fetch on every keystroke.
-  const [customFrom, setCustomFrom] = useState(range.from);
-  const [customTo, setCustomTo] = useState(range.to);
+  // Local state for the date inputs so a partial/invalid date (mid-typing)
+  // doesn't spam fetches. Apply commits; preset clicks bypass this entirely.
+  const [draftFrom, setDraftFrom] = useState(range.from);
+  const [draftTo, setDraftTo] = useState(range.to);
 
-  // Sync local inputs when preset changes externally.
   useEffect(() => {
-    setCustomFrom(range.from);
-    setCustomTo(range.to);
+    setDraftFrom(range.from);
+    setDraftTo(range.to);
+  }, [range.from, range.to]);
+
+  // Derive the active preset by matching the current range against each
+  // preset's computed range. If nothing matches (manual edit), no preset
+  // is highlighted.
+  const activePreset = useMemo<PresetKey | null>(() => {
+    for (const p of PRESET_OPTIONS) {
+      const r = presetToRange(p.value);
+      if (r.from === range.from && r.to === range.to) return p.value;
+    }
+    return null;
   }, [range.from, range.to]);
 
   function pickPreset(key: PresetKey) {
-    if (key === "custom") {
-      onChange({ preset: "custom", range });
-      return;
-    }
-    onChange({ preset: key, range: presetToRange(key) });
+    onChange(presetToRange(key));
   }
 
-  function applyCustom() {
-    if (!customFrom || !customTo) return;
-    if (customFrom > customTo) return;
-    onChange({ preset: "custom", range: { from: customFrom, to: customTo } });
+  const applyDisabled =
+    !draftFrom ||
+    !draftTo ||
+    draftFrom > draftTo ||
+    (draftFrom === range.from && draftTo === range.to);
+
+  function applyDraft() {
+    if (applyDisabled) return;
+    onChange({ from: draftFrom, to: draftTo });
   }
 
   return (
@@ -313,49 +317,43 @@ export function DateRangeControls({
             type="button"
             onClick={() => pickPreset(p.value)}
             className={`rounded px-3 py-1 text-xs ${
-              preset === p.value
+              activePreset === p.value
                 ? "bg-foreground text-background"
                 : "border border-border text-muted-foreground hover:text-foreground"
             }`}
           >
             {p.label}
-            {p.value === "custom" && " ▾"}
           </button>
         ))}
       </div>
-      {preset === "custom" && (
-        <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-background/40 p-2 text-xs">
-          <label className="flex items-center gap-1">
-            <span className="text-muted-foreground">From</span>
-            <input
-              type="date"
-              value={customFrom}
-              onChange={(e) => setCustomFrom(e.target.value)}
-              className="rounded border border-border bg-background px-2 py-1 text-xs"
-            />
-          </label>
-          <label className="flex items-center gap-1">
-            <span className="text-muted-foreground">To</span>
-            <input
-              type="date"
-              value={customTo}
-              onChange={(e) => setCustomTo(e.target.value)}
-              className="rounded border border-border bg-background px-2 py-1 text-xs"
-            />
-          </label>
-          <button
-            type="button"
-            onClick={applyCustom}
-            disabled={!customFrom || !customTo || customFrom > customTo}
-            className="rounded bg-foreground px-3 py-1 text-xs text-background disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            Apply
-          </button>
-          <span className="text-muted-foreground">
-            Showing {range.from} → {range.to}
-          </span>
-        </div>
-      )}
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <label className="flex items-center gap-1">
+          <span className="text-muted-foreground">From</span>
+          <input
+            type="date"
+            value={draftFrom}
+            onChange={(e) => setDraftFrom(e.target.value)}
+            className="rounded border border-border bg-background px-2 py-1 text-xs"
+          />
+        </label>
+        <label className="flex items-center gap-1">
+          <span className="text-muted-foreground">To</span>
+          <input
+            type="date"
+            value={draftTo}
+            onChange={(e) => setDraftTo(e.target.value)}
+            className="rounded border border-border bg-background px-2 py-1 text-xs"
+          />
+        </label>
+        <button
+          type="button"
+          onClick={applyDraft}
+          disabled={applyDisabled}
+          className="rounded bg-foreground px-3 py-1 text-xs text-background disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          Apply
+        </button>
+      </div>
     </div>
   );
 }

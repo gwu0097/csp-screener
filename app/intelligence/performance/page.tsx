@@ -11,11 +11,9 @@ import {
   useIntelligenceData,
   type BrokerFilter,
   type DateRange,
-  type PresetKey,
 } from "@/components/intelligence-shared";
 
 export default function PerformancePage() {
-  const [preset, setPreset] = useState<PresetKey>("month");
   const [range, setRange] = useState<DateRange>(() => presetToRange("month"));
   const [broker, setBroker] = useState<BrokerFilter>("all");
   const [copyStatus, setCopyStatus] = useState<string | null>(null);
@@ -40,14 +38,7 @@ export default function PerformancePage() {
       title="Performance"
       controls={
         <>
-          <DateRangeControls
-            range={range}
-            preset={preset}
-            onChange={({ preset: p, range: r }) => {
-              setPreset(p);
-              setRange(r);
-            }}
-          />
+          <DateRangeControls range={range} onChange={setRange} />
           <BrokerControl broker={broker} onChange={setBroker} />
         </>
       }

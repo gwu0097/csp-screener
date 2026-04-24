@@ -10,11 +10,9 @@ import {
   useIntelligenceData,
   type BrokerFilter,
   type DateRange,
-  type PresetKey,
 } from "@/components/intelligence-shared";
 
 export default function PatternsPage() {
-  const [preset, setPreset] = useState<PresetKey>("all");
   const [range, setRange] = useState<DateRange>(() => presetToRange("all"));
   const [broker, setBroker] = useState<BrokerFilter>("all");
   const { data, loading, error } = useIntelligenceData(range, broker);
@@ -24,14 +22,7 @@ export default function PatternsPage() {
       title="Patterns"
       controls={
         <>
-          <DateRangeControls
-            range={range}
-            preset={preset}
-            onChange={({ preset: p, range: r }) => {
-              setPreset(p);
-              setRange(r);
-            }}
-          />
+          <DateRangeControls range={range} onChange={setRange} />
           <BrokerControl broker={broker} onChange={setBroker} />
         </>
       }

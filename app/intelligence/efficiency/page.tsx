@@ -10,13 +10,11 @@ import {
   useIntelligenceData,
   type BrokerFilter,
   type DateRange,
-  type PresetKey,
 } from "@/components/intelligence-shared";
 
 export default function EfficiencyPage() {
   // Ticker-level comparison only gets meaningful with a big window, so
-  // default to all-time. User can narrow via the presets.
-  const [preset, setPreset] = useState<PresetKey>("all");
+  // default to all-time. User can narrow via presets or manual dates.
   const [range, setRange] = useState<DateRange>(() => presetToRange("all"));
   const [broker, setBroker] = useState<BrokerFilter>("all");
   const [expandedSymbol, setExpandedSymbol] = useState<string | null>(null);
@@ -27,14 +25,7 @@ export default function EfficiencyPage() {
       title="Capital Efficiency"
       controls={
         <>
-          <DateRangeControls
-            range={range}
-            preset={preset}
-            onChange={({ preset: p, range: r }) => {
-              setPreset(p);
-              setRange(r);
-            }}
-          />
+          <DateRangeControls range={range} onChange={setRange} />
           <BrokerControl broker={broker} onChange={setBroker} />
         </>
       }
