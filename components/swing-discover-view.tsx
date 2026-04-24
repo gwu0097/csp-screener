@@ -5,6 +5,7 @@ import {
   AlertTriangle,
   CheckCircle2,
   ExternalLink,
+  Info,
   Loader2,
   Plus,
   RefreshCw,
@@ -194,10 +195,18 @@ function fmt50dMA(pct: number | null): { text: string; cls: string } | null {
 function domainOf(url: unknown): string {
   if (typeof url !== "string" || url.length === 0) return "source";
   try {
-    return new URL(url).hostname.replace(/^www\./, "");
+    return new URL(ensureHttp(url)).hostname.replace(/^www\./, "");
   } catch {
     return url;
   }
+}
+
+// Coerce a possibly schemeless citation ("stocktitan.net/news/...")
+// into a fully qualified URL. Without this the browser treats the href
+// as a relative path and the link goes nowhere.
+function ensureHttp(url: string): string {
+  if (/^https?:\/\//i.test(url)) return url;
+  return `https://${url.replace(/^\/+/, "")}`;
 }
 
 // Defensive normalizer for candidates loaded from the API. Earlier
@@ -310,6 +319,13 @@ export function SwingDiscoverView() {
   const [deepDiveLoading, setDeepDiveLoading] = useState<Set<string>>(new Set());
   const [deepDiveError, setDeepDiveError] = useState<Record<string, string>>({});
   const [activeDeepDive, setActiveDeepDive] = useState<Candidate | null>(null);
+
+  // Per-URL source summary cache, lazily filled when the user opens the
+  // Sources & Summary tab. Survives drawer open/close cycles so the
+  // summary doesn't re-fetch the second time you look at the same URL.
+  const [sourceSummaries, setSourceSummaries] = useState<
+    Record<string, { summary: string | null; loading: boolean; error: string | null }>
+  >({});
 
   async function loadLatest() {
     setLoading(true);
@@ -517,6 +533,41 @@ export function SwingDiscoverView() {
     setActiveDeepDive(null);
   }
 
+  // Lazy summary fetch — fired by the drawer when the Sources tab is
+  // opened for the first time on a candidate. Cache hits short-circuit.
+  async function summarizeSource(url: string, symbol: string) {
+    if (!url) return;
+    const existing = sourceSummaries[url];
+    if (existing && (existing.summary || existing.loading)) return;
+    setSourceSummaries((prev) => ({
+      ...prev,
+      [url]: { summary: null, loading: true, error: null },
+    }));
+    try {
+      const res = await fetch("/api/swings/discover/summarize-source", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url, symbol }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+      setSourceSummaries((prev) => ({
+        ...prev,
+        [url]: {
+          summary: typeof json.summary === "string" ? json.summary : null,
+          loading: false,
+          error: null,
+        },
+      }));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Summary failed";
+      setSourceSummaries((prev) => ({
+        ...prev,
+        [url]: { summary: null, loading: false, error: msg },
+      }));
+    }
+  }
+
   // Bucket candidates per category from the per-category state. Each
   // category bucket is whatever was last persisted for that category —
   // partial scans only refresh one bucket at a time.
@@ -713,6 +764,14 @@ export function SwingDiscoverView() {
               </TabsContent>
 
               <TabsContent value="social">
+                <div className="mb-3 flex items-start gap-2 rounded border border-violet-500/30 bg-violet-500/5 p-2.5 text-[11px] text-muted-foreground">
+                  <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-violet-300" />
+                  <span>
+                    Social signals are sourced from financial media coverage of
+                    retail sentiment. For direct X / Reddit data, connect a
+                    social API.
+                  </span>
+                </div>
                 {buckets.social.length === 0 ? (
                   <EmptyTab label="social/retail candidates" />
                 ) : (
@@ -743,6 +802,8 @@ export function SwingDiscoverView() {
           activeDeepDive ? ideasSymbols.has(activeDeepDive.symbol) : false
         }
         adding={activeDeepDive ? adding.has(activeDeepDive.symbol) : false}
+        sourceSummaries={sourceSummaries}
+        onSummarizeSource={summarizeSource}
         onAdd={() => activeDeepDive && addToIdeas(activeDeepDive)}
         onClose={closeDeepDive}
       />
@@ -971,7 +1032,7 @@ function CandidateCard({
               {c.sources.slice(0, 3).map((src, i) => (
                 <a
                   key={i}
-                  href={src}
+                  href={ensureHttp(src)}
                   target="_blank"
                   rel="noopener noreferrer"
                   onClick={(e) => e.stopPropagation()}
@@ -1039,6 +1100,12 @@ function CandidateCard({
   );
 }
 
+type SourceSummaryState = {
+  summary: string | null;
+  loading: boolean;
+  error: string | null;
+};
+
 function DeepDiveDrawer({
   candidate: c,
   dive,
@@ -1046,6 +1113,8 @@ function DeepDiveDrawer({
   error,
   inIdeas,
   adding,
+  sourceSummaries,
+  onSummarizeSource,
   onAdd,
   onClose,
 }: {
@@ -1055,10 +1124,30 @@ function DeepDiveDrawer({
   error: string | null;
   inIdeas: boolean;
   adding: boolean;
+  sourceSummaries: Record<string, SourceSummaryState>;
+  onSummarizeSource: (url: string, symbol: string) => void;
   onAdd: () => void;
   onClose: () => void;
 }) {
   const open = c !== null;
+  const [drawerTab, setDrawerTab] = useState<"analysis" | "sources">("analysis");
+
+  // Reset to Analysis whenever a new candidate is opened so the user
+  // doesn't land on the Sources tab from the previous symbol.
+  useEffect(() => {
+    if (c) setDrawerTab("analysis");
+  }, [c?.symbol]);
+
+  // When the user moves to the Sources tab, fire summary fetches for any
+  // sources we don't have cached yet. Cache hits short-circuit inside
+  // onSummarizeSource.
+  useEffect(() => {
+    if (!c || drawerTab !== "sources") return;
+    for (const src of c.sources) {
+      onSummarizeSource(ensureHttp(src), c.symbol);
+    }
+  }, [c?.symbol, drawerTab]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const changeColor =
     !c || c.price_change_pct === null
       ? "text-muted-foreground"
@@ -1135,137 +1224,165 @@ function DeepDiveDrawer({
           </button>
         </div>
 
-        {/* Body — scrollable. text-base + leading-relaxed gives the panel
-            a research-note feel rather than a tooltip. */}
-        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-6 text-base">
-          {loading && !dive && (
-            <div className="flex flex-col items-center justify-center gap-2 py-16 text-sm text-muted-foreground">
-              <Loader2 className="h-7 w-7 animate-spin" />
-              <span className="text-base">Researching {c?.symbol ?? ""}…</span>
-              <span className="text-xs">
-                Pulling recent news, fundamentals, sentiment, and bear case
-              </span>
-            </div>
-          )}
-
-          {!loading && !dive && error && (
-            <div className="rounded border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-300">
-              {error}
-            </div>
-          )}
-
-          {dive && (
-            <div className="space-y-6">
-              <DeepSection title="📰 Recent news">
-                <p className="leading-relaxed text-foreground/90">
-                  {dive.recent_news}
-                </p>
-              </DeepSection>
-
-              <DeepSection title="💰 Fundamental health">
-                <p className="leading-relaxed text-foreground/90">
-                  {dive.fundamental_health}
-                </p>
-              </DeepSection>
-
-              <DeepSection title="⚡ Catalyst">
-                <div className="mb-2 flex flex-wrap gap-4 text-sm">
-                  <span className="text-muted-foreground">
-                    Credibility:{" "}
-                    <span className="font-medium uppercase text-foreground">
-                      {dive.catalyst_credibility}
-                    </span>
+        {/* Body — tabbed. Analysis = the deep-dive sections; Sources &
+            Summary = clickable source list with on-demand AI summaries. */}
+        <Tabs
+          value={drawerTab}
+          onValueChange={(v) => setDrawerTab(v as "analysis" | "sources")}
+          className="flex min-h-0 flex-1 flex-col"
+        >
+          <div className="border-b border-border px-6 pt-3">
+            <TabsList>
+              <TabsTrigger value="analysis">📊 Analysis</TabsTrigger>
+              <TabsTrigger value="sources">
+                🔗 Sources &amp; Summary
+                {c && c.sources.length > 0 && (
+                  <span className="ml-2 rounded bg-white/10 px-1.5 py-0.5 text-[10px]">
+                    {c.sources.length}
                   </span>
-                  <span className="text-muted-foreground">
-                    Timeline:{" "}
-                    <span className="text-foreground">
-                      {dive.catalyst_timeline}
-                    </span>
-                  </span>
-                </div>
-                {c?.catalyst && (
-                  <p className="leading-relaxed text-foreground/90">
-                    &ldquo;{c.catalyst}&rdquo;
-                  </p>
                 )}
-              </DeepSection>
+              </TabsTrigger>
+            </TabsList>
+          </div>
 
-              <DeepSection title="👥 Sentiment">
-                <div className="flex flex-wrap gap-6 text-sm">
-                  <span className="text-muted-foreground">
-                    Retail:{" "}
-                    <span className="font-medium capitalize text-foreground">
-                      {dive.retail_sentiment}
-                    </span>
-                  </span>
-                  <span className="text-muted-foreground">
-                    Institutional:{" "}
-                    <span className="font-medium capitalize text-foreground">
-                      {dive.institutional_activity}
-                    </span>
-                  </span>
-                </div>
-              </DeepSection>
-
-              <DeepSection title="📊 Technical setup">
-                <div className="text-foreground/90">
-                  {technicalLabel(dive.technical_setup)}
-                </div>
-                {dive.entry_comment && (
-                  <p className="mt-1 leading-relaxed text-muted-foreground">
-                    {dive.entry_comment}
-                  </p>
-                )}
-              </DeepSection>
-
-              {dive.bear_case.length > 0 && (
-                <DeepSection title="⚠ Bear case">
-                  <ul className="list-disc space-y-1 pl-5 leading-relaxed text-foreground/90">
-                    {dive.bear_case.map((r, i) => (
-                      <li key={i}>{r}</li>
-                    ))}
-                  </ul>
-                </DeepSection>
-              )}
-
-              <div
-                className={`rounded border p-5 ${verdictClasses(dive.verdict)}`}
-              >
-                <div className="text-xs font-semibold uppercase tracking-wider">
-                  Verdict: {dive.verdict} priority
-                </div>
-                {dive.verdict_reasoning && (
-                  <p className="mt-2 text-base leading-relaxed">
-                    {dive.verdict_reasoning}
-                  </p>
-                )}
+          <TabsContent
+            value="analysis"
+            className="min-h-0 flex-1 overflow-y-auto px-6 py-6 text-base"
+          >
+            {loading && !dive && (
+              <div className="flex flex-col items-center justify-center gap-2 py-16 text-sm text-muted-foreground">
+                <Loader2 className="h-7 w-7 animate-spin" />
+                <span className="text-base">
+                  Researching {c?.symbol ?? ""}…
+                </span>
+                <span className="text-xs">
+                  Pulling recent news, fundamentals, sentiment, and bear case
+                </span>
               </div>
+            )}
 
-              {c && c.sources.length > 0 && (
-                <DeepSection title="🔗 Sources">
-                  <ol className="space-y-1.5 pl-5 text-sm leading-relaxed text-foreground/90">
-                    {c.sources.map((src, i) => (
-                      <li key={i} className="list-decimal">
-                        <a
-                          href={src}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1 text-sky-300 underline-offset-2 hover:underline"
-                        >
-                          <span className="font-medium">{domainOf(src)}</span>
-                          <ExternalLink className="h-3 w-3 opacity-60" />
-                        </a>
-                        <div className="ml-1 truncate text-[11px] text-muted-foreground">
-                          {src}
-                        </div>
-                      </li>
-                    ))}
-                  </ol>
+            {!loading && !dive && error && (
+              <div className="rounded border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-300">
+                {error}
+              </div>
+            )}
+
+            {dive && (
+              <div className="space-y-6">
+                <DeepSection title="📰 Recent news">
+                  <p className="leading-relaxed text-foreground/90">
+                    {dive.recent_news}
+                  </p>
                 </DeepSection>
-              )}
-            </div>
-          )}
-        </div>
+
+                <DeepSection title="💰 Fundamental health">
+                  <p className="leading-relaxed text-foreground/90">
+                    {dive.fundamental_health}
+                  </p>
+                </DeepSection>
+
+                <DeepSection title="⚡ Catalyst">
+                  <div className="mb-2 flex flex-wrap gap-4 text-sm">
+                    <span className="text-muted-foreground">
+                      Credibility:{" "}
+                      <span className="font-medium uppercase text-foreground">
+                        {dive.catalyst_credibility}
+                      </span>
+                    </span>
+                    <span className="text-muted-foreground">
+                      Timeline:{" "}
+                      <span className="text-foreground">
+                        {dive.catalyst_timeline}
+                      </span>
+                    </span>
+                  </div>
+                  {c?.catalyst && (
+                    <p className="leading-relaxed text-foreground/90">
+                      &ldquo;{c.catalyst}&rdquo;
+                    </p>
+                  )}
+                </DeepSection>
+
+                <DeepSection title="👥 Sentiment">
+                  <div className="flex flex-wrap gap-6 text-sm">
+                    <span className="text-muted-foreground">
+                      Retail:{" "}
+                      <span className="font-medium capitalize text-foreground">
+                        {dive.retail_sentiment}
+                      </span>
+                    </span>
+                    <span className="text-muted-foreground">
+                      Institutional:{" "}
+                      <span className="font-medium capitalize text-foreground">
+                        {dive.institutional_activity}
+                      </span>
+                    </span>
+                  </div>
+                </DeepSection>
+
+                <DeepSection title="📊 Technical setup">
+                  <div className="text-foreground/90">
+                    {technicalLabel(dive.technical_setup)}
+                  </div>
+                  {dive.entry_comment && (
+                    <p className="mt-1 leading-relaxed text-muted-foreground">
+                      {dive.entry_comment}
+                    </p>
+                  )}
+                </DeepSection>
+
+                {dive.bear_case.length > 0 && (
+                  <DeepSection title="⚠ Bear case">
+                    <ul className="list-disc space-y-1 pl-5 leading-relaxed text-foreground/90">
+                      {dive.bear_case.map((r, i) => (
+                        <li key={i}>{r}</li>
+                      ))}
+                    </ul>
+                  </DeepSection>
+                )}
+
+                <div
+                  className={`rounded border p-5 ${verdictClasses(dive.verdict)}`}
+                >
+                  <div className="text-xs font-semibold uppercase tracking-wider">
+                    Verdict: {dive.verdict} priority
+                  </div>
+                  {dive.verdict_reasoning && (
+                    <p className="mt-2 text-base leading-relaxed">
+                      {dive.verdict_reasoning}
+                    </p>
+                  )}
+                </div>
+              </div>
+            )}
+          </TabsContent>
+
+          <TabsContent
+            value="sources"
+            className="min-h-0 flex-1 overflow-y-auto px-6 py-6 text-base"
+          >
+            {!c || c.sources.length === 0 ? (
+              <div className="rounded border border-border bg-background/40 p-4 text-sm text-muted-foreground">
+                No sources attached to this candidate.
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {c.sources.map((rawSrc, i) => {
+                  const src = ensureHttp(rawSrc);
+                  const state = sourceSummaries[src] ?? null;
+                  return (
+                    <SourceCard
+                      key={i}
+                      index={i + 1}
+                      url={src}
+                      state={state}
+                    />
+                  );
+                })}
+              </div>
+            )}
+          </TabsContent>
+        </Tabs>
 
         {/* Footer — sticky */}
         <div className="flex items-center justify-end gap-2 border-t border-border px-6 py-4">
@@ -1302,6 +1419,64 @@ function DeepDiveDrawer({
         </div>
       </SheetContent>
     </Sheet>
+  );
+}
+
+function SourceCard({
+  index,
+  url,
+  state,
+}: {
+  index: number;
+  url: string;
+  state: SourceSummaryState | null;
+}) {
+  const loading = state?.loading ?? false;
+  const summary = state?.summary ?? null;
+  const error = state?.error ?? null;
+  return (
+    <div className="rounded-md border border-border bg-background/40 p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 text-sm">
+            <span className="text-muted-foreground">{index}.</span>
+            <span className="font-medium text-foreground">{domainOf(url)}</span>
+          </div>
+          <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
+            {url}
+          </div>
+        </div>
+        <a
+          href={url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex shrink-0 items-center gap-1 rounded border border-border bg-white/5 px-2 py-1 text-[11px] text-foreground hover:bg-white/10"
+        >
+          <ExternalLink className="h-3 w-3" />
+          Open
+        </a>
+      </div>
+      <div className="mt-3 border-t border-border/60 pt-3 text-sm">
+        <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+          AI Summary
+        </div>
+        {loading && (
+          <div className="flex items-center gap-2 text-muted-foreground">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            <span>Summarizing…</span>
+          </div>
+        )}
+        {!loading && summary && (
+          <p className="leading-relaxed text-foreground/90">{summary}</p>
+        )}
+        {!loading && !summary && error && (
+          <div className="text-rose-300">{error}</div>
+        )}
+        {!loading && !summary && !error && (
+          <div className="text-muted-foreground">Waiting…</div>
+        )}
+      </div>
+    </div>
   );
 }
 
