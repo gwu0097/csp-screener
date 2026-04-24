@@ -27,7 +27,7 @@ export type ParsedTrade = {
   timePlaced?: string; // YYYY-MM-DD
 };
 
-const PROMPT = `This is a screenshot of a ThinkorSwim (ThinkOrSwim) brokerage order history table. The table has colored rows (red for SELL/open, green for BUY/close).
+const PROMPT_SCHWAB = `This is a screenshot of a ThinkorSwim (ThinkOrSwim) brokerage order history table. The table has colored rows (red for SELL/open, green for BUY/close).
 
 Column headers are: Time Placed, Spread, Side, QtyPos Effect, Symbol, Exp, StrikeType, Price, TIF, Status
 
@@ -51,6 +51,40 @@ Return ONLY a JSON array, no explanation, no markdown.
 Extract EVERY row in the table. Do not stop early. There may be 10-30 rows. Return all of them.
 
 The Price column shows values like '.60 LMT' or '7.15 LMT'. The premium is the numeric value only — strip the ' LMT' / ' MKT' suffix and return the result as a JSON number (not a string). '.60 LMT' becomes 0.60. Read the exact digits — do not substitute, round, or guess.`;
+
+const currentYear = new Date().getUTCFullYear();
+
+// Robinhood position detail cards don't show strike directly — strike is
+// computed from (breakeven + average credit). If the screenshot scrolls
+// across multiple open positions, each card becomes its own fill.
+const PROMPT_ROBINHOOD = `This is one or more Robinhood options position detail cards. Each card represents one open short options position.
+
+Each card shows fields like:
+- Market value (e.g. "-$10.00")
+- Current price (e.g. "$0.01") — current option price
+- Current {SYMBOL} price (e.g. "$81.19") — current stock price
+- Today's return
+- Total return
+- Expiration date (e.g. "4/24")
+- Average credit (e.g. "$0.17") — premium received when the position was sold
+- {SYMBOL} breakeven price (e.g. "$53.83")
+- Contracts (e.g. "-10") — negative because short; take the absolute value
+- Date sold (e.g. "4/23") — the date the short was opened
+
+Extract every visible position card as a separate fill.
+
+For each card:
+- symbol: the ticker. It appears inside the field labels "Current {SYMBOL} price" and "{SYMBOL} breakeven price". Example: "Current INTC price" → symbol = "INTC".
+- action: always "open" — Robinhood position cards represent existing short positions.
+- contracts: absolute value of the Contracts field. "-10" → 10.
+- premium: numeric value of "Average credit". Strip the "$" prefix. "$0.17" → 0.17.
+- expiry: "Expiration date" converted to YYYY-MM-DD. If the year is missing (e.g. "4/24"), use the current year ${currentYear}. So "4/24" → "${currentYear}-04-24".
+- strike: breakeven_price + average_credit, then rounded to the nearest $0.50 increment (standard option strike granularity). Example: breakeven=53.83, credit=0.17 → 54.00. breakeven=347.13, credit=0.37 → 347.50.
+- optionType: default to "put" for a CSP screening context. If the card text explicitly says "Call", use "call".
+- timePlaced: "Date sold" converted to YYYY-MM-DD. Same year-inference rule as expiry. "4/23" → "${currentYear}-04-23".
+- broker: always "robinhood".
+
+Return ONLY a JSON array, no explanation, no markdown. One object per card.`;
 
 // Try to pull structured data out of an LLM response. Models wrap their
 // output inconsistently — plain JSON, ```json fences, generic ``` fences,
@@ -131,24 +165,59 @@ function extractJsonFromText(text: string): ExtractResult {
   return { ok: false };
 }
 
+// Accept "4/24" / "04/24" / "4/24/26" / "4/24/2026" as well as strict
+// YYYY-MM-DD. Missing year falls back to the current year. Returns
+// "" if nothing sensible can be derived. Robinhood emits "4/24"-style
+// dates; Schwab emits full dates. Duplicated in test/test-robinhood-parser.ts.
+function normalizeExpiry(raw: string): string {
+  const trimmed = raw.trim();
+  if (/^\d{4}-\d{2}-\d{2}/.test(trimmed)) return trimmed.slice(0, 10);
+  const mdy = trimmed.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/);
+  if (mdy) {
+    const mm = mdy[1].padStart(2, "0");
+    const dd = mdy[2].padStart(2, "0");
+    let year = new Date().getUTCFullYear();
+    if (mdy[3]) {
+      const y = Number(mdy[3]);
+      year = y < 100 ? 2000 + y : y;
+    }
+    return `${year}-${mm}-${dd}`;
+  }
+  return "";
+}
+
+// Nearest $0.50 increment — standard option strike granularity.
+function roundStrikeToHalf(v: number): number {
+  return Math.round(v * 2) / 2;
+}
+
 function coerceTrade(raw: unknown, fallbackBroker: string): ParsedTrade | null {
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
   const symbol = typeof r.symbol === "string" ? r.symbol.toUpperCase().trim() : "";
   const action = r.action === "open" || r.action === "close" ? r.action : null;
-  const optionType = r.optionType === "put" || r.optionType === "call" ? r.optionType : null;
-  const contracts = Number(r.contracts);
-  const strike = Number(r.strike);
+  // Accept both "put"/"call" and "PUT"/"CALL" — Robinhood prompt may
+  // keep the original casing even when we ask for lowercase.
+  const rawOptionType = typeof r.optionType === "string" ? r.optionType.toLowerCase() : "";
+  const optionType = rawOptionType === "put" || rawOptionType === "call" ? rawOptionType : null;
+  // Robinhood emits negative contracts for shorts; take the abs value
+  // defensively even if the prompt already stripped the sign.
+  const contracts = Math.abs(Number(r.contracts));
+  const broker =
+    typeof r.broker === "string" && r.broker.trim() ? r.broker.toLowerCase() : fallbackBroker;
+  // For Robinhood, round the calculated strike to nearest $0.50 even if
+  // the model returned an unrounded raw value (e.g. 53.83 + 0.17 = 54.00
+  // always, but bigger tickers can land on 0.47 etc.).
+  let strike = Number(r.strike);
+  if (broker === "robinhood" && Number.isFinite(strike)) {
+    strike = roundStrikeToHalf(strike);
+  }
   const premium = Number(r.premium);
-  const expiry = typeof r.expiry === "string" ? r.expiry.slice(0, 10) : "";
-  const broker = typeof r.broker === "string" && r.broker.trim() ? r.broker.toLowerCase() : fallbackBroker;
-  // timePlaced is optional — only accept values that parse as YYYY-MM-DD.
-  // The model sometimes returns "11/22/24 14:30" or ISO with time; take
-  // the first 10 chars only if it matches the strict date format.
+  const expiry =
+    typeof r.expiry === "string" ? normalizeExpiry(r.expiry) : "";
   const rawTime = typeof r.timePlaced === "string" ? r.timePlaced.trim() : "";
-  const timePlaced = /^\d{4}-\d{2}-\d{2}$/.test(rawTime.slice(0, 10))
-    ? rawTime.slice(0, 10)
-    : undefined;
+  const timePlaced = rawTime ? normalizeExpiry(rawTime) : "";
+  const timePlacedOut = /^\d{4}-\d{2}-\d{2}$/.test(timePlaced) ? timePlaced : undefined;
   if (!symbol || !action || !optionType) return null;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(expiry)) return null;
   if (!Number.isFinite(contracts) || contracts <= 0) return null;
@@ -163,7 +232,7 @@ function coerceTrade(raw: unknown, fallbackBroker: string): ParsedTrade | null {
     optionType,
     premium,
     broker,
-    timePlaced,
+    timePlaced: timePlacedOut,
   };
 }
 
@@ -207,7 +276,11 @@ export async function POST(req: NextRequest) {
     `[parse-screenshot] broker=${broker} mime=${mime} base64_bytes=${rawLen}`,
   );
 
-  console.log(`[parse-screenshot] gemini url: ${GEMINI_URL}`);
+  // Select prompt by broker. Schwab (ThinkorSwim) uses the existing
+  // order-history table prompt; Robinhood uses the position-card prompt
+  // which computes strike from breakeven + average credit.
+  const prompt = broker === "robinhood" ? PROMPT_ROBINHOOD : PROMPT_SCHWAB;
+  console.log(`[parse-screenshot] gemini url: ${GEMINI_URL}  prompt=${broker === "robinhood" ? "robinhood" : "schwab"}`);
   let res: Response;
   try {
     res = await fetch(GEMINI_URL, {
@@ -221,7 +294,7 @@ export async function POST(req: NextRequest) {
           {
             parts: [
               { inline_data: { mime_type: mime, data } },
-              { text: PROMPT },
+              { text: prompt },
             ],
           },
         ],

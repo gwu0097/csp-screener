@@ -36,7 +36,16 @@ type Props = {
   onSuccess: (msg: string) => void;
 };
 
-const BROKERS = ["schwab", "robinhood", "fidelity", "other"] as const;
+const BROKERS = ["schwab", "robinhood"] as const;
+
+// Short per-broker help — rendered beneath the upload dropzone so users
+// know what the parser expects for the selected broker.
+const BROKER_INSTRUCTIONS: Record<(typeof BROKERS)[number], string> = {
+  schwab:
+    "Screenshot your ThinkorSwim / Schwab Order History table. Parser pulls every FILLED row.",
+  robinhood:
+    "Screenshot your Robinhood position detail cards. Scroll to capture multiple open positions in one image — each card becomes its own fill.",
+};
 
 function readAsDataUrl(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -221,27 +230,33 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
         </div>
 
         {!dataUrl && (
-          <div
-            className="mt-3 flex cursor-pointer flex-col items-center justify-center rounded-md border-2 border-dashed border-border bg-background/40 px-4 py-10 text-center text-sm text-muted-foreground hover:bg-background/60"
-            onClick={() => inputRef.current?.click()}
-            onDragOver={(e) => e.preventDefault()}
-            onDrop={async (e) => {
-              e.preventDefault();
-              const f = e.dataTransfer.files?.[0];
-              await onFile(f);
-            }}
-          >
-            <Upload className="mb-2 h-8 w-8" />
-            <div>Click, drag & drop, or paste (Ctrl/⌘+V) a broker screenshot</div>
-            <div className="mt-1 text-xs">PNG / JPG</div>
-            <input
-              ref={inputRef}
-              type="file"
-              accept="image/*"
-              className="hidden"
-              onChange={(e) => onFile(e.target.files?.[0])}
-            />
-          </div>
+          <>
+            <div
+              className="mt-3 flex cursor-pointer flex-col items-center justify-center rounded-md border-2 border-dashed border-border bg-background/40 px-4 py-10 text-center text-sm text-muted-foreground hover:bg-background/60"
+              onClick={() => inputRef.current?.click()}
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={async (e) => {
+                e.preventDefault();
+                const f = e.dataTransfer.files?.[0];
+                await onFile(f);
+              }}
+            >
+              <Upload className="mb-2 h-8 w-8" />
+              <div>Click, drag & drop, or paste (Ctrl/⌘+V) a broker screenshot</div>
+              <div className="mt-1 text-xs">PNG / JPG</div>
+              <input
+                ref={inputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(e) => onFile(e.target.files?.[0])}
+              />
+            </div>
+            <div className="mt-2 text-xs text-muted-foreground">
+              {BROKER_INSTRUCTIONS[broker as (typeof BROKERS)[number]] ??
+                BROKER_INSTRUCTIONS.schwab}
+            </div>
+          </>
         )}
 
         {dataUrl && !parsed && (
