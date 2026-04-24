@@ -267,10 +267,14 @@ export function useIntelligenceData(
 
 export function DateRangeControls({
   range,
-  onChange,
+  onRangeChange,
+  broker,
+  onBrokerChange,
 }: {
   range: DateRange;
-  onChange: (r: DateRange) => void;
+  onRangeChange: (r: DateRange) => void;
+  broker: BrokerFilter;
+  onBrokerChange: (b: BrokerFilter) => void;
 }) {
   // Local state for the date inputs so a partial/invalid date (mid-typing)
   // doesn't spam fetches. Apply commits; preset clicks bypass this entirely.
@@ -294,7 +298,7 @@ export function DateRangeControls({
   }, [range.from, range.to]);
 
   function pickPreset(key: PresetKey) {
-    onChange(presetToRange(key));
+    onRangeChange(presetToRange(key));
   }
 
   const applyDisabled =
@@ -305,85 +309,72 @@ export function DateRangeControls({
 
   function applyDraft() {
     if (applyDisabled) return;
-    onChange({ from: draftFrom, to: draftTo });
+    onRangeChange({ from: draftFrom, to: draftTo });
   }
 
-  return (
-    <div className="space-y-2">
-      <div className="flex flex-wrap gap-1">
-        {PRESET_OPTIONS.map((p) => (
-          <button
-            key={p.value}
-            type="button"
-            onClick={() => pickPreset(p.value)}
-            className={`rounded px-3 py-1 text-xs ${
-              activePreset === p.value
-                ? "bg-foreground text-background"
-                : "border border-border text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            {p.label}
-          </button>
-        ))}
-      </div>
-      <div className="flex flex-wrap items-center gap-2 text-xs">
-        <label className="flex items-center gap-1">
-          <span className="text-muted-foreground">From</span>
-          <input
-            type="date"
-            value={draftFrom}
-            onChange={(e) => setDraftFrom(e.target.value)}
-            className="rounded border border-border bg-background px-2 py-1 text-xs"
-          />
-        </label>
-        <label className="flex items-center gap-1">
-          <span className="text-muted-foreground">To</span>
-          <input
-            type="date"
-            value={draftTo}
-            onChange={(e) => setDraftTo(e.target.value)}
-            className="rounded border border-border bg-background px-2 py-1 text-xs"
-          />
-        </label>
-        <button
-          type="button"
-          onClick={applyDraft}
-          disabled={applyDisabled}
-          className="rounded bg-foreground px-3 py-1 text-xs text-background disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          Apply
-        </button>
-      </div>
-    </div>
-  );
-}
+  const pillBase = "rounded px-2 py-1 text-xs";
+  const pillActive = "bg-foreground text-background";
+  const pillInactive =
+    "border border-border text-muted-foreground hover:text-foreground";
+  const divider = "mx-3 self-stretch border-r border-white/10";
 
-export function BrokerControl({
-  broker,
-  onChange,
-}: {
-  broker: BrokerFilter;
-  onChange: (b: BrokerFilter) => void;
-}) {
   return (
-    <div className="flex flex-wrap items-center gap-2">
-      <span className="text-xs text-muted-foreground">Account</span>
-      <div className="flex gap-1">
-        {BROKER_OPTIONS.map((b) => (
-          <button
-            key={b.value}
-            type="button"
-            onClick={() => onChange(b.value)}
-            className={`rounded px-3 py-1 text-xs ${
-              broker === b.value
-                ? "bg-foreground text-background"
-                : "border border-border text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            {b.label}
-          </button>
-        ))}
-      </div>
+    <div className="flex flex-wrap items-center gap-x-1 gap-y-2 text-xs">
+      {/* Group 1: manual dates */}
+      <label className="flex items-center gap-1">
+        <span className="text-muted-foreground">From</span>
+        <input
+          type="date"
+          value={draftFrom}
+          onChange={(e) => setDraftFrom(e.target.value)}
+          className="rounded border border-border bg-background px-2 py-1 text-xs"
+        />
+      </label>
+      <label className="flex items-center gap-1">
+        <span className="text-muted-foreground">To</span>
+        <input
+          type="date"
+          value={draftTo}
+          onChange={(e) => setDraftTo(e.target.value)}
+          className="rounded border border-border bg-background px-2 py-1 text-xs"
+        />
+      </label>
+      <button
+        type="button"
+        onClick={applyDraft}
+        disabled={applyDisabled}
+        className="rounded bg-foreground px-2 py-1 text-xs text-background disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        Apply
+      </button>
+
+      <div className={divider} aria-hidden />
+
+      {/* Group 2: presets */}
+      {PRESET_OPTIONS.map((p) => (
+        <button
+          key={p.value}
+          type="button"
+          onClick={() => pickPreset(p.value)}
+          className={`${pillBase} ${activePreset === p.value ? pillActive : pillInactive}`}
+        >
+          {p.label}
+        </button>
+      ))}
+
+      <div className={divider} aria-hidden />
+
+      {/* Group 3: broker */}
+      {BROKER_OPTIONS.map((b) => (
+        <button
+          key={b.value}
+          type="button"
+          onClick={() => onBrokerChange(b.value)}
+          className={`${pillBase} ${broker === b.value ? pillActive : pillInactive}`}
+        >
+          {b.label}
+        </button>
+      ))}
     </div>
   );
 }

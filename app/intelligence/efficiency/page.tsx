@@ -2,7 +2,6 @@
 
 import { useState } from "react";
 import {
-  BrokerControl,
   DateRangeControls,
   IntelligencePageShell,
   TickerRankingsSection,
@@ -24,10 +23,12 @@ export default function EfficiencyPage() {
     <IntelligencePageShell
       title="Capital Efficiency"
       controls={
-        <>
-          <DateRangeControls range={range} onChange={setRange} />
-          <BrokerControl broker={broker} onChange={setBroker} />
-        </>
+        <DateRangeControls
+          range={range}
+          onRangeChange={setRange}
+          broker={broker}
+          onBrokerChange={setBroker}
+        />
       }
       error={error}
       loading={loading}
