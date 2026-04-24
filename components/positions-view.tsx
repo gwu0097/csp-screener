@@ -5,7 +5,12 @@ import { AlertTriangle, Briefcase, Camera, Loader2, Plus, RefreshCcw, Zap } from
 import { Button } from "@/components/ui/button";
 import { ImportScreenshotModal } from "@/components/import-screenshot-modal";
 import { ImportManualModal } from "@/components/import-manual-modal";
-import { PositionCard, type OpenPositionClientView } from "@/components/position-card";
+import {
+  PositionCard,
+  type ClosedPositionClientView,
+  type OpenPositionClientView,
+} from "@/components/position-card";
+import { ChevronDown, ChevronRight } from "lucide-react";
 import { fmtDollarsSigned } from "@/lib/format";
 import type { MarketContext } from "@/lib/market";
 
@@ -55,6 +60,9 @@ export function PositionsView() {
   const [showScreenshot, setShowScreenshot] = useState(false);
   const [showManual, setShowManual] = useState(false);
   const [best, setBest] = useState<BestOpportunity>(null);
+  const [closedPositions, setClosedPositions] = useState<ClosedPositionClientView[] | null>(null);
+  const [closedOpen, setClosedOpen] = useState(false);
+  const [closedLoading, setClosedLoading] = useState(false);
 
   const load = useCallback(async (live: boolean) => {
     if (live) setLiveLoading(true);
@@ -85,7 +93,33 @@ export function PositionsView() {
   const onImportSuccess = (msg: string) => {
     setMessage(msg);
     void load(false);
+    // If the closed section is currently expanded, refresh it too —
+    // closing a position moves it from open to closed.
+    if (closedOpen) void loadClosed();
   };
+
+  async function loadClosed() {
+    setClosedLoading(true);
+    try {
+      const res = await fetch("/api/positions/closed", { cache: "no-store" });
+      const json = (await res.json()) as {
+        positions?: ClosedPositionClientView[];
+        error?: string;
+      };
+      if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
+      setClosedPositions(json.positions ?? []);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load closed positions");
+    } finally {
+      setClosedLoading(false);
+    }
+  }
+
+  async function toggleClosed() {
+    const next = !closedOpen;
+    setClosedOpen(next);
+    if (next && closedPositions === null) await loadClosed();
+  }
 
   const positions = data?.positions ?? [];
   const market = data?.market;
@@ -223,10 +257,53 @@ export function PositionsView() {
         </div>
       )}
 
-      <div className="space-y-3">
+      <div className="space-y-2">
         {positions.map((p) => (
-          <PositionCard key={p.id} position={p} onCloseSubmitted={onImportSuccess} />
+          <PositionCard
+            key={p.id}
+            kind="open"
+            position={p}
+            onCloseSubmitted={onImportSuccess}
+          />
         ))}
+      </div>
+
+      {/* Closed positions — collapsed by default, fetched lazily */}
+      <div className="pt-4">
+        <button
+          type="button"
+          onClick={toggleClosed}
+          className="flex items-center gap-1 text-sm font-semibold text-muted-foreground hover:text-foreground"
+        >
+          {closedOpen ? (
+            <ChevronDown className="h-4 w-4" />
+          ) : (
+            <ChevronRight className="h-4 w-4" />
+          )}
+          Closed positions
+          {closedPositions !== null && (
+            <span className="text-xs font-normal text-muted-foreground">
+              ({closedPositions.length})
+            </span>
+          )}
+        </button>
+        {closedOpen && (
+          <div className="mt-3 space-y-2">
+            {closedLoading && !closedPositions && (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <Loader2 className="h-3 w-3 animate-spin" /> Loading closed positions…
+              </div>
+            )}
+            {closedPositions?.length === 0 && (
+              <div className="rounded-lg border border-border bg-background/40 px-3 py-4 text-sm text-muted-foreground">
+                No closed positions yet.
+              </div>
+            )}
+            {closedPositions?.map((p) => (
+              <PositionCard key={p.id} kind="closed" position={p} />
+            ))}
+          </div>
+        )}
       </div>
 
       <ImportScreenshotModal

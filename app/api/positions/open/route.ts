@@ -61,6 +61,18 @@ type OpenPosition = {
   recommendationReason: string;
   postEarningsRec: PostEarningsRecView | null;
   fills: Fill[];
+  // Entry snapshot — populated at position-open time from the screener's
+  // three-layer grade. Used by the expanded position card for the
+  // left-column "what did we see at entry" panel.
+  entryFinalGrade: string | null;
+  entryCrushGrade: string | null;
+  entryOpportunityGrade: string | null;
+  entryIndustryGrade: string | null;
+  entryRegimeGrade: string | null;
+  entryIvEdge: number | null;
+  entryEmPct: number | null;
+  entryVix: number | null;
+  entryStockPrice: number | null;
 };
 
 function daysBetween(a: Date, b: Date): number {
@@ -313,6 +325,19 @@ export async function GET(req: NextRequest) {
       fills: fills
         .slice()
         .sort((a, b) => a.fill_date.localeCompare(b.fill_date)),
+      entryFinalGrade: (p as unknown as { entry_final_grade?: string | null }).entry_final_grade ?? null,
+      entryCrushGrade: (p as unknown as { entry_crush_grade?: string | null }).entry_crush_grade ?? null,
+      entryOpportunityGrade:
+        (p as unknown as { entry_opportunity_grade?: string | null }).entry_opportunity_grade ?? null,
+      entryIndustryGrade:
+        (p as unknown as { entry_industry_grade?: string | null }).entry_industry_grade ?? null,
+      entryRegimeGrade:
+        (p as unknown as { entry_regime_grade?: string | null }).entry_regime_grade ?? null,
+      entryIvEdge: (p as unknown as { entry_iv_edge?: number | null }).entry_iv_edge ?? null,
+      entryEmPct: (p as unknown as { entry_em_pct?: number | null }).entry_em_pct ?? null,
+      entryVix: (p as unknown as { entry_vix?: number | null }).entry_vix ?? null,
+      entryStockPrice:
+        (p as unknown as { entry_stock_price?: number | null }).entry_stock_price ?? null,
     };
     return out;
   });
