@@ -227,6 +227,20 @@ export default function EncyclopediaPage() {
     loadList();
   }, []);
 
+  // Deep-link: /encyclopedia?symbol=NOW auto-selects that ticker on
+  // mount so "View in Encyclopedia" buttons on other pages navigate
+  // straight to the detail view instead of the list.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const sym = params.get("symbol");
+    if (sym) {
+      const upper = sym.toUpperCase();
+      setSearch(upper);
+      setSelected(upper);
+    }
+  }, []);
+
   useEffect(() => {
     if (selected) loadDetail(selected);
     else setDetail(null);

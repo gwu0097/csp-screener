@@ -261,7 +261,7 @@ export function PositionCard(props: Props) {
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
-        className="grid w-full grid-cols-[16px_1fr_auto_auto_auto_auto_auto_auto_auto] items-center gap-2 px-3 py-2 text-sm sm:grid-cols-[16px_60px_70px_60px_40px_70px_50px_36px_110px_16px]"
+        className="grid w-full grid-cols-[16px_1fr_auto_auto_auto_auto_auto_auto_auto] items-center gap-2 px-3 py-2 text-sm sm:grid-cols-[16px_minmax(60px,1fr)_70px_60px_40px_70px_50px_36px_auto_16px]"
       >
         {/* Post-earnings dot */}
         <div className="flex h-4 w-4 items-center justify-center">

@@ -14,6 +14,141 @@ import { ChevronDown, ChevronRight } from "lucide-react";
 import { fmtDollarsSigned } from "@/lib/format";
 import type { MarketContext } from "@/lib/market";
 
+// localStorage cache of the last successful /api/positions/open?live=true
+// response — lets us populate live fields immediately on page load
+// instead of flashing "—" until the user hits Refresh live data.
+const LS_LIVE_CACHE = "positions_live_cache";
+
+// Fields that only exist on a live fetch. Everything else on the open
+// position row (grades, opened date, etc.) comes from the DB and is
+// present on both live=false and live=true responses.
+const LIVE_FIELDS = [
+  "currentStockPrice",
+  "currentMark",
+  "currentBid",
+  "currentAsk",
+  "currentDelta",
+  "currentTheta",
+  "currentIv",
+  "pnlDollars",
+  "pnlPct",
+  "distanceToStrikePct",
+  "thetaDecayTotal",
+  "momentum",
+  "urgency",
+  "recommendationReason",
+] as const;
+
+type LiveCacheEntry = Partial<Pick<OpenPositionClientView, (typeof LIVE_FIELDS)[number]>>;
+type LiveCache = { fetchedAt: string; byId: Record<string, LiveCacheEntry> };
+
+function readLiveCache(): LiveCache | null {
+  try {
+    const raw = localStorage.getItem(LS_LIVE_CACHE);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as LiveCache;
+    if (!parsed || !parsed.fetchedAt || !parsed.byId) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writeLiveCache(positions: OpenPositionClientView[]): LiveCache {
+  const byId: Record<string, LiveCacheEntry> = {};
+  for (const p of positions) {
+    const entry: LiveCacheEntry = {};
+    for (const f of LIVE_FIELDS) {
+      // @ts-expect-error runtime shape matches the typed fields list
+      entry[f] = p[f];
+    }
+    byId[p.id] = entry;
+  }
+  const cache: LiveCache = { fetchedAt: new Date().toISOString(), byId };
+  try {
+    localStorage.setItem(LS_LIVE_CACHE, JSON.stringify(cache));
+  } catch {
+    /* quota exceeded — ignore, cache is best-effort */
+  }
+  return cache;
+}
+
+function mergeCacheIntoPositions(
+  positions: OpenPositionClientView[],
+  cache: LiveCache,
+): OpenPositionClientView[] {
+  return positions.map((p) => {
+    const cached = cache.byId[p.id];
+    if (!cached) return p;
+    // Only fill cached values where the fresh row has them null/undefined —
+    // a true live refresh always wins.
+    const merged = { ...p };
+    for (const f of LIVE_FIELDS) {
+      const liveVal = (p as Record<string, unknown>)[f];
+      if (liveVal === null || liveVal === undefined) {
+        // @ts-expect-error runtime shape matches the typed fields list
+        merged[f] = cached[f] ?? liveVal;
+      }
+    }
+    return merged;
+  });
+}
+
+function fmtTimeShort(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+// Section label + ordering for the broker groups. Anything not in
+// this list (or missing a broker) falls into the "Other" bucket and
+// renders last.
+const BROKER_ORDER = ["schwab", "robinhood"] as const;
+const BROKER_LABEL: Record<string, string> = {
+  schwab: "Schwab",
+  robinhood: "Robinhood",
+  other: "Other",
+};
+
+function groupByBroker<T extends { broker?: string | null; remainingContracts?: number }>(
+  items: T[],
+): Array<{ key: string; label: string; items: T[]; contractCount: number }> {
+  const groups = new Map<string, T[]>();
+  for (const it of items) {
+    const b = (it.broker ?? "").toLowerCase();
+    const key =
+      b === "schwab" || b === "robinhood" ? b : b.length > 0 ? b : "other";
+    const arr = groups.get(key) ?? [];
+    arr.push(it);
+    groups.set(key, arr);
+  }
+  const ordered: Array<{ key: string; label: string; items: T[]; contractCount: number }> = [];
+  for (const k of BROKER_ORDER) {
+    const items = groups.get(k);
+    if (items && items.length > 0) {
+      ordered.push({
+        key: k,
+        label: BROKER_LABEL[k] ?? k,
+        items,
+        contractCount: items.reduce((s, p) => s + (p.remainingContracts ?? 0), 0),
+      });
+      groups.delete(k);
+    }
+  }
+  // Any remaining groups (unknown brokers) collapse into "Other" at the end.
+  const remaining: T[] = [];
+  for (const arr of Array.from(groups.values())) remaining.push(...arr);
+  if (remaining.length > 0) {
+    ordered.push({
+      key: "other",
+      label: BROKER_LABEL.other,
+      items: remaining,
+      contractCount: remaining.reduce((s, p) => s + (p.remainingContracts ?? 0), 0),
+    });
+  }
+  return ordered;
+}
+
 type ExpireReport = {
   auto_expired: Array<{
     symbol: string;
@@ -76,6 +211,10 @@ export function PositionsView() {
   const [closedPositions, setClosedPositions] = useState<ClosedPositionClientView[] | null>(null);
   const [closedOpen, setClosedOpen] = useState(false);
   const [closedLoading, setClosedLoading] = useState(false);
+  // When the last live refresh was cached to localStorage, for the
+  // "Live data as of [time]" label. Null = never refreshed (or cache
+  // was cleared manually).
+  const [liveCacheFetchedAt, setLiveCacheFetchedAt] = useState<string | null>(null);
 
   const load = useCallback(async (live: boolean) => {
     if (live) setLiveLoading(true);
@@ -90,7 +229,23 @@ export function PositionsView() {
       );
       const json = (await res.json()) as PositionsResponse & { error?: string };
       if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
-      setData(json);
+      if (live) {
+        // Fresh live fetch — cache the per-position live fields so the
+        // next page load can hydrate immediately instead of showing "—".
+        const cache = writeLiveCache(json.positions);
+        setLiveCacheFetchedAt(cache.fetchedAt);
+        setData(json);
+      } else {
+        // Non-live fetch: merge cached live fields so P&L/Greeks
+        // survive the page load. A true live refresh later overwrites.
+        const cache = readLiveCache();
+        if (cache) {
+          setLiveCacheFetchedAt(cache.fetchedAt);
+          setData({ ...json, positions: mergeCacheIntoPositions(json.positions, cache) });
+        } else {
+          setData(json);
+        }
+      }
       // Surface the auto-expire toast once per load if anything got
       // auto-closed. One green message, every auto-expired position
       // listed inline with its realized P&L.
@@ -196,7 +351,11 @@ export function PositionsView() {
         </div>
         <div className="flex items-center gap-2">
           {data && !data.live && positions.length > 0 && (
-            <span className="text-xs text-muted-foreground">Live data not loaded</span>
+            <span className="text-xs text-muted-foreground">
+              {liveCacheFetchedAt
+                ? `Live data as of ${fmtTimeShort(liveCacheFetchedAt)}`
+                : "Live data not loaded"}
+            </span>
           )}
           <Button
             variant="secondary"
@@ -281,16 +440,24 @@ export function PositionsView() {
         </div>
       )}
 
-      <div className="space-y-2">
-        {positions.map((p) => (
-          <PositionCard
-            key={p.id}
-            kind="open"
-            position={p}
-            onCloseSubmitted={onImportSuccess}
-          />
-        ))}
-      </div>
+      {groupByBroker(positions).map((group) => (
+        <div key={group.key} className="space-y-2">
+          <div className="flex items-baseline gap-2 pt-2 text-xs font-semibold uppercase text-muted-foreground">
+            <span>{group.label}</span>
+            <span className="font-normal normal-case">
+              ({group.contractCount} {group.contractCount === 1 ? "contract" : "contracts"})
+            </span>
+          </div>
+          {group.items.map((p) => (
+            <PositionCard
+              key={p.id}
+              kind="open"
+              position={p}
+              onCloseSubmitted={onImportSuccess}
+            />
+          ))}
+        </div>
+      ))}
 
       {/* Closed positions — collapsed by default, fetched lazily */}
       <div className="pt-4">
@@ -323,9 +490,21 @@ export function PositionsView() {
                 No closed positions yet.
               </div>
             )}
-            {closedPositions?.map((p) => (
-              <PositionCard key={p.id} kind="closed" position={p} />
-            ))}
+            {closedPositions !== null &&
+              closedPositions.length > 0 &&
+              groupByBroker(closedPositions).map((group) => (
+                <div key={group.key} className="space-y-2">
+                  <div className="flex items-baseline gap-2 pt-1 text-xs font-semibold uppercase text-muted-foreground">
+                    <span>{group.label}</span>
+                    <span className="font-normal normal-case">
+                      ({group.items.length} {group.items.length === 1 ? "position" : "positions"})
+                    </span>
+                  </div>
+                  {group.items.map((p) => (
+                    <PositionCard key={p.id} kind="closed" position={p} />
+                  ))}
+                </div>
+              ))}
           </div>
         )}
       </div>
