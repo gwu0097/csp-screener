@@ -12,6 +12,13 @@ export const maxDuration = 60;
 // Prompts — three passes targeting different flavors of setup.
 // ------------------------------------------------------------
 
+// Shared "less obvious" steering shipped on every prompt — pushes the
+// model away from the standard mega-cap roster the trader has already
+// seen everywhere.
+const UNDER_THE_RADAR_NOTE = `Important: the trader already knows about mega-cap tech like NVDA, AAPL, MSFT, GOOGL, META, AMZN. Do not include these unless there is a very specific near-term catalyst that is NOT already priced in. Prioritize mid-cap and small-cap names ($1B-$50B market cap) with strong catalysts that haven't been fully covered by mainstream financial media.
+
+Include at least 2-3 less widely-covered names that analysts are quietly upgrading or that have strong fundamental momentum not yet reflected in widespread coverage. Do not just return the most obvious large-cap names everyone already knows.`;
+
 const PROMPT_MOMENTUM = `You are a financial analyst helping a swing trader find 1-6 month opportunities.
 
 The trader's style:
@@ -21,10 +28,12 @@ The trader's style:
 - 1-6 month time horizon
 - Avoids: penny stocks (<$10), pure meme plays, crypto-adjacent without real business
 
-Find 4-6 US stocks with the strongest bullish catalyst momentum RIGHT NOW. Focus on:
+Find 8-10 US stocks with the strongest bullish catalyst momentum RIGHT NOW. Focus on:
 - Recent analyst upgrades or price target raises
 - Specific near-term product/partnership catalysts
 - Stocks that haven't fully priced in the narrative
+
+${UNDER_THE_RADAR_NOTE}
 
 Return ONLY a JSON array, no markdown, no preamble:
 [{
@@ -40,13 +49,15 @@ Return ONLY a JSON array, no markdown, no preamble:
 
 const PROMPT_RECOVERY = `You are a financial analyst helping a swing trader.
 
-Find 4-6 quality US stocks (market cap >$5B) that are:
+Find 8-10 quality US stocks (market cap >$5B) that are:
 - Trading significantly below 52-week highs
 - Have a specific recovery catalyst in next 6 months
 - Fundamental business is still strong despite price drop
 - Beaten down by macro/sentiment not by broken thesis
 
 Examples of what this trader already holds as long-term: CRM, NOW, NKE, ELF, RKT — similar quality/recovery profile preferred.
+
+${UNDER_THE_RADAR_NOTE}
 
 Return ONLY a JSON array, no markdown:
 [{
@@ -62,7 +73,9 @@ Return ONLY a JSON array, no markdown:
 
 const PROMPT_THEMES = `What are the 2-3 strongest sector themes in the US market RIGHT NOW with specific stock examples that haven't fully priced in the narrative?
 
-For each theme, give 2-3 stock examples.
+For each theme, give 8-10 stock examples spread across the themes (so 3-4 per theme).
+
+${UNDER_THE_RADAR_NOTE}
 
 Return ONLY a JSON array, no markdown:
 [{
@@ -76,6 +89,32 @@ Return ONLY a JSON array, no markdown:
   "confidence": "high|medium|low",
   "risk": "one sentence",
   "category": "theme"
+}]`;
+
+const PROMPT_SOCIAL = `You are helping a swing trader find stocks with strong retail and social media momentum RIGHT NOW.
+
+Search across: X/Twitter trading communities, Reddit (r/wallstreetbets, r/stocks, r/investing, r/SecurityAnalysis), YouTube financial creators, Stocktwits, financial Substacks, and trading blogs.
+
+Find 6-8 stocks where:
+- Retail traders and financial social media are showing unusual excitement or attention
+- The retail thesis has REAL fundamental backing (not just a pure meme pump)
+- Retail sentiment appears to be AHEAD of analyst consensus — the crowd sees something institutions haven't caught up to yet
+- There is unusual options activity or volume being discussed in trading communities
+
+Exclude: pure meme stocks with no business fundamentals, crypto tokens, stocks already up >40% in the last month with no new catalyst.
+
+The trader's style: quality companies, catalyst-driven, 1-6 month horizon. Medium conviction in fundamentals.
+
+Return ONLY a JSON array, no markdown, no preamble:
+[{
+  "symbol": "HOOD",
+  "catalyst": "specific social/retail catalyst",
+  "sentiment": "bullish|bearish|mixed",
+  "timeframe": "1month|3months|6months",
+  "thesis": "one sentence — why retail is excited",
+  "confidence": "high|medium|low",
+  "risk": "one sentence main risk",
+  "category": "social"
 }]`;
 
 // ------------------------------------------------------------
@@ -127,6 +166,8 @@ function extractJsonArray(text: string): unknown[] {
 // Candidate shaping
 // ------------------------------------------------------------
 
+type Category = "momentum" | "recovery" | "theme" | "social";
+
 type RawCandidate = {
   symbol: string;
   catalyst: string;
@@ -135,12 +176,13 @@ type RawCandidate = {
   thesis: string;
   confidence: string;
   risk: string;
-  category: "momentum" | "recovery" | "theme";
+  category: Category;
   theme?: string | null;
   theme_momentum?: string | null;
 };
 
 type EnrichedCandidate = RawCandidate & {
+  company_name: string | null;
   current_price: number | null;
   week_52_low: number | null;
   week_52_high: number | null;
@@ -151,11 +193,15 @@ type EnrichedCandidate = RawCandidate & {
   upside_to_target: number | null;
 };
 
-function coerceCategory(
-  raw: unknown,
-  fallback: "momentum" | "recovery" | "theme",
-): "momentum" | "recovery" | "theme" {
-  if (raw === "momentum" || raw === "recovery" || raw === "theme") return raw;
+function coerceCategory(raw: unknown, fallback: Category): Category {
+  if (
+    raw === "momentum" ||
+    raw === "recovery" ||
+    raw === "theme" ||
+    raw === "social"
+  ) {
+    return raw;
+  }
   return fallback;
 }
 
@@ -179,7 +225,7 @@ function coerceTimeframe(v: unknown): string {
 
 function coerceCandidate(
   raw: unknown,
-  fallbackCategory: "momentum" | "recovery" | "theme",
+  fallbackCategory: Category,
 ): RawCandidate | null {
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
@@ -203,7 +249,7 @@ function coerceCandidate(
 
 async function runQuery(
   prompt: string,
-  fallbackCategory: "momentum" | "recovery" | "theme",
+  fallbackCategory: Category,
   label: string,
 ): Promise<RawCandidate[]> {
   const res = await askPerplexityRaw(prompt, { maxTokens: 1500, label });
@@ -244,6 +290,7 @@ async function enrichCandidates(
         : null;
     out.push({
       ...c,
+      company_name: q?.companyName ?? null,
       current_price: current,
       week_52_low: low,
       week_52_high: high,
@@ -268,12 +315,13 @@ export async function POST() {
   const momentum = await runQuery(PROMPT_MOMENTUM, "momentum", "momentum");
   const recovery = await runQuery(PROMPT_RECOVERY, "recovery", "recovery");
   const themes = await runQuery(PROMPT_THEMES, "theme", "themes");
+  const social = await runQuery(PROMPT_SOCIAL, "social", "social");
 
   // Dedupe by symbol — first occurrence wins so the higher-priority
-  // category (momentum > recovery > theme) gets to keep the slot.
+  // category (momentum > recovery > theme > social) gets to keep the slot.
   const seen = new Set<string>();
   const unique: RawCandidate[] = [];
-  for (const bucket of [momentum, recovery, themes]) {
+  for (const bucket of [momentum, recovery, themes, social]) {
     for (const c of bucket) {
       if (seen.has(c.symbol)) continue;
       seen.add(c.symbol);
@@ -322,6 +370,7 @@ export async function POST() {
       momentum: enriched.filter((c) => c.category === "momentum").length,
       recovery: enriched.filter((c) => c.category === "recovery").length,
       theme: enriched.filter((c) => c.category === "theme").length,
+      social: enriched.filter((c) => c.category === "social").length,
       total: enriched.length,
     },
   });

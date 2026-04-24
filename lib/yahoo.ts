@@ -128,6 +128,11 @@ function pickNumber(obj: RawQuote, key: string): number | null {
   return typeof v === "number" && Number.isFinite(v) ? v : null;
 }
 
+function pickString(obj: RawQuote, key: string): string | null {
+  const v = obj[key];
+  return typeof v === "string" && v.trim().length > 0 ? v.trim() : null;
+}
+
 async function quoteMinimal(symbol: string): Promise<MinimalQuote | null> {
   const record = await quoteRaw(symbol);
   if (!record) return null;
@@ -146,6 +151,7 @@ export type QuoteEnrichment = {
   forwardPE: number | null;
   targetMeanPrice: number | null;
   regularMarketChangePercent: number | null;
+  companyName: string | null;
 };
 
 // Single quote pull for the swing discover flow — price + 52-week range
@@ -164,6 +170,7 @@ export async function getQuoteEnrichment(
     forwardPE: pickNumber(record, "forwardPE"),
     targetMeanPrice: pickNumber(record, "targetMeanPrice"),
     regularMarketChangePercent: pickNumber(record, "regularMarketChangePercent"),
+    companyName: pickString(record, "shortName") ?? pickString(record, "longName"),
   };
 }
 
