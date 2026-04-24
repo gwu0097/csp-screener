@@ -19,6 +19,8 @@ import {
 
 type Category = "momentum" | "recovery" | "theme" | "social";
 
+type MarketCapCategory = "large" | "mid" | "small" | null;
+
 type Candidate = {
   symbol: string;
   catalyst: string;
@@ -39,6 +41,10 @@ type Candidate = {
   price_change_pct: number | null;
   pct_from_52w_high: number | null;
   upside_to_target: number | null;
+  fifty_day_ma: number | null;
+  vs_50d_ma_pct: number | null;
+  market_cap: number | null;
+  market_cap_category: MarketCapCategory;
 };
 
 type DeepDive = {
@@ -124,6 +130,48 @@ function categoryLabel(cat: Category): string {
   if (cat === "recovery") return "RECOVERY";
   if (cat === "theme") return "THEME";
   return "SOCIAL";
+}
+
+function marketCapPillClasses(cat: MarketCapCategory): string {
+  if (cat === "large")
+    return "bg-blue-500/20 text-blue-400 border-blue-500/40";
+  if (cat === "mid")
+    return "bg-teal-500/20 text-teal-300 border-teal-500/40";
+  if (cat === "small")
+    return "bg-orange-500/20 text-orange-400 border-orange-500/40";
+  return "bg-muted/40 text-muted-foreground border-border";
+}
+
+function marketCapLabel(cat: MarketCapCategory): string {
+  if (cat === "large") return "Large-cap";
+  if (cat === "mid") return "Mid-cap";
+  if (cat === "small") return "Small-cap";
+  return "";
+}
+
+// "↓ 58% from high" — drop sign + magnitude. Returns colored output for
+// large drops (≥ 20% off) so recovery candidates pop. Returns "Near 52w
+// high" muted when the price is within 10% of the high. null in between
+// (don't render anything).
+function fmtFromHigh(pct: number | null): { text: string; cls: string } | null {
+  if (pct === null || !Number.isFinite(pct)) return null;
+  if (pct > -10) return { text: "Near 52w high", cls: "text-muted-foreground" };
+  if (pct < -20) {
+    const cls = pct < -40 ? "text-rose-300" : "text-amber-300";
+    return { text: `↓ ${Math.abs(pct).toFixed(0)}% from high`, cls };
+  }
+  // -20 ≤ pct ≤ -10 — show the number but in muted tone
+  return {
+    text: `↓ ${Math.abs(pct).toFixed(0)}% from high`,
+    cls: "text-muted-foreground",
+  };
+}
+
+function fmt50dMA(pct: number | null): { text: string; cls: string } | null {
+  if (pct === null || !Number.isFinite(pct)) return null;
+  const cls = pct >= 0 ? "text-emerald-300" : "text-rose-300";
+  const sign = pct >= 0 ? "+" : "";
+  return { text: `${sign}${pct.toFixed(0)}% vs 50d MA`, cls };
 }
 
 function timeframeLabel(tf: string): string {
@@ -575,7 +623,7 @@ function CandidateCard({
         <span className="font-mono text-base font-semibold text-foreground">
           {c.symbol}
         </span>
-        <div className="flex items-center gap-1">
+        <div className="flex flex-wrap items-center justify-end gap-1">
           <span
             className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase ${categoryBadgeClasses(c.category)}`}
             title={
@@ -596,6 +644,13 @@ function CandidateCard({
           >
             {c.sentiment}
           </span>
+          {c.market_cap_category && (
+            <span
+              className={`rounded border px-1.5 py-0.5 text-[10px] font-medium ${marketCapPillClasses(c.market_cap_category)}`}
+            >
+              {marketCapLabel(c.market_cap_category)}
+            </span>
+          )}
         </div>
       </div>
 
@@ -633,9 +688,21 @@ function CandidateCard({
               style={{ left: `calc(${pctOfRange}% - 1px)` }}
             />
           </div>
-          <div className="mt-1 text-[10px] text-muted-foreground">
-            at {Math.round(pctOfRange)}% of 52w range
-          </div>
+        </div>
+      )}
+
+      {/* Contextual signals: distance from 52w high + position vs 50-day MA.
+          Both come from Yahoo enrichment; render whichever is available. */}
+      {(fmtFromHigh(c.pct_from_52w_high) || fmt50dMA(c.vs_50d_ma_pct)) && (
+        <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]">
+          {(() => {
+            const fh = fmtFromHigh(c.pct_from_52w_high);
+            return fh ? <span className={fh.cls}>{fh.text}</span> : null;
+          })()}
+          {(() => {
+            const ma = fmt50dMA(c.vs_50d_ma_pct);
+            return ma ? <span className={ma.cls}>{ma.text}</span> : null;
+          })()}
         </div>
       )}
 
@@ -762,20 +829,20 @@ function DeepDiveModal({
         if (!v) onClose();
       }}
     >
-      <DialogContent className="flex max-h-[90vh] max-w-2xl flex-col gap-0 p-0">
+      <DialogContent className="flex max-h-[90vh] max-w-3xl flex-col gap-0 p-0">
         {/* Header */}
-        <div className="flex items-start justify-between gap-3 border-b border-border px-4 pb-3 pt-4">
+        <div className="flex items-start justify-between gap-3 border-b border-border px-6 pb-4 pt-5">
           <div className="min-w-0 flex-1">
-            <DialogTitle className="flex flex-wrap items-baseline gap-2 text-base">
+            <DialogTitle className="flex flex-wrap items-baseline gap-2 text-lg">
               <span className="font-mono">{c?.symbol}</span>
               {c?.company_name && (
-                <span className="truncate text-xs font-normal text-muted-foreground">
+                <span className="truncate text-sm font-normal text-muted-foreground">
                   — {c.company_name}
                 </span>
               )}
             </DialogTitle>
             {c && (
-              <div className="mt-1 flex flex-wrap items-center gap-2 text-xs">
+              <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
                 <span className="font-mono text-foreground">
                   {fmtMoney(c.current_price)}
                 </span>
@@ -800,6 +867,13 @@ function DeepDiveModal({
                 >
                   {c.sentiment}
                 </span>
+                {c.market_cap_category && (
+                  <span
+                    className={`rounded border px-1.5 py-0.5 text-[10px] font-medium ${marketCapPillClasses(c.market_cap_category)}`}
+                  >
+                    {marketCapLabel(c.market_cap_category)}
+                  </span>
+                )}
               </div>
             )}
           </div>
@@ -809,40 +883,45 @@ function DeepDiveModal({
             className="rounded p-1 text-muted-foreground hover:bg-white/5 hover:text-foreground"
             aria-label="Close"
           >
-            <X className="h-4 w-4" />
+            <X className="h-5 w-5" />
           </button>
         </div>
 
-        {/* Body — scrollable */}
-        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 text-xs">
+        {/* Body — scrollable. text-base + leading-relaxed gives the panel
+            a research-note feel rather than a tooltip. */}
+        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-6 text-base">
           {loading && !dive && (
-            <div className="flex flex-col items-center justify-center gap-2 py-12 text-sm text-muted-foreground">
-              <Loader2 className="h-6 w-6 animate-spin" />
-              <span>Researching {c?.symbol ?? ""}…</span>
-              <span className="text-[11px]">
+            <div className="flex flex-col items-center justify-center gap-2 py-16 text-sm text-muted-foreground">
+              <Loader2 className="h-7 w-7 animate-spin" />
+              <span className="text-base">Researching {c?.symbol ?? ""}…</span>
+              <span className="text-xs">
                 Pulling recent news, fundamentals, sentiment, and bear case
               </span>
             </div>
           )}
 
           {!loading && !dive && error && (
-            <div className="rounded border border-rose-500/40 bg-rose-500/10 p-3 text-xs text-rose-300">
+            <div className="rounded border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-300">
               {error}
             </div>
           )}
 
           {dive && (
-            <div className="space-y-4">
+            <div className="space-y-6">
               <DeepSection title="📰 Recent news">
-                <p className="text-foreground/90">{dive.recent_news}</p>
+                <p className="leading-relaxed text-foreground/90">
+                  {dive.recent_news}
+                </p>
               </DeepSection>
 
               <DeepSection title="💰 Fundamental health">
-                <p className="text-foreground/90">{dive.fundamental_health}</p>
+                <p className="leading-relaxed text-foreground/90">
+                  {dive.fundamental_health}
+                </p>
               </DeepSection>
 
               <DeepSection title="⚡ Catalyst">
-                <div className="mb-1 flex flex-wrap gap-3 text-[11px]">
+                <div className="mb-2 flex flex-wrap gap-4 text-sm">
                   <span className="text-muted-foreground">
                     Credibility:{" "}
                     <span className="font-medium uppercase text-foreground">
@@ -857,12 +936,14 @@ function DeepDiveModal({
                   </span>
                 </div>
                 {c?.catalyst && (
-                  <div className="text-foreground/90">&ldquo;{c.catalyst}&rdquo;</div>
+                  <p className="leading-relaxed text-foreground/90">
+                    &ldquo;{c.catalyst}&rdquo;
+                  </p>
                 )}
               </DeepSection>
 
               <DeepSection title="👥 Sentiment">
-                <div className="flex flex-wrap gap-4 text-[11px]">
+                <div className="flex flex-wrap gap-6 text-sm">
                   <span className="text-muted-foreground">
                     Retail:{" "}
                     <span className="font-medium capitalize text-foreground">
@@ -883,15 +964,15 @@ function DeepDiveModal({
                   {technicalLabel(dive.technical_setup)}
                 </div>
                 {dive.entry_comment && (
-                  <div className="mt-1 text-muted-foreground">
+                  <p className="mt-1 leading-relaxed text-muted-foreground">
                     {dive.entry_comment}
-                  </div>
+                  </p>
                 )}
               </DeepSection>
 
               {dive.bear_case.length > 0 && (
                 <DeepSection title="⚠ Bear case">
-                  <ul className="list-disc space-y-0.5 pl-4 text-foreground/90">
+                  <ul className="list-disc space-y-1 pl-5 leading-relaxed text-foreground/90">
                     {dive.bear_case.map((r, i) => (
                       <li key={i}>{r}</li>
                     ))}
@@ -900,13 +981,15 @@ function DeepDiveModal({
               )}
 
               <div
-                className={`rounded border p-3 ${verdictClasses(dive.verdict)}`}
+                className={`rounded border p-5 ${verdictClasses(dive.verdict)}`}
               >
-                <div className="text-[11px] font-semibold uppercase tracking-wider">
+                <div className="text-xs font-semibold uppercase tracking-wider">
                   Verdict: {dive.verdict} priority
                 </div>
                 {dive.verdict_reasoning && (
-                  <div className="mt-1 text-xs">{dive.verdict_reasoning}</div>
+                  <p className="mt-2 text-base leading-relaxed">
+                    {dive.verdict_reasoning}
+                  </p>
                 )}
               </div>
             </div>
@@ -914,7 +997,7 @@ function DeepDiveModal({
         </div>
 
         {/* Footer — sticky */}
-        <div className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
+        <div className="flex items-center justify-end gap-2 border-t border-border px-6 py-4">
           {!inIdeas && c && (
             <Button
               onClick={onAdd}
@@ -960,7 +1043,7 @@ function DeepSection({
 }) {
   return (
     <div>
-      <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+      <div className="mb-2 text-base font-semibold tracking-wide text-foreground">
         {title}
       </div>
       {children}

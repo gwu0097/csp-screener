@@ -151,6 +151,9 @@ export type QuoteEnrichment = {
   forwardPE: number | null;
   targetMeanPrice: number | null;
   regularMarketChangePercent: number | null;
+  fiftyDayAverage: number | null;
+  twoHundredDayAverage: number | null;
+  marketCap: number | null;
   companyName: string | null;
 };
 
@@ -170,6 +173,9 @@ export async function getQuoteEnrichment(
     forwardPE: pickNumber(record, "forwardPE"),
     targetMeanPrice: pickNumber(record, "targetMeanPrice"),
     regularMarketChangePercent: pickNumber(record, "regularMarketChangePercent"),
+    fiftyDayAverage: pickNumber(record, "fiftyDayAverage"),
+    twoHundredDayAverage: pickNumber(record, "twoHundredDayAverage"),
+    marketCap: pickNumber(record, "marketCap"),
     companyName: pickString(record, "shortName") ?? pickString(record, "longName"),
   };
 }

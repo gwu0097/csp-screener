@@ -14,10 +14,13 @@ export const maxDuration = 60;
 
 // Shared "less obvious" steering shipped on every prompt — pushes the
 // model away from the standard mega-cap roster the trader has already
-// seen everywhere.
+// seen everywhere. Includes the price/market-cap floor so the model
+// stops returning penny stocks and micro-cap biotechs.
 const UNDER_THE_RADAR_NOTE = `Important: the trader already knows about mega-cap tech like NVDA, AAPL, MSFT, GOOGL, META, AMZN. Do not include these unless there is a very specific near-term catalyst that is NOT already priced in. Prioritize mid-cap and small-cap names ($1B-$50B market cap) with strong catalysts that haven't been fully covered by mainstream financial media.
 
-Include at least 2-3 less widely-covered names that analysts are quietly upgrading or that have strong fundamental momentum not yet reflected in widespread coverage. Do not just return the most obvious large-cap names everyone already knows.`;
+Include at least 2-3 less widely-covered names that analysts are quietly upgrading or that have strong fundamental momentum not yet reflected in widespread coverage. Do not just return the most obvious large-cap names everyone already knows.
+
+Exclude any stock with a current price below $10 or market cap below $500M. The trader does not trade penny stocks or micro-caps. Only include stocks with real institutional ownership and sufficient liquidity.`;
 
 const PROMPT_MOMENTUM = `You are a financial analyst helping a swing trader find 1-6 month opportunities.
 
@@ -103,6 +106,8 @@ Find 6-8 stocks where:
 
 Exclude: pure meme stocks with no business fundamentals, crypto tokens, stocks already up >40% in the last month with no new catalyst.
 
+Exclude any stock with a current price below $10 or market cap below $500M. The trader does not trade penny stocks or micro-caps. Only include stocks with real institutional ownership and sufficient liquidity.
+
 The trader's style: quality companies, catalyst-driven, 1-6 month horizon. Medium conviction in fundamentals.
 
 Return ONLY a JSON array, no markdown, no preamble:
@@ -181,6 +186,8 @@ type RawCandidate = {
   theme_momentum?: string | null;
 };
 
+type MarketCapCategory = "large" | "mid" | "small" | null;
+
 type EnrichedCandidate = RawCandidate & {
   company_name: string | null;
   current_price: number | null;
@@ -191,7 +198,18 @@ type EnrichedCandidate = RawCandidate & {
   price_change_pct: number | null;
   pct_from_52w_high: number | null;
   upside_to_target: number | null;
+  fifty_day_ma: number | null;
+  vs_50d_ma_pct: number | null;
+  market_cap: number | null;
+  market_cap_category: MarketCapCategory;
 };
+
+function categorizeMarketCap(cap: number | null): MarketCapCategory {
+  if (cap === null || !Number.isFinite(cap) || cap <= 0) return null;
+  if (cap > 50_000_000_000) return "large";
+  if (cap >= 2_000_000_000) return "mid";
+  return "small";
+}
 
 function coerceCategory(raw: unknown, fallback: Category): Category {
   if (
@@ -288,6 +306,12 @@ async function enrichCandidates(
       current !== null && target !== null && current > 0
         ? ((target - current) / current) * 100
         : null;
+    const fiftyDayMa = q?.fiftyDayAverage ?? null;
+    const vs50dMa =
+      current !== null && fiftyDayMa !== null && fiftyDayMa > 0
+        ? ((current - fiftyDayMa) / fiftyDayMa) * 100
+        : null;
+    const marketCap = q?.marketCap ?? null;
     out.push({
       ...c,
       company_name: q?.companyName ?? null,
@@ -299,6 +323,10 @@ async function enrichCandidates(
       price_change_pct: q?.regularMarketChangePercent ?? null,
       pct_from_52w_high: pctFromHigh,
       upside_to_target: upsideToTarget,
+      fifty_day_ma: fiftyDayMa,
+      vs_50d_ma_pct: vs50dMa,
+      market_cap: marketCap,
+      market_cap_category: categorizeMarketCap(marketCap),
     });
     await sleep(100);
   }
@@ -339,7 +367,25 @@ export async function POST() {
     );
   }
 
-  const enriched = await enrichCandidates(unique);
+  const enrichedAll = await enrichCandidates(unique);
+
+  // Hard floors — even if Perplexity ignores the prompt-level exclusion,
+  // strip penny stocks / micro-caps after Yahoo verifies the numbers.
+  // Symbols where Yahoo failed (current_price === null) get dropped too
+  // because we have no way to confirm they pass the floor.
+  const PRICE_FLOOR = 10;
+  const MARKET_CAP_FLOOR = 500_000_000;
+  const enriched = enrichedAll.filter((c) => {
+    if (c.current_price === null || c.current_price < PRICE_FLOOR) return false;
+    if (c.market_cap === null || c.market_cap < MARKET_CAP_FLOOR) return false;
+    return true;
+  });
+  const dropped = enrichedAll.length - enriched.length;
+  if (dropped > 0) {
+    console.log(
+      `[swings/discover] floor filter dropped ${dropped} candidate${dropped === 1 ? "" : "s"} (price < $${PRICE_FLOOR} or market cap < $${MARKET_CAP_FLOOR / 1e6}M or unverified)`,
+    );
+  }
 
   const sb = createServerClient();
   // Single-row table semantics: wipe previous scan results before writing
