@@ -351,118 +351,312 @@ async function enrichCandidates(
 }
 
 // ------------------------------------------------------------
-// POST — run a fresh scan, persist, return enriched candidates.
+// Persistence helpers
 // ------------------------------------------------------------
 
-export async function POST() {
-  // Sequential — Perplexity rate-limits aggressively, and we're on one
-  // network request at a time anyway (serverless instance).
-  const momentum = await runQuery(PROMPT_MOMENTUM, "momentum", "momentum");
-  const recovery = await runQuery(PROMPT_RECOVERY, "recovery", "recovery");
-  const themes = await runQuery(PROMPT_THEMES, "theme", "themes");
-  const social = await runQuery(PROMPT_SOCIAL, "social", "social");
+const SCANNABLE: Category[] = ["momentum", "recovery", "theme", "social"];
 
-  // Dedupe by symbol — first occurrence wins so the higher-priority
-  // category (momentum > recovery > theme > social) gets to keep the slot.
+const PROMPT_FOR: Record<Category, string> = {
+  momentum: PROMPT_MOMENTUM,
+  recovery: PROMPT_RECOVERY,
+  theme: PROMPT_THEMES,
+  social: PROMPT_SOCIAL,
+};
+
+const PRICE_FLOOR = 10;
+const MARKET_CAP_FLOOR = 500_000_000;
+
+// Strip penny stocks / micro-caps + symbols Yahoo couldn't verify.
+function applyFloor(c: EnrichedCandidate): boolean {
+  if (c.current_price === null || c.current_price < PRICE_FLOOR) return false;
+  if (c.market_cap === null || c.market_cap < MARKET_CAP_FLOOR) return false;
+  return true;
+}
+
+// Dedupe a list of RawCandidates by symbol, first occurrence wins.
+function dedupeBySymbol(rows: RawCandidate[]): RawCandidate[] {
   const seen = new Set<string>();
-  const unique: RawCandidate[] = [];
-  for (const bucket of [momentum, recovery, themes, social]) {
-    for (const c of bucket) {
-      if (seen.has(c.symbol)) continue;
-      seen.add(c.symbol);
-      unique.push(c);
+  const out: RawCandidate[] = [];
+  for (const c of rows) {
+    if (seen.has(c.symbol)) continue;
+    seen.add(c.symbol);
+    out.push(c);
+  }
+  return out;
+}
+
+// Run a single category's pipeline (Perplexity → coerce → enrich → floor).
+// Returns the cleaned candidate list ready to persist + ship to the client.
+async function scanCategory(cat: Category): Promise<EnrichedCandidate[]> {
+  const raw = await runQuery(PROMPT_FOR[cat], cat, cat);
+  if (raw.length === 0) return [];
+  const enriched = await enrichCandidates(raw);
+  const filtered = enriched.filter(applyFloor);
+  const dropped = enriched.length - filtered.length;
+  if (dropped > 0) {
+    console.log(
+      `[swings/discover] ${cat}: floor filter dropped ${dropped} of ${enriched.length}`,
+    );
+  }
+  return filtered;
+}
+
+// Replace one category's persisted row. Delete + insert because we don't
+// rely on a unique index on category — keeps the migration permissive.
+async function persistCategoryRow(
+  sb: ReturnType<typeof createServerClient>,
+  category: Category,
+  candidates: EnrichedCandidate[],
+  scannedAt: string,
+): Promise<string | null> {
+  const del = await sb
+    .from("swing_scan_results")
+    .delete()
+    .eq("category", category);
+  if (del.error) return `delete ${category}: ${del.error.message}`;
+  const ins = await sb
+    .from("swing_scan_results")
+    .insert({ category, candidates, scanned_at: scannedAt });
+  if (ins.error) return `insert ${category}: ${ins.error.message}`;
+  return null;
+}
+
+// Wipe any pre-migration "all"-tagged rows so they don't shadow the new
+// per-category rows on subsequent reads. Called after a full scan.
+async function clearLegacyAllRow(
+  sb: ReturnType<typeof createServerClient>,
+): Promise<void> {
+  const del = await sb.from("swing_scan_results").delete().eq("category", "all");
+  if (del.error) {
+    console.warn(`[swings/discover] clear legacy 'all' row: ${del.error.message}`);
+  }
+}
+
+// ------------------------------------------------------------
+// POST — run a scan (single category or all four), persist, return.
+// ------------------------------------------------------------
+
+export async function POST(req: Request) {
+  let body: { category?: unknown } = {};
+  try {
+    body = (await req.json()) as { category?: unknown };
+  } catch {
+    // Empty body is fine — defaults to a full scan.
+  }
+  const requested =
+    body.category === "momentum" ||
+    body.category === "recovery" ||
+    body.category === "theme" ||
+    body.category === "social"
+      ? (body.category as Category)
+      : "all";
+
+  const sb = createServerClient();
+  const scannedAt = new Date().toISOString();
+  const errors: string[] = [];
+  const perCategory: Record<Category, EnrichedCandidate[]> = {
+    momentum: [],
+    recovery: [],
+    theme: [],
+    social: [],
+  };
+
+  if (requested === "all") {
+    // Run all 4 sequentially (Perplexity rate limits favor it).
+    const momentumRaw = await runQuery(PROMPT_MOMENTUM, "momentum", "momentum");
+    const recoveryRaw = await runQuery(PROMPT_RECOVERY, "recovery", "recovery");
+    const themeRaw = await runQuery(PROMPT_THEMES, "theme", "themes");
+    const socialRaw = await runQuery(PROMPT_SOCIAL, "social", "social");
+
+    // Dedupe across the union — momentum > recovery > theme > social.
+    const unique = dedupeBySymbol([
+      ...momentumRaw,
+      ...recoveryRaw,
+      ...themeRaw,
+      ...socialRaw,
+    ]);
+    if (unique.length === 0) {
+      return NextResponse.json(
+        {
+          error:
+            "No candidates returned — Perplexity may be unavailable or the model produced no parseable output.",
+        },
+        { status: 502 },
+      );
+    }
+    const enriched = await enrichCandidates(unique);
+    const filtered = enriched.filter(applyFloor);
+    for (const c of filtered) perCategory[c.category].push(c);
+
+    // Persist 4 per-category rows.
+    for (const cat of SCANNABLE) {
+      const err = await persistCategoryRow(sb, cat, perCategory[cat], scannedAt);
+      if (err) errors.push(err);
+    }
+    // Drop any pre-migration row tagged 'all' — its data is now split
+    // into per-category rows and we don't want it to shadow them.
+    await clearLegacyAllRow(sb);
+  } else {
+    const filtered = await scanCategory(requested);
+    perCategory[requested] = filtered;
+    if (filtered.length === 0) {
+      return NextResponse.json(
+        {
+          error: `No ${requested} candidates returned — Perplexity may be unavailable or the model produced no parseable output.`,
+        },
+        { status: 502 },
+      );
+    }
+    const err = await persistCategoryRow(sb, requested, filtered, scannedAt);
+    if (err) errors.push(err);
+  }
+
+  if (errors.length > 0) {
+    console.warn(`[swings/discover] persist errors: ${errors.join("; ")}`);
+  }
+
+  // Per-category response: each scanned slot gets the new scannedAt.
+  const perCategoryResponse: Record<
+    Category,
+    { candidates: EnrichedCandidate[]; scanned_at: string }
+  > = {} as Record<
+    Category,
+    { candidates: EnrichedCandidate[]; scanned_at: string }
+  >;
+  for (const cat of SCANNABLE) {
+    if (requested === "all" || requested === cat) {
+      perCategoryResponse[cat] = {
+        candidates: perCategory[cat],
+        scanned_at: scannedAt,
+      };
     }
   }
 
-  if (unique.length === 0) {
-    return NextResponse.json(
-      {
-        error:
-          "No candidates returned — Perplexity may be unavailable or the model produced no parseable output.",
-      },
-      { status: 502 },
-    );
-  }
-
-  const enrichedAll = await enrichCandidates(unique);
-
-  // Hard floors — even if Perplexity ignores the prompt-level exclusion,
-  // strip penny stocks / micro-caps after Yahoo verifies the numbers.
-  // Symbols where Yahoo failed (current_price === null) get dropped too
-  // because we have no way to confirm they pass the floor.
-  const PRICE_FLOOR = 10;
-  const MARKET_CAP_FLOOR = 500_000_000;
-  const enriched = enrichedAll.filter((c) => {
-    if (c.current_price === null || c.current_price < PRICE_FLOOR) return false;
-    if (c.market_cap === null || c.market_cap < MARKET_CAP_FLOOR) return false;
-    return true;
-  });
-  const dropped = enrichedAll.length - enriched.length;
-  if (dropped > 0) {
-    console.log(
-      `[swings/discover] floor filter dropped ${dropped} candidate${dropped === 1 ? "" : "s"} (price < $${PRICE_FLOOR} or market cap < $${MARKET_CAP_FLOOR / 1e6}M or unverified)`,
-    );
-  }
-
-  const sb = createServerClient();
-  // Single-row table semantics: wipe previous scan results before writing
-  // the new one. If the delete fails we still try the insert so a scan
-  // never silently drops on the floor.
-  const delRes = await sb.from("swing_scan_results").delete().neq("id", "00000000-0000-0000-0000-000000000000");
-  if (delRes.error) {
-    console.warn(`[swings/discover] delete prev failed: ${delRes.error.message}`);
-  }
-  const scannedAt = new Date().toISOString();
-  const insRes = await sb
-    .from("swing_scan_results")
-    .insert({ candidates: enriched, scanned_at: scannedAt })
-    .select()
-    .single();
-  if (insRes.error) {
-    console.warn(`[swings/discover] insert failed: ${insRes.error.message}`);
-    return NextResponse.json(
-      { error: insRes.error.message, candidates: enriched, scanned_at: scannedAt },
-      { status: 500 },
-    );
-  }
+  // Flat candidates: union for "all", just the scanned category for partial.
+  const flat: EnrichedCandidate[] =
+    requested === "all"
+      ? SCANNABLE.flatMap((c) => perCategory[c])
+      : perCategory[requested];
 
   return NextResponse.json({
-    candidates: enriched,
+    category: requested,
     scanned_at: scannedAt,
+    candidates: flat,
+    per_category: perCategoryResponse,
     counts: {
-      momentum: enriched.filter((c) => c.category === "momentum").length,
-      recovery: enriched.filter((c) => c.category === "recovery").length,
-      theme: enriched.filter((c) => c.category === "theme").length,
-      social: enriched.filter((c) => c.category === "social").length,
-      total: enriched.length,
+      momentum: perCategory.momentum.length,
+      recovery: perCategory.recovery.length,
+      theme: perCategory.theme.length,
+      social: perCategory.social.length,
+      total: flat.length,
     },
   });
 }
 
 // ------------------------------------------------------------
-// GET — return the most recent persisted scan (or empty).
+// GET — assemble per-category snapshots from persisted rows.
+// Backward compat: if a pre-migration row exists with category='all'
+// (or anything outside the scannable set), we split its candidates
+// across the per-category buckets on read so the user keeps seeing
+// data until they trigger their first new scan.
 // ------------------------------------------------------------
+
+type ScanRow = {
+  category?: string | null;
+  scanned_at: string;
+  candidates: EnrichedCandidate[];
+};
 
 export async function GET() {
   const sb = createServerClient();
+  // Use select("*") instead of explicit columns so the read still works
+  // before the user has run ALTER TABLE ADD COLUMN category. Pre-migration
+  // rows fall through to the "legacy" branch below and get split by their
+  // candidate-level `category` field.
   const res = await sb
     .from("swing_scan_results")
-    .select("scanned_at,candidates")
-    .order("scanned_at", { ascending: false })
-    .limit(1);
+    .select("*")
+    .order("scanned_at", { ascending: false });
   if (res.error) {
     return NextResponse.json({ error: res.error.message }, { status: 500 });
   }
-  const rows = (res.data ?? []) as Array<{
-    scanned_at: string;
-    candidates: EnrichedCandidate[];
-  }>;
-  if (rows.length === 0) {
-    return NextResponse.json({ candidates: [], scanned_at: null });
+  const rows = (res.data ?? []) as ScanRow[];
+
+  // Newest row per category (rows are already sorted desc).
+  const perCategoryRow: Record<Category, ScanRow | null> = {
+    momentum: null,
+    recovery: null,
+    theme: null,
+    social: null,
+  };
+  let legacyAll: ScanRow | null = null;
+  for (const row of rows) {
+    const cat = row.category;
+    if (
+      cat === "momentum" ||
+      cat === "recovery" ||
+      cat === "theme" ||
+      cat === "social"
+    ) {
+      if (!perCategoryRow[cat]) perCategoryRow[cat] = row;
+    } else if (!legacyAll) {
+      // 'all', null, or any pre-migration value — keep the newest.
+      legacyAll = row;
+    }
   }
-  const row = rows[0];
+
+  // Backfill missing per-category buckets from the legacy 'all' row.
+  if (legacyAll) {
+    for (const cat of SCANNABLE) {
+      if (perCategoryRow[cat]) continue;
+      const subset = (legacyAll.candidates ?? []).filter(
+        (c) => c.category === cat,
+      );
+      if (subset.length > 0) {
+        perCategoryRow[cat] = {
+          category: cat,
+          scanned_at: legacyAll.scanned_at,
+          candidates: subset,
+        };
+      }
+    }
+  }
+
+  // Build response.
+  const perCategory: Record<
+    Category,
+    { candidates: EnrichedCandidate[]; scanned_at: string | null }
+  > = {
+    momentum: { candidates: [], scanned_at: null },
+    recovery: { candidates: [], scanned_at: null },
+    theme: { candidates: [], scanned_at: null },
+    social: { candidates: [], scanned_at: null },
+  };
+  const merged: EnrichedCandidate[] = [];
+  const seen = new Set<string>();
+  for (const cat of SCANNABLE) {
+    const row = perCategoryRow[cat];
+    perCategory[cat] = {
+      candidates: row?.candidates ?? [],
+      scanned_at: row?.scanned_at ?? null,
+    };
+    for (const c of row?.candidates ?? []) {
+      if (seen.has(c.symbol)) continue;
+      seen.add(c.symbol);
+      merged.push(c);
+    }
+  }
+
+  // Newest scanned_at across all categories — kept as the top-level
+  // `scanned_at` so older clients reading just that field still work.
+  const newest = SCANNABLE.map((c) => perCategory[c].scanned_at)
+    .filter((s): s is string => s !== null)
+    .sort()
+    .pop() ?? null;
+
   return NextResponse.json({
-    candidates: row.candidates ?? [],
-    scanned_at: row.scanned_at,
+    candidates: merged,
+    scanned_at: newest,
+    per_category: perCategory,
   });
 }

@@ -137,6 +137,13 @@ function categoryLabel(cat: Category): string {
   return "SOCIAL";
 }
 
+function prettyCategory(cat: Category): string {
+  if (cat === "momentum") return "Momentum";
+  if (cat === "recovery") return "Recovery";
+  if (cat === "theme") return "Themes";
+  return "Social";
+}
+
 function marketCapPillClasses(cat: MarketCapCategory): string {
   if (cat === "large")
     return "bg-blue-500/20 text-blue-400 border-blue-500/40";
@@ -266,9 +273,29 @@ function technicalLabel(t: DeepDive["technical_setup"]): string {
   return "Extended";
 }
 
+type CategoryBucket = { candidates: Candidate[]; scannedAt: string | null };
+type PerCategoryState = Record<Category, CategoryBucket>;
+const EMPTY_PER_CATEGORY: PerCategoryState = {
+  momentum: { candidates: [], scannedAt: null },
+  recovery: { candidates: [], scannedAt: null },
+  theme: { candidates: [], scannedAt: null },
+  social: { candidates: [], scannedAt: null },
+};
+type ActiveTab = "all" | Category;
+const SCANNABLE_CATEGORIES: Category[] = [
+  "momentum",
+  "recovery",
+  "theme",
+  "social",
+];
+
 export function SwingDiscoverView() {
-  const [candidates, setCandidates] = useState<Candidate[]>([]);
-  const [scannedAt, setScannedAt] = useState<string | null>(null);
+  // Each category holds its own candidate list + timestamp. The All tab
+  // derives its data from the union; partial scans replace one bucket
+  // and leave the others alone.
+  const [perCategory, setPerCategory] =
+    useState<PerCategoryState>(EMPTY_PER_CATEGORY);
+  const [activeTab, setActiveTab] = useState<ActiveTab>("momentum");
   const [loading, setLoading] = useState(true);
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -290,9 +317,30 @@ export function SwingDiscoverView() {
       const res = await fetch("/api/swings/discover", { cache: "no-store" });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
-      const raw = Array.isArray(json.candidates) ? json.candidates : [];
-      setCandidates(raw.map(normalizeCandidate));
-      setScannedAt(json.scanned_at ?? null);
+      const next = { ...EMPTY_PER_CATEGORY };
+      const pc = json.per_category as
+        | Record<string, { candidates?: unknown; scanned_at?: string | null }>
+        | undefined;
+      if (pc) {
+        for (const cat of SCANNABLE_CATEGORIES) {
+          const bucket = pc[cat];
+          const rawList = Array.isArray(bucket?.candidates) ? bucket.candidates : [];
+          next[cat] = {
+            candidates: rawList.map(normalizeCandidate),
+            scannedAt: bucket?.scanned_at ?? null,
+          };
+        }
+      } else if (Array.isArray(json.candidates)) {
+        // Fallback for older API shapes — split a flat list by category.
+        for (const raw of json.candidates) {
+          const c = normalizeCandidate(raw);
+          next[c.category].candidates.push(c);
+          if (!next[c.category].scannedAt) {
+            next[c.category].scannedAt = json.scanned_at ?? null;
+          }
+        }
+      }
+      setPerCategory(next);
     } catch (e) {
       console.warn("[swing-discover] load failed:", e);
     } finally {
@@ -323,16 +371,50 @@ export function SwingDiscoverView() {
   async function runScan() {
     setScanning(true);
     setError(null);
+    const scope = activeTab; // capture: tab might change while scanning
     try {
+      const body: { category?: Category } = scope === "all" ? {} : { category: scope };
       const res = await fetch("/api/swings/discover", {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
         cache: "no-store",
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
-      const raw = Array.isArray(json.candidates) ? json.candidates : [];
-      setCandidates(raw.map(normalizeCandidate));
-      setScannedAt(json.scanned_at ?? new Date().toISOString());
+
+      const scannedAt = (json.scanned_at as string) ?? new Date().toISOString();
+      const pc = json.per_category as
+        | Record<string, { candidates?: unknown; scanned_at?: string | null }>
+        | undefined;
+
+      setPerCategory((prev) => {
+        const next: PerCategoryState = { ...prev };
+        const updateCat = (cat: Category) => {
+          const bucket = pc?.[cat];
+          if (!bucket) return;
+          const rawList = Array.isArray(bucket.candidates) ? bucket.candidates : [];
+          next[cat] = {
+            candidates: rawList.map(normalizeCandidate),
+            scannedAt: bucket.scanned_at ?? scannedAt,
+          };
+        };
+        if (scope === "all") {
+          for (const cat of SCANNABLE_CATEGORIES) updateCat(cat);
+        } else {
+          updateCat(scope);
+          // Fallback: if the response didn't include per_category, use the
+          // flat list with the scanned scope.
+          if (!pc?.[scope] && Array.isArray(json.candidates)) {
+            const rawList = json.candidates as unknown[];
+            next[scope] = {
+              candidates: rawList.map(normalizeCandidate),
+              scannedAt,
+            };
+          }
+        }
+        return next;
+      });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Scan failed");
     } finally {
@@ -435,16 +517,57 @@ export function SwingDiscoverView() {
     setActiveDeepDive(null);
   }
 
+  // Bucket candidates per category from the per-category state. Each
+  // category bucket is whatever was last persisted for that category —
+  // partial scans only refresh one bucket at a time.
   const buckets = useMemo(() => {
-    const byCategory: Record<Category, Candidate[]> = {
-      momentum: [],
-      recovery: [],
-      theme: [],
-      social: [],
-    };
-    for (const c of candidates) byCategory[c.category].push(c);
-    return byCategory;
-  }, [candidates]);
+    return {
+      momentum: perCategory.momentum.candidates,
+      recovery: perCategory.recovery.candidates,
+      theme: perCategory.theme.candidates,
+      social: perCategory.social.candidates,
+    } as Record<Category, Candidate[]>;
+  }, [perCategory]);
+
+  // Flat union for the All tab and ideas-symbol matching. Dedup by symbol
+  // so a name appearing in two buckets renders once.
+  const candidates = useMemo(() => {
+    const seen = new Set<string>();
+    const out: Candidate[] = [];
+    for (const cat of SCANNABLE_CATEGORIES) {
+      for (const c of perCategory[cat].candidates) {
+        if (seen.has(c.symbol)) continue;
+        seen.add(c.symbol);
+        out.push(c);
+      }
+    }
+    return out;
+  }, [perCategory]);
+
+  // For the scan-button label and the per-tab timestamp display.
+  const scanLabel = (() => {
+    if (activeTab === "all") return "Scan All";
+    if (activeTab === "momentum") return "Scan Momentum";
+    if (activeTab === "recovery") return "Scan Recovery";
+    if (activeTab === "theme") return "Scan Themes";
+    return "Scan Social";
+  })();
+
+  const lastScannedLabel = (() => {
+    if (activeTab === "all") {
+      const stamps = SCANNABLE_CATEGORIES.map((c) => perCategory[c].scannedAt).filter(
+        (s): s is string => s !== null,
+      );
+      if (stamps.length === 0) return "No scan run yet";
+      // Oldest of the four — surfaces "the dataset is stale because X
+      // was last scanned days ago" without hiding it behind the newest.
+      const oldest = stamps.slice().sort()[0];
+      return `Oldest scan: ${fmtRel(oldest)}`;
+    }
+    const stamp = perCategory[activeTab].scannedAt;
+    if (!stamp) return `${prettyCategory(activeTab)} not scanned yet`;
+    return `${prettyCategory(activeTab)} last scanned: ${fmtRel(stamp)}`;
+  })();
 
   const themeGroups = useMemo(() => {
     const groups = new Map<string, { momentum: string | null; items: Candidate[] }>();
@@ -470,16 +593,16 @@ export function SwingDiscoverView() {
           ) : (
             <>
               <RefreshCw className="mr-2 h-4 w-4" />
-              Scan Now
+              {scanLabel}
             </>
           )}
         </Button>
         <span className="text-xs text-muted-foreground">
           {scanning
-            ? "Four Perplexity queries + Yahoo enrichment — takes ~25-30s"
-            : scannedAt
-              ? `Last scanned: ${fmtRel(scannedAt)}`
-              : "No scan run yet"}
+            ? activeTab === "all"
+              ? "Four Perplexity queries + Yahoo enrichment — takes ~25-30s"
+              : `Scanning ${prettyCategory(activeTab as Category).toLowerCase()} — takes ~7-10s`
+            : lastScannedLabel}
         </span>
       </div>
 
@@ -524,7 +647,11 @@ export function SwingDiscoverView() {
             social: buckets.social.length,
           };
           return (
-            <Tabs defaultValue="momentum" className="space-y-4">
+            <Tabs
+              value={activeTab}
+              onValueChange={(v) => setActiveTab(v as ActiveTab)}
+              className="space-y-4"
+            >
               <TabsList className="flex flex-wrap">
                 <TabTrigger value="all" label="All" count={counts.all} />
                 <TabTrigger
