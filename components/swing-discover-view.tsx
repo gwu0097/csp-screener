@@ -4,18 +4,21 @@ import { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
+  ExternalLink,
   Loader2,
   Plus,
   RefreshCw,
+  Signal,
   Telescope,
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
-  Dialog,
-  DialogContent,
-  DialogTitle,
-} from "@/components/ui/dialog";
+  Sheet,
+  SheetContent,
+  SheetTitle,
+} from "@/components/ui/sheet";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 
 type Category = "momentum" | "recovery" | "theme" | "social";
 
@@ -29,6 +32,8 @@ type Candidate = {
   thesis: string;
   confidence: string;
   risk: string;
+  signal_basis: string;
+  sources: string[];
   category: Category;
   theme?: string | null;
   theme_momentum?: string | null;
@@ -172,6 +177,18 @@ function fmt50dMA(pct: number | null): { text: string; cls: string } | null {
   const cls = pct >= 0 ? "text-emerald-300" : "text-rose-300";
   const sign = pct >= 0 ? "+" : "";
   return { text: `${sign}${pct.toFixed(0)}% vs 50d MA`, cls };
+}
+
+// Extract a clean display domain from a full URL. Returns the URL itself
+// if the parse fails so the user still gets a clickable string instead
+// of a blank chip.
+function domainOf(url: string): string {
+  try {
+    const u = new URL(url);
+    return u.hostname.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
 }
 
 function timeframeLabel(tf: string): string {
@@ -431,101 +448,106 @@ export function SwingDiscoverView() {
           scanner — it takes about 25-30 seconds.
         </div>
       ) : (
-        <div className="space-y-8">
-          {buckets.momentum.length > 0 && (
-            <Section title="Momentum Plays">
-              <CardGrid>
-                {buckets.momentum.map((c) => (
-                  <CandidateCard
-                    key={c.symbol}
-                    candidate={c}
-                    inIdeas={ideasSymbols.has(c.symbol)}
-                    adding={adding.has(c.symbol)}
-                    deepDiveLoading={deepDiveLoading.has(c.symbol)}
-                    onAdd={() => addToIdeas(c)}
-                    onOpenDeepDive={() => openDeepDive(c)}
-                  />
-                ))}
-              </CardGrid>
-            </Section>
-          )}
+        (() => {
+          const renderCard = (c: Candidate) => (
+            <CandidateCard
+              key={c.symbol}
+              candidate={c}
+              inIdeas={ideasSymbols.has(c.symbol)}
+              adding={adding.has(c.symbol)}
+              deepDiveLoading={deepDiveLoading.has(c.symbol)}
+              onAdd={() => addToIdeas(c)}
+              onOpenDeepDive={() => openDeepDive(c)}
+            />
+          );
+          const counts = {
+            all: candidates.length,
+            momentum: buckets.momentum.length,
+            recovery: buckets.recovery.length,
+            theme: buckets.theme.length,
+            social: buckets.social.length,
+          };
+          return (
+            <Tabs defaultValue="momentum" className="space-y-4">
+              <TabsList className="flex flex-wrap">
+                <TabTrigger value="all" label="All" count={counts.all} />
+                <TabTrigger
+                  value="momentum"
+                  label="Momentum"
+                  count={counts.momentum}
+                />
+                <TabTrigger
+                  value="recovery"
+                  label="Recovery"
+                  count={counts.recovery}
+                />
+                <TabTrigger value="theme" label="Themes" count={counts.theme} />
+                <TabTrigger value="social" label="Social" count={counts.social} />
+              </TabsList>
 
-          {buckets.recovery.length > 0 && (
-            <Section title="Recovery Plays">
-              <CardGrid>
-                {buckets.recovery.map((c) => (
-                  <CandidateCard
-                    key={c.symbol}
-                    candidate={c}
-                    inIdeas={ideasSymbols.has(c.symbol)}
-                    adding={adding.has(c.symbol)}
-                    deepDiveLoading={deepDiveLoading.has(c.symbol)}
-                    onAdd={() => addToIdeas(c)}
-                    onOpenDeepDive={() => openDeepDive(c)}
-                  />
-                ))}
-              </CardGrid>
-            </Section>
-          )}
+              <TabsContent value="all">
+                <CardGrid>{candidates.map(renderCard)}</CardGrid>
+              </TabsContent>
 
-          {themeGroups.length > 0 && (
-            <Section title="Sector Themes">
-              <div className="space-y-5">
-                {themeGroups.map(([theme, group]) => (
-                  <div key={theme} className="space-y-2">
-                    <div className="flex flex-wrap items-center gap-2 text-sm">
-                      <span className="font-medium">{theme}</span>
-                      {group.momentum && (
-                        <span
-                          className={`rounded border px-1.5 py-0.5 text-[10px] font-medium capitalize ${themeMomentumClasses(group.momentum)}`}
-                        >
-                          {group.momentum} momentum
-                        </span>
-                      )}
-                    </div>
-                    <CardGrid>
-                      {group.items.map((c) => (
-                        <CandidateCard
-                          key={c.symbol}
-                          candidate={c}
-                          inIdeas={ideasSymbols.has(c.symbol)}
-                          adding={adding.has(c.symbol)}
-                          deepDiveLoading={deepDiveLoading.has(c.symbol)}
-                          onAdd={() => addToIdeas(c)}
-                          onOpenDeepDive={() => openDeepDive(c)}
-                        />
-                      ))}
-                    </CardGrid>
+              <TabsContent value="momentum">
+                {buckets.momentum.length === 0 ? (
+                  <EmptyTab label="momentum candidates" />
+                ) : (
+                  <CardGrid>{buckets.momentum.map(renderCard)}</CardGrid>
+                )}
+              </TabsContent>
+
+              <TabsContent value="recovery">
+                {buckets.recovery.length === 0 ? (
+                  <EmptyTab label="recovery candidates" />
+                ) : (
+                  <CardGrid>{buckets.recovery.map(renderCard)}</CardGrid>
+                )}
+              </TabsContent>
+
+              <TabsContent value="theme">
+                {themeGroups.length === 0 ? (
+                  <EmptyTab label="theme candidates" />
+                ) : (
+                  <div className="space-y-5">
+                    {themeGroups.map(([theme, group]) => (
+                      <div key={theme} className="space-y-2">
+                        <div className="flex flex-wrap items-center gap-2 text-sm">
+                          <span className="font-medium">{theme}</span>
+                          {group.momentum && (
+                            <span
+                              className={`rounded border px-1.5 py-0.5 text-[10px] font-medium capitalize ${themeMomentumClasses(group.momentum)}`}
+                            >
+                              {group.momentum} momentum
+                            </span>
+                          )}
+                        </div>
+                        <CardGrid>{group.items.map(renderCard)}</CardGrid>
+                      </div>
+                    ))}
                   </div>
-                ))}
-              </div>
-            </Section>
-          )}
+                )}
+              </TabsContent>
 
-          {buckets.social.length > 0 && (
-            <Section
-              title="Social & Retail Momentum"
-              subtitle="What retail traders and financial communities are talking about — ahead of analyst consensus"
-            >
-              <CardGrid>
-                {buckets.social.map((c) => (
-                  <CandidateCard
-                    key={c.symbol}
-                    candidate={c}
-                    inIdeas={ideasSymbols.has(c.symbol)}
-                    adding={adding.has(c.symbol)}
-                    deepDiveLoading={deepDiveLoading.has(c.symbol)}
-                    onAdd={() => addToIdeas(c)}
-                    onOpenDeepDive={() => openDeepDive(c)}
-                  />
-                ))}
-              </CardGrid>
-            </Section>
-          )}
-        </div>
+              <TabsContent value="social">
+                {buckets.social.length === 0 ? (
+                  <EmptyTab label="social/retail candidates" />
+                ) : (
+                  <>
+                    <p className="mb-3 text-xs text-muted-foreground">
+                      What retail traders and financial communities are talking
+                      about — ahead of analyst consensus
+                    </p>
+                    <CardGrid>{buckets.social.map(renderCard)}</CardGrid>
+                  </>
+                )}
+              </TabsContent>
+            </Tabs>
+          );
+        })()
       )}
 
-      <DeepDiveModal
+      <DeepDiveDrawer
         candidate={activeDeepDive}
         dive={activeDeepDive ? (deepDives[activeDeepDive.symbol] ?? null) : null}
         loading={
@@ -545,27 +567,30 @@ export function SwingDiscoverView() {
   );
 }
 
-function Section({
-  title,
-  subtitle,
-  children,
+function TabTrigger({
+  value,
+  label,
+  count,
 }: {
-  title: string;
-  subtitle?: string;
-  children: React.ReactNode;
+  value: string;
+  label: string;
+  count: number;
 }) {
   return (
-    <section className="space-y-3">
-      <div>
-        <h2 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-          {title}
-        </h2>
-        {subtitle && (
-          <p className="mt-0.5 text-[11px] text-muted-foreground">{subtitle}</p>
-        )}
-      </div>
-      {children}
-    </section>
+    <TabsTrigger value={value} className="gap-2">
+      <span>{label}</span>
+      <span className="rounded bg-white/10 px-1.5 py-0.5 text-[10px] font-medium">
+        {count}
+      </span>
+    </TabsTrigger>
+  );
+}
+
+function EmptyTab({ label }: { label: string }) {
+  return (
+    <div className="rounded border border-border bg-background/40 p-6 text-sm text-muted-foreground">
+      No {label} in this scan.
+    </div>
   );
 }
 
@@ -741,6 +766,42 @@ function CandidateCard({
         </div>
       )}
 
+      {(c.signal_basis || c.sources.length > 0) && (
+        <div className="mb-3 space-y-1 text-[11px]">
+          <div className="flex items-center gap-1 text-muted-foreground">
+            <Signal className="h-3 w-3 shrink-0 text-sky-300" />
+            <span className="text-foreground/90">
+              {c.signal_basis || "Signal source"}
+            </span>
+            {c.sources.length > 0 && (
+              <>
+                <span className="text-muted-foreground/60">•</span>
+                <span>
+                  {c.sources.length}{" "}
+                  {c.sources.length === 1 ? "source" : "sources"}
+                </span>
+              </>
+            )}
+          </div>
+          {c.sources.length > 0 && (
+            <div className="flex flex-wrap gap-1">
+              {c.sources.slice(0, 3).map((src, i) => (
+                <a
+                  key={i}
+                  href={src}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={(e) => e.stopPropagation()}
+                  className="rounded border border-white/10 px-2 py-0.5 text-[10px] text-muted-foreground hover:border-white/30 hover:text-foreground"
+                >
+                  {domainOf(src)}
+                </a>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="mt-auto space-y-1.5">
         <div className="flex items-center gap-1">
           {inIdeas ? (
@@ -795,7 +856,7 @@ function CandidateCard({
   );
 }
 
-function DeepDiveModal({
+function DeepDiveDrawer({
   candidate: c,
   dive,
   loading,
@@ -823,24 +884,28 @@ function DeepDiveModal({
         : "text-rose-300";
 
   return (
-    <Dialog
+    <Sheet
       open={open}
       onOpenChange={(v) => {
         if (!v) onClose();
       }}
     >
-      <DialogContent className="flex max-h-[90vh] max-w-3xl flex-col gap-0 p-0">
+      <SheetContent
+        side="right"
+        showCloseButton={false}
+        className="flex h-full w-[55vw] flex-col gap-0 p-0 sm:max-w-none"
+      >
         {/* Header */}
         <div className="flex items-start justify-between gap-3 border-b border-border px-6 pb-4 pt-5">
           <div className="min-w-0 flex-1">
-            <DialogTitle className="flex flex-wrap items-baseline gap-2 text-lg">
+            <SheetTitle className="flex flex-wrap items-baseline gap-2 text-lg">
               <span className="font-mono">{c?.symbol}</span>
               {c?.company_name && (
                 <span className="truncate text-sm font-normal text-muted-foreground">
                   — {c.company_name}
                 </span>
               )}
-            </DialogTitle>
+            </SheetTitle>
             {c && (
               <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
                 <span className="font-mono text-foreground">
@@ -992,6 +1057,29 @@ function DeepDiveModal({
                   </p>
                 )}
               </div>
+
+              {c && c.sources.length > 0 && (
+                <DeepSection title="🔗 Sources">
+                  <ol className="space-y-1.5 pl-5 text-sm leading-relaxed text-foreground/90">
+                    {c.sources.map((src, i) => (
+                      <li key={i} className="list-decimal">
+                        <a
+                          href={src}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 text-sky-300 underline-offset-2 hover:underline"
+                        >
+                          <span className="font-medium">{domainOf(src)}</span>
+                          <ExternalLink className="h-3 w-3 opacity-60" />
+                        </a>
+                        <div className="ml-1 truncate text-[11px] text-muted-foreground">
+                          {src}
+                        </div>
+                      </li>
+                    ))}
+                  </ol>
+                </DeepSection>
+              )}
             </div>
           )}
         </div>
@@ -1029,8 +1117,8 @@ function DeepDiveModal({
             Close
           </Button>
         </div>
-      </DialogContent>
-    </Dialog>
+      </SheetContent>
+    </Sheet>
   );
 }
 

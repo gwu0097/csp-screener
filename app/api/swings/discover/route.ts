@@ -47,6 +47,7 @@ Return ONLY a JSON array, no markdown, no preamble:
   "thesis": "one sentence why this could move",
   "confidence": "high|medium|low",
   "risk": "one sentence main downside risk",
+  "signal_basis": "2-3 words: what is this based on e.g. analyst upgrades, earnings beat, reddit buzz, X trending, insider buying, options flow",
   "category": "momentum"
 }]`;
 
@@ -71,6 +72,7 @@ Return ONLY a JSON array, no markdown:
   "thesis": "one sentence recovery thesis",
   "confidence": "high|medium|low",
   "risk": "one sentence main risk",
+  "signal_basis": "2-3 words: what this is based on (analyst upgrades, sector rotation, insider buying, etc.)",
   "category": "recovery"
 }]`;
 
@@ -91,6 +93,7 @@ Return ONLY a JSON array, no markdown:
   "thesis": "one sentence",
   "confidence": "high|medium|low",
   "risk": "one sentence",
+  "signal_basis": "2-3 words: what this is based on (sector rotation, theme momentum, etc.)",
   "category": "theme"
 }]`;
 
@@ -119,6 +122,7 @@ Return ONLY a JSON array, no markdown, no preamble:
   "thesis": "one sentence — why retail is excited",
   "confidence": "high|medium|low",
   "risk": "one sentence main risk",
+  "signal_basis": "2-3 words: where the signal is coming from (reddit buzz, X trending, options flow, youtube creator, etc.)",
   "category": "social"
 }]`;
 
@@ -181,6 +185,8 @@ type RawCandidate = {
   thesis: string;
   confidence: string;
   risk: string;
+  signal_basis: string;
+  sources: string[];
   category: Category;
   theme?: string | null;
   theme_momentum?: string | null;
@@ -258,6 +264,11 @@ function coerceCandidate(
     thesis: typeof r.thesis === "string" ? r.thesis.trim() : "",
     confidence: coerceConfidence(r.confidence),
     risk: typeof r.risk === "string" ? r.risk.trim() : "",
+    signal_basis:
+      typeof r.signal_basis === "string" ? r.signal_basis.trim() : "",
+    // sources are not produced by the model; runQuery fills them in from
+    // the Perplexity response citations after the row coerces.
+    sources: [],
     category: coerceCategory(r.category, fallbackCategory),
     theme: typeof r.theme === "string" ? r.theme.trim() : null,
     theme_momentum:
@@ -270,18 +281,24 @@ async function runQuery(
   fallbackCategory: Category,
   label: string,
 ): Promise<RawCandidate[]> {
-  const res = await askPerplexityRaw(prompt, { maxTokens: 1500, label });
+  const res = await askPerplexityRaw(prompt, { maxTokens: 1800, label });
   if (!res) {
     console.warn(`[swings/discover] ${label}: no response`);
     return [];
   }
   const arr = extractJsonArray(res.text);
   console.log(
-    `[swings/discover] ${label} parsed ${arr.length} rows from ${res.text.length} chars`,
+    `[swings/discover] ${label} parsed ${arr.length} rows from ${res.text.length} chars (citations=${res.citations.length})`,
   );
+  // Top 3 citations from the Perplexity response are shared across every
+  // candidate parsed from that query. Perplexity citations are tied to
+  // the whole query, not per-row, so this is the closest approximation
+  // we have to a per-candidate source list.
+  const sources = res.citations.slice(0, 3);
   return arr
     .map((r) => coerceCandidate(r, fallbackCategory))
-    .filter((c): c is RawCandidate => c !== null);
+    .filter((c): c is RawCandidate => c !== null)
+    .map((c) => ({ ...c, sources }));
 }
 
 // Small deterministic sleep — Yahoo tolerates bursts but the spec asks
