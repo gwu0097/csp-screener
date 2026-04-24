@@ -4,9 +4,6 @@ import { createServerClient } from "@/lib/supabase";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-type Window = "today" | "week" | "month" | "ytd" | "all";
-const VALID_WINDOWS: readonly Window[] = ["today", "week", "month", "ytd", "all"];
-
 type PositionRow = {
   id: string;
   symbol: string;
@@ -24,6 +21,7 @@ type PositionRow = {
   entry_em_pct: number | null;
   entry_vix: number | null;
   status: string;
+  broker: string | null;
 };
 
 type RecRow = {
@@ -33,28 +31,6 @@ type RecRow = {
   was_system_aligned: boolean | null;
   analysis_date: string;
 };
-
-// Returns the inclusive start date (YYYY-MM-DD) of the requested window.
-// null means "no lower bound" — used for "all".
-function windowStart(w: Window): string | null {
-  if (w === "all") return null;
-  const now = new Date();
-  if (w === "today") return now.toISOString().slice(0, 10);
-  if (w === "week") {
-    const day = now.getUTCDay();
-    const mondayOffset = (day + 6) % 7; // Sun=0 -> 6, Mon=1 -> 0, ...
-    const d = new Date(now);
-    d.setUTCDate(d.getUTCDate() - mondayOffset);
-    return d.toISOString().slice(0, 10);
-  }
-  if (w === "month") {
-    return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}-01`;
-  }
-  if (w === "ytd") {
-    return `${now.getUTCFullYear()}-01-01`;
-  }
-  return null;
-}
 
 // ROC = realized_pnl / (strike × contracts × 100). Returns a decimal
 // fraction (0.0042 = 0.42%). null when any input is missing or the
@@ -70,7 +46,6 @@ function computeROC(
   return realizedPnl / capital;
 }
 
-// Day-of-week index (0 = Sunday) in UTC for a YYYY-MM-DD date.
 function dayOfWeek(iso: string): number {
   return new Date(iso + "T00:00:00Z").getUTCDay();
 }
@@ -82,34 +57,53 @@ function vixBucket(vix: number | null): "calm" | "elevated" | "panic" | null {
   return "calm";
 }
 
+// ISO YYYY-MM-DD validation — anything else is ignored and we fall back.
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+function validIsoDate(s: string | null): string | null {
+  if (!s || !ISO_DATE.test(s)) return null;
+  // Guard against nonsense like 2026-13-45
+  const d = new Date(s + "T00:00:00Z");
+  if (Number.isNaN(d.getTime())) return null;
+  return s;
+}
+
 export async function GET(req: NextRequest) {
-  const rawWindow = (req.nextUrl.searchParams.get("window") ?? "month") as Window;
-  const window: Window = VALID_WINDOWS.includes(rawWindow) ? rawWindow : "month";
-  const startDate = windowStart(window);
+  const params = req.nextUrl.searchParams;
+  const todayIso = new Date().toISOString().slice(0, 10);
+
+  // Default: this month → today. Callers override via ?from=&to=.
+  const fromParam = validIsoDate(params.get("from"));
+  const toParam = validIsoDate(params.get("to"));
+  const from = fromParam ?? `${todayIso.slice(0, 7)}-01`;
+  const to = toParam ?? todayIso;
+
+  const brokerRaw = (params.get("broker") ?? "all").toLowerCase();
+  const broker = brokerRaw === "all" || brokerRaw === "" ? null : brokerRaw;
 
   const sb = createServerClient();
 
-  // Closed positions — unfiltered first (we need both the windowed set for
-  // stats AND the full set for "all-time" ticker rankings per spec).
-  // All completed trades regardless of how they closed: user-initiated
-  // ('closed'), auto-expired worthless ('expired_worthless'), or assigned
-  // ('assigned'). Win rate + expectancy + ROC all roll up over the same
-  // set so the page reflects reality.
-  const allClosedRes = await sb
+  // All closed positions (all-time), optionally broker-filtered. We need
+  // both the in-range set (for window stats + equity curve) and the full
+  // set (for all-time ticker rankings + pattern intelligence).
+  let query = sb
     .from("positions")
     .select(
-      "id,symbol,strike,expiry,total_contracts,avg_premium_sold,opened_date,closed_date,realized_pnl,entry_final_grade,entry_crush_grade,entry_opportunity_grade,entry_iv_edge,entry_em_pct,entry_vix,status",
+      "id,symbol,strike,expiry,total_contracts,avg_premium_sold,opened_date,closed_date,realized_pnl,entry_final_grade,entry_crush_grade,entry_opportunity_grade,entry_iv_edge,entry_em_pct,entry_vix,status,broker",
     )
     .in("status", ["closed", "expired_worthless", "assigned"])
     .order("closed_date", { ascending: true });
+  if (broker) query = query.eq("broker", broker);
+  const allClosedRes = await query;
   if (allClosedRes.error) {
     return NextResponse.json({ error: allClosedRes.error.message }, { status: 500 });
   }
   const allClosed = (allClosedRes.data ?? []) as PositionRow[];
 
-  const windowed = startDate
-    ? allClosed.filter((p) => (p.closed_date ?? "") >= startDate)
-    : allClosed;
+  // In-range: filter by closed_date within [from, to] inclusive.
+  const windowed = allClosed.filter((p) => {
+    const cd = p.closed_date ?? "";
+    return cd >= from && cd <= to;
+  });
 
   // ---------- Section 1: stats + equity curve ----------
   const totals = windowed.reduce(
@@ -156,8 +150,6 @@ export async function GET(req: NextRequest) {
   const expectancy =
     totalTrades > 0 ? win_rate * avgWinPnl + (1 - win_rate) * avgLossPnl : 0;
 
-  // Equity curve: one point per closed position, x = closed_date,
-  // cumulative_pnl = running sum. Already sorted ascending above.
   let running = 0;
   const equity_curve = windowed
     .filter((p) => p.closed_date !== null)
@@ -172,7 +164,7 @@ export async function GET(req: NextRequest) {
       };
     });
 
-  // ---------- Section 2: ticker rankings (uses ALL closed, not windowed) ----------
+  // ---------- Section 2: ticker rankings (uses ALL closed within broker filter) ----------
   type TickerBucket = {
     symbol: string;
     trades: number;
@@ -224,7 +216,6 @@ export async function GET(req: NextRequest) {
     bySymbol.set(p.symbol, b);
   }
 
-  // Fetch all recommendation outcomes in one query, group by position_id.
   const allPositionIds = Array.from(bySymbol.values()).flatMap((b) => b.positionIds);
   const recsBySymbol = new Map<string, { aligned: number; total: number }>();
   if (allPositionIds.length > 0) {
@@ -233,7 +224,6 @@ export async function GET(req: NextRequest) {
       .select("position_id,recommendation,confidence,was_system_aligned,analysis_date")
       .in("position_id", allPositionIds);
     const allRecs = (recsRes.data ?? []) as RecRow[];
-    // Build positionId → symbol reverse map
     const positionIdToSymbol = new Map<string, string>();
     for (const [sym, b] of Array.from(bySymbol.entries())) {
       for (const pid of b.positionIds) positionIdToSymbol.set(pid, sym);
@@ -322,14 +312,12 @@ export async function GET(req: NextRequest) {
     ["calm", "elevated", "panic"],
   );
 
-  // Calibration check: flag drift when higher grades don't win more.
   const gradeLookup = new Map(by_grade.map((g) => [g.key, g]));
   const a = gradeLookup.get("A");
   const b = gradeLookup.get("B");
   const calibrationDrift =
     !!a && !!b && a.trades > 0 && b.trades > 0 && a.win_rate < b.win_rate;
 
-  // Rec accuracy — only if we have 5+ recorded outcomes.
   let rec_accuracy: {
     close_correct: number;
     close_total: number;
@@ -364,6 +352,8 @@ export async function GET(req: NextRequest) {
   const vixMap = new Map(by_vix_regime.map((v) => [v.key, v]));
   const export_payload = {
     export_date: new Date().toISOString(),
+    date_range: { from, to },
+    broker_filter: broker ?? "all",
     summary: {
       total_closed_trades: totalClosedAllTime,
       overall_win_rate:
@@ -393,6 +383,7 @@ export async function GET(req: NextRequest) {
       entry_iv_edge: p.entry_iv_edge,
       entry_em_pct: p.entry_em_pct,
       entry_vix: p.entry_vix,
+      broker: p.broker,
     })),
     grade_accuracy: Object.fromEntries(
       by_grade
@@ -424,8 +415,8 @@ export async function GET(req: NextRequest) {
   };
 
   return NextResponse.json({
-    window,
-    start_date: startDate,
+    date_range: { from, to },
+    broker: broker ?? "all",
     stats: {
       total_pnl: totals.total_pnl,
       win_rate,

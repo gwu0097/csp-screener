@@ -1,18 +1,19 @@
 "use client";
 
-// Shared UI + data-fetching for the Intelligence pages. Previously lived
-// inline in app/intelligence/page.tsx; extracted so the three sub-pages
-// (performance, efficiency, patterns) can each render the section they
-// own without dragging the entire screen's worth of components along.
-//
-// Named exports:
-//   - Types: Window, IntelligenceResponse, TickerRanking, PatternBucket, EquityPoint
-//   - Helpers: fmtMoney, fmtPct, gradeColor, winRateColor, WINDOW_OPTIONS
+// Shared UI + data-fetching for the Intelligence pages. Each sub-page
+// (performance, efficiency, patterns) owns its own date-range + broker
+// state and renders the section it needs. This file exports:
+//   - Types: DateRange, BrokerFilter, IntelligenceResponse, TickerRanking,
+//     PatternBucket, EquityPoint, PresetKey
+//   - Helpers: fmtMoney, fmtPct, gradeColor, winRateColor, PRESET_OPTIONS,
+//     BROKER_OPTIONS, presetToRange
 //   - Hook: useIntelligenceData
-//   - Sections: PerformanceSection, TickerRankingsSection, PatternIntelligenceSection,
-//     ExportSection
+//   - Controls: DateRangeControls, BrokerControl
+//   - Sections: PerformanceSection, TickerRankingsSection,
+//     PatternIntelligenceSection, ExportSection
+//   - Shell: IntelligencePageShell
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Area,
   AreaChart,
@@ -35,7 +36,22 @@ import {
   TableRow,
 } from "@/components/ui/table";
 
-export type Window = "today" | "week" | "month" | "ytd" | "all";
+export type DateRange = { from: string; to: string };
+
+// Preset keys for the date-range row. "custom" triggers the inline
+// date picker. Everything else resolves to a concrete range via
+// presetToRange() evaluated against "today".
+export type PresetKey =
+  | "today"
+  | "week"
+  | "month"
+  | "last_month"
+  | "last_quarter"
+  | "ytd"
+  | "all"
+  | "custom";
+
+export type BrokerFilter = "all" | "schwab" | "robinhood";
 
 export type EquityPoint = {
   date: string;
@@ -73,7 +89,8 @@ export type PatternBucket = {
 };
 
 export type IntelligenceResponse = {
-  window: Window;
+  date_range: DateRange;
+  broker: string;
   stats: {
     total_pnl: number;
     win_rate: number;
@@ -104,13 +121,81 @@ export type IntelligenceResponse = {
   export_payload: unknown;
 };
 
-export const WINDOW_OPTIONS: Array<{ value: Window; label: string }> = [
+export const PRESET_OPTIONS: Array<{ value: PresetKey; label: string }> = [
   { value: "today", label: "Today" },
-  { value: "week", label: "This Week" },
-  { value: "month", label: "This Month" },
+  { value: "week", label: "Week" },
+  { value: "month", label: "Month" },
+  { value: "last_month", label: "Last Month" },
+  { value: "last_quarter", label: "Quarter" },
   { value: "ytd", label: "YTD" },
   { value: "all", label: "All Time" },
+  { value: "custom", label: "Custom" },
 ];
+
+export const BROKER_OPTIONS: Array<{ value: BrokerFilter; label: string }> = [
+  { value: "all", label: "All" },
+  { value: "schwab", label: "Schwab" },
+  { value: "robinhood", label: "Robinhood" },
+];
+
+// -------- Date helpers --------
+// All date math uses UTC to match how the API parses ISO strings.
+
+function iso(d: Date): string {
+  return d.toISOString().slice(0, 10);
+}
+
+function startOfWeekMonday(d: Date): Date {
+  const out = new Date(d);
+  const day = out.getUTCDay();
+  const mondayOffset = (day + 6) % 7; // Sun=0 -> 6, Mon=1 -> 0, ...
+  out.setUTCDate(out.getUTCDate() - mondayOffset);
+  return out;
+}
+
+function startOfMonth(d: Date): Date {
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1));
+}
+
+function endOfMonth(d: Date): Date {
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0));
+}
+
+function startOfQuarter(d: Date): Date {
+  const q = Math.floor(d.getUTCMonth() / 3);
+  return new Date(Date.UTC(d.getUTCFullYear(), q * 3, 1));
+}
+
+function endOfQuarter(d: Date): Date {
+  const q = Math.floor(d.getUTCMonth() / 3);
+  return new Date(Date.UTC(d.getUTCFullYear(), q * 3 + 3, 0));
+}
+
+export function presetToRange(key: PresetKey, today: Date = new Date()): DateRange {
+  const t = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
+  const todayStr = iso(t);
+  if (key === "today") return { from: todayStr, to: todayStr };
+  if (key === "week") return { from: iso(startOfWeekMonday(t)), to: todayStr };
+  if (key === "month") return { from: iso(startOfMonth(t)), to: todayStr };
+  if (key === "last_month") {
+    const lastMonth = new Date(Date.UTC(t.getUTCFullYear(), t.getUTCMonth() - 1, 15));
+    return { from: iso(startOfMonth(lastMonth)), to: iso(endOfMonth(lastMonth)) };
+  }
+  if (key === "last_quarter") {
+    const lastQ = new Date(Date.UTC(t.getUTCFullYear(), t.getUTCMonth() - 3, 15));
+    return { from: iso(startOfQuarter(lastQ)), to: iso(endOfQuarter(lastQ)) };
+  }
+  if (key === "ytd") {
+    return { from: `${t.getUTCFullYear()}-01-01`, to: todayStr };
+  }
+  if (key === "all") {
+    return { from: "2020-01-01", to: todayStr };
+  }
+  // custom — caller handles this via state; fall back to month.
+  return { from: iso(startOfMonth(t)), to: todayStr };
+}
+
+// -------- Formatters + color helpers --------
 
 export function fmtMoney(n: number | null | undefined, signed = false): string {
   if (n === null || n === undefined || !Number.isFinite(n)) return "—";
@@ -137,10 +222,12 @@ export function winRateColor(r: number): string {
   return "text-rose-300";
 }
 
-// Shared loader — each sub-page pulls the full /api/intelligence payload
-// even though it only renders one slice. The API doesn't expose
-// section-specific query params yet; when it does we can narrow this.
-export function useIntelligenceData(window: Window): {
+// -------- Data loader --------
+
+export function useIntelligenceData(
+  range: DateRange,
+  broker: BrokerFilter,
+): {
   data: IntelligenceResponse | null;
   loading: boolean;
   error: string | null;
@@ -155,7 +242,14 @@ export function useIntelligenceData(window: Window): {
       setLoading(true);
       setError(null);
       try {
-        const res = await fetch(`/api/intelligence?window=${window}`, { cache: "no-store" });
+        const params = new URLSearchParams({
+          from: range.from,
+          to: range.to,
+          broker,
+        });
+        const res = await fetch(`/api/intelligence?${params.toString()}`, {
+          cache: "no-store",
+        });
         const json = (await res.json()) as IntelligenceResponse | { error: string };
         if (!res.ok) throw new Error((json as { error?: string }).error ?? `HTTP ${res.status}`);
         if (!cancelled) setData(json as IntelligenceResponse);
@@ -169,46 +263,146 @@ export function useIntelligenceData(window: Window): {
     return () => {
       cancelled = true;
     };
-  }, [window]);
+  }, [range.from, range.to, broker]);
 
   return { data, loading, error };
+}
+
+// -------- Shared controls --------
+
+export function DateRangeControls({
+  range,
+  preset,
+  onChange,
+}: {
+  range: DateRange;
+  preset: PresetKey;
+  onChange: (next: { preset: PresetKey; range: DateRange }) => void;
+}) {
+  // Local state for the custom date inputs, so the user can type a
+  // partial date without triggering a fetch on every keystroke.
+  const [customFrom, setCustomFrom] = useState(range.from);
+  const [customTo, setCustomTo] = useState(range.to);
+
+  // Sync local inputs when preset changes externally.
+  useEffect(() => {
+    setCustomFrom(range.from);
+    setCustomTo(range.to);
+  }, [range.from, range.to]);
+
+  function pickPreset(key: PresetKey) {
+    if (key === "custom") {
+      onChange({ preset: "custom", range });
+      return;
+    }
+    onChange({ preset: key, range: presetToRange(key) });
+  }
+
+  function applyCustom() {
+    if (!customFrom || !customTo) return;
+    if (customFrom > customTo) return;
+    onChange({ preset: "custom", range: { from: customFrom, to: customTo } });
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap gap-1">
+        {PRESET_OPTIONS.map((p) => (
+          <button
+            key={p.value}
+            type="button"
+            onClick={() => pickPreset(p.value)}
+            className={`rounded px-3 py-1 text-xs ${
+              preset === p.value
+                ? "bg-foreground text-background"
+                : "border border-border text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            {p.label}
+            {p.value === "custom" && " ▾"}
+          </button>
+        ))}
+      </div>
+      {preset === "custom" && (
+        <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-background/40 p-2 text-xs">
+          <label className="flex items-center gap-1">
+            <span className="text-muted-foreground">From</span>
+            <input
+              type="date"
+              value={customFrom}
+              onChange={(e) => setCustomFrom(e.target.value)}
+              className="rounded border border-border bg-background px-2 py-1 text-xs"
+            />
+          </label>
+          <label className="flex items-center gap-1">
+            <span className="text-muted-foreground">To</span>
+            <input
+              type="date"
+              value={customTo}
+              onChange={(e) => setCustomTo(e.target.value)}
+              className="rounded border border-border bg-background px-2 py-1 text-xs"
+            />
+          </label>
+          <button
+            type="button"
+            onClick={applyCustom}
+            disabled={!customFrom || !customTo || customFrom > customTo}
+            className="rounded bg-foreground px-3 py-1 text-xs text-background disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            Apply
+          </button>
+          <span className="text-muted-foreground">
+            Showing {range.from} → {range.to}
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function BrokerControl({
+  broker,
+  onChange,
+}: {
+  broker: BrokerFilter;
+  onChange: (b: BrokerFilter) => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <span className="text-xs text-muted-foreground">Account</span>
+      <div className="flex gap-1">
+        {BROKER_OPTIONS.map((b) => (
+          <button
+            key={b.value}
+            type="button"
+            onClick={() => onChange(b.value)}
+            className={`rounded px-3 py-1 text-xs ${
+              broker === b.value
+                ? "bg-foreground text-background"
+                : "border border-border text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            {b.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 // ================== Section 1: Performance ==================
 
 export function PerformanceSection({
   data,
-  window,
-  onWindowChange,
 }: {
   data: IntelligenceResponse;
-  window: Window;
-  onWindowChange: (w: Window) => void;
 }) {
   const { stats, equity_curve } = data;
   const pnlColor = stats.total_pnl >= 0 ? "text-emerald-300" : "text-rose-300";
 
   return (
     <section className="space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <h2 className="text-lg font-semibold">Performance</h2>
-        <div className="flex flex-wrap gap-1">
-          {WINDOW_OPTIONS.map((w) => (
-            <button
-              key={w.value}
-              type="button"
-              onClick={() => onWindowChange(w.value)}
-              className={`rounded px-3 py-1 text-xs ${
-                window === w.value
-                  ? "bg-foreground text-background"
-                  : "border border-border text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              {w.label}
-            </button>
-          ))}
-        </div>
-      </div>
+      <h2 className="text-lg font-semibold">Performance</h2>
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
         <StatCard label="Realized P&L">
@@ -258,7 +452,7 @@ export function PerformanceSection({
         <div className="mb-2 text-sm font-medium">Equity curve</div>
         {equity_curve.length < 2 ? (
           <div className="py-8 text-center text-sm text-muted-foreground">
-            Not enough trades to display equity curve.
+            Not enough trades in this range to display equity curve.
           </div>
         ) : (
           <div className="h-64 w-full">
@@ -328,6 +522,16 @@ export function TickerRankingsSection({
   expandedSymbol: string | null;
   onToggleSymbol: (s: string) => void;
 }) {
+  const [search, setSearch] = useState("");
+  const normalized = search.trim().toLowerCase();
+  const filtered = useMemo(
+    () =>
+      normalized === ""
+        ? rankings
+        : rankings.filter((r) => r.symbol.toLowerCase().includes(normalized)),
+    [rankings, normalized],
+  );
+
   return (
     <section className="space-y-3">
       <div>
@@ -336,36 +540,61 @@ export function TickerRankingsSection({
           Sorted by average ROC — your best-performing setups
         </p>
       </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          type="text"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search ticker..."
+          className="w-full max-w-xs rounded border border-border bg-background px-3 py-1.5 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-foreground/40"
+        />
+      </div>
       {rankings.length === 0 ? (
         <div className="rounded border border-border bg-background/40 p-6 text-sm text-muted-foreground">
           No closed trades yet. Rankings appear after your first closed position.
         </div>
       ) : (
-        <div className="overflow-x-auto rounded border border-border">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Symbol</TableHead>
-                <TableHead className="text-right">Trades</TableHead>
-                <TableHead className="text-right">Win Rate</TableHead>
-                <TableHead className="text-right">Avg ROC</TableHead>
-                <TableHead className="text-right">Best ROC</TableHead>
-                <TableHead>Grade</TableHead>
-                <TableHead className="text-right">Rec Accuracy</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {rankings.map((r) => (
-                <TickerRow
-                  key={r.symbol}
-                  row={r}
-                  expanded={expandedSymbol === r.symbol}
-                  onToggle={() => onToggleSymbol(r.symbol)}
-                />
-              ))}
-            </TableBody>
-          </Table>
-        </div>
+        <>
+          <div className="max-h-[600px] overflow-y-auto rounded border border-border">
+            <Table>
+              <TableHeader className="sticky top-0 z-10 bg-background">
+                <TableRow>
+                  <TableHead>Symbol</TableHead>
+                  <TableHead className="text-right">Trades</TableHead>
+                  <TableHead className="text-right">Win Rate</TableHead>
+                  <TableHead className="text-right">Avg ROC</TableHead>
+                  <TableHead className="text-right">Best ROC</TableHead>
+                  <TableHead>Grade</TableHead>
+                  <TableHead className="text-right">Rec Accuracy</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {filtered.length === 0 ? (
+                  <TableRow>
+                    <TableCell
+                      colSpan={7}
+                      className="py-6 text-center text-sm text-muted-foreground"
+                    >
+                      No tickers match &ldquo;{search}&rdquo;.
+                    </TableCell>
+                  </TableRow>
+                ) : (
+                  filtered.map((r) => (
+                    <TickerRow
+                      key={r.symbol}
+                      row={r}
+                      expanded={expandedSymbol === r.symbol}
+                      onToggle={() => onToggleSymbol(r.symbol)}
+                    />
+                  ))
+                )}
+              </TableBody>
+            </Table>
+          </div>
+          <div className="text-xs text-muted-foreground">
+            Showing {filtered.length} of {rankings.length} tickers
+          </div>
+        </>
       )}
     </section>
   );
@@ -734,25 +963,27 @@ export function ExportSection({
 
 // ================== Shared shell for sub-pages ==================
 
-// Tiny helper the three sub-pages all use — renders the title + error
-// banner + loading indicator + children. Keeps each sub-page's body to
-// just the section(s) it owns.
 export function IntelligencePageShell({
   title,
+  controls,
   error,
   loading,
   data,
   children,
 }: {
   title: string;
+  controls?: React.ReactNode;
   error: string | null;
   loading: boolean;
   data: IntelligenceResponse | null;
   children: React.ReactNode;
 }) {
   return (
-    <div className="space-y-8">
-      <h1 className="text-2xl font-semibold">{title}</h1>
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <h1 className="text-2xl font-semibold">{title}</h1>
+      </div>
+      {controls && <div className="space-y-3">{controls}</div>}
       {error && (
         <div className="rounded border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-300">
           {error}
@@ -761,7 +992,7 @@ export function IntelligencePageShell({
       {loading && !data && (
         <div className="text-sm text-muted-foreground">Loading intelligence…</div>
       )}
-      {data && children}
+      {data && <div className="space-y-8">{children}</div>}
     </div>
   );
 }

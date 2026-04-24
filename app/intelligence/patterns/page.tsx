@@ -2,19 +2,39 @@
 
 import { useState } from "react";
 import {
+  BrokerControl,
+  DateRangeControls,
   IntelligencePageShell,
   PatternIntelligenceSection,
+  presetToRange,
   useIntelligenceData,
-  type Window,
+  type BrokerFilter,
+  type DateRange,
+  type PresetKey,
 } from "@/components/intelligence-shared";
 
 export default function PatternsPage() {
-  const [window] = useState<Window>("all");
-  const { data, loading, error } = useIntelligenceData(window);
+  const [preset, setPreset] = useState<PresetKey>("all");
+  const [range, setRange] = useState<DateRange>(() => presetToRange("all"));
+  const [broker, setBroker] = useState<BrokerFilter>("all");
+  const { data, loading, error } = useIntelligenceData(range, broker);
 
   return (
     <IntelligencePageShell
       title="Patterns"
+      controls={
+        <>
+          <DateRangeControls
+            range={range}
+            preset={preset}
+            onChange={({ preset: p, range: r }) => {
+              setPreset(p);
+              setRange(r);
+            }}
+          />
+          <BrokerControl broker={broker} onChange={setBroker} />
+        </>
+      }
       error={error}
       loading={loading}
       data={data}

@@ -2,17 +2,24 @@
 
 import { useState } from "react";
 import {
+  BrokerControl,
+  DateRangeControls,
   ExportSection,
   IntelligencePageShell,
   PerformanceSection,
+  presetToRange,
   useIntelligenceData,
-  type Window,
+  type BrokerFilter,
+  type DateRange,
+  type PresetKey,
 } from "@/components/intelligence-shared";
 
 export default function PerformancePage() {
-  const [window, setWindow] = useState<Window>("month");
+  const [preset, setPreset] = useState<PresetKey>("month");
+  const [range, setRange] = useState<DateRange>(() => presetToRange("month"));
+  const [broker, setBroker] = useState<BrokerFilter>("all");
   const [copyStatus, setCopyStatus] = useState<string | null>(null);
-  const { data, loading, error } = useIntelligenceData(window);
+  const { data, loading, error } = useIntelligenceData(range, broker);
 
   async function copyExport() {
     if (!data) return;
@@ -31,17 +38,26 @@ export default function PerformancePage() {
   return (
     <IntelligencePageShell
       title="Performance"
+      controls={
+        <>
+          <DateRangeControls
+            range={range}
+            preset={preset}
+            onChange={({ preset: p, range: r }) => {
+              setPreset(p);
+              setRange(r);
+            }}
+          />
+          <BrokerControl broker={broker} onChange={setBroker} />
+        </>
+      }
       error={error}
       loading={loading}
       data={data}
     >
       {data && (
         <>
-          <PerformanceSection
-            data={data}
-            window={window}
-            onWindowChange={setWindow}
-          />
+          <PerformanceSection data={data} />
           <ExportSection onCopy={copyExport} copyStatus={copyStatus} />
         </>
       )}
