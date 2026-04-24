@@ -50,6 +50,61 @@ function dayOfWeek(iso: string): number {
   return new Date(iso + "T00:00:00Z").getUTCDay();
 }
 
+function daysBetweenInclusive(fromIso: string, toIso: string): number {
+  const a = Date.parse(fromIso + "T00:00:00Z");
+  const b = Date.parse(toIso + "T00:00:00Z");
+  return Math.floor((b - a) / 86400000);
+}
+
+type Granularity = "day" | "week" | "month";
+
+function granularityFor(days: number): Granularity {
+  if (days <= 90) return "day";
+  if (days <= 365) return "week";
+  return "month";
+}
+
+// ISO week — Monday is the first day.
+function startOfISOWeekIso(iso: string): string {
+  const d = new Date(iso + "T00:00:00Z");
+  const day = d.getUTCDay();
+  const mondayOffset = (day + 6) % 7;
+  d.setUTCDate(d.getUTCDate() - mondayOffset);
+  return d.toISOString().slice(0, 10);
+}
+
+function startOfMonthIso(iso: string): string {
+  return `${iso.slice(0, 7)}-01`;
+}
+
+function bucketKeyFor(closedDate: string, g: Granularity): string {
+  if (g === "day") return closedDate;
+  if (g === "week") return startOfISOWeekIso(closedDate);
+  return startOfMonthIso(closedDate);
+}
+
+function labelFor(bucketKey: string, g: Granularity): string {
+  const d = new Date(bucketKey + "T00:00:00Z");
+  if (g === "month") {
+    return d.toLocaleDateString("en-US", {
+      month: "short",
+      year: "numeric",
+      timeZone: "UTC",
+    });
+  }
+  return d.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC",
+  });
+}
+
+function addDaysIso(iso: string, days: number): string {
+  const d = new Date(iso + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
 function vixBucket(vix: number | null): "calm" | "elevated" | "panic" | null {
   if (vix === null || !Number.isFinite(vix)) return null;
   if (vix > 25) return "panic";
@@ -150,19 +205,71 @@ export async function GET(req: NextRequest) {
   const expectancy =
     totalTrades > 0 ? win_rate * avgWinPnl + (1 - win_rate) * avgLossPnl : 0;
 
-  let running = 0;
-  const equity_curve = windowed
-    .filter((p) => p.closed_date !== null)
-    .map((p) => {
-      const trade_pnl = Number(p.realized_pnl ?? 0);
-      running += trade_pnl;
-      return {
-        date: p.closed_date as string,
-        symbol: p.symbol,
-        trade_pnl,
-        cumulative_pnl: running,
+  // Equity curve is bucketed so multiple trades on the same date collapse
+  // into a single data point. Granularity stretches with range length so
+  // a "year" view doesn't render 250 daily ticks.
+  const granularity = granularityFor(daysBetweenInclusive(from, to));
+  type BucketAcc = {
+    bucketKey: string;
+    label: string;
+    tradePnl: number;
+    tradeCount: number;
+    trades: Array<{ symbol: string; pnl: number }>;
+  };
+  const bucketMap = new Map<string, BucketAcc>();
+  for (const p of windowed) {
+    if (!p.closed_date) continue;
+    const key = bucketKeyFor(p.closed_date, granularity);
+    let b = bucketMap.get(key);
+    if (!b) {
+      b = {
+        bucketKey: key,
+        label: labelFor(key, granularity),
+        tradePnl: 0,
+        tradeCount: 0,
+        trades: [],
       };
-    });
+      bucketMap.set(key, b);
+    }
+    const pnl = Number(p.realized_pnl ?? 0);
+    b.tradePnl += pnl;
+    b.tradeCount += 1;
+    b.trades.push({ symbol: p.symbol, pnl });
+  }
+
+  // Zero-fill only on day granularity so the line stays continuous across
+  // weekends / no-trade days. Week + month buckets skip the fill — empty
+  // months would stretch the x-axis without adding information.
+  if (granularity === "day") {
+    let cursor = from;
+    while (cursor <= to) {
+      if (!bucketMap.has(cursor)) {
+        bucketMap.set(cursor, {
+          bucketKey: cursor,
+          label: labelFor(cursor, "day"),
+          tradePnl: 0,
+          tradeCount: 0,
+          trades: [],
+        });
+      }
+      cursor = addDaysIso(cursor, 1);
+    }
+  }
+
+  const sortedKeys = Array.from(bucketMap.keys()).sort();
+  let running = 0;
+  const equity_curve = sortedKeys.map((k) => {
+    const b = bucketMap.get(k)!;
+    running += b.tradePnl;
+    return {
+      bucketKey: b.bucketKey,
+      label: b.label,
+      tradePnl: b.tradePnl,
+      cumulativePnl: running,
+      tradeCount: b.tradeCount,
+      trades: b.trades,
+    };
+  });
 
   // ---------- Section 2: ticker rankings (uses ALL closed within broker filter) ----------
   type TickerBucket = {
@@ -417,6 +524,7 @@ export async function GET(req: NextRequest) {
   return NextResponse.json({
     date_range: { from, to },
     broker: broker ?? "all",
+    granularity,
     stats: {
       total_pnl: totals.total_pnl,
       win_rate,

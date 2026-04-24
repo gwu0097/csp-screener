@@ -52,11 +52,15 @@ export type PresetKey =
 
 export type BrokerFilter = "all" | "schwab" | "robinhood";
 
+export type Granularity = "day" | "week" | "month";
+
 export type EquityPoint = {
-  date: string;
-  symbol: string;
-  trade_pnl: number;
-  cumulative_pnl: number;
+  bucketKey: string;
+  label: string;
+  tradePnl: number;
+  cumulativePnl: number;
+  tradeCount: number;
+  trades: Array<{ symbol: string; pnl: number }>;
 };
 
 export type TickerRanking = {
@@ -90,6 +94,7 @@ export type PatternBucket = {
 export type IntelligenceResponse = {
   date_range: DateRange;
   broker: string;
+  granularity: Granularity;
   stats: {
     total_pnl: number;
     win_rate: number;
@@ -454,30 +459,12 @@ export function PerformanceSection({
                   </linearGradient>
                 </defs>
                 <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
-                <XAxis dataKey="date" stroke="#71717a" tick={{ fontSize: 11 }} />
+                <XAxis dataKey="label" stroke="#71717a" tick={{ fontSize: 11 }} />
                 <YAxis stroke="#71717a" tick={{ fontSize: 11 }} />
-                <Tooltip
-                  contentStyle={{
-                    background: "#18181b",
-                    border: "1px solid #3f3f46",
-                    borderRadius: 6,
-                    fontSize: 12,
-                  }}
-                  labelStyle={{ color: "#e4e4e7" }}
-                  formatter={(value, name) => {
-                    const n = typeof value === "number" ? value : Number(value);
-                    if (name === "cumulative_pnl") return [fmtMoney(n, true), "Cumulative"];
-                    if (name === "trade_pnl") return [fmtMoney(n, true), "Trade P&L"];
-                    return [String(value), String(name)];
-                  }}
-                  labelFormatter={(label, payload) => {
-                    const sym = (payload?.[0]?.payload as EquityPoint | undefined)?.symbol;
-                    return sym ? `${label} · ${sym}` : label;
-                  }}
-                />
+                <Tooltip content={<EquityTooltip />} />
                 <Area
                   type="monotone"
-                  dataKey="cumulative_pnl"
+                  dataKey="cumulativePnl"
                   stroke="#3b82f6"
                   strokeWidth={2}
                   fill="url(#pnlGradient)"
@@ -488,6 +475,64 @@ export function PerformanceSection({
         )}
       </div>
     </section>
+  );
+}
+
+// Rich tooltip for the equity curve — lists every trade inside the
+// bucket, then shows bucket total + running cumulative P&L. Recharts
+// passes `payload` with the raw data point at payload[0].payload.
+function EquityTooltip({
+  active,
+  payload,
+}: {
+  active?: boolean;
+  payload?: Array<{ payload: EquityPoint }>;
+}) {
+  if (!active || !payload || payload.length === 0) return null;
+  const b = payload[0].payload;
+  const totalColor = b.tradePnl >= 0 ? "text-emerald-300" : "text-rose-300";
+  const cumColor = b.cumulativePnl >= 0 ? "text-emerald-300" : "text-rose-300";
+  return (
+    <div className="min-w-[180px] rounded border border-border bg-zinc-900/95 p-2 text-xs shadow-lg">
+      <div className="mb-1 font-medium text-foreground">
+        {b.label}{" "}
+        <span className="text-muted-foreground">
+          ({b.tradeCount} {b.tradeCount === 1 ? "trade" : "trades"})
+        </span>
+      </div>
+      {b.trades.length > 0 ? (
+        <>
+          <div className="space-y-0.5">
+            {b.trades.map((t, i) => (
+              <div
+                key={`${t.symbol}-${i}`}
+                className="flex justify-between gap-3 font-mono"
+              >
+                <span>{t.symbol}</span>
+                <span
+                  className={
+                    t.pnl >= 0 ? "text-emerald-300" : "text-rose-300"
+                  }
+                >
+                  {fmtMoney(t.pnl, true)}
+                </span>
+              </div>
+            ))}
+          </div>
+          <div className="my-1 border-t border-border" />
+          <div className="flex justify-between gap-3">
+            <span className="text-muted-foreground">Total:</span>
+            <span className={totalColor}>{fmtMoney(b.tradePnl, true)}</span>
+          </div>
+        </>
+      ) : (
+        <div className="text-muted-foreground">No trades</div>
+      )}
+      <div className="flex justify-between gap-3">
+        <span className="text-muted-foreground">Cumulative:</span>
+        <span className={cumColor}>{fmtMoney(b.cumulativePnl, true)}</span>
+      </div>
+    </div>
   );
 }
 
