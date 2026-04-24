@@ -167,6 +167,8 @@ type PositionsResponse = {
   opportunityAvailable: boolean;
   live: boolean;
   expireReport?: ExpireReport;
+  snapshotsWritten?: number;
+  snapshotsSkipped?: number;
 };
 
 type BestOpportunity = { symbol: string; recommendation: string } | null;
@@ -215,6 +217,12 @@ export function PositionsView() {
   // "Live data as of [time]" label. Null = never refreshed (or cache
   // was cleared manually).
   const [liveCacheFetchedAt, setLiveCacheFetchedAt] = useState<string | null>(null);
+  // Result of the most recent live refresh — drives the "N snapshots
+  // saved" / "snapshots up to date" suffix after the timestamp. Null
+  // when we haven't done a live fetch yet this session.
+  const [liveSnapshotSummary, setLiveSnapshotSummary] = useState<
+    { written: number; skipped: number } | null
+  >(null);
 
   const load = useCallback(async (live: boolean) => {
     if (live) setLiveLoading(true);
@@ -234,6 +242,10 @@ export function PositionsView() {
         // next page load can hydrate immediately instead of showing "—".
         const cache = writeLiveCache(json.positions);
         setLiveCacheFetchedAt(cache.fetchedAt);
+        setLiveSnapshotSummary({
+          written: json.snapshotsWritten ?? 0,
+          skipped: json.snapshotsSkipped ?? 0,
+        });
         setData(json);
       } else {
         // Non-live fetch: merge cached live fields so P&L/Greeks
@@ -355,6 +367,14 @@ export function PositionsView() {
               {liveCacheFetchedAt
                 ? `Live data as of ${fmtTimeShort(liveCacheFetchedAt)}`
                 : "Live data not loaded"}
+              {liveSnapshotSummary && (
+                <>
+                  {" · "}
+                  {liveSnapshotSummary.written > 0
+                    ? `${liveSnapshotSummary.written} snapshot${liveSnapshotSummary.written === 1 ? "" : "s"} saved`
+                    : "snapshots up to date"}
+                </>
+              )}
             </span>
           )}
           <Button

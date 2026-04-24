@@ -15,6 +15,7 @@ import {
   type PositionRow,
 } from "@/lib/positions";
 import { runAutoExpire, type AutoExpireReport } from "@/lib/expire-positions";
+import { buildSnapshotRow, shouldWriteSnapshot } from "@/lib/snapshots";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -401,13 +402,88 @@ export async function GET(req: NextRequest) {
       entryStockPrice:
         (p as unknown as { entry_stock_price?: number | null }).entry_stock_price ?? null,
     };
-    return out;
+
+    // Snapshot-on-refresh: in live mode, after we've resolved the chain
+    // + contract, persist a position_snapshots row. Skip when:
+    //   - not live (no live data to snapshot anyway)
+    //   - chain or contract missing (partial writes are worse than none)
+    //   - rate limit hits (< 60 min since last snapshot for this position)
+    // Result tracked so the caller can surface a count in the response.
+    let snapshotResult: "written" | "skipped_rate" | "skipped_no_data" = "skipped_no_data";
+    if (live && chain && contract) {
+      try {
+        const allowed = await shouldWriteSnapshot(p.id);
+        if (!allowed) {
+          snapshotResult = "skipped_rate";
+        } else {
+          const todayStr = new Date().toISOString().slice(0, 10);
+          const isExpiryDay = (expiry ?? "") <= todayStr;
+          const snapshotRow = buildSnapshotRow(
+            {
+              id: p.id,
+              symbol: p.symbol,
+              strike,
+              expiry,
+              avg_premium_sold: p.avg_premium_sold,
+              opened_date: p.opened_date,
+              entry_stock_price:
+                (p as unknown as { entry_stock_price?: number | null })
+                  .entry_stock_price ?? null,
+              entry_em_pct:
+                (p as unknown as { entry_em_pct?: number | null }).entry_em_pct ?? null,
+            },
+            chain,
+            fills,
+            { nowIso: new Date().toISOString(), closeSnapshot: isExpiryDay },
+          );
+          // Guard against partial writes: buildSnapshotRow's strict
+          // strike lookup is stricter than pickContractFromChain's
+          // fuzzy fallback, so a contract pass at the outer gate can
+          // still produce a snapshot with null option_price/IV/delta
+          // (deep OTM strike no longer listed in the chain on expiry
+          // day). Per spec, partial data is worse than no data — skip.
+          if (snapshotRow.option_price === null || snapshotRow.current_iv === null) {
+            console.warn(
+              `[positions:refresh-snapshot] ${p.symbol} $${strike} exp=${expiry}: partial snapshot (option=${snapshotRow.option_price} iv=${snapshotRow.current_iv}) — skipping write`,
+            );
+            snapshotResult = "skipped_no_data";
+          } else {
+            const ins = await supabase.from("position_snapshots").insert(snapshotRow);
+            if (ins.error) {
+              console.warn(
+                `[positions:refresh-snapshot] ${p.symbol} insert failed: ${ins.error.message}`,
+              );
+              snapshotResult = "skipped_no_data";
+            } else {
+              snapshotResult = "written";
+            }
+          }
+        }
+      } catch (e) {
+        console.warn(
+          `[positions:refresh-snapshot] ${p.symbol} threw: ${e instanceof Error ? e.message : e}`,
+        );
+      }
+    }
+    return { out, snapshotResult };
   });
 
-  const [market, positions] = await Promise.all([
+  const [market, resolved] = await Promise.all([
     marketPromise,
     Promise.all(positionPromises),
   ]);
+
+  // Tally snapshot outcomes so the UI can show "2 snapshots saved"
+  // vs "snapshots up to date". Only written/skipped_rate are user-
+  // visible — skipped_no_data is the common case (no chain, no
+  // contract, or live=false) and doesn't warrant surfacing.
+  let snapshotsWritten = 0;
+  let snapshotsSkipped = 0;
+  for (const r of resolved) {
+    if (r.snapshotResult === "written") snapshotsWritten += 1;
+    else if (r.snapshotResult === "skipped_rate") snapshotsSkipped += 1;
+  }
+  const positions = resolved.map((r) => r.out);
 
   positions.sort((a, b) => {
     const u = URGENCY_ORDER[a.urgency] - URGENCY_ORDER[b.urgency];
@@ -421,5 +497,7 @@ export async function GET(req: NextRequest) {
     opportunityAvailable,
     live,
     expireReport,
+    snapshotsWritten,
+    snapshotsSkipped,
   });
 }

@@ -10,6 +10,34 @@ import {
   type SchwabOptionsChain,
 } from "@/lib/schwab";
 import { remainingContracts, type Fill } from "@/lib/positions";
+import { createServerClient } from "@/lib/supabase";
+
+// Rate limit for "Refresh live data" snapshot writes. Prevents the
+// table from flooding if the user mashes the button. One snapshot per
+// position per 60 minutes; Run Analysis (a less frequent trigger) is
+// not rate-limited and takes precedence.
+export const SNAPSHOT_RATE_LIMIT_MINUTES = 60;
+
+// Returns true when no snapshot exists for the position OR the most
+// recent one is at least SNAPSHOT_RATE_LIMIT_MINUTES old. Used to
+// gate per-refresh writes.
+export async function shouldWriteSnapshot(positionId: string): Promise<boolean> {
+  const sb = createServerClient();
+  const r = await sb
+    .from("position_snapshots")
+    .select("snapshot_time")
+    .eq("position_id", positionId)
+    .order("snapshot_time", { ascending: false })
+    .limit(1);
+  const rows = (r.data ?? []) as Array<{ snapshot_time: string | null }>;
+  if (rows.length === 0) return true;
+  const last = rows[0].snapshot_time;
+  if (!last) return true;
+  const lastMs = new Date(last).getTime();
+  if (!Number.isFinite(lastMs)) return true;
+  const ageMinutes = (Date.now() - lastMs) / 60000;
+  return ageMinutes >= SNAPSHOT_RATE_LIMIT_MINUTES;
+}
 
 export type SnapshotPosition = {
   id: string;
