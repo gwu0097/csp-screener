@@ -34,7 +34,7 @@ function PositionsTableHeader() {
       <div className="text-right">P&amp;L</div>
       <div className="text-right">POP</div>
       <div>Grade</div>
-      <div>Status</div>
+      <div className="text-right">Status</div>
       <div />
     </div>
   );

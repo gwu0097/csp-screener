@@ -119,8 +119,25 @@ type Props =
 // row in positions-view. Keeping both on the same template guarantees
 // the header labels sit directly above their data. If you add/remove a
 // column here, update PositionsTableHeader too.
+//
+// Desktop columns (sm+):
+//   1. 16px                  post-earnings dot indicator
+//   2. minmax(60px, 80px)    symbol — clamped so it doesn't hog extra
+//                            row width; that space goes to status
+//                            instead (prevents a gap between Symbol
+//                            and Strike when viewport is wide)
+//   3. 70px                  strike (e.g. "$312.5P")
+//   4. 60px                  expiry ("Apr 24")
+//   5. 40px                  qty ("×4")
+//   6. 70px                  P&L ("-$42")
+//   7. 50px                  POP% ("91%")
+//   8. 36px                  grade badge ("A")
+//   9. 1fr                   status — absorbs extra row width; the
+//                            badge inside uses justify-self-end so
+//                            it sits flush to the right edge
+//  10. 16px                  expand chevron
 export const COLLAPSED_ROW_GRID =
-  "grid w-full grid-cols-[16px_1fr_auto_auto_auto_auto_auto_auto_auto] items-center gap-2 px-3 text-sm sm:grid-cols-[16px_minmax(60px,1fr)_70px_60px_40px_70px_50px_36px_auto_16px]";
+  "grid w-full grid-cols-[16px_1fr_auto_auto_auto_auto_auto_auto_auto] items-center gap-2 px-3 text-sm sm:grid-cols-[16px_minmax(60px,80px)_70px_60px_40px_70px_50px_36px_1fr_16px]";
 
 // ---------- small helpers ----------
 
