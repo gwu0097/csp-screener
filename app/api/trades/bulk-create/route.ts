@@ -8,6 +8,7 @@ import {
   type PositionRow,
 } from "@/lib/positions";
 import { buildSnapshotRow, fetchChainSafe } from "@/lib/snapshots";
+import { recordPositionOutcome } from "@/lib/post-earnings";
 
 export const dynamic = "force-dynamic";
 
@@ -314,6 +315,19 @@ export async function POST(req: NextRequest) {
         .eq("id", positionId);
       if (uErr) {
         errors.push(`${input.symbol}: position update failed — ${uErr.message}`);
+      }
+
+      // If this fill flipped the position to closed, record the outcome
+      // against the most recent post-earnings recommendation. Silent
+      // no-op when no rec exists for this position.
+      if (status === "closed") {
+        try {
+          await recordPositionOutcome(positionId);
+        } catch (e) {
+          console.warn(
+            `[bulk-create] recordPositionOutcome(${positionId}) failed: ${e instanceof Error ? e.message : e}`,
+          );
+        }
       }
     } catch (e) {
       errors.push(

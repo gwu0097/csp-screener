@@ -18,6 +18,21 @@ import {
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
+type PostEarningsRecView = {
+  recommendation: "CLOSE" | "HOLD" | "PARTIAL" | "MONITOR";
+  confidence: "HIGH" | "MEDIUM" | "LOW";
+  reasoning: string;
+  ruleFired: string;
+  analysisDate: string;
+  moveRatio: number | null;
+  ivCrushed: boolean | null;
+  ivCrushMagnitude: number | null;
+  breachedTwoXem: boolean | null;
+  analystSentiment: string | null;
+  recoveryLikelihood: string | null;
+  stockPctFromStrike: number | null;
+};
+
 type OpenPosition = {
   id: string;
   symbol: string;
@@ -44,6 +59,7 @@ type OpenPosition = {
   momentum: Momentum | null;
   urgency: Urgency;
   recommendationReason: string;
+  postEarningsRec: PostEarningsRecView | null;
   fills: Fill[];
 };
 
@@ -138,6 +154,52 @@ export async function GET(req: NextRequest) {
   }
 
   const now = new Date();
+
+  // Fetch the latest post-earnings recommendation per position in one
+  // query. We take the newest row per position (by analysis_date desc)
+  // and dedupe in memory, so a same-day rerun still shows today's rec.
+  const recsByPosition = new Map<string, PostEarningsRecView>();
+  if (positionIds.length > 0) {
+    const recRes = await supabase
+      .from("post_earnings_recommendations")
+      .select(
+        "position_id,analysis_date,move_ratio,iv_crushed,iv_crush_magnitude,breached_two_x_em,analyst_sentiment,recovery_likelihood,stock_pct_from_strike,recommendation,confidence,reasoning,rule_fired",
+      )
+      .in("position_id", positionIds)
+      .order("analysis_date", { ascending: false });
+    const allRecs = (recRes.data ?? []) as Array<{
+      position_id: string;
+      analysis_date: string;
+      move_ratio: number | null;
+      iv_crushed: boolean | null;
+      iv_crush_magnitude: number | null;
+      breached_two_x_em: boolean | null;
+      analyst_sentiment: string | null;
+      recovery_likelihood: string | null;
+      stock_pct_from_strike: number | null;
+      recommendation: "CLOSE" | "HOLD" | "PARTIAL" | "MONITOR";
+      confidence: "HIGH" | "MEDIUM" | "LOW";
+      reasoning: string;
+      rule_fired: string;
+    }>;
+    for (const r of allRecs) {
+      if (recsByPosition.has(r.position_id)) continue;
+      recsByPosition.set(r.position_id, {
+        recommendation: r.recommendation,
+        confidence: r.confidence,
+        reasoning: r.reasoning,
+        ruleFired: r.rule_fired,
+        analysisDate: r.analysis_date,
+        moveRatio: r.move_ratio,
+        ivCrushed: r.iv_crushed,
+        ivCrushMagnitude: r.iv_crush_magnitude,
+        breachedTwoXem: r.breached_two_x_em,
+        analystSentiment: r.analyst_sentiment,
+        recoveryLikelihood: r.recovery_likelihood,
+        stockPctFromStrike: r.stock_pct_from_strike,
+      });
+    }
+  }
 
   const marketPromise = getMarketContext();
 
@@ -247,6 +309,7 @@ export async function GET(req: NextRequest) {
       momentum,
       urgency: rec.urgency,
       recommendationReason: rec.reason,
+      postEarningsRec: recsByPosition.get(p.id) ?? null,
       fills: fills
         .slice()
         .sort((a, b) => a.fill_date.localeCompare(b.fill_date)),

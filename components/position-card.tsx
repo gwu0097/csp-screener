@@ -13,6 +13,21 @@ import {
 } from "@/lib/format";
 import type { Urgency, Momentum, Fill } from "@/lib/positions";
 
+export type PostEarningsRecView = {
+  recommendation: "CLOSE" | "HOLD" | "PARTIAL" | "MONITOR";
+  confidence: "HIGH" | "MEDIUM" | "LOW";
+  reasoning: string;
+  ruleFired: string;
+  analysisDate: string;
+  moveRatio: number | null;
+  ivCrushed: boolean | null;
+  ivCrushMagnitude: number | null;
+  breachedTwoXem: boolean | null;
+  analystSentiment: string | null;
+  recoveryLikelihood: string | null;
+  stockPctFromStrike: number | null;
+};
+
 // Server shape from /api/positions/open. Matches the rebuilt route.
 export type OpenPositionClientView = {
   id: string;
@@ -40,6 +55,7 @@ export type OpenPositionClientView = {
   momentum: Momentum | null;
   urgency: Urgency;
   recommendationReason: string;
+  postEarningsRec: PostEarningsRecView | null;
   fills: Fill[];
 };
 
@@ -63,6 +79,31 @@ function momentumStyle(m: Momentum | null) {
   return "text-muted-foreground";
 }
 
+// Tailwind classes for the post-earnings banner, keyed on
+// (recommendation, confidence). recommendation picks the color family,
+// confidence picks the border treatment (solid/outlined/dashed).
+function postEarningsBannerStyle(r: PostEarningsRecView): string {
+  const bg =
+    r.recommendation === "CLOSE"
+      ? "bg-rose-500/15 text-rose-200"
+      : r.recommendation === "PARTIAL"
+        ? "bg-amber-500/15 text-amber-200"
+        : r.recommendation === "HOLD"
+          ? "bg-emerald-500/15 text-emerald-200"
+          : "bg-muted/40 text-muted-foreground";
+  const borderColor =
+    r.recommendation === "CLOSE"
+      ? "border-rose-500/60"
+      : r.recommendation === "PARTIAL"
+        ? "border-amber-500/60"
+        : r.recommendation === "HOLD"
+          ? "border-emerald-500/60"
+          : "border-border";
+  const borderStyle =
+    r.confidence === "HIGH" ? "border-2" : r.confidence === "MEDIUM" ? "border" : "border border-dashed";
+  return `${bg} ${borderColor} ${borderStyle}`;
+}
+
 type Props = {
   position: OpenPositionClientView;
   onCloseSubmitted: (msg: string) => void;
@@ -70,6 +111,7 @@ type Props = {
 
 export function PositionCard({ position: p, onCloseSubmitted }: Props) {
   const [expanded, setExpanded] = useState(false);
+  const [recExpanded, setRecExpanded] = useState(false);
   const [closeAllPrice, setCloseAllPrice] = useState<string>(
     p.currentMark !== null ? p.currentMark.toFixed(2) : "",
   );
@@ -132,6 +174,13 @@ export function PositionCard({ position: p, onCloseSubmitted }: Props) {
 
   return (
     <div className="rounded-lg border border-border bg-background/40 p-4">
+      {p.postEarningsRec && (
+        <PostEarningsBanner
+          rec={p.postEarningsRec}
+          expanded={recExpanded}
+          onToggle={() => setRecExpanded((v) => !v)}
+        />
+      )}
       <div className="flex items-center justify-between gap-2">
         <button
           type="button"
@@ -301,5 +350,81 @@ function Cell({ k, v }: { k: string; v: React.ReactNode }) {
       <span className="text-muted-foreground">{k}</span>
       <span className="text-foreground">{v}</span>
     </div>
+  );
+}
+
+function PostEarningsBanner({
+  rec,
+  expanded,
+  onToggle,
+}: {
+  rec: PostEarningsRecView;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const confidenceBadge =
+    rec.confidence === "HIGH"
+      ? "bg-foreground/20 border-foreground/40"
+      : rec.confidence === "MEDIUM"
+        ? "border-foreground/40"
+        : "border-dashed border-foreground/40";
+  const ivCrushedLabel = rec.ivCrushed === null ? "—" : rec.ivCrushed ? "YES" : "NO";
+  const moveRatioLabel = rec.moveRatio !== null ? rec.moveRatio.toFixed(2) : "—";
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      className={cn(
+        "mb-3 w-full rounded-md px-3 py-2 text-left text-xs",
+        postEarningsBannerStyle(rec),
+      )}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 font-medium">
+          <span>📊 Post-earnings: {rec.recommendation}</span>
+          <span className={cn("rounded border px-1.5 py-0.5 text-[10px] font-semibold", confidenceBadge)}>
+            {rec.confidence}
+          </span>
+        </div>
+        <span className="text-[10px] opacity-70">
+          {expanded ? "click to collapse ▲" : "click to expand ▼"}
+        </span>
+      </div>
+      <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 opacity-90">
+        <span>Move ratio: {moveRatioLabel}</span>
+        <span>·</span>
+        <span>IV crushed: {ivCrushedLabel}</span>
+        {rec.analystSentiment && (
+          <>
+            <span>·</span>
+            <span>Sentiment: {rec.analystSentiment}</span>
+          </>
+        )}
+      </div>
+      {expanded && (
+        <div className="mt-3 space-y-2 border-t border-foreground/10 pt-2">
+          <div>{rec.reasoning}</div>
+          <div className="flex flex-wrap gap-3 text-[11px] opacity-80">
+            <span>
+              Rule: <span className="font-mono">{rec.ruleFired}</span>
+            </span>
+            {rec.breachedTwoXem !== null && (
+              <span>Breached 2×EM: {rec.breachedTwoXem ? "yes" : "no"}</span>
+            )}
+            {rec.ivCrushMagnitude !== null && (
+              <span>IV crush: {(rec.ivCrushMagnitude * 100).toFixed(1)}%</span>
+            )}
+            {rec.recoveryLikelihood && <span>Recovery: {rec.recoveryLikelihood}</span>}
+            {rec.stockPctFromStrike !== null && (
+              <span>
+                From strike: {(rec.stockPctFromStrike * 100).toFixed(2)}%{" "}
+                {rec.stockPctFromStrike < 0 ? "(ITM)" : "(OTM)"}
+              </span>
+            )}
+            <span>Analyzed: {new Date(rec.analysisDate).toLocaleString()}</span>
+          </div>
+        </div>
+      )}
+    </button>
   );
 }

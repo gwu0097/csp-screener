@@ -1134,6 +1134,12 @@ export type MaintenanceReport = {
   t1Captured: Array<{ symbol: string; earnings_date: string }>;
   expiryBackfilled: Array<{ symbol: string; earnings_date: string }>;
   perplexityBackfilled: Array<{ symbol: string; earnings_date: string }>;
+  recommendationsGenerated: Array<{
+    symbol: string;
+    position_id: string;
+    recommendation: string;
+    confidence: string;
+  }>;
   errors: Array<{ symbol: string; earnings_date: string | null; stage: string; reason: string }>;
 };
 
@@ -1171,6 +1177,7 @@ export async function runEncyclopediaMaintenance(): Promise<MaintenanceReport> {
     t1Captured: [],
     expiryBackfilled: [],
     perplexityBackfilled: [],
+    recommendationsGenerated: [],
     errors: [],
   };
 
@@ -1361,6 +1368,58 @@ export async function runEncyclopediaMaintenance(): Promise<MaintenanceReport> {
       });
     }
     await sleep(PERPLEXITY_GAP_MS);
+  }
+
+  // 5.5. Post-earnings recommendation pass. For each open position
+  // whose symbol had an earnings event in the last 48 hours, generate
+  // (or refresh) today's recommendation. analyzePositionPostEarnings
+  // is idempotent per (position, day) so same-day reruns just overwrite.
+  try {
+    const { analyzePositionPostEarnings } = await import("@/lib/post-earnings");
+    const openRes = await sb
+      .from("positions")
+      .select("*")
+      .eq("status", "open");
+    const openPositions = (openRes.data ?? []) as Array<{
+      id: string;
+      symbol: string;
+      strike: number;
+      expiry: string;
+      broker: string;
+      total_contracts: number;
+      avg_premium_sold: number | null;
+      status: "open" | "closed";
+      opened_date: string;
+      closed_date: string | null;
+      realized_pnl: number | null;
+    }>;
+    for (const p of openPositions) {
+      try {
+        const rec = await analyzePositionPostEarnings(p);
+        if (rec) {
+          report.recommendationsGenerated.push({
+            symbol: p.symbol,
+            position_id: p.id,
+            recommendation: rec.recommendation,
+            confidence: rec.confidence,
+          });
+        }
+      } catch (e) {
+        report.errors.push({
+          symbol: p.symbol,
+          earnings_date: null,
+          stage: "post-earnings-rec",
+          reason: e instanceof Error ? e.message : String(e),
+        });
+      }
+    }
+  } catch (e) {
+    report.errors.push({
+      symbol: "",
+      earnings_date: null,
+      stage: "post-earnings-rec-pass",
+      reason: e instanceof Error ? e.message : String(e),
+    });
   }
 
   // 6. Recompute rollup stats for every touched symbol.
