@@ -926,9 +926,12 @@ export async function reingestHistoricalDates(
     if (existingAtAnnouncement) {
       // MERGE: the T0-inserted row at the announcement date keeps its
       // live-captured implied_move_pct / iv_before / etc. We copy in
-      // EPS, revenue, and Perplexity narrative from the old row where
-      // the newer row has null. Yahoo price re-fetch runs regardless so
-      // actual_move_pct reflects the correct pre/post dates.
+      // EPS and revenue from the old row where the newer row has null,
+      // but we deliberately CLEAR Perplexity fields — any narrative
+      // previously attached to either row was generated against the
+      // pre-rekey actual_move_pct (wrong) and is now stale. Clearing
+      // forces ensurePerplexityData to re-pull on the next maintenance
+      // run, where it'll read the corrected actual_move_pct.
       const newerRow = existingAtAnnouncement;
       const updatePayload = {
         eps_estimate: newerRow.eps_estimate ?? merged.eps_estimate,
@@ -937,9 +940,9 @@ export async function reingestHistoricalDates(
         revenue_estimate: newerRow.revenue_estimate ?? merged.revenue_estimate,
         revenue_actual: newerRow.revenue_actual ?? merged.revenue_actual,
         revenue_surprise_pct: newerRow.revenue_surprise_pct ?? revenue_surprise_pct,
-        analyst_sentiment: newerRow.analyst_sentiment ?? row.analyst_sentiment,
-        news_summary: newerRow.news_summary ?? row.news_summary,
-        perplexity_pulled_at: newerRow.perplexity_pulled_at ?? row.perplexity_pulled_at,
+        analyst_sentiment: null,
+        news_summary: null,
+        perplexity_pulled_at: null,
         price_before: price.price_before,
         price_after: price.price_after,
         actual_move_pct: price.actual_move_pct,
@@ -985,6 +988,10 @@ export async function reingestHistoricalDates(
     }
 
     // No existing row at the announcement date — simply UPDATE in place.
+    // Clear Perplexity fields too: any narrative on this row was
+    // generated against the wrong earnings_date / actual_move_pct and
+    // is now stale. ensurePerplexityData will re-pull on the next
+    // maintenance run using the corrected values.
     const updatePayload = {
       earnings_date: announcementDate,
       eps_estimate: merged.eps_estimate,
@@ -998,6 +1005,9 @@ export async function reingestHistoricalDates(
       actual_move_pct: price.actual_move_pct,
       price_at_expiry: null, // cleared — ensurePriceAtExpiry refills below
       recovered_by_expiry: null,
+      analyst_sentiment: null,
+      news_summary: null,
+      perplexity_pulled_at: null,
       data_source: "finnhub+calendar-rekey",
     };
     const u = await sb
@@ -1450,7 +1460,15 @@ export type PerplexityResult =
 const PERPLEXITY_URL = "https://api.perplexity.ai/chat/completions";
 
 function buildEncyclopediaPrompt(symbol: string, row: HistoryRow): string {
-  const lines: string[] = [`${symbol} reported earnings on ${row.earnings_date}.`];
+  // Lead with unambiguous ticker framing. Common-word tickers like "NOW"
+  // (ServiceNow) get mistaken for temporal adverbs by Perplexity's sonar
+  // model — we saw it answer with TSLA-flavored content when the prompt
+  // opened with "NOW reported earnings...". Quoting the symbol and
+  // explicitly tagging it as a ticker prevents the misread.
+  const lines: string[] = [
+    `Research the US publicly-traded company whose stock ticker symbol is "${symbol}".`,
+    `This company (ticker ${symbol}) reported earnings on ${row.earnings_date}.`,
+  ];
   if (row.eps_actual !== null && row.eps_estimate !== null) {
     const surprisePct =
       row.eps_surprise_pct !== null ? (row.eps_surprise_pct * 100).toFixed(1) : "?";
@@ -1469,7 +1487,7 @@ function buildEncyclopediaPrompt(symbol: string, row: HistoryRow): string {
     lines.push(`Stock reaction: ${(row.actual_move_pct * 100).toFixed(2)}% overnight`);
   }
   lines.push("");
-  lines.push("Research:");
+  lines.push(`Research for ${symbol} only (do not substitute another ticker):`);
   lines.push("1. What did analysts say about these earnings? Upgrades/downgrades/price targets.");
   lines.push("2. Primary reason for the stock's reaction.");
   lines.push("3. Was this company-specific or sector-wide?");
