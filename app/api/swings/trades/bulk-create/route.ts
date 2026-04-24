@@ -14,7 +14,7 @@ type ParsedStockTrade = {
   broker?: string;
 };
 
-type SwingIdeaRow = { id: string; symbol: string };
+type SwingIdeaRow = { id: string; symbol: string; status: string };
 type SwingTradeRow = {
   id: string;
   symbol: string;
@@ -69,18 +69,20 @@ export async function POST(req: NextRequest) {
 
   const symbols = Array.from(new Set(trades.map((t) => t.symbol)));
 
-  // Preload ideas for all symbols so buys can get linked without N round-trips.
+  // Preload ideas (with status) so we can both link trades and auto-sync
+  // the idea's stage as buys / sells arrive. Ideas are the "kanban card";
+  // trades drive their lifecycle once a position is actually held.
   const ideasRes = await sb
     .from("swing_ideas")
-    .select("id,symbol")
+    .select("id,symbol,status")
     .in("symbol", symbols);
   if (ideasRes.error) {
     return NextResponse.json({ error: ideasRes.error.message }, { status: 500 });
   }
-  const ideaBySymbol = new Map<string, string>();
+  const ideaBySymbol = new Map<string, { id: string; status: string }>();
   for (const i of (ideasRes.data ?? []) as SwingIdeaRow[]) {
     // If multiple ideas per symbol, last one wins — good enough for Phase 1.
-    ideaBySymbol.set(i.symbol, i.id);
+    ideaBySymbol.set(i.symbol, { id: i.id, status: i.status });
   }
 
   // Preload open swing_trades for the same symbols — a sell will try to
@@ -105,14 +107,82 @@ export async function POST(req: NextRequest) {
   let inserted = 0;
   let closed = 0;
   let orphaned = 0; // sells with no matching open buy
+  let ideasPromoted = 0; // watching/conviction → entered
+  let ideasDemoted = 0; // entered → exited
+  let ideasCreated = 0; // buy with no existing idea
   const errors: string[] = [];
+
+  // Helper: look up or create the idea for a symbol. Used by both buy
+  // (promotes to 'entered') and orphan-sell (attaches to an existing idea
+  // so the trade shows up on the right card, but doesn't force a status
+  // change). Returns the id or null on error.
+  async function ensureIdeaForBuy(
+    symbol: string,
+    entryPrice: number,
+  ): Promise<string | null> {
+    const existing = ideaBySymbol.get(symbol);
+    if (existing) {
+      // Only promote manual stages — ENTERED stays ENTERED (another open
+      // position for the same symbol) and EXITED stays EXITED rather than
+      // resurrecting an already-closed idea.
+      if (existing.status === "watching" || existing.status === "conviction") {
+        const upd = await sb
+          .from("swing_ideas")
+          .update({ status: "entered", updated_at: new Date().toISOString() })
+          .eq("id", existing.id);
+        if (upd.error) {
+          errors.push(`${symbol} idea promote: ${upd.error.message}`);
+        } else {
+          existing.status = "entered";
+          ideasPromoted += 1;
+        }
+      }
+      return existing.id;
+    }
+
+    const ins = await sb
+      .from("swing_ideas")
+      .insert({
+        symbol,
+        status: "entered",
+        price_at_discovery: entryPrice,
+        user_thesis: "Auto-created from trade import",
+      })
+      .select()
+      .single();
+    if (ins.error) {
+      errors.push(`${symbol} idea create: ${ins.error.message}`);
+      return null;
+    }
+    const created = ins.data as { id: string } | null;
+    if (!created) return null;
+    ideaBySymbol.set(symbol, { id: created.id, status: "entered" });
+    ideasCreated += 1;
+    return created.id;
+  }
+
+  async function demoteIdeaOnClose(symbol: string) {
+    const existing = ideaBySymbol.get(symbol);
+    if (!existing || existing.status !== "entered") return;
+    const upd = await sb
+      .from("swing_ideas")
+      .update({ status: "exited", updated_at: new Date().toISOString() })
+      .eq("id", existing.id);
+    if (upd.error) {
+      errors.push(`${symbol} idea demote: ${upd.error.message}`);
+      return;
+    }
+    existing.status = "exited";
+    ideasDemoted += 1;
+  }
 
   for (const t of trades) {
     const broker = t.broker ?? bodyBroker ?? null;
 
     if (t.action === "buy") {
+      const ideaId = await ensureIdeaForBuy(t.symbol, t.price);
       const insertRow = {
-        swing_idea_id: ideaBySymbol.get(t.symbol) ?? null,
+        swing_idea_id: ideaId,
         symbol: t.symbol,
         broker,
         shares: t.shares,
@@ -129,7 +199,6 @@ export async function POST(req: NextRequest) {
         errors.push(`${t.symbol} buy @ ${t.date}: ${ins.error.message}`);
         continue;
       }
-      // Make this new open trade available for any later sell in the same import.
       const list = openBySymbol.get(t.symbol) ?? [];
       if (ins.data) list.push(ins.data as SwingTradeRow);
       openBySymbol.set(t.symbol, list);
@@ -159,19 +228,24 @@ export async function POST(req: NextRequest) {
         .single();
       if (upd.error) {
         errors.push(`${t.symbol} sell @ ${t.date}: ${upd.error.message}`);
-        // Put the match back since the update failed.
         candidates.unshift(match);
         continue;
       }
       openBySymbol.set(t.symbol, candidates);
       closed += 1;
+      // If this was the last open position for the symbol, flip the
+      // linked idea to 'exited'. Still-open positions keep the idea
+      // in 'entered'.
+      if (candidates.length === 0) {
+        await demoteIdeaOnClose(t.symbol);
+      }
       continue;
     }
 
     // No open buy to close against — record as a closed trade with only
-    // exit data. Avoids dropping history when the import is partial.
+    // exit data. Link to any existing idea but don't force a status change.
     const orphanRow = {
-      swing_idea_id: ideaBySymbol.get(t.symbol) ?? null,
+      swing_idea_id: ideaBySymbol.get(t.symbol)?.id ?? null,
       symbol: t.symbol,
       broker,
       shares: t.shares,
@@ -198,6 +272,9 @@ export async function POST(req: NextRequest) {
     closed,
     orphaned,
     total: inserted + closed + orphaned,
+    ideas_promoted: ideasPromoted,
+    ideas_demoted: ideasDemoted,
+    ideas_created: ideasCreated,
     errors,
   });
 }

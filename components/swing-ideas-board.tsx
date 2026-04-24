@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { ArrowRight, Pencil, Plus, Trash2 } from "lucide-react";
+import Link from "next/link";
+import { useEffect, useMemo, useState } from "react";
+import { ArrowLeft, ArrowRight, ExternalLink, Pencil, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   SwingIdeaDialog,
@@ -18,14 +19,12 @@ const COLUMNS: Array<{ key: Status; label: string }> = [
   { key: "exited", label: "Exited" },
 ];
 
-const NEXT_STATUS: Partial<Record<Status, Status>> = {
-  watching: "conviction",
-  conviction: "entered",
-  entered: "exited",
-};
+// Only the first two stages are user-controlled. ENTERED and EXITED
+// follow from trade data — attempting to move manually (button or drag)
+// would get out of sync with the trade log.
+const MANUAL_STAGES: Status[] = ["watching", "conviction"];
+const TRADE_STAGES: Status[] = ["entered", "exited"];
 
-// DnD payload MIME — keeps us from reacting to arbitrary drags (e.g. a
-// file dragged onto the column from outside the page).
 const DND_MIME = "application/x-swing-idea-id";
 
 function sentimentColor(s: string | null): string {
@@ -42,13 +41,37 @@ function timeframeLabel(tf: string | null): string {
   return "—";
 }
 
-function fmtMoney(n: number | null): string {
-  if (n === null || !Number.isFinite(n)) return "";
-  return `$${n.toFixed(2)}`;
+function fmtMoney(n: number | null, signed = false): string {
+  if (n === null || n === undefined || !Number.isFinite(n)) return "—";
+  const sign = signed && n > 0 ? "+" : "";
+  return `${sign}$${n.toFixed(2)}`;
+}
+
+function fmtPct(n: number | null, digits = 1): string {
+  if (n === null || n === undefined || !Number.isFinite(n)) return "—";
+  const sign = n > 0 ? "+" : "";
+  return `${sign}${(n * 100).toFixed(digits)}%`;
+}
+
+function exitReasonLabel(r: string | null): string {
+  if (r === "target_hit") return "Target hit";
+  if (r === "stop_loss") return "Stop loss";
+  if (r === "thesis_broken") return "Thesis broken";
+  if (r === "manual") return "Manual";
+  return "";
+}
+
+function daysBetween(fromIso: string | null, toIso: string | null): number | null {
+  if (!fromIso) return null;
+  const end = toIso ? Date.parse(toIso + "T00:00:00Z") : Date.now();
+  const start = Date.parse(fromIso + "T00:00:00Z");
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+  return Math.max(0, Math.round((end - start) / 86400000));
 }
 
 export function SwingIdeasBoard() {
   const [ideas, setIdeas] = useState<SwingIdea[]>([]);
+  const [prices, setPrices] = useState<Record<string, number | null>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -78,9 +101,39 @@ export function SwingIdeasBoard() {
     load();
   }, []);
 
-  // PATCH status and reload. Errors surface to the persistent banner
-  // (not a toast/alert) so they stay visible until the user acts or a
-  // follow-up action clears them.
+  // Batch-fetch current prices for ENTERED symbols after ideas load. Runs
+  // once per unique symbol list — re-fetches only when the set changes so
+  // we don't hammer Yahoo on every parent re-render.
+  const enteredSymbols = useMemo(() => {
+    const set = new Set<string>();
+    for (const idea of ideas) {
+      if (idea.status === "entered") set.add(idea.symbol);
+    }
+    return Array.from(set).sort();
+  }, [ideas]);
+
+  useEffect(() => {
+    if (enteredSymbols.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const url = `/api/swings/quotes?symbols=${enteredSymbols.join(",")}`;
+        const res = await fetch(url, { cache: "no-store" });
+        const json = (await res.json()) as {
+          prices?: Record<string, number | null>;
+          error?: string;
+        };
+        if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+        if (!cancelled) setPrices(json.prices ?? {});
+      } catch (e) {
+        console.warn("[swing-ideas] quote fetch failed:", e);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [enteredSymbols.join(",")]);
+
   async function changeStatus(idea: SwingIdea, next: Status): Promise<boolean> {
     setActionError(null);
     try {
@@ -93,8 +146,6 @@ export function SwingIdeasBoard() {
         const j = await res.json().catch(() => ({}));
         throw new Error(j.error ?? `HTTP ${res.status}`);
       }
-      // Optimistic local update — avoids a full refetch flicker. A
-      // full load() happens for consistency in the background.
       setIdeas((prev) =>
         prev.map((i) => (i.id === idea.id ? { ...i, status: next } : i)),
       );
@@ -105,22 +156,6 @@ export function SwingIdeasBoard() {
       console.error("[swing-ideas] status change failed:", e);
       setActionError(`Could not move ${idea.symbol}: ${msg}`);
       return false;
-    }
-  }
-
-  async function moveIdea(idea: SwingIdea) {
-    const next = NEXT_STATUS[idea.status as Status];
-    if (!next) return;
-    const ok = await changeStatus(idea, next);
-    if (ok && next === "entered") {
-      const go = window.confirm(
-        `${idea.symbol} moved to Entered. Log a trade now?`,
-      );
-      if (go) {
-        window.location.href = `/swings/journal/trades?prefill=${encodeURIComponent(
-          idea.symbol,
-        )}&ideaId=${idea.id}`;
-      }
     }
   }
 
@@ -143,10 +178,13 @@ export function SwingIdeasBoard() {
     }
   }
 
-  // DnD handlers — event targets are the column container, data is the
-  // idea id. dataTransfer is read-only during dragover, so we track the
-  // dragging id in React state alongside the transfer payload.
+  // DnD only between manual stages. Cards in ENTERED/EXITED are not
+  // draggable, and those columns never accept drops.
   function onCardDragStart(e: React.DragEvent<HTMLDivElement>, idea: SwingIdea) {
+    if (!MANUAL_STAGES.includes(idea.status as Status)) {
+      e.preventDefault();
+      return;
+    }
     e.dataTransfer.setData(DND_MIME, idea.id);
     e.dataTransfer.setData("text/plain", idea.id);
     e.dataTransfer.effectAllowed = "move";
@@ -157,7 +195,7 @@ export function SwingIdeasBoard() {
     setDragOverCol(null);
   }
   function onColumnDragOver(e: React.DragEvent<HTMLDivElement>, col: Status) {
-    // preventDefault is required to signal "this element is a drop target".
+    if (!MANUAL_STAGES.includes(col)) return; // not a drop target
     e.preventDefault();
     e.dataTransfer.dropEffect = "move";
     if (dragOverCol !== col) setDragOverCol(col);
@@ -166,6 +204,7 @@ export function SwingIdeasBoard() {
     setDragOverCol((cur) => (cur === col ? null : cur));
   }
   async function onColumnDrop(e: React.DragEvent<HTMLDivElement>, col: Status) {
+    if (!MANUAL_STAGES.includes(col)) return;
     e.preventDefault();
     const id = e.dataTransfer.getData(DND_MIME) || e.dataTransfer.getData("text/plain");
     setDragOverCol(null);
@@ -173,7 +212,8 @@ export function SwingIdeasBoard() {
     if (!id) return;
     const idea = ideas.find((i) => i.id === id);
     if (!idea) return;
-    if (idea.status === col) return; // same column — no-op
+    if (!MANUAL_STAGES.includes(idea.status as Status)) return;
+    if (idea.status === col) return;
     await changeStatus(idea, col);
   }
 
@@ -215,6 +255,7 @@ export function SwingIdeasBoard() {
           {COLUMNS.map((col) => {
             const list = byStatus[col.key];
             const isDropTarget = dragOverCol === col.key;
+            const isTradeDriven = TRADE_STAGES.includes(col.key);
             return (
               <div
                 key={col.key}
@@ -234,6 +275,14 @@ export function SwingIdeasBoard() {
                       {list.length}
                     </span>
                   </span>
+                  {isTradeDriven && (
+                    <span
+                      className="text-[9px] text-muted-foreground/70"
+                      title="Stage is controlled by trade data — not drag-droppable"
+                    >
+                      auto
+                    </span>
+                  )}
                 </div>
                 <div className="flex-1 space-y-2 overflow-y-auto p-2">
                   {list.length === 0 ? (
@@ -245,10 +294,12 @@ export function SwingIdeasBoard() {
                       <IdeaCard
                         key={idea.id}
                         idea={idea}
+                        currentPrice={prices[idea.symbol] ?? null}
                         dragging={draggingId === idea.id}
                         onDragStart={(e) => onCardDragStart(e, idea)}
                         onDragEnd={onCardDragEnd}
-                        onMove={() => moveIdea(idea)}
+                        onForward={() => changeStatus(idea, "conviction")}
+                        onBackward={() => changeStatus(idea, "watching")}
                         onEdit={() => setEditing(idea)}
                         onDelete={() => deleteIdea(idea)}
                       />
@@ -288,12 +339,70 @@ export function SwingIdeasBoard() {
   );
 }
 
-function IdeaCard({
+// ---------- Card variants ----------
+
+function IdeaCard(props: {
+  idea: SwingIdea;
+  currentPrice: number | null;
+  dragging: boolean;
+  onDragStart: (e: React.DragEvent<HTMLDivElement>) => void;
+  onDragEnd: () => void;
+  onForward: () => void;
+  onBackward: () => void;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
+  const { idea } = props;
+  if (idea.status === "entered") {
+    return (
+      <EnteredCard
+        idea={idea}
+        currentPrice={props.currentPrice}
+        onEdit={props.onEdit}
+      />
+    );
+  }
+  if (idea.status === "exited") return <ExitedCard idea={idea} />;
+  return (
+    <ManualCard
+      idea={idea}
+      dragging={props.dragging}
+      onDragStart={props.onDragStart}
+      onDragEnd={props.onDragEnd}
+      onForward={props.onForward}
+      onBackward={props.onBackward}
+      onEdit={props.onEdit}
+      onDelete={props.onDelete}
+    />
+  );
+}
+
+// Shared header: symbol + sentiment pill.
+function CardHeader({ idea }: { idea: SwingIdea }) {
+  return (
+    <div className="mb-1 flex items-center justify-between gap-2">
+      <span className="font-mono text-sm font-semibold text-foreground">
+        {idea.symbol}
+      </span>
+      {idea.analyst_sentiment && (
+        <span
+          className={`rounded border px-1.5 py-0.5 text-[10px] font-medium capitalize ${sentimentColor(idea.analyst_sentiment)}`}
+        >
+          {idea.analyst_sentiment}
+        </span>
+      )}
+    </div>
+  );
+}
+
+// Manual-stage card (WATCHING / CONVICTION) — directional Move + Edit + Delete.
+function ManualCard({
   idea,
   dragging,
   onDragStart,
   onDragEnd,
-  onMove,
+  onForward,
+  onBackward,
   onEdit,
   onDelete,
 }: {
@@ -301,13 +410,14 @@ function IdeaCard({
   dragging: boolean;
   onDragStart: (e: React.DragEvent<HTMLDivElement>) => void;
   onDragEnd: () => void;
-  onMove: () => void;
+  onForward: () => void;
+  onBackward: () => void;
   onEdit: () => void;
   onDelete: () => void;
 }) {
-  const canMove = idea.status !== "exited";
   const summary =
     idea.catalyst?.trim() || idea.user_thesis?.trim() || idea.ai_summary?.trim() || "";
+  const isWatching = idea.status === "watching";
   return (
     <div
       draggable
@@ -317,18 +427,7 @@ function IdeaCard({
         dragging ? "opacity-40" : ""
       }`}
     >
-      <div className="mb-1 flex items-center justify-between gap-2">
-        <span className="font-mono text-sm font-semibold text-foreground">
-          {idea.symbol}
-        </span>
-        {idea.analyst_sentiment && (
-          <span
-            className={`rounded border px-1.5 py-0.5 text-[10px] font-medium capitalize ${sentimentColor(idea.analyst_sentiment)}`}
-          >
-            {idea.analyst_sentiment}
-          </span>
-        )}
-      </div>
+      <CardHeader idea={idea} />
 
       <div className="mb-1 flex gap-3 text-[11px] text-muted-foreground">
         {idea.price_at_discovery !== null && (
@@ -360,17 +459,24 @@ function IdeaCard({
       </div>
 
       <div className="flex items-center gap-1">
-        {canMove && (
-          <button
-            type="button"
-            onClick={onMove}
-            className="flex flex-1 items-center justify-center gap-1 rounded border border-border py-1 text-[11px] text-muted-foreground hover:bg-white/5 hover:text-foreground"
-            title="Move to next stage"
-          >
-            <ArrowRight className="h-3 w-3" />
-            Move
-          </button>
-        )}
+        <button
+          type="button"
+          onClick={isWatching ? onForward : onBackward}
+          className="flex flex-1 items-center justify-center gap-1 rounded border border-border py-1 text-[11px] text-muted-foreground hover:bg-white/5 hover:text-foreground"
+          title={isWatching ? "Mark as Conviction" : "Back to Watching"}
+        >
+          {isWatching ? (
+            <>
+              <ArrowRight className="h-3 w-3" />
+              Mark as Conviction
+            </>
+          ) : (
+            <>
+              <ArrowLeft className="h-3 w-3" />
+              Back to Watching
+            </>
+          )}
+        </button>
         <button
           type="button"
           onClick={onEdit}
@@ -393,3 +499,140 @@ function IdeaCard({
     </div>
   );
 }
+
+function EnteredCard({
+  idea,
+  currentPrice,
+  onEdit,
+}: {
+  idea: SwingIdea;
+  currentPrice: number | null;
+  onEdit: () => void;
+}) {
+  const trade = idea.active_trade ?? null;
+  const entry = trade?.entry_price ?? null;
+  const shares = trade?.shares ?? null;
+  const heldDays = daysBetween(trade?.entry_date ?? null, null);
+
+  const unrealizedPnl =
+    currentPrice !== null && entry !== null && shares !== null
+      ? (currentPrice - entry) * shares
+      : null;
+  const unrealizedPct =
+    currentPrice !== null && entry !== null && entry > 0
+      ? (currentPrice - entry) / entry
+      : null;
+  const pnlColor =
+    unrealizedPnl === null
+      ? "text-muted-foreground"
+      : unrealizedPnl >= 0
+        ? "text-emerald-300"
+        : "text-rose-300";
+
+  return (
+    <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3 text-xs">
+      <CardHeader idea={idea} />
+
+      <div className="mb-1 flex items-baseline gap-2 text-[11px]">
+        <span className="text-muted-foreground">Entry</span>
+        <span className="font-mono text-foreground">{fmtMoney(entry)}</span>
+        <span className="text-muted-foreground">→</span>
+        <span className="font-mono text-foreground">
+          {currentPrice !== null ? fmtMoney(currentPrice) : "…"}
+        </span>
+      </div>
+
+      <div className="mb-1 text-[11px]">
+        <span className="text-muted-foreground">Unrealized: </span>
+        <span className={`font-medium ${pnlColor}`}>
+          {fmtMoney(unrealizedPnl, true)}
+        </span>
+        <span className={`ml-1 ${pnlColor}`}>({fmtPct(unrealizedPct, 1)})</span>
+      </div>
+
+      <div className="mb-2 text-[11px] text-muted-foreground">
+        {shares !== null && <>{shares} shares · </>}
+        {heldDays !== null ? `${heldDays} day${heldDays === 1 ? "" : "s"} held` : "—"}
+      </div>
+
+      <div className="flex items-center gap-1">
+        <button
+          type="button"
+          onClick={onEdit}
+          className="flex flex-1 items-center justify-center gap-1 rounded border border-border py-1 text-[11px] text-muted-foreground hover:bg-white/5 hover:text-foreground"
+        >
+          <Pencil className="h-3 w-3" />
+          Edit thesis
+        </button>
+        <Link
+          href={`/swings/journal/trades?symbol=${encodeURIComponent(idea.symbol)}`}
+          className="flex items-center justify-center gap-1 rounded border border-border px-2 py-1 text-[11px] text-muted-foreground hover:bg-white/5 hover:text-foreground"
+        >
+          <ExternalLink className="h-3 w-3" />
+          Trades
+        </Link>
+      </div>
+    </div>
+  );
+}
+
+function ExitedCard({ idea }: { idea: SwingIdea }) {
+  const trade = idea.active_trade ?? null;
+  const entry = trade?.entry_price ?? null;
+  const exit = trade?.exit_price ?? null;
+  const realized = trade?.realized_pnl ?? null;
+  const returnPct = trade?.return_pct ?? null;
+  const heldDays = daysBetween(trade?.entry_date ?? null, trade?.exit_date ?? null);
+  const reason = exitReasonLabel(trade?.exit_reason ?? null);
+  const pnlColor =
+    realized === null
+      ? "text-muted-foreground"
+      : realized >= 0
+        ? "text-emerald-300"
+        : "text-rose-300";
+
+  return (
+    <div className="rounded-md border border-border bg-zinc-900/60 p-3 text-xs opacity-90">
+      <CardHeader idea={idea} />
+
+      <div className="mb-1 flex items-baseline gap-2 text-[11px]">
+        <span className="text-muted-foreground">Entry</span>
+        <span className="font-mono text-foreground">{fmtMoney(entry)}</span>
+        <span className="text-muted-foreground">→</span>
+        <span className="text-muted-foreground">Exit</span>
+        <span className="font-mono text-foreground">{fmtMoney(exit)}</span>
+      </div>
+
+      <div className="mb-1 text-[11px]">
+        <span className="text-muted-foreground">Realized: </span>
+        <span className={`font-medium ${pnlColor}`}>{fmtMoney(realized, true)}</span>
+        <span className={`ml-1 ${pnlColor}`}>({fmtPct(returnPct, 1)})</span>
+      </div>
+
+      <div className="mb-2 flex items-center gap-2 text-[11px] text-muted-foreground">
+        <span>
+          {heldDays !== null
+            ? `${heldDays} day${heldDays === 1 ? "" : "s"} held`
+            : "—"}
+        </span>
+        {reason && (
+          <>
+            <span>·</span>
+            <span>{reason}</span>
+          </>
+        )}
+      </div>
+
+      <div className="flex items-center gap-1">
+        <Link
+          href={`/swings/journal/trades?symbol=${encodeURIComponent(idea.symbol)}`}
+          className="flex flex-1 items-center justify-center gap-1 rounded border border-border py-1 text-[11px] text-muted-foreground hover:bg-white/5 hover:text-foreground"
+        >
+          <ExternalLink className="h-3 w-3" />
+          View in Trades
+        </Link>
+      </div>
+    </div>
+  );
+}
+

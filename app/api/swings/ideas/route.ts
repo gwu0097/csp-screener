@@ -27,16 +27,79 @@ type IdeaRow = {
   created_at: string;
 };
 
+type TradeRow = {
+  id: string;
+  swing_idea_id: string | null;
+  symbol: string;
+  shares: number | null;
+  entry_price: number | null;
+  entry_date: string | null;
+  exit_price: number | null;
+  exit_date: string | null;
+  realized_pnl: number | null;
+  return_pct: number | null;
+  exit_reason: string | null;
+  status: string;
+};
+
 export async function GET() {
   const sb = createServerClient();
-  const res = await sb
-    .from<IdeaRow>("swing_ideas")
+  const ideasRes = await sb
+    .from("swing_ideas")
     .select("*")
     .order("created_at", { ascending: false });
-  if (res.error) {
-    return NextResponse.json({ error: res.error.message }, { status: 500 });
+  if (ideasRes.error) {
+    return NextResponse.json({ error: ideasRes.error.message }, { status: 500 });
   }
-  return NextResponse.json({ ideas: res.data ?? [] });
+  const ideas = (ideasRes.data ?? []) as IdeaRow[];
+
+  // Enrich ENTERED / EXITED ideas with their linked trade data. Cards in
+  // those stages need to render trade metrics (entry, exit, P&L) that
+  // live in swing_trades, not in swing_ideas. Fetch all trades for the
+  // set of idea ids in one query.
+  const ideaIds = ideas.map((i) => i.id);
+  const tradesById = new Map<string, TradeRow>();
+  if (ideaIds.length > 0) {
+    const tradesRes = await sb
+      .from("swing_trades")
+      .select(
+        "id,swing_idea_id,symbol,shares,entry_price,entry_date,exit_price,exit_date,realized_pnl,return_pct,exit_reason,status",
+      )
+      .in("swing_idea_id", ideaIds)
+      .order("created_at", { ascending: false });
+    if (tradesRes.error) {
+      return NextResponse.json({ error: tradesRes.error.message }, { status: 500 });
+    }
+    const trades = (tradesRes.data ?? []) as TradeRow[];
+
+    // For each idea, pick the single most-relevant trade:
+    //   ENTERED → latest open trade
+    //   EXITED  → latest closed trade
+    //   others  → any latest trade (rare, but shouldn't crash)
+    // trades is already ordered created_at desc, so the first match wins.
+    for (const idea of ideas) {
+      if (tradesById.has(idea.id)) continue;
+      const pool = trades.filter((t) => t.swing_idea_id === idea.id);
+      if (pool.length === 0) continue;
+      const pickStatus =
+        idea.status === "entered"
+          ? "open"
+          : idea.status === "exited"
+            ? "closed"
+            : null;
+      const pick = pickStatus
+        ? (pool.find((t) => t.status === pickStatus) ?? pool[0])
+        : pool[0];
+      tradesById.set(idea.id, pick);
+    }
+  }
+
+  const enriched = ideas.map((idea) => ({
+    ...idea,
+    active_trade: tradesById.get(idea.id) ?? null,
+  }));
+
+  return NextResponse.json({ ideas: enriched });
 }
 
 type CreateBody = {

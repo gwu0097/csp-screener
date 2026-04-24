@@ -11,6 +11,21 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 
+export type SwingIdeaTrade = {
+  id: string;
+  swing_idea_id: string | null;
+  symbol: string;
+  shares: number | null;
+  entry_price: number | null;
+  entry_date: string | null;
+  exit_price: number | null;
+  exit_date: string | null;
+  realized_pnl: number | null;
+  return_pct: number | null;
+  exit_reason: string | null;
+  status: string;
+};
+
 export type SwingIdea = {
   id: string;
   symbol: string;
@@ -30,6 +45,10 @@ export type SwingIdea = {
   discovered_at: string;
   updated_at: string;
   created_at: string;
+  // Populated by /api/swings/ideas when the idea is in a trade-driven stage
+  // (ENTERED → latest open trade, EXITED → latest closed trade). null for
+  // WATCHING / CONVICTION and when no linked trade exists.
+  active_trade?: SwingIdeaTrade | null;
 };
 
 type Mode =
