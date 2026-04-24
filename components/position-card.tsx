@@ -115,6 +115,13 @@ type Props =
   | { kind: "open"; position: OpenPositionClientView; onCloseSubmitted: (msg: string) => void }
   | { kind: "closed"; position: ClosedPositionClientView };
 
+// Grid template shared between the collapsed row and the column-header
+// row in positions-view. Keeping both on the same template guarantees
+// the header labels sit directly above their data. If you add/remove a
+// column here, update PositionsTableHeader too.
+export const COLLAPSED_ROW_GRID =
+  "grid w-full grid-cols-[16px_1fr_auto_auto_auto_auto_auto_auto_auto] items-center gap-2 px-3 text-sm sm:grid-cols-[16px_minmax(60px,1fr)_70px_60px_40px_70px_50px_36px_auto_16px]";
+
 // ---------- small helpers ----------
 
 function shortExpiry(iso: string): string {
@@ -261,7 +268,7 @@ export function PositionCard(props: Props) {
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
-        className="grid w-full grid-cols-[16px_1fr_auto_auto_auto_auto_auto_auto_auto] items-center gap-2 px-3 py-2 text-sm sm:grid-cols-[16px_minmax(60px,1fr)_70px_60px_40px_70px_50px_36px_auto_16px]"
+        className={cn(COLLAPSED_ROW_GRID, "py-2")}
       >
         {/* Post-earnings dot */}
         <div className="flex h-4 w-4 items-center justify-center">

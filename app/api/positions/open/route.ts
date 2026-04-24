@@ -227,6 +227,33 @@ export async function GET(req: NextRequest) {
     });
   }
 
+  // Entry-grade fallback: positions that opened before the grade-merge
+  // feature (or via screenshot import that didn't find a tracked_tickers
+  // row) have entry_final_grade = null. Look up the most recent
+  // tracked_tickers row per symbol so the UI can still show a badge.
+  // This makes the display consistent across brokers — both Schwab NOW
+  // and Robinhood NOW end up with the same fallback grade.
+  const gradeFallbackBySymbol = new Map<string, string | null>();
+  {
+    const symbols = Array.from(new Set(positionsList.map((p) => p.symbol.toUpperCase())));
+    if (symbols.length > 0) {
+      const trRes = await supabase
+        .from("tracked_tickers")
+        .select("symbol,entry_final_grade,screened_date")
+        .in("symbol", symbols)
+        .order("screened_date", { ascending: false });
+      const trRows = ((trRes.data ?? []) as Array<{
+        symbol: string;
+        entry_final_grade: string | null;
+      }>);
+      for (const r of trRows) {
+        const sym = r.symbol.toUpperCase();
+        if (gradeFallbackBySymbol.has(sym)) continue;
+        if (r.entry_final_grade) gradeFallbackBySymbol.set(sym, r.entry_final_grade);
+      }
+    }
+  }
+
   // Fetch the latest post-earnings recommendation per position in one
   // query. We take the newest row per position (by analysis_date desc)
   // and dedupe in memory, so a same-day rerun still shows today's rec.
@@ -388,7 +415,10 @@ export async function GET(req: NextRequest) {
       fills: fills
         .slice()
         .sort((a, b) => a.fill_date.localeCompare(b.fill_date)),
-      entryFinalGrade: (p as unknown as { entry_final_grade?: string | null }).entry_final_grade ?? null,
+      entryFinalGrade:
+        (p as unknown as { entry_final_grade?: string | null }).entry_final_grade ??
+        gradeFallbackBySymbol.get(p.symbol.toUpperCase()) ??
+        null,
       entryCrushGrade: (p as unknown as { entry_crush_grade?: string | null }).entry_crush_grade ?? null,
       entryOpportunityGrade:
         (p as unknown as { entry_opportunity_grade?: string | null }).entry_opportunity_grade ?? null,

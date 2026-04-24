@@ -103,6 +103,32 @@ export async function GET() {
     fillsByPosition.set(f.position_id, arr);
   }
 
+  // Entry-grade fallback — mirrors the open route. Positions opened
+  // before the grade-merge feature land with null entry_final_grade;
+  // fall back to the most recent tracked_tickers entry for that symbol
+  // so the closed-positions UI shows a badge consistent with the open
+  // side.
+  const gradeFallbackBySymbol = new Map<string, string | null>();
+  {
+    const symbols = Array.from(new Set(positions.map((p) => p.symbol.toUpperCase())));
+    if (symbols.length > 0) {
+      const trRes = await supabase
+        .from("tracked_tickers")
+        .select("symbol,entry_final_grade,screened_date")
+        .in("symbol", symbols)
+        .order("screened_date", { ascending: false });
+      const trRows = (trRes.data ?? []) as Array<{
+        symbol: string;
+        entry_final_grade: string | null;
+      }>;
+      for (const r of trRows) {
+        const sym = r.symbol.toUpperCase();
+        if (gradeFallbackBySymbol.has(sym)) continue;
+        if (r.entry_final_grade) gradeFallbackBySymbol.set(sym, r.entry_final_grade);
+      }
+    }
+  }
+
   // Latest recommendation per position — same pattern as the open route.
   const recsByPosition = new Map<string, ClosedPositionView["postEarningsRec"]>();
   const recRes = await supabase
@@ -162,7 +188,10 @@ export async function GET() {
       status:
         (p.status as "closed" | "expired_worthless" | "assigned" | undefined) ??
         "closed",
-      entryFinalGrade: p.entry_final_grade,
+      entryFinalGrade:
+        p.entry_final_grade ??
+        gradeFallbackBySymbol.get(p.symbol.toUpperCase()) ??
+        null,
       entryCrushGrade: p.entry_crush_grade,
       entryOpportunityGrade: p.entry_opportunity_grade,
       entryIndustryGrade: p.entry_industry_grade,

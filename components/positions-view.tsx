@@ -6,11 +6,39 @@ import { Button } from "@/components/ui/button";
 import { ImportScreenshotModal } from "@/components/import-screenshot-modal";
 import { ImportManualModal } from "@/components/import-manual-modal";
 import {
+  COLLAPSED_ROW_GRID,
   PositionCard,
   type ClosedPositionClientView,
   type OpenPositionClientView,
 } from "@/components/position-card";
 import { ChevronDown, ChevronRight } from "lucide-react";
+import { cn } from "@/lib/utils";
+
+// Column header row for a group of position cards. Uses the exact same
+// grid template as the collapsed row so labels sit above their data.
+// Hidden on mobile (< sm) — the mobile card layout uses auto columns
+// and the labels wouldn't align anyway.
+function PositionsTableHeader() {
+  return (
+    <div
+      className={cn(
+        COLLAPSED_ROW_GRID,
+        "hidden py-1 text-[10px] font-semibold uppercase text-muted-foreground sm:grid",
+      )}
+    >
+      <div />
+      <div>Symbol</div>
+      <div>Strike</div>
+      <div>Expiry</div>
+      <div className="text-right">Qty</div>
+      <div className="text-right">P&amp;L</div>
+      <div className="text-right">POP</div>
+      <div>Grade</div>
+      <div>Status</div>
+      <div />
+    </div>
+  );
+}
 import { fmtDollarsSigned } from "@/lib/format";
 import type { MarketContext } from "@/lib/market";
 
@@ -362,7 +390,7 @@ export function PositionsView() {
           )}
         </div>
         <div className="flex items-center gap-2">
-          {data && !data.live && positions.length > 0 && (
+          {data && positions.length > 0 && (
             <span className="text-xs text-muted-foreground">
               {liveCacheFetchedAt
                 ? `Live data as of ${fmtTimeShort(liveCacheFetchedAt)}`
@@ -468,6 +496,7 @@ export function PositionsView() {
               ({group.contractCount} {group.contractCount === 1 ? "contract" : "contracts"})
             </span>
           </div>
+          <PositionsTableHeader />
           {group.items.map((p) => (
             <PositionCard
               key={p.id}
@@ -520,6 +549,7 @@ export function PositionsView() {
                       ({group.items.length} {group.items.length === 1 ? "position" : "positions"})
                     </span>
                   </div>
+                  <PositionsTableHeader />
                   {group.items.map((p) => (
                     <PositionCard key={p.id} kind="closed" position={p} />
                   ))}
