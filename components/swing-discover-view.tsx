@@ -4,13 +4,18 @@ import { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
-  ChevronDown,
-  ChevronUp,
   Loader2,
   Plus,
   RefreshCw,
+  Telescope,
+  X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 type Category = "momentum" | "recovery" | "theme" | "social";
 
@@ -101,6 +106,26 @@ function categoryAccentClasses(cat: Category): string {
   return "border-border bg-zinc-900/60";
 }
 
+// Pill colors for the category-source badge — matches the spec
+// (momentum=blue, recovery=emerald, theme=orange, social=violet so
+// the inline pill agrees with the social card's accent border).
+function categoryBadgeClasses(cat: Category): string {
+  if (cat === "momentum")
+    return "bg-blue-500/20 text-blue-400 border-blue-500/40";
+  if (cat === "recovery")
+    return "bg-emerald-500/20 text-emerald-400 border-emerald-500/40";
+  if (cat === "theme")
+    return "bg-orange-500/20 text-orange-400 border-orange-500/40";
+  return "bg-violet-500/20 text-violet-300 border-violet-500/40";
+}
+
+function categoryLabel(cat: Category): string {
+  if (cat === "momentum") return "MOMENTUM";
+  if (cat === "recovery") return "RECOVERY";
+  if (cat === "theme") return "THEME";
+  return "SOCIAL";
+}
+
 function timeframeLabel(tf: string): string {
   if (tf === "1month") return "1 month";
   if (tf === "3months") return "3 months";
@@ -131,12 +156,14 @@ export function SwingDiscoverView() {
   const [ideasSymbols, setIdeasSymbols] = useState<Set<string>>(new Set());
   const [adding, setAdding] = useState<Set<string>>(new Set());
 
-  // Deep-dive state — keyed by symbol so each card holds its own panel
-  // independently. `loading` is a Set of symbols currently being researched.
+  // Deep-dive state. The modal renders whichever symbol is "active" and
+  // looks up the cached payload (or shows a loading state if the fetch
+  // is still in flight). Cache is keyed by symbol so re-opening the same
+  // candidate is instant.
   const [deepDives, setDeepDives] = useState<Record<string, DeepDive>>({});
-  const [deepDiveOpen, setDeepDiveOpen] = useState<Set<string>>(new Set());
   const [deepDiveLoading, setDeepDiveLoading] = useState<Set<string>>(new Set());
   const [deepDiveError, setDeepDiveError] = useState<Record<string, string>>({});
+  const [activeDeepDive, setActiveDeepDive] = useState<Candidate | null>(null);
 
   async function loadLatest() {
     setLoading(true);
@@ -232,26 +259,13 @@ export function SwingDiscoverView() {
     }
   }
 
-  async function toggleDeepDive(c: Candidate) {
-    // Open ↔ close. If we already have the data cached, just open.
-    const isOpen = deepDiveOpen.has(c.symbol);
-    if (isOpen) {
-      setDeepDiveOpen((prev) => {
-        const next = new Set(prev);
-        next.delete(c.symbol);
-        return next;
-      });
-      return;
-    }
-
-    if (deepDives[c.symbol]) {
-      setDeepDiveOpen((prev) => {
-        const next = new Set(prev);
-        next.add(c.symbol);
-        return next;
-      });
-      return;
-    }
+  async function openDeepDive(c: Candidate) {
+    // Always show the modal immediately — if we have cached data the
+    // body renders instantly; otherwise the modal shows a spinner while
+    // the Perplexity call resolves.
+    setActiveDeepDive(c);
+    if (deepDives[c.symbol]) return;
+    if (deepDiveLoading.has(c.symbol)) return;
 
     setDeepDiveLoading((prev) => {
       const next = new Set(prev);
@@ -280,12 +294,10 @@ export function SwingDiscoverView() {
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
-      setDeepDives((prev) => ({ ...prev, [c.symbol]: json.deep_dive as DeepDive }));
-      setDeepDiveOpen((prev) => {
-        const next = new Set(prev);
-        next.add(c.symbol);
-        return next;
-      });
+      setDeepDives((prev) => ({
+        ...prev,
+        [c.symbol]: json.deep_dive as DeepDive,
+      }));
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Deep dive failed";
       setDeepDiveError((prev) => ({ ...prev, [c.symbol]: msg }));
@@ -296,6 +308,10 @@ export function SwingDiscoverView() {
         return next;
       });
     }
+  }
+
+  function closeDeepDive() {
+    setActiveDeepDive(null);
   }
 
   const buckets = useMemo(() => {
@@ -377,12 +393,9 @@ export function SwingDiscoverView() {
                     candidate={c}
                     inIdeas={ideasSymbols.has(c.symbol)}
                     adding={adding.has(c.symbol)}
-                    deepDive={deepDives[c.symbol] ?? null}
-                    deepDiveOpen={deepDiveOpen.has(c.symbol)}
                     deepDiveLoading={deepDiveLoading.has(c.symbol)}
-                    deepDiveError={deepDiveError[c.symbol] ?? null}
                     onAdd={() => addToIdeas(c)}
-                    onToggleDeepDive={() => toggleDeepDive(c)}
+                    onOpenDeepDive={() => openDeepDive(c)}
                   />
                 ))}
               </CardGrid>
@@ -398,12 +411,9 @@ export function SwingDiscoverView() {
                     candidate={c}
                     inIdeas={ideasSymbols.has(c.symbol)}
                     adding={adding.has(c.symbol)}
-                    deepDive={deepDives[c.symbol] ?? null}
-                    deepDiveOpen={deepDiveOpen.has(c.symbol)}
                     deepDiveLoading={deepDiveLoading.has(c.symbol)}
-                    deepDiveError={deepDiveError[c.symbol] ?? null}
                     onAdd={() => addToIdeas(c)}
-                    onToggleDeepDive={() => toggleDeepDive(c)}
+                    onOpenDeepDive={() => openDeepDive(c)}
                   />
                 ))}
               </CardGrid>
@@ -432,12 +442,9 @@ export function SwingDiscoverView() {
                           candidate={c}
                           inIdeas={ideasSymbols.has(c.symbol)}
                           adding={adding.has(c.symbol)}
-                          deepDive={deepDives[c.symbol] ?? null}
-                          deepDiveOpen={deepDiveOpen.has(c.symbol)}
                           deepDiveLoading={deepDiveLoading.has(c.symbol)}
-                          deepDiveError={deepDiveError[c.symbol] ?? null}
                           onAdd={() => addToIdeas(c)}
-                          onToggleDeepDive={() => toggleDeepDive(c)}
+                          onOpenDeepDive={() => openDeepDive(c)}
                         />
                       ))}
                     </CardGrid>
@@ -459,12 +466,9 @@ export function SwingDiscoverView() {
                     candidate={c}
                     inIdeas={ideasSymbols.has(c.symbol)}
                     adding={adding.has(c.symbol)}
-                    deepDive={deepDives[c.symbol] ?? null}
-                    deepDiveOpen={deepDiveOpen.has(c.symbol)}
                     deepDiveLoading={deepDiveLoading.has(c.symbol)}
-                    deepDiveError={deepDiveError[c.symbol] ?? null}
                     onAdd={() => addToIdeas(c)}
-                    onToggleDeepDive={() => toggleDeepDive(c)}
+                    onOpenDeepDive={() => openDeepDive(c)}
                   />
                 ))}
               </CardGrid>
@@ -472,6 +476,23 @@ export function SwingDiscoverView() {
           )}
         </div>
       )}
+
+      <DeepDiveModal
+        candidate={activeDeepDive}
+        dive={activeDeepDive ? (deepDives[activeDeepDive.symbol] ?? null) : null}
+        loading={
+          activeDeepDive ? deepDiveLoading.has(activeDeepDive.symbol) : false
+        }
+        error={
+          activeDeepDive ? (deepDiveError[activeDeepDive.symbol] ?? null) : null
+        }
+        inIdeas={
+          activeDeepDive ? ideasSymbols.has(activeDeepDive.symbol) : false
+        }
+        adding={activeDeepDive ? adding.has(activeDeepDive.symbol) : false}
+        onAdd={() => activeDeepDive && addToIdeas(activeDeepDive)}
+        onClose={closeDeepDive}
+      />
     </div>
   );
 }
@@ -510,22 +531,16 @@ function CandidateCard({
   candidate: c,
   inIdeas,
   adding,
-  deepDive,
-  deepDiveOpen,
   deepDiveLoading,
-  deepDiveError,
   onAdd,
-  onToggleDeepDive,
+  onOpenDeepDive,
 }: {
   candidate: Candidate;
   inIdeas: boolean;
   adding: boolean;
-  deepDive: DeepDive | null;
-  deepDiveOpen: boolean;
   deepDiveLoading: boolean;
-  deepDiveError: string | null;
   onAdd: () => void;
-  onToggleDeepDive: () => void;
+  onOpenDeepDive: () => void;
 }) {
   let pctOfRange: number | null = null;
   if (
@@ -561,6 +576,16 @@ function CandidateCard({
           {c.symbol}
         </span>
         <div className="flex items-center gap-1">
+          <span
+            className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase ${categoryBadgeClasses(c.category)}`}
+            title={
+              c.category === "theme" && c.theme
+                ? `Theme: ${c.theme}`
+                : undefined
+            }
+          >
+            {categoryLabel(c.category)}
+          </span>
           <span
             className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase ${confidenceClasses(c.confidence)}`}
           >
@@ -683,152 +708,246 @@ function CandidateCard({
         </div>
         <button
           type="button"
-          onClick={onToggleDeepDive}
-          disabled={deepDiveLoading}
-          className="flex w-full items-center justify-center gap-1 rounded border border-border py-1 text-[11px] text-muted-foreground hover:bg-white/5 hover:text-foreground disabled:opacity-50"
+          onClick={onOpenDeepDive}
+          className="flex w-full items-center justify-center gap-1 rounded border border-border py-1 text-[11px] text-muted-foreground hover:bg-white/5 hover:text-foreground"
         >
           {deepDiveLoading ? (
             <>
               <Loader2 className="h-3 w-3 animate-spin" />
               Researching…
             </>
-          ) : deepDiveOpen ? (
-            <>
-              <ChevronUp className="h-3 w-3" />
-              Collapse
-            </>
           ) : (
             <>
-              <ChevronDown className="h-3 w-3" />
+              <Telescope className="h-3 w-3" />
               Deep Dive
             </>
           )}
         </button>
-        {deepDiveError && (
-          <div className="rounded border border-rose-500/40 bg-rose-500/10 p-1.5 text-[10px] text-rose-300">
-            {deepDiveError}
-          </div>
-        )}
       </div>
-
-      {deepDiveOpen && deepDive && (
-        <DeepDivePanel
-          dive={deepDive}
-          inIdeas={inIdeas}
-          adding={adding}
-          onAdd={onAdd}
-          onCollapse={onToggleDeepDive}
-        />
-      )}
     </div>
   );
 }
 
-function DeepDivePanel({
+function DeepDiveModal({
+  candidate: c,
   dive,
+  loading,
+  error,
   inIdeas,
   adding,
   onAdd,
-  onCollapse,
+  onClose,
 }: {
-  dive: DeepDive;
+  candidate: Candidate | null;
+  dive: DeepDive | null;
+  loading: boolean;
+  error: string | null;
   inIdeas: boolean;
   adding: boolean;
   onAdd: () => void;
-  onCollapse: () => void;
+  onClose: () => void;
 }) {
+  const open = c !== null;
+  const changeColor =
+    !c || c.price_change_pct === null
+      ? "text-muted-foreground"
+      : c.price_change_pct >= 0
+        ? "text-emerald-300"
+        : "text-rose-300";
+
   return (
-    <div className="mt-3 space-y-3 rounded-md border border-border bg-background/60 p-3 text-[11px]">
-      <DeepSection title="📰 Recent news">
-        <p className="text-foreground/90">{dive.recent_news}</p>
-      </DeepSection>
-
-      <DeepSection title="💰 Fundamental health">
-        <p className="text-foreground/90">{dive.fundamental_health}</p>
-      </DeepSection>
-
-      <DeepSection title="⚡ Catalyst">
-        <div className="mb-1 flex flex-wrap gap-2 text-[10px]">
-          <span className="text-muted-foreground">
-            Credibility:{" "}
-            <span className="font-medium uppercase text-foreground">
-              {dive.catalyst_credibility}
-            </span>
-          </span>
-          <span className="text-muted-foreground">
-            Timeline:{" "}
-            <span className="text-foreground">{dive.catalyst_timeline}</span>
-          </span>
-        </div>
-      </DeepSection>
-
-      <DeepSection title="👥 Sentiment">
-        <div className="flex flex-wrap gap-3 text-[10px]">
-          <span className="text-muted-foreground">
-            Retail:{" "}
-            <span className="font-medium capitalize text-foreground">
-              {dive.retail_sentiment}
-            </span>
-          </span>
-          <span className="text-muted-foreground">
-            Institutional:{" "}
-            <span className="font-medium capitalize text-foreground">
-              {dive.institutional_activity}
-            </span>
-          </span>
-        </div>
-      </DeepSection>
-
-      <DeepSection title="📊 Technical setup">
-        <div className="text-foreground/90">
-          {technicalLabel(dive.technical_setup)}
-        </div>
-        {dive.entry_comment && (
-          <div className="mt-1 text-muted-foreground">{dive.entry_comment}</div>
-        )}
-      </DeepSection>
-
-      {dive.bear_case.length > 0 && (
-        <DeepSection title="⚠ Bear case">
-          <ul className="list-disc space-y-0.5 pl-4 text-foreground/90">
-            {dive.bear_case.map((r, i) => (
-              <li key={i}>{r}</li>
-            ))}
-          </ul>
-        </DeepSection>
-      )}
-
-      <div className={`rounded border p-2 ${verdictClasses(dive.verdict)}`}>
-        <div className="text-[10px] font-semibold uppercase tracking-wider">
-          Verdict: {dive.verdict} priority
-        </div>
-        {dive.verdict_reasoning && (
-          <div className="mt-1 text-[11px]">{dive.verdict_reasoning}</div>
-        )}
-      </div>
-
-      <div className="flex items-center gap-1">
-        {!inIdeas && (
+    <Dialog
+      open={open}
+      onOpenChange={(v) => {
+        if (!v) onClose();
+      }}
+    >
+      <DialogContent className="flex max-h-[90vh] max-w-2xl flex-col gap-0 p-0">
+        {/* Header */}
+        <div className="flex items-start justify-between gap-3 border-b border-border px-4 pb-3 pt-4">
+          <div className="min-w-0 flex-1">
+            <DialogTitle className="flex flex-wrap items-baseline gap-2 text-base">
+              <span className="font-mono">{c?.symbol}</span>
+              {c?.company_name && (
+                <span className="truncate text-xs font-normal text-muted-foreground">
+                  — {c.company_name}
+                </span>
+              )}
+            </DialogTitle>
+            {c && (
+              <div className="mt-1 flex flex-wrap items-center gap-2 text-xs">
+                <span className="font-mono text-foreground">
+                  {fmtMoney(c.current_price)}
+                </span>
+                <span className={changeColor}>
+                  {c.price_change_pct !== null
+                    ? `${c.price_change_pct >= 0 ? "▲" : "▼"} ${fmtPct(c.price_change_pct, 2)}`
+                    : ""}
+                </span>
+                <span className="text-muted-foreground">|</span>
+                <span
+                  className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase ${categoryBadgeClasses(c.category)}`}
+                >
+                  {categoryLabel(c.category)}
+                </span>
+                <span
+                  className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase ${confidenceClasses(c.confidence)}`}
+                >
+                  {c.confidence}
+                </span>
+                <span
+                  className={`rounded border px-1.5 py-0.5 text-[10px] font-medium capitalize ${sentimentClasses(c.sentiment)}`}
+                >
+                  {c.sentiment}
+                </span>
+              </div>
+            )}
+          </div>
           <button
             type="button"
-            onClick={onAdd}
-            disabled={adding}
-            className="flex flex-1 items-center justify-center gap-1 rounded border border-border bg-white/5 py-1.5 text-[11px] font-medium text-foreground hover:bg-white/10 disabled:opacity-50"
+            onClick={onClose}
+            className="rounded p-1 text-muted-foreground hover:bg-white/5 hover:text-foreground"
+            aria-label="Close"
           >
-            <Plus className="h-3 w-3" />
-            Add to Ideas
+            <X className="h-4 w-4" />
           </button>
-        )}
-        <button
-          type="button"
-          onClick={onCollapse}
-          className="flex items-center justify-center gap-1 rounded border border-border px-3 py-1.5 text-[11px] text-muted-foreground hover:bg-white/5 hover:text-foreground"
-        >
-          <ChevronUp className="h-3 w-3" />
-          Collapse
-        </button>
-      </div>
-    </div>
+        </div>
+
+        {/* Body — scrollable */}
+        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 text-xs">
+          {loading && !dive && (
+            <div className="flex flex-col items-center justify-center gap-2 py-12 text-sm text-muted-foreground">
+              <Loader2 className="h-6 w-6 animate-spin" />
+              <span>Researching {c?.symbol ?? ""}…</span>
+              <span className="text-[11px]">
+                Pulling recent news, fundamentals, sentiment, and bear case
+              </span>
+            </div>
+          )}
+
+          {!loading && !dive && error && (
+            <div className="rounded border border-rose-500/40 bg-rose-500/10 p-3 text-xs text-rose-300">
+              {error}
+            </div>
+          )}
+
+          {dive && (
+            <div className="space-y-4">
+              <DeepSection title="📰 Recent news">
+                <p className="text-foreground/90">{dive.recent_news}</p>
+              </DeepSection>
+
+              <DeepSection title="💰 Fundamental health">
+                <p className="text-foreground/90">{dive.fundamental_health}</p>
+              </DeepSection>
+
+              <DeepSection title="⚡ Catalyst">
+                <div className="mb-1 flex flex-wrap gap-3 text-[11px]">
+                  <span className="text-muted-foreground">
+                    Credibility:{" "}
+                    <span className="font-medium uppercase text-foreground">
+                      {dive.catalyst_credibility}
+                    </span>
+                  </span>
+                  <span className="text-muted-foreground">
+                    Timeline:{" "}
+                    <span className="text-foreground">
+                      {dive.catalyst_timeline}
+                    </span>
+                  </span>
+                </div>
+                {c?.catalyst && (
+                  <div className="text-foreground/90">&ldquo;{c.catalyst}&rdquo;</div>
+                )}
+              </DeepSection>
+
+              <DeepSection title="👥 Sentiment">
+                <div className="flex flex-wrap gap-4 text-[11px]">
+                  <span className="text-muted-foreground">
+                    Retail:{" "}
+                    <span className="font-medium capitalize text-foreground">
+                      {dive.retail_sentiment}
+                    </span>
+                  </span>
+                  <span className="text-muted-foreground">
+                    Institutional:{" "}
+                    <span className="font-medium capitalize text-foreground">
+                      {dive.institutional_activity}
+                    </span>
+                  </span>
+                </div>
+              </DeepSection>
+
+              <DeepSection title="📊 Technical setup">
+                <div className="text-foreground/90">
+                  {technicalLabel(dive.technical_setup)}
+                </div>
+                {dive.entry_comment && (
+                  <div className="mt-1 text-muted-foreground">
+                    {dive.entry_comment}
+                  </div>
+                )}
+              </DeepSection>
+
+              {dive.bear_case.length > 0 && (
+                <DeepSection title="⚠ Bear case">
+                  <ul className="list-disc space-y-0.5 pl-4 text-foreground/90">
+                    {dive.bear_case.map((r, i) => (
+                      <li key={i}>{r}</li>
+                    ))}
+                  </ul>
+                </DeepSection>
+              )}
+
+              <div
+                className={`rounded border p-3 ${verdictClasses(dive.verdict)}`}
+              >
+                <div className="text-[11px] font-semibold uppercase tracking-wider">
+                  Verdict: {dive.verdict} priority
+                </div>
+                {dive.verdict_reasoning && (
+                  <div className="mt-1 text-xs">{dive.verdict_reasoning}</div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Footer — sticky */}
+        <div className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
+          {!inIdeas && c && (
+            <Button
+              onClick={onAdd}
+              disabled={adding}
+              variant="outline"
+              size="sm"
+            >
+              {adding ? (
+                <>
+                  <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                  Adding…
+                </>
+              ) : (
+                <>
+                  <Plus className="mr-1 h-3 w-3" />
+                  Add to Ideas
+                </>
+              )}
+            </Button>
+          )}
+          {inIdeas && (
+            <span className="flex items-center gap-1 rounded border border-emerald-500/40 bg-emerald-500/10 px-2 py-1 text-[11px] text-emerald-300">
+              <CheckCircle2 className="h-3 w-3" />
+              Already in Ideas
+            </span>
+          )}
+          <Button onClick={onClose} variant="ghost" size="sm">
+            <X className="mr-1 h-3 w-3" />
+            Close
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
