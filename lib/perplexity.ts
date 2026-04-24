@@ -68,6 +68,64 @@ function coerceSentiment(v: unknown): PerplexitySentiment {
   return v === "positive" || v === "negative" ? v : "neutral";
 }
 
+// Generic single-turn Perplexity call. Returns the raw message content
+// as a string plus any citations. Callers parse the body themselves —
+// this keeps the helper shape-agnostic so a new feature can reuse it
+// without hacking in a bespoke parser. Unlike getEarningsNewsContext
+// there is no typed fallback: the caller decides what to do on failure.
+export async function askPerplexityRaw(
+  prompt: string,
+  opts?: { maxTokens?: number; label?: string },
+): Promise<{ text: string; citations: string[] } | null> {
+  const label = opts?.label ?? "pplx";
+  if (!PERPLEXITY_API_KEY) {
+    console.warn(`[perplexity] ${label}: PERPLEXITY_API_KEY not set`);
+    return null;
+  }
+  const body = JSON.stringify({
+    model: "sonar",
+    messages: [{ role: "user", content: prompt }],
+    max_tokens: opts?.maxTokens ?? 1500,
+    temperature: 0,
+  });
+  let res: Response;
+  try {
+    res = await fetch(PERPLEXITY_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${PERPLEXITY_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body,
+      cache: "no-store",
+    });
+  } catch (e) {
+    console.warn(
+      `[perplexity] ${label} network error: ${e instanceof Error ? e.message : e}`,
+    );
+    return null;
+  }
+  if (!res.ok) {
+    const errText = await res.text();
+    console.warn(`[perplexity] ${label} HTTP ${res.status}: ${errText.slice(0, 300)}`);
+    return null;
+  }
+  let json: {
+    choices?: Array<{ message?: { content?: string } }>;
+    citations?: string[];
+  };
+  try {
+    json = (await res.json()) as typeof json;
+  } catch {
+    return null;
+  }
+  const text = json.choices?.[0]?.message?.content ?? "";
+  const citations = Array.isArray(json.citations)
+    ? json.citations.filter((x): x is string => typeof x === "string")
+    : [];
+  return { text, citations };
+}
+
 export async function getEarningsNewsContext(
   symbol: string,
   companyName: string,

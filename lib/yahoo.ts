@@ -137,6 +137,36 @@ async function quoteMinimal(symbol: string): Promise<MinimalQuote | null> {
   };
 }
 
+// ---------- Multi-field quote enrichment (swing discover) ----------
+
+export type QuoteEnrichment = {
+  regularMarketPrice: number | null;
+  fiftyTwoWeekLow: number | null;
+  fiftyTwoWeekHigh: number | null;
+  forwardPE: number | null;
+  targetMeanPrice: number | null;
+  regularMarketChangePercent: number | null;
+};
+
+// Single quote pull for the swing discover flow — price + 52-week range
+// + fundamentals + today's change %. Yahoo exposes all of these on the
+// default v7 quote payload, so one call is enough. Returns null on
+// failure; callers decide whether to skip the symbol or render a stub.
+export async function getQuoteEnrichment(
+  symbol: string,
+): Promise<QuoteEnrichment | null> {
+  const record = await quoteRaw(symbol);
+  if (!record) return null;
+  return {
+    regularMarketPrice: pickNumber(record, "regularMarketPrice"),
+    fiftyTwoWeekLow: pickNumber(record, "fiftyTwoWeekLow"),
+    fiftyTwoWeekHigh: pickNumber(record, "fiftyTwoWeekHigh"),
+    forwardPE: pickNumber(record, "forwardPE"),
+    targetMeanPrice: pickNumber(record, "targetMeanPrice"),
+    regularMarketChangePercent: pickNumber(record, "regularMarketChangePercent"),
+  };
+}
+
 export async function getCurrentPrice(symbol: string): Promise<number | null> {
   try {
     const record = await quoteRaw(symbol);
