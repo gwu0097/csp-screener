@@ -179,16 +179,70 @@ function fmt50dMA(pct: number | null): { text: string; cls: string } | null {
   return { text: `${sign}${pct.toFixed(0)}% vs 50d MA`, cls };
 }
 
-// Extract a clean display domain from a full URL. Returns the URL itself
-// if the parse fails so the user still gets a clickable string instead
-// of a blank chip.
-function domainOf(url: string): string {
+// Extract a clean display domain from a full URL. Returns the input
+// string if the parse fails so we still render *something* clickable
+// instead of crashing the page. Perplexity occasionally returns
+// non-URL strings (raw page titles, "indeed.com" without a scheme,
+// etc.) and `new URL()` throws on those.
+function domainOf(url: unknown): string {
+  if (typeof url !== "string" || url.length === 0) return "source";
   try {
-    const u = new URL(url);
-    return u.hostname.replace(/^www\./, "");
+    return new URL(url).hostname.replace(/^www\./, "");
   } catch {
     return url;
   }
+}
+
+// Defensive normalizer for candidates loaded from the API. Earlier
+// scans persisted to swing_scan_results don't have the newer fields
+// (signal_basis, sources, market_cap_category, vs_50d_ma_pct,
+// company_name); rendering against undefined would throw on the
+// first .length / .slice / .map call. Run every payload through here
+// at the boundary so the rest of the view can rely on the type.
+function normalizeCandidate(raw: unknown): Candidate {
+  const r = (raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {});
+  const cat = r.category;
+  const category: Category =
+    cat === "momentum" || cat === "recovery" || cat === "theme" || cat === "social"
+      ? cat
+      : "momentum";
+  const sources = Array.isArray(r.sources)
+    ? (r.sources as unknown[]).filter((s): s is string => typeof s === "string")
+    : [];
+  const num = (v: unknown): number | null =>
+    typeof v === "number" && Number.isFinite(v) ? v : null;
+  const str = (v: unknown): string => (typeof v === "string" ? v : "");
+  const mcc = r.market_cap_category;
+  const market_cap_category: MarketCapCategory =
+    mcc === "large" || mcc === "mid" || mcc === "small" ? mcc : null;
+  return {
+    symbol: str(r.symbol).toUpperCase(),
+    catalyst: str(r.catalyst),
+    sentiment: str(r.sentiment),
+    timeframe: str(r.timeframe),
+    thesis: str(r.thesis),
+    confidence: str(r.confidence),
+    risk: str(r.risk),
+    signal_basis: str(r.signal_basis),
+    sources,
+    category,
+    theme: typeof r.theme === "string" ? r.theme : null,
+    theme_momentum:
+      typeof r.theme_momentum === "string" ? r.theme_momentum : null,
+    company_name: typeof r.company_name === "string" ? r.company_name : null,
+    current_price: num(r.current_price),
+    week_52_low: num(r.week_52_low),
+    week_52_high: num(r.week_52_high),
+    forward_pe: num(r.forward_pe),
+    analyst_target: num(r.analyst_target),
+    price_change_pct: num(r.price_change_pct),
+    pct_from_52w_high: num(r.pct_from_52w_high),
+    upside_to_target: num(r.upside_to_target),
+    fifty_day_ma: num(r.fifty_day_ma),
+    vs_50d_ma_pct: num(r.vs_50d_ma_pct),
+    market_cap: num(r.market_cap),
+    market_cap_category,
+  };
 }
 
 function timeframeLabel(tf: string): string {
@@ -236,7 +290,8 @@ export function SwingDiscoverView() {
       const res = await fetch("/api/swings/discover", { cache: "no-store" });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
-      setCandidates((json.candidates ?? []) as Candidate[]);
+      const raw = Array.isArray(json.candidates) ? json.candidates : [];
+      setCandidates(raw.map(normalizeCandidate));
       setScannedAt(json.scanned_at ?? null);
     } catch (e) {
       console.warn("[swing-discover] load failed:", e);
@@ -275,7 +330,8 @@ export function SwingDiscoverView() {
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
-      setCandidates((json.candidates ?? []) as Candidate[]);
+      const raw = Array.isArray(json.candidates) ? json.candidates : [];
+      setCandidates(raw.map(normalizeCandidate));
       setScannedAt(json.scanned_at ?? new Date().toISOString());
     } catch (e) {
       setError(e instanceof Error ? e.message : "Scan failed");
