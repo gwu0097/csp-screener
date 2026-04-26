@@ -1,11 +1,9 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
-  ChevronDown,
-  ChevronRight,
   ExternalLink,
   Info,
   Loader2,
@@ -961,7 +959,7 @@ function EmptyTab({ label }: { label: string }) {
 // to drop out of the grid on small screens, leaving the 6 visible cells
 // to fill the 6-column mobile template precisely.
 const ROW_GRID =
-  "grid w-full items-center gap-2 px-3 grid-cols-[24px_minmax(50px,1fr)_70px_60px_60px_minmax(70px,1fr)] md:grid-cols-[24px_80px_minmax(120px,1.5fr)_80px_70px_80px_80px_60px_minmax(100px,1fr)_70px_70px_70px_60px_140px]";
+  "grid w-full items-center gap-2 px-3 grid-cols-[minmax(50px,1fr)_70px_60px_60px_minmax(70px,1fr)] md:grid-cols-[minmax(60px,80px)_minmax(120px,2fr)_80px_70px_80px_80px_60px_60px_80px_80px_70px_130px]";
 
 type RowProps = {
   candidate: Candidate;
@@ -1006,7 +1004,6 @@ function CandidateTableHeader({
     <div
       className={`${ROW_GRID} border-b border-border/60 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground`}
     >
-      <div />
       <SortHeader label="Symbol" />
       <SortHeader label="Company" className="hidden md:block" />
       <SortHeader
@@ -1047,7 +1044,6 @@ function CandidateTableHeader({
         align="right"
         className="hidden md:block"
       />
-      <SortHeader label="Signal" className="hidden md:block" />
       <SortHeader label="Seen" className="hidden md:block" align="center" />
       <SortHeader
         label="Confidence"
@@ -1114,7 +1110,6 @@ function CandidateRow({
   onAdd,
   onOpenDeepDive,
 }: RowProps) {
-  const [expanded, setExpanded] = useState(false);
   const changeColor =
     c.price_change_pct === null
       ? "text-muted-foreground"
@@ -1126,68 +1121,43 @@ function CandidateRow({
   const accent = categoryAccentClasses(c.category);
 
   return (
-    <div
-      className={`overflow-hidden rounded-md border ${accent} ${expanded ? "border-foreground/20" : ""}`}
-    >
-      <button
-        type="button"
-        onClick={() => setExpanded((v) => !v)}
-        className={`${ROW_GRID} py-2 text-xs hover:bg-white/[0.02]`}
-      >
-        {/* 1. Chevron */}
-        <div className="flex h-4 w-4 items-center justify-center text-muted-foreground">
-          {expanded ? (
-            <ChevronDown className="h-3.5 w-3.5" />
-          ) : (
-            <ChevronRight className="h-3.5 w-3.5" />
-          )}
-        </div>
-        {/* 2. Symbol */}
+    <div className={`overflow-hidden rounded-md border ${accent}`}>
+      <div className={`${ROW_GRID} pt-2 text-xs`}>
+        {/* 1. Symbol */}
         <div className="truncate text-left font-mono text-sm font-semibold text-foreground">
           {c.symbol}
         </div>
-        {/* 3. Company — hidden on mobile */}
+        {/* 2. Company — hidden on mobile */}
         <div className="hidden truncate text-left text-[11px] text-muted-foreground md:block">
           {c.company_name ?? ""}
         </div>
-        {/* 4. Price */}
+        {/* 3. Price */}
         <div className="text-right font-mono text-foreground">
           {fmtMoney(c.current_price)}
         </div>
-        {/* 5. Chg% */}
+        {/* 4. Chg% */}
         <div className={`text-right ${changeColor}`}>
           {c.price_change_pct !== null
             ? `${c.price_change_pct >= 0 ? "▲" : "▼"}${Math.abs(c.price_change_pct).toFixed(2)}%`
             : "—"}
         </div>
-        {/* 6. From High — hidden mobile */}
+        {/* 5. From High — hidden mobile */}
         <div
           className={`hidden text-right md:block ${fromHigh ? fromHigh.cls : "text-muted-foreground"}`}
         >
           {fromHigh ? fromHigh.text : "—"}
         </div>
-        {/* 7. vs 50d MA — hidden mobile */}
+        {/* 6. vs 50d MA — hidden mobile */}
         <div
           className={`hidden text-right md:block ${ma50 ? ma50.cls : "text-muted-foreground"}`}
         >
           {ma50 ? ma50.text : "—"}
         </div>
-        {/* 8. Fwd P/E — hidden mobile */}
+        {/* 7. Fwd P/E — hidden mobile */}
         <div className="hidden text-right text-foreground md:block">
           {c.forward_pe !== null ? `${c.forward_pe.toFixed(1)}x` : "—"}
         </div>
-        {/* 9. Signal basis — hidden mobile */}
-        <div className="hidden truncate text-left text-foreground/90 md:block">
-          {c.signal_basis ? (
-            <span className="inline-flex items-center gap-1">
-              <Signal className="h-3 w-3 shrink-0 text-sky-300" />
-              <span className="truncate">{c.signal_basis}</span>
-            </span>
-          ) : (
-            <span className="text-muted-foreground">—</span>
-          )}
-        </div>
-        {/* 10. Seen — hidden mobile */}
+        {/* 8. Seen — hidden mobile */}
         <div className="hidden justify-center md:flex">
           <SeenBadge
             count={c.appearance_count}
@@ -1195,7 +1165,7 @@ function CandidateRow({
             category={c.category}
           />
         </div>
-        {/* 11. Confidence */}
+        {/* 9. Confidence */}
         <div className="flex justify-center">
           <span
             className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase ${confidenceClasses(c.confidence)}`}
@@ -1203,7 +1173,7 @@ function CandidateRow({
             {c.confidence}
           </span>
         </div>
-        {/* 12. Sentiment — hidden mobile */}
+        {/* 10. Sentiment — hidden mobile */}
         <div className="hidden justify-center md:flex">
           <span
             className={`rounded border px-1.5 py-0.5 text-[10px] font-medium capitalize ${sentimentClasses(c.sentiment)}`}
@@ -1211,7 +1181,7 @@ function CandidateRow({
             {c.sentiment}
           </span>
         </div>
-        {/* 13. Cap — hidden mobile */}
+        {/* 11. Cap — hidden mobile */}
         <div className="hidden justify-center md:flex">
           {c.market_cap_category ? (
             <span
@@ -1223,11 +1193,8 @@ function CandidateRow({
             <span className="text-muted-foreground">—</span>
           )}
         </div>
-        {/* 14. Actions */}
-        <div
-          className="flex items-center justify-end gap-1"
-          onClick={(e) => e.stopPropagation()}
-        >
+        {/* 12. Actions */}
+        <div className="flex items-center justify-end gap-1">
           <RowActions
             inIdeas={inIdeas}
             adding={adding}
@@ -1236,16 +1203,68 @@ function CandidateRow({
             onOpenDeepDive={onOpenDeepDive}
           />
         </div>
-      </button>
-      {expanded && (
-        <CandidateRowExpansion
-          candidate={c}
-          inIdeas={inIdeas}
-          adding={adding}
-          deepDiveLoading={deepDiveLoading}
-          onAdd={onAdd}
-          onOpenDeepDive={onOpenDeepDive}
-        />
+      </div>
+      <CandidateRowLine2 candidate={c} />
+    </div>
+  );
+}
+
+function CandidateRowLine2({ candidate: c }: { candidate: Candidate }) {
+  const items: React.ReactNode[] = [];
+  if (c.signal_basis) {
+    items.push(
+      <>
+        <Signal className="mr-1 inline h-3 w-3 align-text-bottom text-sky-300" />
+        {c.signal_basis}
+      </>,
+    );
+  }
+  if (c.catalyst) {
+    items.push(
+      <span className="italic">&ldquo;{c.catalyst}&rdquo;</span>,
+    );
+  }
+  if (c.timeframe) {
+    items.push(<>{timeframeLabel(c.timeframe)}</>);
+  }
+  if (c.risk) {
+    items.push(
+      <>
+        <AlertTriangle className="mr-1 inline h-3 w-3 align-text-bottom text-amber-400" />
+        {c.risk}
+      </>,
+    );
+  }
+
+  const hasSources = c.sources.length > 0;
+  if (items.length === 0 && !hasSources) return null;
+
+  return (
+    <div className="flex items-start gap-2 px-3 pb-2 pt-1 text-sm text-muted-foreground">
+      <div className="min-w-0 flex-1 line-clamp-2">
+        {items.map((item, i) => (
+          <Fragment key={i}>
+            {i > 0 && (
+              <span className="px-1.5 text-muted-foreground/60">·</span>
+            )}
+            {item}
+          </Fragment>
+        ))}
+      </div>
+      {hasSources && (
+        <div className="hidden shrink-0 flex-wrap items-center justify-end gap-1 md:flex">
+          {c.sources.slice(0, 3).map((src, i) => (
+            <a
+              key={i}
+              href={ensureHttp(src)}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="rounded border border-white/10 px-1.5 py-0 text-[10px] text-muted-foreground hover:border-white/30 hover:text-foreground"
+            >
+              {domainOf(src)}
+            </a>
+          ))}
+        </div>
       )}
     </div>
   );
@@ -1313,80 +1332,6 @@ function RowActions({
         <span>Dive</span>
       </button>
     </>
-  );
-}
-
-function CandidateRowExpansion({
-  candidate: c,
-  inIdeas,
-  adding,
-  deepDiveLoading,
-  onAdd,
-  onOpenDeepDive,
-}: {
-  candidate: Candidate;
-  inIdeas: boolean;
-  adding: boolean;
-  deepDiveLoading: boolean;
-  onAdd: () => void;
-  onOpenDeepDive: () => void;
-}) {
-  return (
-    <div className="border-t border-border/60 bg-background/40 px-3 py-3 text-xs">
-      {c.catalyst && (
-        <div className="mb-2 italic text-foreground/80">
-          &ldquo;{c.catalyst}&rdquo;
-        </div>
-      )}
-      {c.risk && (
-        <div className="mb-2 flex items-start gap-1 text-muted-foreground">
-          <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0 text-amber-400" />
-          <span>Risk: {c.risk}</span>
-        </div>
-      )}
-      <div className="mb-2 flex flex-wrap items-center gap-2 text-[11px]">
-        <span className="rounded bg-white/5 px-1.5 py-0.5 text-muted-foreground">
-          Timeframe: {timeframeLabel(c.timeframe)}
-        </span>
-        {c.category === "theme" && c.theme && (
-          <span className="rounded bg-white/5 px-1.5 py-0.5 text-muted-foreground">
-            Theme: {c.theme}
-          </span>
-        )}
-        <span
-          className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase ${categoryBadgeClasses(c.category)}`}
-        >
-          {categoryLabel(c.category)}
-        </span>
-      </div>
-      {c.sources.length > 0 && (
-        <div className="mb-3 flex flex-wrap items-center gap-1">
-          <span className="text-[10px] text-muted-foreground">Sources:</span>
-          {c.sources.slice(0, 5).map((src, i) => (
-            <a
-              key={i}
-              href={ensureHttp(src)}
-              target="_blank"
-              rel="noopener noreferrer"
-              onClick={(e) => e.stopPropagation()}
-              className="rounded border border-white/10 px-2 py-0.5 text-[10px] text-muted-foreground hover:border-white/30 hover:text-foreground"
-            >
-              {domainOf(src)}
-            </a>
-          ))}
-        </div>
-      )}
-      <div className="flex flex-wrap items-center gap-2">
-        <RowActions
-          inIdeas={inIdeas}
-          adding={adding}
-          deepDiveLoading={deepDiveLoading}
-          onAdd={onAdd}
-          onOpenDeepDive={onOpenDeepDive}
-          size="full"
-        />
-      </div>
-    </div>
   );
 }
 
