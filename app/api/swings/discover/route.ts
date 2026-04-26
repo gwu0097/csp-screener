@@ -421,6 +421,104 @@ async function persistCategoryRow(
   return null;
 }
 
+type SeenEntry = {
+  appearance_count: number;
+  first_seen_at: string;
+  last_seen_at: string;
+};
+
+// Load the last-30-days scan history aggregated by symbol+category.
+// Supabase doesn't expose GROUP BY directly through the PostgREST client,
+// so we pull the rows and reduce in memory. Volume is bounded by category
+// count × candidates per scan × scans/month — well under 50k rows.
+async function loadSeenMap(
+  sb: ReturnType<typeof createServerClient>,
+): Promise<Map<string, SeenEntry>> {
+  const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  const res = await sb
+    .from("swing_scan_history")
+    .select("symbol, category, scanned_at")
+    .gte("scanned_at", since);
+  if (res.error) {
+    console.warn(
+      `[swings/discover] scan history fetch: ${res.error.message}`,
+    );
+    return new Map();
+  }
+  const map = new Map<string, SeenEntry>();
+  const rows = (res.data ?? []) as Array<{
+    symbol: string;
+    category: string;
+    scanned_at: string;
+  }>;
+  for (const row of rows) {
+    const key = `${row.symbol}::${row.category}`;
+    const existing = map.get(key);
+    if (!existing) {
+      map.set(key, {
+        appearance_count: 1,
+        first_seen_at: row.scanned_at,
+        last_seen_at: row.scanned_at,
+      });
+    } else {
+      existing.appearance_count += 1;
+      if (row.scanned_at < existing.first_seen_at) {
+        existing.first_seen_at = row.scanned_at;
+      }
+      if (row.scanned_at > existing.last_seen_at) {
+        existing.last_seen_at = row.scanned_at;
+      }
+    }
+  }
+  return map;
+}
+
+type SeenAttached = EnrichedCandidate & {
+  appearance_count: number;
+  first_seen_at: string | null;
+  last_seen_at: string | null;
+};
+
+function attachSeen(
+  cands: EnrichedCandidate[],
+  cat: Category,
+  seenMap: Map<string, SeenEntry>,
+): SeenAttached[] {
+  return cands.map((c) => {
+    const entry = seenMap.get(`${c.symbol}::${cat}`);
+    return {
+      ...c,
+      appearance_count: entry?.appearance_count ?? 0,
+      first_seen_at: entry?.first_seen_at ?? null,
+      last_seen_at: entry?.last_seen_at ?? null,
+    };
+  });
+}
+
+// Append one row per candidate to the permanent scan history log.
+// Failure here is non-fatal — the SEEN indicator just won't update.
+async function appendScanHistory(
+  sb: ReturnType<typeof createServerClient>,
+  category: Category,
+  candidates: EnrichedCandidate[],
+  scannedAt: string,
+): Promise<void> {
+  if (candidates.length === 0) return;
+  const rows = candidates.map((c) => ({
+    symbol: c.symbol,
+    category,
+    scanned_at: scannedAt,
+    confidence: c.confidence || null,
+    signal_basis: c.signal_basis || null,
+  }));
+  const ins = await sb.from("swing_scan_history").insert(rows);
+  if (ins.error) {
+    console.warn(
+      `[swings/discover] scan history insert ${category}: ${ins.error.message}`,
+    );
+  }
+}
+
 // Wipe any pre-migration "all"-tagged rows so they don't shadow the new
 // per-category rows on subsequent reads. Called after a full scan.
 async function clearLegacyAllRow(
@@ -492,6 +590,7 @@ export async function POST(req: Request) {
     for (const cat of SCANNABLE) {
       const err = await persistCategoryRow(sb, cat, perCategory[cat], scannedAt);
       if (err) errors.push(err);
+      await appendScanHistory(sb, cat, perCategory[cat], scannedAt);
     }
     // Drop any pre-migration row tagged 'all' — its data is now split
     // into per-category rows and we don't want it to shadow them.
@@ -509,34 +608,46 @@ export async function POST(req: Request) {
     }
     const err = await persistCategoryRow(sb, requested, filtered, scannedAt);
     if (err) errors.push(err);
+    await appendScanHistory(sb, requested, filtered, scannedAt);
   }
 
   if (errors.length > 0) {
     console.warn(`[swings/discover] persist errors: ${errors.join("; ")}`);
   }
 
+  // Pull scan history once after the new rows have been written, so the
+  // returned candidates reflect their up-to-date appearance counts (the
+  // scan we just ran is included).
+  const seenMap = await loadSeenMap(sb);
+  const perCategorySeen: Record<Category, SeenAttached[]> = {
+    momentum: attachSeen(perCategory.momentum, "momentum", seenMap),
+    recovery: attachSeen(perCategory.recovery, "recovery", seenMap),
+    theme: attachSeen(perCategory.theme, "theme", seenMap),
+    social: attachSeen(perCategory.social, "social", seenMap),
+  };
+
   // Per-category response: each scanned slot gets the new scannedAt.
   const perCategoryResponse: Record<
     Category,
-    { candidates: EnrichedCandidate[]; scanned_at: string }
+    { candidates: SeenAttached[]; scanned_at: string }
   > = {} as Record<
     Category,
-    { candidates: EnrichedCandidate[]; scanned_at: string }
+    { candidates: SeenAttached[]; scanned_at: string }
   >;
   for (const cat of SCANNABLE) {
     if (requested === "all" || requested === cat) {
       perCategoryResponse[cat] = {
-        candidates: perCategory[cat],
+        candidates: perCategorySeen[cat],
         scanned_at: scannedAt,
       };
     }
   }
 
   // Flat candidates: union for "all", just the scanned category for partial.
-  const flat: EnrichedCandidate[] =
+  const flat: SeenAttached[] =
     requested === "all"
-      ? SCANNABLE.flatMap((c) => perCategory[c])
-      : perCategory[requested];
+      ? SCANNABLE.flatMap((c) => perCategorySeen[c])
+      : perCategorySeen[requested];
 
   return NextResponse.json({
     category: requested,
@@ -622,25 +733,30 @@ export async function GET() {
     }
   }
 
+  // Pull aggregated history before assembling the response so each
+  // candidate carries appearance_count / first_seen_at / last_seen_at.
+  const seenMap = await loadSeenMap(sb);
+
   // Build response.
   const perCategory: Record<
     Category,
-    { candidates: EnrichedCandidate[]; scanned_at: string | null }
+    { candidates: SeenAttached[]; scanned_at: string | null }
   > = {
     momentum: { candidates: [], scanned_at: null },
     recovery: { candidates: [], scanned_at: null },
     theme: { candidates: [], scanned_at: null },
     social: { candidates: [], scanned_at: null },
   };
-  const merged: EnrichedCandidate[] = [];
+  const merged: SeenAttached[] = [];
   const seen = new Set<string>();
   for (const cat of SCANNABLE) {
     const row = perCategoryRow[cat];
+    const attached = attachSeen(row?.candidates ?? [], cat, seenMap);
     perCategory[cat] = {
-      candidates: row?.candidates ?? [],
+      candidates: attached,
       scanned_at: row?.scanned_at ?? null,
     };
-    for (const c of row?.candidates ?? []) {
+    for (const c of attached) {
       if (seen.has(c.symbol)) continue;
       seen.add(c.symbol);
       merged.push(c);

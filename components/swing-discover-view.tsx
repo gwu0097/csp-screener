@@ -4,6 +4,8 @@ import { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   ExternalLink,
   Info,
   Loader2,
@@ -51,6 +53,9 @@ type Candidate = {
   vs_50d_ma_pct: number | null;
   market_cap: number | null;
   market_cap_category: MarketCapCategory;
+  appearance_count: number;
+  first_seen_at: string | null;
+  last_seen_at: string | null;
 };
 
 type DeepDive = {
@@ -190,31 +195,6 @@ function marketCapLabel(cat: MarketCapCategory): string {
   return "";
 }
 
-// "↓ 58% from high" — drop sign + magnitude. Returns colored output for
-// large drops (≥ 20% off) so recovery candidates pop. Returns "Near 52w
-// high" muted when the price is within 10% of the high. null in between
-// (don't render anything).
-function fmtFromHigh(pct: number | null): { text: string; cls: string } | null {
-  if (pct === null || !Number.isFinite(pct)) return null;
-  if (pct > -10) return { text: "Near 52w high", cls: "text-muted-foreground" };
-  if (pct < -20) {
-    const cls = pct < -40 ? "text-rose-300" : "text-amber-300";
-    return { text: `↓ ${Math.abs(pct).toFixed(0)}% from high`, cls };
-  }
-  // -20 ≤ pct ≤ -10 — show the number but in muted tone
-  return {
-    text: `↓ ${Math.abs(pct).toFixed(0)}% from high`,
-    cls: "text-muted-foreground",
-  };
-}
-
-function fmt50dMA(pct: number | null): { text: string; cls: string } | null {
-  if (pct === null || !Number.isFinite(pct)) return null;
-  const cls = pct >= 0 ? "text-emerald-300" : "text-rose-300";
-  const sign = pct >= 0 ? "+" : "";
-  return { text: `${sign}${pct.toFixed(0)}% vs 50d MA`, cls };
-}
-
 // Extract a clean display domain from a full URL. Returns the input
 // string if the parse fails so we still render *something* clickable
 // instead of crashing the page. Perplexity occasionally returns
@@ -259,6 +239,14 @@ function normalizeCandidate(raw: unknown): Candidate {
   const mcc = r.market_cap_category;
   const market_cap_category: MarketCapCategory =
     mcc === "large" || mcc === "mid" || mcc === "small" ? mcc : null;
+  const appearance_count =
+    typeof r.appearance_count === "number" && Number.isFinite(r.appearance_count)
+      ? r.appearance_count
+      : 0;
+  const first_seen_at =
+    typeof r.first_seen_at === "string" ? r.first_seen_at : null;
+  const last_seen_at =
+    typeof r.last_seen_at === "string" ? r.last_seen_at : null;
   return {
     symbol: str(r.symbol).toUpperCase(),
     catalyst: str(r.catalyst),
@@ -286,6 +274,9 @@ function normalizeCandidate(raw: unknown): Candidate {
     vs_50d_ma_pct: num(r.vs_50d_ma_pct),
     market_cap: num(r.market_cap),
     market_cap_category,
+    appearance_count,
+    first_seen_at,
+    last_seen_at,
   };
 }
 
@@ -309,6 +300,54 @@ function technicalLabel(t: DeepDive["technical_setup"]): string {
   if (t === "oversold") return "Oversold";
   return "Extended";
 }
+
+// Sortable column keys. "confidence" uses an ordered HIGH > MEDIUM > LOW
+// scale; the rest sort by the underlying numeric field. Default is
+// confidence desc with a signal_basis alphabetical tiebreak.
+type SortKey =
+  | "current_price"
+  | "price_change_pct"
+  | "pct_from_52w_high"
+  | "vs_50d_ma_pct"
+  | "forward_pe"
+  | "confidence";
+type SortDir = "asc" | "desc";
+type SortState = { key: SortKey; dir: SortDir };
+
+const CONFIDENCE_RANK: Record<string, number> = { high: 3, medium: 2, low: 1 };
+
+function compareCandidates(
+  a: Candidate,
+  b: Candidate,
+  sort: SortState,
+): number {
+  const dirMul = sort.dir === "desc" ? -1 : 1;
+  if (sort.key === "confidence") {
+    const av = CONFIDENCE_RANK[a.confidence] ?? 0;
+    const bv = CONFIDENCE_RANK[b.confidence] ?? 0;
+    if (av !== bv) return (av - bv) * dirMul;
+    // Stable tiebreak — alphabetical by signal basis (always asc).
+    return (a.signal_basis || "").localeCompare(b.signal_basis || "");
+  }
+  const av = a[sort.key];
+  const bv = b[sort.key];
+  const aNull = av === null || !Number.isFinite(av);
+  const bNull = bv === null || !Number.isFinite(bv);
+  // Nulls always sort to the end regardless of direction.
+  if (aNull && bNull) return 0;
+  if (aNull) return 1;
+  if (bNull) return -1;
+  if (av === bv) {
+    return (a.signal_basis || "").localeCompare(b.signal_basis || "");
+  }
+  return (av - bv) * dirMul;
+}
+
+function sortCandidates(list: Candidate[], sort: SortState): Candidate[] {
+  return list.slice().sort((a, b) => compareCandidates(a, b, sort));
+}
+
+const DEFAULT_SORT: SortState = { key: "confidence", dir: "desc" };
 
 type CategoryBucket = { candidates: Candidate[]; scannedAt: string | null };
 type PerCategoryState = Record<Category, CategoryBucket>;
@@ -338,6 +377,19 @@ export function SwingDiscoverView() {
   const [error, setError] = useState<string | null>(null);
   const [ideasSymbols, setIdeasSymbols] = useState<Set<string>>(new Set());
   const [adding, setAdding] = useState<Set<string>>(new Set());
+  const [sort, setSort] = useState<SortState>(DEFAULT_SORT);
+  // Toggle sort direction on repeat clicks; switch keys reset to a sensible
+  // default for that column (asc for "from high" so most-beaten-down sit
+  // on top, desc otherwise — matches how the user thinks about each).
+  function handleHeaderClick(key: SortKey) {
+    setSort((prev) => {
+      if (prev.key === key) {
+        return { key, dir: prev.dir === "asc" ? "desc" : "asc" };
+      }
+      const dir: SortDir = key === "pct_from_52w_high" ? "asc" : "desc";
+      return { key, dir };
+    });
+  }
 
   // Deep-dive state. The modal renders whichever symbol is "active" and
   // looks up the cached payload (or shows a loading state if the fetch
@@ -715,17 +767,14 @@ export function SwingDiscoverView() {
         </div>
       ) : (
         (() => {
-          const renderCard = (c: Candidate) => (
-            <CandidateCard
-              key={c.symbol}
-              candidate={c}
-              inIdeas={ideasSymbols.has(c.symbol)}
-              adding={adding.has(c.symbol)}
-              deepDiveLoading={deepDiveLoading.has(c.symbol)}
-              onAdd={() => addToIdeas(c)}
-              onOpenDeepDive={() => openDeepDive(c)}
-            />
-          );
+          const rowProps = (c: Candidate) => ({
+            candidate: c,
+            inIdeas: ideasSymbols.has(c.symbol),
+            adding: adding.has(c.symbol),
+            deepDiveLoading: deepDiveLoading.has(c.symbol),
+            onAdd: () => addToIdeas(c),
+            onOpenDeepDive: () => openDeepDive(c),
+          });
           const counts = {
             all: candidates.length,
             momentum: buckets.momentum.length,
@@ -756,14 +805,24 @@ export function SwingDiscoverView() {
               </TabsList>
 
               <TabsContent value="all">
-                <CardGrid>{candidates.map(renderCard)}</CardGrid>
+                <CandidateTable
+                  candidates={sortCandidates(candidates, sort)}
+                  sort={sort}
+                  onSort={handleHeaderClick}
+                  rowProps={rowProps}
+                />
               </TabsContent>
 
               <TabsContent value="momentum">
                 {buckets.momentum.length === 0 ? (
                   <EmptyTab label="momentum candidates" />
                 ) : (
-                  <CardGrid>{buckets.momentum.map(renderCard)}</CardGrid>
+                  <CandidateTable
+                    candidates={sortCandidates(buckets.momentum, sort)}
+                    sort={sort}
+                    onSort={handleHeaderClick}
+                    rowProps={rowProps}
+                  />
                 )}
               </TabsContent>
 
@@ -771,7 +830,12 @@ export function SwingDiscoverView() {
                 {buckets.recovery.length === 0 ? (
                   <EmptyTab label="recovery candidates" />
                 ) : (
-                  <CardGrid>{buckets.recovery.map(renderCard)}</CardGrid>
+                  <CandidateTable
+                    candidates={sortCandidates(buckets.recovery, sort)}
+                    sort={sort}
+                    onSort={handleHeaderClick}
+                    rowProps={rowProps}
+                  />
                 )}
               </TabsContent>
 
@@ -792,7 +856,12 @@ export function SwingDiscoverView() {
                             </span>
                           )}
                         </div>
-                        <CardGrid>{group.items.map(renderCard)}</CardGrid>
+                        <CandidateTable
+                          candidates={sortCandidates(group.items, sort)}
+                          sort={sort}
+                          onSort={handleHeaderClick}
+                          rowProps={rowProps}
+                        />
                       </div>
                     ))}
                   </div>
@@ -816,7 +885,12 @@ export function SwingDiscoverView() {
                       What retail traders and financial communities are talking
                       about — ahead of analyst consensus
                     </p>
-                    <CardGrid>{buckets.social.map(renderCard)}</CardGrid>
+                    <CandidateTable
+                      candidates={sortCandidates(buckets.social, sort)}
+                      sort={sort}
+                      onSort={handleHeaderClick}
+                      rowProps={rowProps}
+                    />
                   </>
                 )}
               </TabsContent>
@@ -882,13 +956,367 @@ function EmptyTab({ label }: { label: string }) {
   );
 }
 
-function CardGrid({ children }: { children: React.ReactNode }) {
+// 14-column desktop grid + a 6-column mobile grid. Cells in the JSX flow
+// in desktop order; mobile-only cells get `hidden md:block` (or similar)
+// to drop out of the grid on small screens, leaving the 6 visible cells
+// to fill the 6-column mobile template precisely.
+const ROW_GRID =
+  "grid w-full items-center gap-2 px-3 grid-cols-[24px_minmax(50px,1fr)_70px_60px_60px_minmax(70px,1fr)] md:grid-cols-[24px_80px_minmax(120px,1.5fr)_80px_70px_80px_80px_60px_minmax(100px,1fr)_70px_70px_70px_60px_140px]";
+
+type RowProps = {
+  candidate: Candidate;
+  inIdeas: boolean;
+  adding: boolean;
+  deepDiveLoading: boolean;
+  onAdd: () => void;
+  onOpenDeepDive: () => void;
+};
+
+function CandidateTable({
+  candidates,
+  sort,
+  onSort,
+  rowProps,
+}: {
+  candidates: Candidate[];
+  sort: SortState;
+  onSort: (key: SortKey) => void;
+  rowProps: (c: Candidate) => RowProps;
+}) {
   return (
-    <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{children}</div>
+    <div className="space-y-1">
+      <CandidateTableHeader sort={sort} onSort={onSort} />
+      <div className="space-y-1">
+        {candidates.map((c) => (
+          <CandidateRow key={c.symbol} {...rowProps(c)} />
+        ))}
+      </div>
+    </div>
   );
 }
 
-function CandidateCard({
+function CandidateTableHeader({
+  sort,
+  onSort,
+}: {
+  sort: SortState;
+  onSort: (key: SortKey) => void;
+}) {
+  return (
+    <div
+      className={`${ROW_GRID} border-b border-border/60 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground`}
+    >
+      <div />
+      <SortHeader label="Symbol" />
+      <SortHeader label="Company" className="hidden md:block" />
+      <SortHeader
+        label="Price"
+        sortKey="current_price"
+        sort={sort}
+        onSort={onSort}
+        align="right"
+      />
+      <SortHeader
+        label="Chg %"
+        sortKey="price_change_pct"
+        sort={sort}
+        onSort={onSort}
+        align="right"
+      />
+      <SortHeader
+        label="From High"
+        sortKey="pct_from_52w_high"
+        sort={sort}
+        onSort={onSort}
+        align="right"
+        className="hidden md:block"
+      />
+      <SortHeader
+        label="vs 50d MA"
+        sortKey="vs_50d_ma_pct"
+        sort={sort}
+        onSort={onSort}
+        align="right"
+        className="hidden md:block"
+      />
+      <SortHeader
+        label="Fwd P/E"
+        sortKey="forward_pe"
+        sort={sort}
+        onSort={onSort}
+        align="right"
+        className="hidden md:block"
+      />
+      <SortHeader label="Signal" className="hidden md:block" />
+      <SortHeader label="Seen" className="hidden md:block" align="center" />
+      <SortHeader
+        label="Confidence"
+        sortKey="confidence"
+        sort={sort}
+        onSort={onSort}
+        align="center"
+      />
+      <SortHeader
+        label="Sentiment"
+        className="hidden md:block"
+        align="center"
+      />
+      <SortHeader label="Cap" className="hidden md:block" align="center" />
+      <SortHeader label="Actions" align="right" />
+    </div>
+  );
+}
+
+function SortHeader({
+  label,
+  sortKey,
+  sort,
+  onSort,
+  className = "",
+  align = "left",
+}: {
+  label: string;
+  sortKey?: SortKey;
+  sort?: SortState;
+  onSort?: (key: SortKey) => void;
+  className?: string;
+  align?: "left" | "right" | "center";
+}) {
+  const alignCls =
+    align === "right"
+      ? "justify-end text-right"
+      : align === "center"
+        ? "justify-center text-center"
+        : "justify-start text-left";
+  const isActive = !!sortKey && sort?.key === sortKey;
+  if (!sortKey) {
+    return <div className={`flex ${alignCls} ${className}`}>{label}</div>;
+  }
+  return (
+    <button
+      type="button"
+      onClick={() => onSort?.(sortKey)}
+      className={`flex items-center gap-0.5 ${alignCls} ${className} hover:text-foreground ${isActive ? "text-foreground" : ""}`}
+    >
+      <span>{label}</span>
+      {isActive && (
+        <span className="text-[9px]">{sort?.dir === "asc" ? "▲" : "▼"}</span>
+      )}
+    </button>
+  );
+}
+
+function CandidateRow({
+  candidate: c,
+  inIdeas,
+  adding,
+  deepDiveLoading,
+  onAdd,
+  onOpenDeepDive,
+}: RowProps) {
+  const [expanded, setExpanded] = useState(false);
+  const changeColor =
+    c.price_change_pct === null
+      ? "text-muted-foreground"
+      : c.price_change_pct >= 0
+        ? "text-emerald-300"
+        : "text-rose-300";
+  const fromHigh = fmtFromHighShort(c.pct_from_52w_high);
+  const ma50 = fmt50dMAShort(c.vs_50d_ma_pct);
+  const accent = categoryAccentClasses(c.category);
+
+  return (
+    <div
+      className={`overflow-hidden rounded-md border ${accent} ${expanded ? "border-foreground/20" : ""}`}
+    >
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        className={`${ROW_GRID} py-2 text-xs hover:bg-white/[0.02]`}
+      >
+        {/* 1. Chevron */}
+        <div className="flex h-4 w-4 items-center justify-center text-muted-foreground">
+          {expanded ? (
+            <ChevronDown className="h-3.5 w-3.5" />
+          ) : (
+            <ChevronRight className="h-3.5 w-3.5" />
+          )}
+        </div>
+        {/* 2. Symbol */}
+        <div className="truncate text-left font-mono text-sm font-semibold text-foreground">
+          {c.symbol}
+        </div>
+        {/* 3. Company — hidden on mobile */}
+        <div className="hidden truncate text-left text-[11px] text-muted-foreground md:block">
+          {c.company_name ?? ""}
+        </div>
+        {/* 4. Price */}
+        <div className="text-right font-mono text-foreground">
+          {fmtMoney(c.current_price)}
+        </div>
+        {/* 5. Chg% */}
+        <div className={`text-right ${changeColor}`}>
+          {c.price_change_pct !== null
+            ? `${c.price_change_pct >= 0 ? "▲" : "▼"}${Math.abs(c.price_change_pct).toFixed(2)}%`
+            : "—"}
+        </div>
+        {/* 6. From High — hidden mobile */}
+        <div
+          className={`hidden text-right md:block ${fromHigh ? fromHigh.cls : "text-muted-foreground"}`}
+        >
+          {fromHigh ? fromHigh.text : "—"}
+        </div>
+        {/* 7. vs 50d MA — hidden mobile */}
+        <div
+          className={`hidden text-right md:block ${ma50 ? ma50.cls : "text-muted-foreground"}`}
+        >
+          {ma50 ? ma50.text : "—"}
+        </div>
+        {/* 8. Fwd P/E — hidden mobile */}
+        <div className="hidden text-right text-foreground md:block">
+          {c.forward_pe !== null ? `${c.forward_pe.toFixed(1)}x` : "—"}
+        </div>
+        {/* 9. Signal basis — hidden mobile */}
+        <div className="hidden truncate text-left text-foreground/90 md:block">
+          {c.signal_basis ? (
+            <span className="inline-flex items-center gap-1">
+              <Signal className="h-3 w-3 shrink-0 text-sky-300" />
+              <span className="truncate">{c.signal_basis}</span>
+            </span>
+          ) : (
+            <span className="text-muted-foreground">—</span>
+          )}
+        </div>
+        {/* 10. Seen — hidden mobile */}
+        <div className="hidden justify-center md:flex">
+          <SeenBadge
+            count={c.appearance_count}
+            firstSeenAt={c.first_seen_at}
+            category={c.category}
+          />
+        </div>
+        {/* 11. Confidence */}
+        <div className="flex justify-center">
+          <span
+            className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase ${confidenceClasses(c.confidence)}`}
+          >
+            {c.confidence}
+          </span>
+        </div>
+        {/* 12. Sentiment — hidden mobile */}
+        <div className="hidden justify-center md:flex">
+          <span
+            className={`rounded border px-1.5 py-0.5 text-[10px] font-medium capitalize ${sentimentClasses(c.sentiment)}`}
+          >
+            {c.sentiment}
+          </span>
+        </div>
+        {/* 13. Cap — hidden mobile */}
+        <div className="hidden justify-center md:flex">
+          {c.market_cap_category ? (
+            <span
+              className={`rounded border px-1.5 py-0.5 text-[10px] font-medium ${marketCapPillClasses(c.market_cap_category)}`}
+            >
+              {marketCapLabel(c.market_cap_category)}
+            </span>
+          ) : (
+            <span className="text-muted-foreground">—</span>
+          )}
+        </div>
+        {/* 14. Actions */}
+        <div
+          className="flex items-center justify-end gap-1"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <RowActions
+            inIdeas={inIdeas}
+            adding={adding}
+            deepDiveLoading={deepDiveLoading}
+            onAdd={onAdd}
+            onOpenDeepDive={onOpenDeepDive}
+          />
+        </div>
+      </button>
+      {expanded && (
+        <CandidateRowExpansion
+          candidate={c}
+          inIdeas={inIdeas}
+          adding={adding}
+          deepDiveLoading={deepDiveLoading}
+          onAdd={onAdd}
+          onOpenDeepDive={onOpenDeepDive}
+        />
+      )}
+    </div>
+  );
+}
+
+function RowActions({
+  inIdeas,
+  adding,
+  deepDiveLoading,
+  onAdd,
+  onOpenDeepDive,
+  size = "compact",
+}: {
+  inIdeas: boolean;
+  adding: boolean;
+  deepDiveLoading: boolean;
+  onAdd: () => void;
+  onOpenDeepDive: () => void;
+  size?: "compact" | "full";
+}) {
+  const padding = size === "full" ? "px-2 py-1" : "px-1.5 py-0.5";
+  return (
+    <>
+      {inIdeas ? (
+        <span
+          className={`inline-flex items-center gap-1 rounded border border-emerald-500/40 bg-emerald-500/10 ${padding} text-[10px] font-medium text-emerald-300`}
+          title="Already in Ideas"
+        >
+          <CheckCircle2 className="h-3 w-3" />
+          {size === "full" ? "In Ideas" : "Ideas"}
+        </span>
+      ) : (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onAdd();
+          }}
+          disabled={adding}
+          className={`inline-flex items-center gap-1 rounded border border-border bg-white/5 ${padding} text-[10px] font-medium text-foreground hover:bg-white/10 disabled:opacity-50`}
+          title="Add to Ideas"
+        >
+          {adding ? (
+            <Loader2 className="h-3 w-3 animate-spin" />
+          ) : (
+            <Plus className="h-3 w-3" />
+          )}
+          <span>Ideas</span>
+        </button>
+      )}
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onOpenDeepDive();
+        }}
+        className={`inline-flex items-center gap-1 rounded border border-border ${padding} text-[10px] text-muted-foreground hover:bg-white/5 hover:text-foreground`}
+        title="Deep dive"
+      >
+        {deepDiveLoading ? (
+          <Loader2 className="h-3 w-3 animate-spin" />
+        ) : (
+          <Telescope className="h-3 w-3" />
+        )}
+        <span>Dive</span>
+      </button>
+    </>
+  );
+}
+
+function CandidateRowExpansion({
   candidate: c,
   inIdeas,
   adding,
@@ -903,244 +1331,138 @@ function CandidateCard({
   onAdd: () => void;
   onOpenDeepDive: () => void;
 }) {
-  let pctOfRange: number | null = null;
-  if (
-    c.current_price !== null &&
-    c.week_52_low !== null &&
-    c.week_52_high !== null &&
-    c.week_52_high > c.week_52_low
-  ) {
-    const raw =
-      ((c.current_price - c.week_52_low) / (c.week_52_high - c.week_52_low)) *
-      100;
-    pctOfRange = Math.max(0, Math.min(100, raw));
-  }
-  const changeColor =
-    c.price_change_pct === null
-      ? "text-muted-foreground"
-      : c.price_change_pct >= 0
-        ? "text-emerald-300"
-        : "text-rose-300";
-  const upsideColor =
-    c.upside_to_target === null
-      ? "text-muted-foreground"
-      : c.upside_to_target >= 0
-        ? "text-emerald-300"
-        : "text-rose-300";
-
   return (
-    <div
-      className={`flex flex-col rounded-md border p-3 text-xs ${categoryAccentClasses(c.category)}`}
-    >
-      <div className="mb-1 flex items-center justify-between gap-2">
-        <span className="font-mono text-base font-semibold text-foreground">
-          {c.symbol}
-        </span>
-        <div className="flex flex-wrap items-center justify-end gap-1">
-          <span
-            className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase ${categoryBadgeClasses(c.category)}`}
-            title={
-              c.category === "theme" && c.theme
-                ? `Theme: ${c.theme}`
-                : undefined
-            }
-          >
-            {categoryLabel(c.category)}
-          </span>
-          <span
-            className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase ${confidenceClasses(c.confidence)}`}
-          >
-            {c.confidence}
-          </span>
-          <span
-            className={`rounded border px-1.5 py-0.5 text-[10px] font-medium capitalize ${sentimentClasses(c.sentiment)}`}
-          >
-            {c.sentiment}
-          </span>
-          {c.market_cap_category && (
-            <span
-              className={`rounded border px-1.5 py-0.5 text-[10px] font-medium ${marketCapPillClasses(c.market_cap_category)}`}
-            >
-              {marketCapLabel(c.market_cap_category)}
-            </span>
-          )}
-        </div>
-      </div>
-
-      {c.company_name && (
-        <div className="mb-1 truncate text-[11px] text-muted-foreground">
-          {c.company_name}
-        </div>
-      )}
-
-      <div className="mb-2 flex items-baseline gap-2">
-        <span className="font-mono text-sm text-foreground">
-          {fmtMoney(c.current_price)}
-        </span>
-        <span className={`text-[11px] ${changeColor}`}>
-          {c.price_change_pct !== null
-            ? `${c.price_change_pct >= 0 ? "▲" : "▼"} ${fmtPct(c.price_change_pct, 2)} today`
-            : ""}
-        </span>
-      </div>
-
-      {pctOfRange !== null && (
-        <div className="mb-2">
-          <div className="flex justify-between text-[10px] text-muted-foreground">
-            <span>{fmtMoney(c.week_52_low)}</span>
-            <span>52w</span>
-            <span>{fmtMoney(c.week_52_high)}</span>
-          </div>
-          <div className="relative mt-1 h-1.5 rounded-full bg-white/5">
-            <div
-              className="absolute top-0 h-full rounded-full bg-gradient-to-r from-rose-500/60 via-amber-500/60 to-emerald-500/60"
-              style={{ width: `${pctOfRange}%` }}
-            />
-            <div
-              className="absolute -top-1 h-3.5 w-0.5 bg-foreground"
-              style={{ left: `calc(${pctOfRange}% - 1px)` }}
-            />
-          </div>
-        </div>
-      )}
-
-      {/* Contextual signals: distance from 52w high + position vs 50-day MA.
-          Both come from Yahoo enrichment; render whichever is available. */}
-      {(fmtFromHigh(c.pct_from_52w_high) || fmt50dMA(c.vs_50d_ma_pct)) && (
-        <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]">
-          {(() => {
-            const fh = fmtFromHigh(c.pct_from_52w_high);
-            return fh ? <span className={fh.cls}>{fh.text}</span> : null;
-          })()}
-          {(() => {
-            const ma = fmt50dMA(c.vs_50d_ma_pct);
-            return ma ? <span className={ma.cls}>{ma.text}</span> : null;
-          })()}
-        </div>
-      )}
-
-      <div className="mb-2 grid grid-cols-3 gap-1 text-[11px]">
-        <div>
-          <div className="text-muted-foreground">Fwd P/E</div>
-          <div className="text-foreground">
-            {c.forward_pe !== null ? `${c.forward_pe.toFixed(1)}x` : "—"}
-          </div>
-        </div>
-        <div>
-          <div className="text-muted-foreground">Target</div>
-          <div className="text-foreground">{fmtMoney(c.analyst_target)}</div>
-        </div>
-        <div>
-          <div className="text-muted-foreground">Upside</div>
-          <div className={upsideColor}>{fmtPct(c.upside_to_target, 0)}</div>
-        </div>
-      </div>
-
+    <div className="border-t border-border/60 bg-background/40 px-3 py-3 text-xs">
       {c.catalyst && (
-        <div className="mb-1 italic text-muted-foreground">
+        <div className="mb-2 italic text-foreground/80">
           &ldquo;{c.catalyst}&rdquo;
         </div>
       )}
-      <div className="mb-2 flex items-center gap-2">
-        <span className="rounded bg-white/5 px-1.5 py-0.5 text-[10px] text-muted-foreground">
-          Timeframe: {timeframeLabel(c.timeframe)}
-        </span>
-      </div>
-
       {c.risk && (
-        <div className="mb-3 flex items-start gap-1 text-[11px] text-muted-foreground">
+        <div className="mb-2 flex items-start gap-1 text-muted-foreground">
           <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0 text-amber-400" />
           <span>Risk: {c.risk}</span>
         </div>
       )}
-
-      {(c.signal_basis || c.sources.length > 0) && (
-        <div className="mb-3 space-y-1 text-[11px]">
-          <div className="flex items-center gap-1 text-muted-foreground">
-            <Signal className="h-3 w-3 shrink-0 text-sky-300" />
-            <span className="text-foreground/90">
-              {c.signal_basis || "Signal source"}
-            </span>
-            {c.sources.length > 0 && (
-              <>
-                <span className="text-muted-foreground/60">•</span>
-                <span>
-                  {c.sources.length}{" "}
-                  {c.sources.length === 1 ? "source" : "sources"}
-                </span>
-              </>
-            )}
-          </div>
-          {c.sources.length > 0 && (
-            <div className="flex flex-wrap gap-1">
-              {c.sources.slice(0, 3).map((src, i) => (
-                <a
-                  key={i}
-                  href={ensureHttp(src)}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  onClick={(e) => e.stopPropagation()}
-                  className="rounded border border-white/10 px-2 py-0.5 text-[10px] text-muted-foreground hover:border-white/30 hover:text-foreground"
-                >
-                  {domainOf(src)}
-                </a>
-              ))}
-            </div>
-          )}
+      <div className="mb-2 flex flex-wrap items-center gap-2 text-[11px]">
+        <span className="rounded bg-white/5 px-1.5 py-0.5 text-muted-foreground">
+          Timeframe: {timeframeLabel(c.timeframe)}
+        </span>
+        {c.category === "theme" && c.theme && (
+          <span className="rounded bg-white/5 px-1.5 py-0.5 text-muted-foreground">
+            Theme: {c.theme}
+          </span>
+        )}
+        <span
+          className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase ${categoryBadgeClasses(c.category)}`}
+        >
+          {categoryLabel(c.category)}
+        </span>
+      </div>
+      {c.sources.length > 0 && (
+        <div className="mb-3 flex flex-wrap items-center gap-1">
+          <span className="text-[10px] text-muted-foreground">Sources:</span>
+          {c.sources.slice(0, 5).map((src, i) => (
+            <a
+              key={i}
+              href={ensureHttp(src)}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(e) => e.stopPropagation()}
+              className="rounded border border-white/10 px-2 py-0.5 text-[10px] text-muted-foreground hover:border-white/30 hover:text-foreground"
+            >
+              {domainOf(src)}
+            </a>
+          ))}
         </div>
       )}
-
-      <div className="mt-auto space-y-1.5">
-        <div className="flex items-center gap-1">
-          {inIdeas ? (
-            <button
-              type="button"
-              disabled
-              className="flex flex-1 items-center justify-center gap-1 rounded border border-emerald-500/40 bg-emerald-500/10 py-1.5 text-[11px] font-medium text-emerald-300"
-            >
-              <CheckCircle2 className="h-3 w-3" />
-              Already in Ideas
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={onAdd}
-              disabled={adding}
-              className="flex flex-1 items-center justify-center gap-1 rounded border border-border bg-white/5 py-1.5 text-[11px] font-medium text-foreground hover:bg-white/10 disabled:opacity-50"
-            >
-              {adding ? (
-                <>
-                  <Loader2 className="h-3 w-3 animate-spin" />
-                  Adding…
-                </>
-              ) : (
-                <>
-                  <Plus className="h-3 w-3" />
-                  Add to Ideas
-                </>
-              )}
-            </button>
-          )}
-        </div>
-        <button
-          type="button"
-          onClick={onOpenDeepDive}
-          className="flex w-full items-center justify-center gap-1 rounded border border-border py-1 text-[11px] text-muted-foreground hover:bg-white/5 hover:text-foreground"
-        >
-          {deepDiveLoading ? (
-            <>
-              <Loader2 className="h-3 w-3 animate-spin" />
-              Researching…
-            </>
-          ) : (
-            <>
-              <Telescope className="h-3 w-3" />
-              Deep Dive
-            </>
-          )}
-        </button>
+      <div className="flex flex-wrap items-center gap-2">
+        <RowActions
+          inIdeas={inIdeas}
+          adding={adding}
+          deepDiveLoading={deepDiveLoading}
+          onAdd={onAdd}
+          onOpenDeepDive={onOpenDeepDive}
+          size="full"
+        />
       </div>
     </div>
+  );
+}
+
+// Compact variants used inline in the row — abbreviate "↓ 35% from high"
+// to "-35%" so the cell fits within an 80px column.
+function fmtFromHighShort(
+  pct: number | null,
+): { text: string; cls: string } | null {
+  if (pct === null || !Number.isFinite(pct)) return null;
+  const cls =
+    pct < -40
+      ? "text-rose-300"
+      : pct < -20
+        ? "text-amber-300"
+        : "text-muted-foreground";
+  return { text: `${pct.toFixed(0)}%`, cls };
+}
+
+function fmt50dMAShort(
+  pct: number | null,
+): { text: string; cls: string } | null {
+  if (pct === null || !Number.isFinite(pct)) return null;
+  const cls = pct >= 0 ? "text-emerald-300" : "text-rose-300";
+  const sign = pct >= 0 ? "+" : "";
+  return { text: `${sign}${pct.toFixed(0)}%`, cls };
+}
+
+function SeenBadge({
+  count,
+  firstSeenAt,
+  category,
+}: {
+  count: number;
+  firstSeenAt: string | null;
+  category: Category;
+}) {
+  if (count <= 1) return null;
+  // Hide for first-time appearances even if multiple scans were run today —
+  // the indicator is meant to flag *recurrence* across days, not within a
+  // single session.
+  if (firstSeenAt) {
+    const f = new Date(firstSeenAt);
+    if (!Number.isNaN(f.getTime())) {
+      const now = new Date();
+      const sameDay =
+        f.getFullYear() === now.getFullYear() &&
+        f.getMonth() === now.getMonth() &&
+        f.getDate() === now.getDate();
+      if (sameDay) return null;
+    }
+  }
+  const firstSeenLabel = firstSeenAt
+    ? new Date(firstSeenAt).toLocaleDateString("en-US", {
+        month: "short",
+        day: "numeric",
+      })
+    : "earlier";
+  const tooltip = `Appeared ${count} times in ${prettyCategory(category)} scans this month. First seen ${firstSeenLabel}.`;
+  if (count >= 5) {
+    return (
+      <span className="text-[11px] text-emerald-300" title={tooltip}>
+        🔥🔥 5x+
+      </span>
+    );
+  }
+  if (count >= 3) {
+    return (
+      <span className="text-[11px] text-amber-300" title={tooltip}>
+        🔥 {count}x
+      </span>
+    );
+  }
+  return (
+    <span className="text-[11px] text-muted-foreground" title={tooltip}>
+      🔁 2x
+    </span>
   );
 }
 
