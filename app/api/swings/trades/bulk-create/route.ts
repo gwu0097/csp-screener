@@ -125,7 +125,7 @@ export async function POST(req: NextRequest) {
       // Only promote manual stages — ENTERED stays ENTERED (another open
       // position for the same symbol) and EXITED stays EXITED rather than
       // resurrecting an already-closed idea.
-      if (existing.status === "watching" || existing.status === "conviction") {
+      if (existing.status === "setup_ready") {
         const upd = await sb
           .from("swing_ideas")
           .update({ status: "entered", updated_at: new Date().toISOString() })

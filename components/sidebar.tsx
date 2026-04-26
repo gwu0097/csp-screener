@@ -14,9 +14,13 @@ import {
   Layers,
   Lightbulb,
   Menu,
+  PieChart,
   Search,
   Settings,
+  Star,
+  Telescope,
   X,
+  Zap,
 } from "lucide-react";
 import {
   Tooltip,
@@ -70,7 +74,7 @@ const INTELLIGENCE_GROUP: NavGroup = {
 const SWINGS_DISCOVER: NavItem = {
   href: "/swings/discover",
   label: "Discover",
-  icon: Search,
+  icon: Zap,
 };
 const SWINGS_IDEAS: NavItem = {
   href: "/swings/ideas",
@@ -87,6 +91,28 @@ const SWINGS_JOURNAL_GROUP: NavGroup = {
     { href: "/swings/journal/performance", label: "Performance" },
     { href: "/swings/journal/trades", label: "Trades" },
   ],
+};
+
+// ------------ LONG TERM ------------
+const LONGTERM_RESEARCH: NavItem = {
+  href: "/longterm/research",
+  label: "Research",
+  icon: Search,
+};
+const LONGTERM_IDEAS: NavItem = {
+  href: "/longterm/ideas",
+  label: "Ideas",
+  icon: Telescope,
+};
+const LONGTERM_WATCHLIST: NavItem = {
+  href: "/longterm/watchlist",
+  label: "Watchlist",
+  icon: Star,
+};
+const LONGTERM_PORTFOLIO: NavItem = {
+  href: "/longterm/portfolio",
+  label: "Portfolio",
+  icon: PieChart,
 };
 
 // ------------ TOOLS ------------
@@ -209,6 +235,12 @@ export function Sidebar() {
             open={openGroups[SWINGS_JOURNAL_GROUP.key] ?? false}
             onToggle={() => toggleGroup(SWINGS_JOURNAL_GROUP.key)}
           />
+
+          <SectionHeader label="Long Term" />
+          <SidebarLink item={LONGTERM_RESEARCH} pathname={pathname} />
+          <SidebarLink item={LONGTERM_IDEAS} pathname={pathname} />
+          <SidebarLink item={LONGTERM_WATCHLIST} pathname={pathname} />
+          <SidebarLink item={LONGTERM_PORTFOLIO} pathname={pathname} />
 
           <SectionHeader label="Tools" />
           <SidebarLink item={ENCYCLOPEDIA} pathname={pathname} />

@@ -61,11 +61,15 @@ export function SwingIdeaDialog({
   onOpenChange,
   mode,
   onSaved,
+  apiBase = "/api/swings/ideas",
+  titlePrefix = "swing idea",
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
   mode: Mode;
   onSaved: () => void;
+  apiBase?: string;
+  titlePrefix?: string;
 }) {
   const seed = mode.kind === "edit" ? mode.idea : null;
 
@@ -146,8 +150,8 @@ export function SwingIdeaDialog({
       };
       const url =
         mode.kind === "edit"
-          ? `/api/swings/ideas/${mode.idea.id}`
-          : "/api/swings/ideas";
+          ? `${apiBase}/${mode.idea.id}`
+          : apiBase;
       const method = mode.kind === "edit" ? "PATCH" : "POST";
       const res = await fetch(url, {
         method,
@@ -172,7 +176,7 @@ export function SwingIdeaDialog({
       <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle>
-            {mode.kind === "edit" ? `Edit idea · ${seed?.symbol}` : "Add swing idea"}
+            {mode.kind === "edit" ? `Edit idea · ${seed?.symbol}` : `Add ${titlePrefix}`}
           </DialogTitle>
         </DialogHeader>
 

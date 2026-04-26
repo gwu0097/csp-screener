@@ -30,11 +30,13 @@ export function SwingConvictionGate({
   open,
   onOpenChange,
   onConfirmed,
+  apiBase = "/api/swings/ideas",
 }: {
   idea: SwingIdea | null;
   open: boolean;
   onOpenChange: (v: boolean) => void;
   onConfirmed: () => void;
+  apiBase?: string;
 }) {
   const [checks, setChecks] = useState<Record<string, boolean>>({});
   const [thesis, setThesis] = useState("");
@@ -66,7 +68,7 @@ export function SwingConvictionGate({
     setSubmitting(true);
     setError(null);
     try {
-      const res = await fetch(`/api/swings/ideas/${idea.id}`, {
+      const res = await fetch(`${apiBase}/${idea.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

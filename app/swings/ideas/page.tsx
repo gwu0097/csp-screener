@@ -8,9 +8,8 @@ export default function SwingIdeasPage() {
       <header className="flex flex-col gap-1">
         <h1 className="text-2xl font-semibold tracking-tight">Swing Ideas</h1>
         <p className="text-sm text-muted-foreground">
-          Kanban of swing-trading candidates. Move cards through Watching →
-          Conviction → Entered → Exited as your conviction grows or the thesis
-          resolves.
+          Kanban of swing setups. Cards land in Setup Ready when they pass the
+          screener; Entered and Exited follow your trade log.
         </p>
       </header>
       <SwingIdeasBoard />

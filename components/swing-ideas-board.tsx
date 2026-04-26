@@ -2,31 +2,25 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-import { ArrowLeft, ArrowRight, ExternalLink, Pencil, Plus, Trash2 } from "lucide-react";
+import { ArrowRight, ExternalLink, Pencil, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   SwingIdeaDialog,
-  StarRating,
   type SwingIdea,
 } from "@/components/swing-idea-dialog";
-import { SwingConvictionGate } from "@/components/swing-conviction-gate";
 
-type Status = "watching" | "conviction" | "entered" | "exited";
+type Status = "setup_ready" | "entered" | "exited";
 
 const COLUMNS: Array<{ key: Status; label: string }> = [
-  { key: "watching", label: "Watching" },
-  { key: "conviction", label: "Conviction" },
+  { key: "setup_ready", label: "Setup Ready" },
   { key: "entered", label: "Entered" },
   { key: "exited", label: "Exited" },
 ];
 
-// Only the first two stages are user-controlled. ENTERED and EXITED
-// follow from trade data — attempting to move manually (button or drag)
-// would get out of sync with the trade log.
-const MANUAL_STAGES: Status[] = ["watching", "conviction"];
+// Only SETUP READY accepts manual moves. ENTERED/EXITED are reached either
+// through the explicit "Move to Entered" button on a setup card or via
+// trade import, both of which call PATCH directly — no drag/drop here.
 const TRADE_STAGES: Status[] = ["entered", "exited"];
-
-const DND_MIME = "application/x-swing-idea-id";
 
 function sentimentColor(s: string | null): string {
   if (s === "bullish") return "bg-emerald-500/20 text-emerald-300 border-emerald-500/40";
@@ -79,15 +73,6 @@ export function SwingIdeasBoard() {
 
   const [createOpen, setCreateOpen] = useState(false);
   const [editing, setEditing] = useState<SwingIdea | null>(null);
-
-  const [dragOverCol, setDragOverCol] = useState<Status | null>(null);
-  const [draggingId, setDraggingId] = useState<string | null>(null);
-
-  // The conviction gate intercepts every watching → conviction move
-  // (Move button or DnD) so the user has to articulate a thesis + exit
-  // before promoting. Setting this opens the modal; the modal patches
-  // the idea itself on confirm.
-  const [convictionFor, setConvictionFor] = useState<SwingIdea | null>(null);
 
   async function load() {
     setLoading(true);
@@ -185,60 +170,13 @@ export function SwingIdeasBoard() {
     }
   }
 
-  // DnD only between manual stages. Cards in ENTERED/EXITED are not
-  // draggable, and those columns never accept drops.
-  function onCardDragStart(e: React.DragEvent<HTMLDivElement>, idea: SwingIdea) {
-    if (!MANUAL_STAGES.includes(idea.status as Status)) {
-      e.preventDefault();
-      return;
-    }
-    e.dataTransfer.setData(DND_MIME, idea.id);
-    e.dataTransfer.setData("text/plain", idea.id);
-    e.dataTransfer.effectAllowed = "move";
-    setDraggingId(idea.id);
-  }
-  function onCardDragEnd() {
-    setDraggingId(null);
-    setDragOverCol(null);
-  }
-  function onColumnDragOver(e: React.DragEvent<HTMLDivElement>, col: Status) {
-    if (!MANUAL_STAGES.includes(col)) return; // not a drop target
-    e.preventDefault();
-    e.dataTransfer.dropEffect = "move";
-    if (dragOverCol !== col) setDragOverCol(col);
-  }
-  function onColumnDragLeave(col: Status) {
-    setDragOverCol((cur) => (cur === col ? null : cur));
-  }
-  async function onColumnDrop(e: React.DragEvent<HTMLDivElement>, col: Status) {
-    if (!MANUAL_STAGES.includes(col)) return;
-    e.preventDefault();
-    const id = e.dataTransfer.getData(DND_MIME) || e.dataTransfer.getData("text/plain");
-    setDragOverCol(null);
-    setDraggingId(null);
-    if (!id) return;
-    const idea = ideas.find((i) => i.id === id);
-    if (!idea) return;
-    if (!MANUAL_STAGES.includes(idea.status as Status)) return;
-    if (idea.status === col) return;
-    // Promotion to CONVICTION always goes through the gate so the user
-    // has to write a thesis first. Other moves (back to watching) don't
-    // need the ceremony.
-    if (col === "conviction" && idea.status === "watching") {
-      setConvictionFor(idea);
-      return;
-    }
-    await changeStatus(idea, col);
-  }
-
   const byStatus: Record<Status, SwingIdea[]> = {
-    watching: [],
-    conviction: [],
+    setup_ready: [],
     entered: [],
     exited: [],
   };
   for (const idea of ideas) {
-    const key = (idea.status as Status) ?? "watching";
+    const key = (idea.status as Status) ?? "setup_ready";
     if (byStatus[key]) byStatus[key].push(idea);
   }
 
@@ -265,22 +203,14 @@ export function SwingIdeasBoard() {
       {loading && ideas.length === 0 ? (
         <div className="text-sm text-muted-foreground">Loading ideas…</div>
       ) : (
-        <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
+        <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
           {COLUMNS.map((col) => {
             const list = byStatus[col.key];
-            const isDropTarget = dragOverCol === col.key;
             const isTradeDriven = TRADE_STAGES.includes(col.key);
             return (
               <div
                 key={col.key}
-                onDragOver={(e) => onColumnDragOver(e, col.key)}
-                onDragLeave={() => onColumnDragLeave(col.key)}
-                onDrop={(e) => onColumnDrop(e, col.key)}
-                className={`flex min-h-[400px] flex-col rounded-md border bg-background/40 transition-colors ${
-                  isDropTarget
-                    ? "border-2 border-blue-500 bg-blue-500/5"
-                    : "border border-border"
-                }`}
+                className="flex min-h-[400px] flex-col rounded-md border border-border bg-background/40"
               >
                 <div className="flex items-center justify-between border-b border-border px-3 py-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                   <span>
@@ -292,7 +222,7 @@ export function SwingIdeasBoard() {
                   {isTradeDriven && (
                     <span
                       className="text-[9px] text-muted-foreground/70"
-                      title="Stage is controlled by trade data — not drag-droppable"
+                      title="Stage is controlled by trade data"
                     >
                       auto
                     </span>
@@ -309,18 +239,14 @@ export function SwingIdeasBoard() {
                         key={idea.id}
                         idea={idea}
                         currentPrice={prices[idea.symbol] ?? null}
-                        dragging={draggingId === idea.id}
-                        onDragStart={(e) => onCardDragStart(e, idea)}
-                        onDragEnd={onCardDragEnd}
-                        onForward={() => setConvictionFor(idea)}
-                        onBackward={() => changeStatus(idea, "watching")}
+                        onMoveToEntered={() => changeStatus(idea, "entered")}
                         onEdit={() => setEditing(idea)}
                         onDelete={() => deleteIdea(idea)}
                       />
                     ))
                   )}
                 </div>
-                {col.key === "watching" && (
+                {col.key === "setup_ready" && (
                   <div className="border-t border-border p-2">
                     <Button
                       variant="outline"
@@ -349,12 +275,6 @@ export function SwingIdeasBoard() {
         mode={editing ? { kind: "edit", idea: editing } : { kind: "create" }}
         onSaved={load}
       />
-      <SwingConvictionGate
-        idea={convictionFor}
-        open={convictionFor !== null}
-        onOpenChange={(v) => !v && setConvictionFor(null)}
-        onConfirmed={load}
-      />
     </div>
   );
 }
@@ -364,11 +284,7 @@ export function SwingIdeasBoard() {
 function IdeaCard(props: {
   idea: SwingIdea;
   currentPrice: number | null;
-  dragging: boolean;
-  onDragStart: (e: React.DragEvent<HTMLDivElement>) => void;
-  onDragEnd: () => void;
-  onForward: () => void;
-  onBackward: () => void;
+  onMoveToEntered: () => void;
   onEdit: () => void;
   onDelete: () => void;
 }) {
@@ -384,13 +300,9 @@ function IdeaCard(props: {
   }
   if (idea.status === "exited") return <ExitedCard idea={idea} />;
   return (
-    <ManualCard
+    <SetupReadyCard
       idea={idea}
-      dragging={props.dragging}
-      onDragStart={props.onDragStart}
-      onDragEnd={props.onDragEnd}
-      onForward={props.onForward}
-      onBackward={props.onBackward}
+      onMoveToEntered={props.onMoveToEntered}
       onEdit={props.onEdit}
       onDelete={props.onDelete}
     />
@@ -415,108 +327,60 @@ function CardHeader({ idea }: { idea: SwingIdea }) {
   );
 }
 
-// Manual-stage card (WATCHING / CONVICTION) — directional Move + Edit + Delete.
-function ManualCard({
+function SetupReadyCard({
   idea,
-  dragging,
-  onDragStart,
-  onDragEnd,
-  onForward,
-  onBackward,
+  onMoveToEntered,
   onEdit,
   onDelete,
 }: {
   idea: SwingIdea;
-  dragging: boolean;
-  onDragStart: (e: React.DragEvent<HTMLDivElement>) => void;
-  onDragEnd: () => void;
-  onForward: () => void;
-  onBackward: () => void;
+  onMoveToEntered: () => void;
   onEdit: () => void;
   onDelete: () => void;
 }) {
-  const isWatching = idea.status === "watching";
-  const watchingSummary =
+  const summary =
     idea.catalyst?.trim() || idea.user_thesis?.trim() || idea.ai_summary?.trim() || "";
   return (
-    <div
-      draggable
-      onDragStart={onDragStart}
-      onDragEnd={onDragEnd}
-      className={`cursor-grab rounded-md border border-border bg-zinc-900/60 p-3 text-xs active:cursor-grabbing ${
-        dragging ? "opacity-40" : ""
-      }`}
-    >
+    <div className="rounded-md border border-border bg-zinc-900/60 p-3 text-xs">
       <CardHeader idea={idea} />
 
-      {isWatching ? (
-        <>
-          <div className="mb-1 flex gap-3 text-[11px] text-muted-foreground">
-            {idea.price_at_discovery !== null && (
-              <span className="text-foreground">{fmtMoney(idea.price_at_discovery)}</span>
-            )}
-            {idea.forward_pe !== null && (
-              <span>
-                Fwd P/E: <span className="text-foreground">{idea.forward_pe}x</span>
-              </span>
-            )}
-            {idea.analyst_target !== null && (
-              <span>
-                Tgt: <span className="text-foreground">{fmtMoney(idea.analyst_target)}</span>
-              </span>
-            )}
-          </div>
+      <div className="mb-1 flex gap-3 text-[11px] text-muted-foreground">
+        {idea.price_at_discovery !== null && (
+          <span className="text-foreground">{fmtMoney(idea.price_at_discovery)}</span>
+        )}
+        {idea.forward_pe !== null && (
+          <span>
+            Fwd P/E: <span className="text-foreground">{idea.forward_pe}x</span>
+          </span>
+        )}
+        {idea.analyst_target !== null && (
+          <span>
+            Tgt: <span className="text-foreground">{fmtMoney(idea.analyst_target)}</span>
+          </span>
+        )}
+      </div>
 
-          {watchingSummary && (
-            <div className="mb-2 line-clamp-1 italic text-muted-foreground">
-              &ldquo;{watchingSummary}&rdquo;
-            </div>
-          )}
-        </>
-      ) : (
-        // CONVICTION card: lead with the user-articulated thesis +
-        // exit condition that the gate captured. Fundamentals are
-        // less load-bearing here than the trader's own framing.
-        <>
-          {idea.user_thesis?.trim() && (
-            <div className="mb-1 line-clamp-3 italic text-foreground/90">
-              &ldquo;{idea.user_thesis}&rdquo;
-            </div>
-          )}
-          {idea.exit_condition?.trim() && (
-            <div className="mb-2 line-clamp-2 text-[11px] text-muted-foreground">
-              <span className="font-medium text-foreground/80">Exit:</span>{" "}
-              {idea.exit_condition}
-            </div>
-          )}
-        </>
+      {summary && (
+        <div className="mb-2 line-clamp-1 italic text-muted-foreground">
+          &ldquo;{summary}&rdquo;
+        </div>
       )}
 
       <div className="mb-2 flex items-center justify-between">
         <span className="rounded bg-white/5 px-1.5 py-0.5 text-[10px] text-muted-foreground">
           {timeframeLabel(idea.timeframe)}
         </span>
-        <StarRating value={idea.conviction ?? 0} readonly size="xs" />
       </div>
 
       <div className="flex items-center gap-1">
         <button
           type="button"
-          onClick={isWatching ? onForward : onBackward}
+          onClick={onMoveToEntered}
           className="flex flex-1 items-center justify-center gap-1 rounded border border-border py-1 text-[11px] text-muted-foreground hover:bg-white/5 hover:text-foreground"
-          title={isWatching ? "Mark as Conviction" : "Back to Watching"}
+          title="Move to Entered"
         >
-          {isWatching ? (
-            <>
-              <ArrowRight className="h-3 w-3" />
-              Mark as Conviction
-            </>
-          ) : (
-            <>
-              <ArrowLeft className="h-3 w-3" />
-              Back to Watching
-            </>
-          )}
+          <ArrowRight className="h-3 w-3" />
+          Move to Entered
         </button>
         <button
           type="button"
@@ -676,4 +540,3 @@ function ExitedCard({ idea }: { idea: SwingIdea }) {
     </div>
   );
 }
-

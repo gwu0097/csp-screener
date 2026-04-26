@@ -5,7 +5,7 @@ export const dynamic = "force-dynamic";
 
 const ALLOWED_TIMEFRAMES = ["1month", "3months", "6months"] as const;
 const ALLOWED_SENTIMENTS = ["bullish", "bearish", "mixed", "neutral"] as const;
-const ALLOWED_STATUSES = ["setup_ready", "entered", "exited"] as const;
+const ALLOWED_STATUSES = ["watching", "conviction", "entered", "exited"] as const;
 
 type UpdateBody = {
   symbol?: unknown;
@@ -72,11 +72,9 @@ export async function PATCH(
   }
   if (body.conviction !== undefined) {
     const n = num(body.conviction);
-    if (n === undefined) {
-      /* unreachable */
-    } else if (n === null) {
+    if (n === null) {
       patch.conviction = null;
-    } else {
+    } else if (n !== undefined) {
       const i = Math.round(n);
       if (i < 1 || i > 5) {
         return NextResponse.json({ error: "Conviction must be 1–5" }, { status: 400 });
@@ -109,7 +107,7 @@ export async function PATCH(
   }
 
   const sb = createServerClient();
-  const res = await sb.from("swing_ideas").update(patch).eq("id", id).select().single();
+  const res = await sb.from("longterm_ideas").update(patch).eq("id", id).select().single();
   if (res.error) {
     return NextResponse.json({ error: res.error.message }, { status: 400 });
   }
@@ -123,7 +121,7 @@ export async function DELETE(
   const id = (params.id ?? "").trim();
   if (!id) return NextResponse.json({ error: "Missing id" }, { status: 400 });
   const sb = createServerClient();
-  const res = await sb.from("swing_ideas").delete().eq("id", id);
+  const res = await sb.from("longterm_ideas").delete().eq("id", id);
   if (res.error) {
     return NextResponse.json({ error: res.error.message }, { status: 400 });
   }

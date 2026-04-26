@@ -372,7 +372,13 @@ const SCANNABLE_CATEGORIES: Category[] = [
   "social",
 ];
 
-export function SwingDiscoverView() {
+export function SwingDiscoverView({
+  ideasApiBase = "/api/swings/ideas",
+  scanLabelOverride,
+}: {
+  ideasApiBase?: string;
+  scanLabelOverride?: string;
+} = {}) {
   // Each category holds its own candidate list + timestamp. The All tab
   // derives its data from the union; partial scans replace one bucket
   // and leave the others alone.
@@ -453,7 +459,7 @@ export function SwingDiscoverView() {
 
   async function loadIdeasSymbols() {
     try {
-      const res = await fetch("/api/swings/ideas", { cache: "no-store" });
+      const res = await fetch(ideasApiBase, { cache: "no-store" });
       const json = await res.json();
       if (!res.ok) return;
       const set = new Set<string>();
@@ -533,7 +539,7 @@ export function SwingDiscoverView() {
     });
     setError(null);
     try {
-      const res = await fetch("/api/swings/ideas", {
+      const res = await fetch(ideasApiBase, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -692,13 +698,15 @@ export function SwingDiscoverView() {
   }, [perCategory]);
 
   // For the scan-button label and the per-tab timestamp display.
-  const scanLabel = (() => {
-    if (activeTab === "all") return "Scan All";
-    if (activeTab === "momentum") return "Scan Momentum";
-    if (activeTab === "recovery") return "Scan Recovery";
-    if (activeTab === "theme") return "Scan Themes";
-    return "Scan Social";
-  })();
+  const scanLabel =
+    scanLabelOverride ??
+    (() => {
+      if (activeTab === "all") return "Scan All";
+      if (activeTab === "momentum") return "Scan Momentum";
+      if (activeTab === "recovery") return "Scan Recovery";
+      if (activeTab === "theme") return "Scan Themes";
+      return "Scan Social";
+    })();
 
   const lastScannedLabel = (() => {
     if (activeTab === "all") {

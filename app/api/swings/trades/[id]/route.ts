@@ -67,7 +67,7 @@ export async function DELETE(
           const upd = await sb
             .from("swing_ideas")
             .update({
-              status: "conviction",
+              status: "setup_ready",
               updated_at: new Date().toISOString(),
             })
             .eq("id", ideaId);
