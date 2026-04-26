@@ -251,6 +251,56 @@ export async function getFinnhubPastEarningsDates(
   }
 }
 
+// Next future earnings announcement for a single symbol within ~120 days,
+// pulled from Finnhub's /calendar/earnings endpoint. Returns null if the
+// window is empty (Finnhub typically only schedules ~1 quarter ahead, so
+// dropping the window past 120 days yields no extra signal).
+export type NextEarningsAnnouncement = {
+  date: string; // YYYY-MM-DD (Eastern calendar day)
+  timing: "BMO" | "AMC" | "DMH" | "unknown";
+};
+
+export async function getFinnhubNextEarningsDate(
+  symbol: string,
+): Promise<NextEarningsAnnouncement | null> {
+  const todayIso = todayInEastern();
+  const to = new Date();
+  to.setUTCDate(to.getUTCDate() + 120);
+  const toIso = `${to.getUTCFullYear()}-${String(to.getUTCMonth() + 1).padStart(2, "0")}-${String(to.getUTCDate()).padStart(2, "0")}`;
+
+  try {
+    const data = await finnhubGet<{ earningsCalendar: FinnhubCalendarEntry[] }>(
+      "/calendar/earnings",
+      { symbol: symbol.toUpperCase(), from: todayIso, to: toIso },
+    );
+    const rows = data.earningsCalendar ?? [];
+    const matching = rows
+      .filter((r) => (r.symbol ?? "").toUpperCase() === symbol.toUpperCase())
+      .filter((r) => typeof r.date === "string" && r.date >= todayIso)
+      .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+    const next = matching[0];
+    if (!next) {
+      console.log(
+        `[finnhub] getFinnhubNextEarningsDate(${symbol}) window=${todayIso}→${toIso} raw=${rows.length} matched=0`,
+      );
+      return null;
+    }
+    const h = (next.hour ?? "").toLowerCase();
+    const timing: NextEarningsAnnouncement["timing"] =
+      h === "bmo" ? "BMO" : h === "amc" ? "AMC" : h === "dmh" ? "DMH" : "unknown";
+    console.log(
+      `[finnhub] getFinnhubNextEarningsDate(${symbol}) → ${next.date}/${timing}`,
+    );
+    return { date: next.date, timing };
+  } catch (e) {
+    console.warn(
+      `[finnhub] getFinnhubNextEarningsDate(${symbol}) failed:`,
+      e instanceof Error ? e.message : e,
+    );
+    return null;
+  }
+}
+
 // Finnhub /stock/earnings fallback source: returns fiscal quarter-end dates
 // (ISO YYYY-MM-DD). The fiscal quarter end is NOT the announcement date —
 // announcements happen ~2-6 weeks later — so callers must map period → likely

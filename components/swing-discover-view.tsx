@@ -95,9 +95,16 @@ type Fundamentals = {
   forwardEps: number | null;
 };
 
+type NextEarnings = {
+  date: string; // YYYY-MM-DD
+  timing: "BMO" | "AMC" | "DMH" | "unknown";
+  daysAway: number;
+};
+
 type ResearchData = {
   news: NewsItem[];
   fundamentals: Fundamentals | null;
+  nextEarnings: NextEarnings | null;
 };
 
 function fmtMoney(n: number | null): string {
@@ -642,6 +649,7 @@ export function SwingDiscoverView() {
         [symbol]: {
           news: Array.isArray(json.news) ? (json.news as NewsItem[]) : [],
           fundamentals: (json.fundamentals as Fundamentals | null) ?? null,
+          nextEarnings: (json.nextEarnings as NextEarnings | null) ?? null,
         },
       }));
     } catch (e) {
@@ -1425,60 +1433,125 @@ function MiniFundamentalsPanel({
   }
 
   return wrap(
-    <div className="space-y-1.5">
-      <FundLine
-        label="Targets"
-        items={[
-          {
-            v: f.targetMeanPrice !== null ? `$${f.targetMeanPrice.toFixed(2)} mean` : "—",
-          },
-          {
-            v: fmtTargetRange(f.targetLowPrice, f.targetHighPrice) + " range",
-          },
-          {
-            v: c.upside_to_target !== null ? `${fmtSigned(c.upside_to_target)} upside` : "— upside",
-            tone: upsideTone(c.upside_to_target),
-          },
-          {
-            v:
-              f.numberOfAnalystOpinions !== null
-                ? `${f.numberOfAnalystOpinions} analysts`
-                : "— analysts",
-          },
-        ]}
-      />
-      <FundLine
-        label="Growth"
-        items={[
-          {
-            v: `Revenue ${fmtGrowth(f.revenueGrowth)}`,
-            tone: growthTone(f.revenueGrowth),
-          },
-          {
-            v: `Earnings ${fmtGrowth(f.earningsGrowth)}`,
-            tone: growthTone(f.earningsGrowth),
-          },
-          {
-            v: `EPS TTM ${f.trailingEps !== null ? `$${f.trailingEps.toFixed(2)}` : "—"}`,
-          },
-          {
-            v: `EPS Fwd ${f.forwardEps !== null ? `$${f.forwardEps.toFixed(2)}` : "—"}`,
-          },
-        ]}
-      />
-      <FundLine
-        label="Ownership"
-        items={[
-          { v: `Insider ${fmtPctDecimal(f.heldPercentInsiders)}` },
-          { v: `Institution ${fmtPctDecimal(f.heldPercentInstitutions)}` },
-          {
-            v: `Short float ${fmtPctDecimal(f.shortPercentOfFloat)}`,
-            tone: shortTone(f.shortPercentOfFloat),
-          },
-        ]}
-      />
+    <div className="grid grid-cols-1 gap-3 md:grid-cols-[3fr_2fr]">
+      <div className="space-y-1.5">
+        <FundLine
+          label="Targets"
+          items={[
+            {
+              v: f.targetMeanPrice !== null ? `$${f.targetMeanPrice.toFixed(2)} mean` : "—",
+            },
+            {
+              v: fmtTargetRange(f.targetLowPrice, f.targetHighPrice) + " range",
+            },
+            {
+              v: c.upside_to_target !== null ? `${fmtSigned(c.upside_to_target)} upside` : "— upside",
+              tone: upsideTone(c.upside_to_target),
+            },
+            {
+              v:
+                f.numberOfAnalystOpinions !== null
+                  ? `${f.numberOfAnalystOpinions} analysts`
+                  : "— analysts",
+            },
+          ]}
+        />
+        <FundLine
+          label="Growth"
+          items={[
+            {
+              v: `Revenue ${fmtGrowth(f.revenueGrowth)}`,
+              tone: growthTone(f.revenueGrowth),
+            },
+            {
+              v: `Earnings ${fmtGrowth(f.earningsGrowth)}`,
+              tone: growthTone(f.earningsGrowth),
+            },
+            {
+              v: `EPS TTM ${f.trailingEps !== null ? `$${f.trailingEps.toFixed(2)}` : "—"}`,
+            },
+            {
+              v: `EPS Fwd ${f.forwardEps !== null ? `$${f.forwardEps.toFixed(2)}` : "—"}`,
+            },
+          ]}
+        />
+        <FundLine
+          label="Ownership"
+          items={[
+            { v: `Insider ${fmtPctDecimal(f.heldPercentInsiders)}` },
+            { v: `Institution ${fmtPctDecimal(f.heldPercentInstitutions)}` },
+            {
+              v: `Short float ${fmtPctDecimal(f.shortPercentOfFloat)}`,
+              tone: shortTone(f.shortPercentOfFloat),
+            },
+          ]}
+        />
+        {c.thesis && (
+          <div className="flex flex-wrap items-start gap-x-3 gap-y-1">
+            <span className="w-20 shrink-0 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+              Thesis
+            </span>
+            <span className="min-w-0 flex-1 italic text-muted-foreground">
+              &ldquo;{c.thesis}&rdquo;
+            </span>
+          </div>
+        )}
+      </div>
+      <NextEarningsPanel earnings={research?.nextEarnings ?? null} />
     </div>,
   );
+}
+
+function NextEarningsPanel({ earnings }: { earnings: NextEarnings | null }) {
+  return (
+    <div className="rounded border border-border/50 bg-white/[0.02] p-2">
+      <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+        Next earnings
+      </div>
+      {!earnings ? (
+        <div className="mt-1 text-sm text-muted-foreground">—</div>
+      ) : (
+        <div className="mt-1 space-y-0.5">
+          <div className={`text-sm font-medium ${earningsProximityTone(earnings.daysAway)}`}>
+            {fmtEarningsDate(earnings.date)}
+            {earnings.timing && earnings.timing !== "unknown" && (
+              <span className="ml-1 text-[10px] uppercase text-muted-foreground">
+                {earnings.timing}
+              </span>
+            )}
+          </div>
+          <div className="text-[11px] text-muted-foreground">
+            {fmtDaysAway(earnings.daysAway)}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function fmtEarningsDate(iso: string): string {
+  const [y, m, d] = iso.split("-").map(Number);
+  if (!y || !m || !d) return iso;
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+}
+
+function fmtDaysAway(days: number): string {
+  if (days === 0) return "today";
+  if (days === 1) return "tomorrow";
+  if (days < 0) return `${Math.abs(days)} days ago`;
+  return `in ${days} days`;
+}
+
+function earningsProximityTone(days: number): string {
+  if (days < 14) return "text-rose-300";
+  if (days <= 30) return "text-amber-300";
+  return "text-emerald-300";
 }
 
 function FundLine({
