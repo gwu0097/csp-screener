@@ -4,6 +4,8 @@ import { Fragment, useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   ExternalLink,
   Info,
   Loader2,
@@ -772,6 +774,10 @@ export function SwingDiscoverView() {
             deepDiveLoading: deepDiveLoading.has(c.symbol),
             onAdd: () => addToIdeas(c),
             onOpenDeepDive: () => openDeepDive(c),
+            research: research[c.symbol] ?? null,
+            researchLoading: researchLoading.has(c.symbol),
+            researchError: researchError[c.symbol] ?? null,
+            onLoadResearch: () => loadResearch(c.symbol),
           });
           const counts = {
             all: candidates.length,
@@ -968,6 +974,10 @@ type RowProps = {
   deepDiveLoading: boolean;
   onAdd: () => void;
   onOpenDeepDive: () => void;
+  research: ResearchData | null;
+  researchLoading: boolean;
+  researchError: string | null;
+  onLoadResearch: () => void;
 };
 
 function CandidateTable({
@@ -1109,7 +1119,19 @@ function CandidateRow({
   deepDiveLoading,
   onAdd,
   onOpenDeepDive,
+  research,
+  researchLoading,
+  researchError,
+  onLoadResearch,
 }: RowProps) {
+  const [expanded, setExpanded] = useState(false);
+  const toggleExpanded = () => {
+    setExpanded((v) => {
+      const next = !v;
+      if (next) onLoadResearch();
+      return next;
+    });
+  };
   const changeColor =
     c.price_change_pct === null
       ? "text-muted-foreground"
@@ -1204,31 +1226,43 @@ function CandidateRow({
           />
         </div>
       </div>
-      <CandidateRowLine2 candidate={c} />
+      <CandidateRowLine2
+        candidate={c}
+        expanded={expanded}
+        onToggle={toggleExpanded}
+      />
+      {expanded && (
+        <MiniFundamentalsPanel
+          candidate={c}
+          research={research}
+          loading={researchLoading}
+          error={researchError}
+        />
+      )}
     </div>
   );
 }
 
-function CandidateRowLine2({ candidate: c }: { candidate: Candidate }) {
-  const items: React.ReactNode[] = [];
-  if (c.signal_basis) {
-    items.push(
-      <>
-        <Signal className="mr-1 inline h-3 w-3 align-text-bottom text-sky-300" />
-        {c.signal_basis}
-      </>,
-    );
-  }
+function CandidateRowLine2({
+  candidate: c,
+  expanded,
+  onToggle,
+}: {
+  candidate: Candidate;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const restItems: React.ReactNode[] = [];
   if (c.catalyst) {
-    items.push(
+    restItems.push(
       <span className="italic">&ldquo;{c.catalyst}&rdquo;</span>,
     );
   }
   if (c.timeframe) {
-    items.push(<>{timeframeLabel(c.timeframe)}</>);
+    restItems.push(<>{timeframeLabel(c.timeframe)}</>);
   }
   if (c.risk) {
-    items.push(
+    restItems.push(
       <>
         <AlertTriangle className="mr-1 inline h-3 w-3 align-text-bottom text-amber-400" />
         {c.risk}
@@ -1237,22 +1271,67 @@ function CandidateRowLine2({ candidate: c }: { candidate: Candidate }) {
   }
 
   const hasSources = c.sources.length > 0;
-  if (items.length === 0 && !hasSources) return null;
+  const hasBar =
+    c.week_52_low !== null &&
+    c.week_52_high !== null &&
+    c.current_price !== null &&
+    c.week_52_high > c.week_52_low;
 
   return (
-    <div className="flex items-start gap-2 px-3 pb-2 pt-1 text-sm text-muted-foreground">
-      <div className="min-w-0 flex-1 line-clamp-2">
-        {items.map((item, i) => (
-          <Fragment key={i}>
-            {i > 0 && (
-              <span className="px-1.5 text-muted-foreground/60">·</span>
-            )}
-            {item}
-          </Fragment>
-        ))}
-      </div>
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={onToggle}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onToggle();
+        }
+      }}
+      className="flex cursor-pointer items-center gap-2 px-3 pb-2 pt-1 text-sm text-muted-foreground hover:bg-white/[0.02]"
+    >
+      <span className="flex h-4 w-4 shrink-0 items-center justify-center text-muted-foreground/70">
+        {expanded ? (
+          <ChevronDown className="h-3.5 w-3.5" />
+        ) : (
+          <ChevronRight className="h-3.5 w-3.5" />
+        )}
+      </span>
+      {c.signal_basis && (
+        <span className="inline-flex shrink-0 items-center gap-1 text-foreground/90">
+          <Signal className="h-3 w-3 shrink-0 text-sky-300" />
+          <span>{c.signal_basis}</span>
+        </span>
+      )}
+      {hasBar && (
+        <Mini52wBar
+          low={c.week_52_low}
+          high={c.week_52_high}
+          current={c.current_price}
+        />
+      )}
+      {restItems.length > 0 ? (
+        <div className="min-w-0 flex-1 line-clamp-2">
+          {(c.signal_basis || hasBar) && (
+            <span className="pr-1.5 text-muted-foreground/60">·</span>
+          )}
+          {restItems.map((item, i) => (
+            <Fragment key={i}>
+              {i > 0 && (
+                <span className="px-1.5 text-muted-foreground/60">·</span>
+              )}
+              {item}
+            </Fragment>
+          ))}
+        </div>
+      ) : (
+        <div className="min-w-0 flex-1" />
+      )}
       {hasSources && (
-        <div className="hidden shrink-0 flex-wrap items-center justify-end gap-1 md:flex">
+        <div
+          className="hidden shrink-0 flex-wrap items-center justify-end gap-1 md:flex"
+          onClick={(e) => e.stopPropagation()}
+        >
           {c.sources.slice(0, 3).map((src, i) => (
             <a
               key={i}
@@ -1268,6 +1347,185 @@ function CandidateRowLine2({ candidate: c }: { candidate: Candidate }) {
       )}
     </div>
   );
+}
+
+function Mini52wBar({
+  low,
+  high,
+  current,
+}: {
+  low: number | null;
+  high: number | null;
+  current: number | null;
+}) {
+  if (
+    low === null ||
+    high === null ||
+    current === null ||
+    !(high > low)
+  )
+    return null;
+  const pct = Math.max(0, Math.min(100, ((current - low) / (high - low)) * 100));
+  return (
+    <div className="hidden w-[120px] shrink-0 flex-col gap-0.5 md:flex">
+      <div className="flex items-center justify-between text-[9px] leading-none text-muted-foreground">
+        <span>${low.toFixed(0)}</span>
+        <span>${high.toFixed(0)}</span>
+      </div>
+      <div className="relative h-1.5 rounded-full bg-gradient-to-r from-rose-500/60 via-amber-500/60 to-emerald-500/60">
+        <div
+          className="absolute top-1/2 h-2.5 w-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full border border-foreground/60 bg-foreground"
+          style={{ left: `${pct}%` }}
+        />
+      </div>
+      <div className="text-center text-[9px] leading-none text-muted-foreground">
+        at {pct.toFixed(0)}% of range
+      </div>
+    </div>
+  );
+}
+
+function MiniFundamentalsPanel({
+  candidate: c,
+  research,
+  loading,
+  error,
+}: {
+  candidate: Candidate;
+  research: ResearchData | null;
+  loading: boolean;
+  error: string | null;
+}) {
+  const f = research?.fundamentals ?? null;
+  const wrap = (children: React.ReactNode) => (
+    <div className="border-t border-border/40 bg-background/40 px-3 py-2 text-xs">
+      {children}
+    </div>
+  );
+
+  if (loading && !f) {
+    return wrap(
+      <div className="flex items-center gap-2 text-muted-foreground">
+        <Loader2 className="h-3 w-3 animate-spin" />
+        Loading fundamentals…
+      </div>,
+    );
+  }
+  if (error && !f) {
+    return wrap(
+      <div className="text-rose-300">Could not load fundamentals: {error}</div>,
+    );
+  }
+  if (!f) {
+    return wrap(
+      <div className="text-muted-foreground">
+        Yahoo did not return fundamentals for {c.symbol}.
+      </div>,
+    );
+  }
+
+  return wrap(
+    <div className="space-y-1.5">
+      <FundLine
+        label="Targets"
+        items={[
+          {
+            v: f.targetMeanPrice !== null ? `$${f.targetMeanPrice.toFixed(2)} mean` : "—",
+          },
+          {
+            v: fmtTargetRange(f.targetLowPrice, f.targetHighPrice) + " range",
+          },
+          {
+            v: c.upside_to_target !== null ? `${fmtSigned(c.upside_to_target)} upside` : "— upside",
+            tone: upsideTone(c.upside_to_target),
+          },
+          {
+            v:
+              f.numberOfAnalystOpinions !== null
+                ? `${f.numberOfAnalystOpinions} analysts`
+                : "— analysts",
+          },
+        ]}
+      />
+      <FundLine
+        label="Growth"
+        items={[
+          {
+            v: `Revenue ${fmtGrowth(f.revenueGrowth)}`,
+            tone: growthTone(f.revenueGrowth),
+          },
+          {
+            v: `Earnings ${fmtGrowth(f.earningsGrowth)}`,
+            tone: growthTone(f.earningsGrowth),
+          },
+          {
+            v: `EPS TTM ${f.trailingEps !== null ? `$${f.trailingEps.toFixed(2)}` : "—"}`,
+          },
+          {
+            v: `EPS Fwd ${f.forwardEps !== null ? `$${f.forwardEps.toFixed(2)}` : "—"}`,
+          },
+        ]}
+      />
+      <FundLine
+        label="Ownership"
+        items={[
+          { v: `Insider ${fmtPctDecimal(f.heldPercentInsiders)}` },
+          { v: `Institution ${fmtPctDecimal(f.heldPercentInstitutions)}` },
+          {
+            v: `Short float ${fmtPctDecimal(f.shortPercentOfFloat)}`,
+            tone: shortTone(f.shortPercentOfFloat),
+          },
+        ]}
+      />
+    </div>,
+  );
+}
+
+function FundLine({
+  label,
+  items,
+}: {
+  label: string;
+  items: Array<{ v: string; tone?: "good" | "warn" | "bad" }>;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+      <span className="w-20 shrink-0 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+        {label}
+      </span>
+      {items.map((it, i) => (
+        <Fragment key={i}>
+          {i > 0 && <span className="text-muted-foreground/40">|</span>}
+          <span
+            className={
+              it.tone === "good"
+                ? "text-emerald-300"
+                : it.tone === "warn"
+                  ? "text-amber-300"
+                  : it.tone === "bad"
+                    ? "text-rose-300"
+                    : "text-foreground/90"
+            }
+          >
+            {it.v}
+          </span>
+        </Fragment>
+      ))}
+    </div>
+  );
+}
+
+function fmtSigned(n: number | null): string {
+  if (n === null || !Number.isFinite(n)) return "—";
+  const sign = n > 0 ? "+" : "";
+  return `${sign}${n.toFixed(1)}%`;
+}
+
+function upsideTone(pct: number | null): "good" | "warn" | undefined {
+  if (pct === null || !Number.isFinite(pct)) return undefined;
+  if (pct > 20) return "good";
+  if (pct >= 10) return "warn";
+  return undefined;
 }
 
 function RowActions({
