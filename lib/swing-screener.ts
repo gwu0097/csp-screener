@@ -48,13 +48,23 @@ const yf = yahooFinance as unknown as YFClient;
 
 // ---------- Types ----------
 
+// Keeps the older labels (fda_decision, contract_award, rate_decision,
+// analyst_upgrade, restructuring) so historical candidates render
+// correctly while the new prompt asks Perplexity for the shorter
+// per-spec set (fda, contract, management, macro, squeeze, activist).
 export type CatalystType =
   | "product_launch"
+  | "fda"
   | "fda_decision"
+  | "contract"
   | "contract_award"
   | "rate_decision"
   | "partnership"
   | "regulatory"
+  | "management"
+  | "macro"
+  | "squeeze"
+  | "activist"
   | "analyst_upgrade"
   | "restructuring"
   | "other"
@@ -128,6 +138,11 @@ export type SwingCandidate = {
   catalystDate: string | null;
   catalystDescription: string | null;
   catalystConfidence: "high" | "medium" | "low" | "none";
+  // When Perplexity can't find a specific near-term catalyst but
+  // insiders are buying anyway, this captures the likely thesis ("why
+  // might insiders know something the market doesn't?"). Surfaced in
+  // the expanded row when catalystFound === false.
+  catalystInsiderAngle: string | null;
   catalystRawResponse: string | null;
 
   // Display
@@ -679,6 +694,7 @@ export async function pass2Enrich(
       catalystDate: null,
       catalystDescription: null,
       catalystConfidence: "none",
+      catalystInsiderAngle: null,
       catalystRawResponse: null,
       tier1Signals,
       tier2Signals,
@@ -699,11 +715,17 @@ import { askPerplexityRaw } from "./perplexity";
 
 const VALID_CATALYST_TYPES: ReadonlyArray<CatalystType> = [
   "product_launch",
+  "fda",
   "fda_decision",
+  "contract",
   "contract_award",
   "rate_decision",
   "partnership",
   "regulatory",
+  "management",
+  "macro",
+  "squeeze",
+  "activist",
   "analyst_upgrade",
   "restructuring",
   "other",
@@ -750,38 +772,35 @@ function tryParseObject(text: string): Record<string, unknown> | null {
 }
 
 function buildCatalystPrompt(symbol: string, companyName: string): string {
-  return `Research ${symbol} (${companyName}).
+  return `You are researching ${symbol} (${companyName}) for a swing trader looking for 30-90 day setups.
 
-Find SPECIFIC upcoming catalysts in the next 30-90 days that could cause a significant price move.
+What SPECIFIC events or catalysts could move this stock significantly in the next 30-90 days?
 
 Look for:
 - Product launches or major releases
-- FDA drug approval decisions (PDUFA dates)
-- Government contract awards or decisions
-- Federal Reserve or macro policy decisions that directly impact this company
-- Major partnership or licensing announcements
-- Regulatory approvals or decisions
-- Analyst day or investor day events
-- Index inclusion decisions
-- Activist investor campaigns
-- M&A or strategic review announcements
+- FDA approval decisions
+- Government contract awards
+- Partnership or licensing announcements
+- Regulatory decisions
+- Management changes with market impact
+- Macro events directly impacting this company
+- Short squeeze potential
+- Activist investor activity
+- Any other near-term binary events
 
-Do NOT count:
-- Regular quarterly earnings (not a catalyst)
-- Normal dividend payments
-- Vague "momentum" or "market conditions"
-- Generic analyst upgrades without specific trigger
+Be SPECIFIC with dates if known.
+Do NOT include regular quarterly earnings.
 
-If a specific catalyst exists, be precise: What is it? When exactly? What's the expected impact?
+If ${symbol} has insider buying, what might insiders know that retail doesn't?
 
-Return ONLY this JSON, no markdown:
+Return ONLY this JSON:
 {
   "catalyst_found": true/false,
-  "catalyst_type": "product_launch|fda_decision|contract_award|rate_decision|partnership|regulatory|analyst_upgrade|restructuring|other|none",
-  "catalyst_date": "YYYY-MM-DD or null if unknown",
-  "catalyst_description": "one specific sentence describing the catalyst and expected timeline, or null if none found",
+  "catalyst_type": "product_launch|fda|contract|partnership|regulatory|management|macro|squeeze|activist|other|none",
+  "catalyst_date": "YYYY-MM-DD or Q2 2026 or null",
+  "catalyst_description": "2-3 specific sentences or null if none found",
   "catalyst_confidence": "high|medium|low|none",
-  "reasoning": "one sentence on why this is or isn't a real near-term catalyst"
+  "insider_angle": "why might insiders be buying right now? or null"
 }`;
 }
 
@@ -809,10 +828,16 @@ function applyCatalystResponse(
   )
     ? (typeRaw as CatalystType)
     : "other";
+  // Date can be ISO (YYYY-MM-DD), or a fuzzy "Q2 2026" / "H2 2026" /
+  // "2027" — keep as-is when we can recognise the shape, blank
+  // otherwise. fmtCalendarDate in the UI gracefully falls back to
+  // passthrough when it can't parse.
   const dateRaw = parsed.catalyst_date;
+  const dateStr =
+    typeof dateRaw === "string" ? dateRaw.trim() : null;
   const date =
-    typeof dateRaw === "string" && /^\d{4}-\d{2}-\d{2}$/.test(dateRaw)
-      ? dateRaw
+    dateStr && dateStr.length > 0 && dateStr.toLowerCase() !== "null"
+      ? dateStr
       : null;
   const desc =
     typeof parsed.catalyst_description === "string" &&
@@ -827,11 +852,23 @@ function applyCatalystResponse(
     confRaw === "high" || confRaw === "medium" || confRaw === "low"
       ? confRaw
       : "none";
+  // insider_angle can come back even when no specific catalyst was
+  // found — that's the whole point: insiders may be buying for a
+  // structural reason (turnaround, hidden value) rather than a single
+  // upcoming event.
+  const angleRaw = parsed.insider_angle;
+  const angle =
+    typeof angleRaw === "string" &&
+    angleRaw.trim().length > 0 &&
+    angleRaw.trim().toLowerCase() !== "null"
+      ? angleRaw.trim()
+      : null;
   out.catalystFound = found;
   out.catalystType = found ? type : "none";
-  out.catalystDate = date;
+  out.catalystDate = found ? date : null;
   out.catalystDescription = desc;
   out.catalystConfidence = found ? confidence : "none";
+  out.catalystInsiderAngle = angle;
   return out;
 }
 
@@ -869,7 +906,12 @@ export async function pass3CatalystDiscovery(
   }
 
   // Re-score with catalyst points: +2 high, +1 medium, +0 low/none.
-  // Cap at 10 — same total ceiling as before.
+  // Cap at 10. NOTE: pass 3 only ENRICHES — every candidate that made
+  // it through pass 2's tier-1 filter must remain in the result set,
+  // regardless of whether Perplexity found a specific catalyst. No
+  // candidate is filtered out here, no points are subtracted, and a
+  // missing catalyst never reduces a stock's setupScore below what
+  // pass 2 produced.
   return out.map((c) => {
     const bonus =
       c.catalystConfidence === "high"

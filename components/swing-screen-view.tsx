@@ -124,6 +124,7 @@ type SwingCandidate = {
   catalystDate: string | null;
   catalystDescription: string | null;
   catalystConfidence: "high" | "medium" | "low" | "none";
+  catalystInsiderAngle: string | null;
   catalystRawResponse: string | null;
   tier1Signals: string[];
   tier2Signals: string[];
@@ -1443,11 +1444,15 @@ function OptionsSection({ candidate: c }: { candidate: SwingCandidate }) {
 
 function catalystTypeLabel(t: string): string {
   if (t === "product_launch") return "Product launch";
-  if (t === "fda_decision") return "FDA decision";
-  if (t === "contract_award") return "Contract award";
+  if (t === "fda" || t === "fda_decision") return "FDA decision";
+  if (t === "contract" || t === "contract_award") return "Contract award";
   if (t === "rate_decision") return "Rate decision";
   if (t === "partnership") return "Partnership";
   if (t === "regulatory") return "Regulatory";
+  if (t === "management") return "Management change";
+  if (t === "macro") return "Macro event";
+  if (t === "squeeze") return "Short squeeze potential";
+  if (t === "activist") return "Activist activity";
   if (t === "analyst_upgrade") return "Analyst upgrade";
   if (t === "restructuring") return "Restructuring";
   if (t === "other") return "Other";
@@ -1468,10 +1473,22 @@ function CatalystSection({ candidate: c }: { candidate: SwingCandidate }) {
     return (
       <DetailSection title="Upcoming catalyst" titleTooltip={sectionTooltip}>
         <div className="text-muted-foreground">
-          No specific near-term catalyst identified. Insider activity and
-          options flow may reflect general business confidence or defensive
-          positioning.
+          No specific near-term catalyst identified.
         </div>
+        {c.catalystInsiderAngle && (
+          <div className="mt-2 rounded border border-amber-500/30 bg-amber-500/[0.05] p-2">
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-amber-300/80">
+              Why insiders are buying
+            </div>
+            <div className="mt-0.5 italic text-foreground/90">
+              {c.catalystInsiderAngle}
+            </div>
+            <div className="mt-1 text-[10px] text-muted-foreground">
+              Confidence: LOW — no specific catalyst found, but the insider
+              thesis still builds conviction.
+            </div>
+          </div>
+        )}
         <DetailRow
           label="Confidence"
           value={c.catalystConfidence === "low" ? "LOW" : "NONE"}
