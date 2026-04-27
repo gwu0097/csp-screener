@@ -1847,6 +1847,23 @@ export async function runEncyclopediaMaintenance(): Promise<MaintenanceReport> {
           reason: e instanceof Error ? e.message : String(e),
         });
       }
+    } else {
+      // Non-stale symbols still need a Phase 2C sweep to clean up any
+      // legacy quarter-end-keyed rows. reingestHistoricalDates bails
+      // early on clean symbols (one Yahoo earnings-module call), so
+      // running it always here is cheap. Without this, symbols that
+      // were ingested in the last 7 days never get their stale rows
+      // re-keyed by maintenance — exactly the SPOT gap.
+      try {
+        await reingestHistoricalDates(sym);
+      } catch (e) {
+        report.errors.push({
+          symbol: sym,
+          earnings_date: null,
+          stage: "reingestHistoricalDates",
+          reason: e instanceof Error ? e.message : String(e),
+        });
+      }
     }
   }
 

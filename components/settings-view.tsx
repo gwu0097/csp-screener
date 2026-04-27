@@ -76,8 +76,9 @@ export function SettingsView({ connected, lastRefresh, envFlags, schwabFlash, sc
         <CardHeader>
           <CardTitle>Encyclopedia maintenance</CardTitle>
         </CardHeader>
-        <CardContent>
+        <CardContent className="space-y-4">
           <ImpliedMoveBackfill />
+          <RekeySymbol />
         </CardContent>
       </Card>
 
@@ -288,6 +289,117 @@ function ImpliedMoveBackfill() {
               {last.errors.length === 1 ? "" : "s"}: {last.errors.slice(0, 3).join("; ")}
               {last.errors.length > 3 && ` (+${last.errors.length - 3} more)`}
             </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Calls /api/encyclopedia/rekey-symbol for a single ticker. Phase 2C
+// re-key only runs automatically on stale or never-pulled symbols;
+// recently-touched symbols never get their legacy quarter-end rows
+// cleaned up by maintenance, so this manual button covers that case.
+type RekeyChange = {
+  oldDate: string;
+  newDate: string;
+  action: "update" | "merge" | "unmatched";
+  hour: "bmo" | "amc" | "dmh" | null;
+};
+type RekeyResponse = {
+  rekey: {
+    symbol: string;
+    reingested: number;
+    merged_with_existing: number;
+    unmatched_rows: Array<{ oldDate: string; reason: string }>;
+    already_clean: boolean;
+    dryRun: boolean;
+    changes: RekeyChange[];
+  };
+  summary: {
+    symbol: string;
+    newRecords: number;
+    updatedRecords: number;
+    isComplete: boolean;
+  };
+};
+
+function RekeySymbol() {
+  const [symbol, setSymbol] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [last, setLast] = useState<RekeyResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function run() {
+    const s = symbol.trim().toUpperCase();
+    if (!s) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/encyclopedia/rekey-symbol", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ symbol: s }),
+        cache: "no-store",
+      });
+      const json = (await res.json()) as RekeyResponse | { error?: string };
+      if (!res.ok) {
+        throw new Error((json as { error?: string }).error ?? `HTTP ${res.status}`);
+      }
+      setLast(json as RekeyResponse);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Re-key failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="space-y-3 border-t border-border pt-3 text-sm">
+      <p className="text-muted-foreground">
+        Manually re-keys earnings_history rows from fiscal-quarter end to
+        the actual announcement date and re-fetches price action with
+        BMO/AMC timing. Use this when a symbol&apos;s recent rows still
+        show implausibly small moves (e.g. 0.3%) after the auto-fix.
+      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          type="text"
+          value={symbol}
+          onChange={(e) => setSymbol(e.target.value.toUpperCase())}
+          placeholder="Ticker (e.g. SPOT)"
+          className="w-32 rounded border border-border bg-background px-2 py-1 font-mono text-xs uppercase"
+        />
+        <Button size="sm" onClick={run} disabled={busy || !symbol.trim()}>
+          {busy ? "Running…" : "Re-key earnings history"}
+        </Button>
+      </div>
+      {error && (
+        <div className="rounded border border-rose-500/40 bg-rose-500/10 p-2 text-xs text-rose-300">
+          {error}
+        </div>
+      )}
+      {last && (
+        <div className="rounded border border-border bg-background/40 p-2 text-xs">
+          <div className="font-mono text-muted-foreground">
+            {last.rekey.symbol} · rekeyed={last.rekey.reingested} · merged=
+            {last.rekey.merged_with_existing} · unmatched=
+            {last.rekey.unmatched_rows.length} · already-clean=
+            {String(last.rekey.already_clean)}
+          </div>
+          {last.rekey.changes.length > 0 && (
+            <ul className="mt-1 space-y-0.5 text-[11px]">
+              {last.rekey.changes.slice(0, 8).map((c, i) => (
+                <li key={i} className="font-mono">
+                  <span className="text-muted-foreground">{c.oldDate}</span>{" "}
+                  →{" "}
+                  <span className="text-foreground">{c.newDate}</span>{" "}
+                  <span className="text-muted-foreground/70">
+                    ({c.hour ?? "?"}, {c.action})
+                  </span>
+                </li>
+              ))}
+            </ul>
           )}
         </div>
       )}
