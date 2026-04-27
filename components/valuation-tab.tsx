@@ -23,6 +23,7 @@ import { ValuationTier1 } from "@/components/valuation-tier1";
 import { ValuationTier2 } from "@/components/valuation-tier2";
 import { ValuationComps } from "@/components/valuation-comps";
 import { fmtDate, fmtRoundPrice } from "@/components/valuation-format";
+import { TooltipProvider } from "@/components/ui/tooltip";
 
 type Version = {
   id: string;
@@ -97,8 +98,9 @@ export function ValuationTab({ symbol }: { symbol: string }) {
   const isV2Selected = selected ? isV2(selected.output) : false;
 
   return (
-    <div className="rounded-md border border-border bg-background/30 p-3 text-xs">
-      {loading ? (
+    <TooltipProvider delayDuration={150}>
+      <div className="rounded-md border border-border bg-background/30 p-3 text-xs">
+        {loading ? (
         <div className="flex items-center justify-center gap-2 p-6 text-muted-foreground">
           <Loader2 className="h-3.5 w-3.5 animate-spin" />
           Loading valuation models…
@@ -145,7 +147,8 @@ export function ValuationTab({ symbol }: { symbol: string }) {
           />
         </>
       )}
-    </div>
+      </div>
+    </TooltipProvider>
   );
 }
 

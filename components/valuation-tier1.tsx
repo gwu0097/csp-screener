@@ -13,7 +13,7 @@ import {
   type ScenarioSet,
   type ValuationModelV2,
 } from "@/lib/valuation";
-import { CalcCell, EditableCell } from "@/components/valuation-cell";
+import { CalcCell, CellLegend, EditableCell } from "@/components/valuation-cell";
 import {
   fmtBigDollars,
   fmtPct,
@@ -21,6 +21,15 @@ import {
   fmtRoundPrice,
   fmtSignedPct,
 } from "@/components/valuation-format";
+import { LabelWithTooltip } from "@/components/valuation-label";
+import {
+  tipExitPE,
+  tipOpMargin,
+  tipProbability,
+  tipRevGrowth,
+  tipShares,
+  tipTaxRate,
+} from "@/components/valuation-tooltips";
 
 type Field = keyof ScenarioInputs;
 
@@ -39,23 +48,64 @@ const SCENARIO_PILL: Record<ScenarioKey, string> = {
 // UI — revenue first, then profitability, then per-share, then P/E +
 // targets.
 type Row =
-  | { kind: "edit"; field: Field; label: string; cell: "pct" | "pe" }
-  | { kind: "calc"; label: string; format: "money" | "price" | "signedPct" | "round" | "pct"; pick: (out: import("@/lib/valuation").ScenarioOutputs) => number }
+  | {
+      kind: "edit";
+      field: Field;
+      label: string;
+      cell: "pct" | "pe";
+      help?: (m: ValuationModelV2) => React.ReactNode;
+    }
+  | {
+      kind: "calc";
+      label: string;
+      format: "money" | "price" | "signedPct" | "round" | "pct";
+      pick: (out: import("@/lib/valuation").ScenarioOutputs) => number;
+    }
   | { kind: "section"; label: string };
 
 const ROWS: Row[] = [
   { kind: "section", label: "REVENUE" },
-  { kind: "edit", field: "rev_growth_y1", label: "Rev Growth Y1", cell: "pct" },
+  {
+    kind: "edit",
+    field: "rev_growth_y1",
+    label: "Rev Growth Y1",
+    cell: "pct",
+    help: (m) => tipRevGrowth(1, m),
+  },
   { kind: "calc", label: "Revenue Y1", format: "money", pick: (o) => o.rev_y1 },
-  { kind: "edit", field: "rev_growth_y2", label: "Rev Growth Y2", cell: "pct" },
+  {
+    kind: "edit",
+    field: "rev_growth_y2",
+    label: "Rev Growth Y2",
+    cell: "pct",
+    help: (m) => tipRevGrowth(2, m),
+  },
   { kind: "calc", label: "Revenue Y2", format: "money", pick: (o) => o.rev_y2 },
-  { kind: "edit", field: "rev_growth_y3", label: "Rev Growth Y3", cell: "pct" },
+  {
+    kind: "edit",
+    field: "rev_growth_y3",
+    label: "Rev Growth Y3",
+    cell: "pct",
+    help: (m) => tipRevGrowth(3, m),
+  },
   { kind: "calc", label: "Revenue Y3", format: "money", pick: (o) => o.rev_y3 },
 
   { kind: "section", label: "PROFITABILITY" },
-  { kind: "edit", field: "op_margin", label: "Op Margin", cell: "pct" },
+  {
+    kind: "edit",
+    field: "op_margin",
+    label: "Op Margin",
+    cell: "pct",
+    help: (m) => tipOpMargin(m),
+  },
   { kind: "calc", label: "Operating Income Y3", format: "money", pick: (o) => o.op_income_y3 },
-  { kind: "edit", field: "tax_rate", label: "Tax Rate", cell: "pct" },
+  {
+    kind: "edit",
+    field: "tax_rate",
+    label: "Tax Rate",
+    cell: "pct",
+    help: (m) => tipTaxRate(m),
+  },
   { kind: "calc", label: "Net Income Y3", format: "money", pick: (o) => o.net_income_y3 },
 
   { kind: "section", label: "PER SHARE" },
@@ -64,12 +114,24 @@ const ROWS: Row[] = [
   { kind: "calc", label: "EPS Y3", format: "price", pick: (o) => o.eps_y3 },
 
   { kind: "section", label: "VALUATION" },
-  { kind: "edit", field: "exit_pe", label: "Exit P/E", cell: "pe" },
+  {
+    kind: "edit",
+    field: "exit_pe",
+    label: "Exit P/E",
+    cell: "pe",
+    help: (m) => tipExitPE(m),
+  },
   { kind: "calc", label: "Price Target", format: "round", pick: (o) => o.price_target },
   { kind: "calc", label: "Return", format: "signedPct", pick: (o) => o.return_pct },
   { kind: "calc", label: "Implied Mkt Cap", format: "money", pick: (o) => o.implied_mkt_cap },
 
-  { kind: "edit", field: "probability", label: "Probability", cell: "pct" },
+  {
+    kind: "edit",
+    field: "probability",
+    label: "Probability",
+    cell: "pct",
+    help: () => tipProbability(),
+  },
 ];
 
 export function ValuationTier1({
@@ -137,6 +199,7 @@ export function ValuationTier1({
 
       <div>
         <SectionLabel>Projection</SectionLabel>
+        <CellLegend />
         <div className="overflow-x-auto rounded border border-border">
           <table className="min-w-full text-xs">
             <thead className="bg-background/60">
@@ -186,7 +249,12 @@ export function ValuationTier1({
                 }
                 return (
                   <tr key={`e-${idx}`} className="border-t border-border">
-                    <td className="px-2 py-1 text-foreground">{row.label}</td>
+                    <td className="px-2 py-1 text-foreground">
+                      <LabelWithTooltip
+                        label={row.label}
+                        help={row.help?.(model)}
+                      />
+                    </td>
                     {SCENARIOS.map((s) => (
                       <td key={s} className="px-2 py-1 text-center">
                         <EditableCell
@@ -269,7 +337,7 @@ function StartingPoint({
         />
         <div className="flex items-center gap-2">
           <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
-            Tax Rate
+            <LabelWithTooltip label="Tax Rate" help={tipTaxRate(model)} />
           </span>
           <EditableCell
             value={model.tax_rate}
@@ -281,7 +349,7 @@ function StartingPoint({
         </div>
         <div className="flex items-center gap-2">
           <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
-            Shares (M)
+            <LabelWithTooltip label="Shares (M)" help={tipShares(model)} />
           </span>
           <EditableCell
             value={model.shares_outstanding}

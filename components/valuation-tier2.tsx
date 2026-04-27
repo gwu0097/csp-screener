@@ -15,7 +15,7 @@ import {
   type ScenarioKey,
   type ValuationModelV2,
 } from "@/lib/valuation";
-import { CalcCell, EditableCell } from "@/components/valuation-cell";
+import { CalcCell, CellLegend, EditableCell } from "@/components/valuation-cell";
 import {
   fmtBigDollars,
   fmtPct,
@@ -23,6 +23,21 @@ import {
   fmtRoundPrice,
   fmtSignedPct,
 } from "@/components/valuation-format";
+import { LabelWithTooltip } from "@/components/valuation-label";
+import {
+  tipBeta,
+  tipCostOfDebt,
+  tipDebtToCapital,
+  tipEquityRiskPremium,
+  tipExitMultiple,
+  tipFCFMargin,
+  tipRevGrowth,
+  tipRiskFreeRate,
+  tipTerminalGrowth,
+  tipTerminalMethod,
+  tipWACC,
+  tipProbability,
+} from "@/components/valuation-tooltips";
 
 type DCFField = keyof DCFScenarioInputs;
 
@@ -43,25 +58,26 @@ type EditRow = {
   field: DCFField;
   label: string;
   cell: "pct" | "pe" | "beta" | "raw";
+  help?: (m: ValuationModelV2) => React.ReactNode;
 };
 
 const REV_ROWS: EditRow[] = [
-  { field: "rev_growth_y1", label: "Rev Growth Y1", cell: "pct" },
-  { field: "rev_growth_y2", label: "Rev Growth Y2", cell: "pct" },
-  { field: "rev_growth_y3", label: "Rev Growth Y3", cell: "pct" },
-  { field: "rev_growth_y4", label: "Rev Growth Y4", cell: "pct" },
-  { field: "rev_growth_y5", label: "Rev Growth Y5", cell: "pct" },
-  { field: "terminal_growth_rate", label: "Terminal Growth", cell: "pct" },
+  { field: "rev_growth_y1", label: "Rev Growth Y1", cell: "pct", help: (m) => tipRevGrowth(1, m) },
+  { field: "rev_growth_y2", label: "Rev Growth Y2", cell: "pct", help: (m) => tipRevGrowth(2, m) },
+  { field: "rev_growth_y3", label: "Rev Growth Y3", cell: "pct", help: (m) => tipRevGrowth(3, m) },
+  { field: "rev_growth_y4", label: "Rev Growth Y4", cell: "pct", help: (m) => tipRevGrowth(4, m) },
+  { field: "rev_growth_y5", label: "Rev Growth Y5", cell: "pct", help: (m) => tipRevGrowth(5, m) },
+  { field: "terminal_growth_rate", label: "Terminal Growth", cell: "pct", help: () => tipTerminalGrowth() },
 ];
 const PROFIT_ROWS: EditRow[] = [
-  { field: "fcf_margin", label: "FCF Margin", cell: "pct" },
+  { field: "fcf_margin", label: "FCF Margin", cell: "pct", help: (m) => tipFCFMargin(m) },
 ];
 const DISCOUNT_ROWS: EditRow[] = [
-  { field: "risk_free_rate", label: "Risk-Free Rate", cell: "pct" },
-  { field: "equity_risk_premium", label: "Equity Risk Premium", cell: "pct" },
-  { field: "beta", label: "Beta", cell: "beta" },
-  { field: "debt_to_total_capital", label: "Debt / Total Capital", cell: "pct" },
-  { field: "cost_of_debt_pretax", label: "Cost of Debt (pre-tax)", cell: "pct" },
+  { field: "risk_free_rate", label: "Risk-Free Rate", cell: "pct", help: () => tipRiskFreeRate() },
+  { field: "equity_risk_premium", label: "Equity Risk Premium", cell: "pct", help: () => tipEquityRiskPremium() },
+  { field: "beta", label: "Beta", cell: "beta", help: (m) => tipBeta(m) },
+  { field: "debt_to_total_capital", label: "Debt / Total Capital", cell: "pct", help: (m) => tipDebtToCapital(m) },
+  { field: "cost_of_debt_pretax", label: "Cost of Debt (pre-tax)", cell: "pct", help: () => tipCostOfDebt() },
 ];
 
 export function ValuationTier2({
@@ -139,18 +155,22 @@ export function ValuationTier2({
   return (
     <div className="space-y-4">
       <DCFContextStrip model={model} />
+      <CellLegend />
 
       <InputBlock title="Revenue projection" rows={REV_ROWS}
+        model={model}
         userInputs={userInputs} system={model.tier2.system}
         editable={editable} onChange={onChangeField}
       />
 
       <InputBlock title="Profitability" rows={PROFIT_ROWS}
+        model={model}
         userInputs={userInputs} system={model.tier2.system}
         editable={editable} onChange={onChangeField}
       />
 
       <DiscountBlock
+        model={model}
         userInputs={userInputs}
         system={model.tier2.system}
         liveOutputs={liveOutputs}
@@ -170,6 +190,7 @@ export function ValuationTier2({
       <ScenarioCalcs liveOutputs={liveOutputs} model={model} />
 
       <ProbabilityRow
+        model={model}
         userInputs={userInputs}
         system={model.tier2.system}
         editable={editable}
@@ -234,6 +255,7 @@ function KV({ label, value }: { label: string; value: string }) {
 function InputBlock({
   title,
   rows,
+  model,
   userInputs,
   system,
   editable,
@@ -241,6 +263,7 @@ function InputBlock({
 }: {
   title: string;
   rows: EditRow[];
+  model: ValuationModelV2;
   userInputs: DCFScenarioSet;
   system: DCFScenarioSet;
   editable: boolean;
@@ -268,7 +291,9 @@ function InputBlock({
           <tbody>
             {rows.map((row) => (
               <tr key={row.field} className="border-t border-border">
-                <td className="px-2 py-1 text-foreground">{row.label}</td>
+                <td className="px-2 py-1 text-foreground">
+                  <LabelWithTooltip label={row.label} help={row.help?.(model)} />
+                </td>
                 {SCENARIOS.map((s) => (
                   <td key={s} className="px-2 py-1 text-center">
                     <EditableCell
@@ -292,12 +317,14 @@ function InputBlock({
 // Discount-rate block also shows the calculated CoE / after-tax CoD /
 // WACC rows so the user sees how WACC is built up.
 function DiscountBlock({
+  model,
   userInputs,
   system,
   liveOutputs,
   editable,
   onChange,
 }: {
+  model: ValuationModelV2;
   userInputs: DCFScenarioSet;
   system: DCFScenarioSet;
   liveOutputs: ReturnType<typeof computeTier2All>;
@@ -328,6 +355,7 @@ function DiscountBlock({
               <RowAndPossibleCalc
                 key={row.field}
                 row={row}
+                model={model}
                 userInputs={userInputs}
                 system={system}
                 editable={editable}
@@ -338,7 +366,12 @@ function DiscountBlock({
               />
             ))}
             <tr className="border-t border-border bg-emerald-500/[0.04]">
-              <td className="px-2 py-1 font-semibold text-emerald-300">WACC</td>
+              <td className="px-2 py-1 font-semibold text-emerald-300">
+                <LabelWithTooltip
+                  label="WACC"
+                  help={tipWACC(model, userInputs.base)}
+                />
+              </td>
               {SCENARIOS.map((s) => (
                 <td key={s} className="px-2 py-1 text-center font-mono font-semibold text-emerald-200">
                   {fmtPct(liveOutputs[s].wacc, 2)}
@@ -354,6 +387,7 @@ function DiscountBlock({
 
 function RowAndPossibleCalc({
   row,
+  model,
   userInputs,
   system,
   editable,
@@ -363,6 +397,7 @@ function RowAndPossibleCalc({
   liveOutputs,
 }: {
   row: EditRow;
+  model: ValuationModelV2;
   userInputs: DCFScenarioSet;
   system: DCFScenarioSet;
   editable: boolean;
@@ -374,7 +409,9 @@ function RowAndPossibleCalc({
   return (
     <>
       <tr className="border-t border-border">
-        <td className="px-2 py-1 text-foreground">{row.label}</td>
+        <td className="px-2 py-1 text-foreground">
+          <LabelWithTooltip label={row.label} help={row.help?.(model)} />
+        </td>
         {SCENARIOS.map((s) => (
           <td key={s} className="px-2 py-1 text-center">
             <EditableCell
@@ -449,7 +486,9 @@ function TerminalBlock({
           </thead>
           <tbody>
             <tr className="border-t border-border">
-              <td className="px-2 py-1 text-foreground">Method</td>
+              <td className="px-2 py-1 text-foreground">
+                <LabelWithTooltip label="Method" help={tipTerminalMethod()} />
+              </td>
               {SCENARIOS.map((s) => (
                 <td key={s} className="px-2 py-1 text-center">
                   <select
@@ -461,7 +500,7 @@ function TerminalBlock({
                       )
                     }
                     disabled={!editable}
-                    className="rounded border border-border bg-background px-1 py-0.5 text-xs"
+                    className="cursor-pointer rounded border border-white/15 bg-white/[0.05] px-2 py-1 text-xs hover:border-white/40 disabled:cursor-default disabled:opacity-70"
                   >
                     <option value="gordon">Gordon Growth</option>
                     <option value="exit_multiple">Exit Multiple</option>
@@ -470,7 +509,12 @@ function TerminalBlock({
               ))}
             </tr>
             <tr className="border-t border-border">
-              <td className="px-2 py-1 text-foreground">Exit Multiple (× FCF)</td>
+              <td className="px-2 py-1 text-foreground">
+                <LabelWithTooltip
+                  label="Exit Multiple (× FCF)"
+                  help={tipExitMultiple()}
+                />
+              </td>
               {SCENARIOS.map((s) => (
                 <td key={s} className="px-2 py-1 text-center">
                   <EditableCell
@@ -498,6 +542,7 @@ function ProbabilityRow({
   probValid,
   probSum,
 }: {
+  model: ValuationModelV2;
   userInputs: DCFScenarioSet;
   system: DCFScenarioSet;
   editable: boolean;
@@ -511,7 +556,9 @@ function ProbabilityRow({
         <table className="min-w-full text-xs">
           <tbody>
             <tr>
-              <td className="px-2 py-1 text-foreground">Probability</td>
+              <td className="px-2 py-1 text-foreground">
+                <LabelWithTooltip label="Probability" help={tipProbability()} />
+              </td>
               {SCENARIOS.map((s) => (
                 <td key={s} className="px-2 py-1 text-center">
                   <EditableCell
