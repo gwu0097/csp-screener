@@ -14,6 +14,7 @@ import {
   X,
 } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { ValuationTab } from "@/components/valuation-tab";
 
 // ---------- Types mirrored from the API routes ----------
 
@@ -320,10 +321,7 @@ export function ResearchStockView({ symbol }: { symbol: string }) {
         </TabsContent>
 
         <TabsContent value="valuation">
-          <ComingSoon
-            title="Valuation Model"
-            blurb="DCF + bear/base/bull scenarios with editable assumptions, plus historical valuation snapshots."
-          />
+          <ValuationTab symbol={symbol} />
         </TabsContent>
         <TabsContent value="tenk">
           <ComingSoon
