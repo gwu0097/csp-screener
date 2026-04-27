@@ -20,6 +20,7 @@ type RecentStock = {
   symbol: string;
   company_name: string | null;
   overall_grade: string | null;
+  grade_reasoning: string | null;
   last_researched_at: string | null;
   modules: ModuleCounts;
   valuation_base_target: number | null;
@@ -568,7 +569,13 @@ function Row({ s }: { s: RecentStock }) {
       <td className="px-3 py-2">
         <span
           className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${gradeClasses(s.overall_grade)}`}
-          title={s.overall_grade ? `Grade ${s.overall_grade}` : "Not yet graded"}
+          title={
+            s.grade_reasoning
+              ? s.grade_reasoning
+              : s.overall_grade
+                ? `Grade ${s.overall_grade}`
+                : "Not yet graded"
+          }
         >
           {s.overall_grade ?? "Not graded"}
         </span>

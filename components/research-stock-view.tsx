@@ -16,6 +16,8 @@ import {
 } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { ValuationTab } from "@/components/valuation-tab";
+import { SentimentTab } from "@/components/research-sentiment";
+import { RiskTab } from "@/components/research-risk";
 
 // ---------- Types mirrored from the API routes ----------
 
@@ -346,16 +348,10 @@ export function ResearchStockView({ symbol }: { symbol: string }) {
           />
         </TabsContent>
         <TabsContent value="risk">
-          <ComingSoon
-            title="Risk Assessment"
-            blurb="Scored risk inventory across regulatory, competitive, balance-sheet, and macro vectors."
-          />
+          <RiskTab symbol={symbol} />
         </TabsContent>
         <TabsContent value="sentiment">
-          <ComingSoon
-            title="Sentiment"
-            blurb="Retail + institutional sentiment, options skew, and social/news flow."
-          />
+          <SentimentTab symbol={symbol} />
         </TabsContent>
       </Tabs>
     </div>

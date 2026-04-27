@@ -168,63 +168,137 @@ export async function saveModule<T>(
 
 // ---------- Overall grade ----------
 //
-// Pure function — caller passes whatever modules it has and gets a grade
-// back. Phase 1 only weights fundamental_health + catalyst_scanner; more
-// modules will plug in later.
+// Five-input weighted score. Each present input contributes up to its
+// max; absent inputs simply don't accrue points (so a stock with only
+// fundamentals + catalysts run will mechanically score lower than one
+// where all five have run, which is the intent — graded confidence
+// scales with how much research has been done).
+//
+// Max points: fundamentals 30 / catalyst 20 / sentiment 20 / risk 20
+// / valuation upside 10 = 100. Grade thresholds A≥80, B≥65, C≥45.
 
 export type OverallGrade = "A" | "B" | "C" | "D" | null;
 
 export type GradeInputs = {
   fundamentalHealthScore?: number | null; // 0-10
   catalystScore?: "rich" | "moderate" | "sparse" | null;
+  sentimentScore?: number | null; // 0-10
+  riskLevel?: "low" | "medium" | "high" | null;
+  weightedReturn?: number | null; // valuation weighted return (e.g. 0.25 = +25%)
 };
 
 export function computeOverallGrade(
   inputs: GradeInputs,
 ): { grade: OverallGrade; reasoning: string } {
-  const fh = inputs.fundamentalHealthScore ?? null;
-  const cat = inputs.catalystScore ?? null;
-  if (fh === null && cat === null) {
-    return { grade: null, reasoning: "Not yet graded." };
-  }
-  if ((fh ?? 0) >= 8 && cat === "rich") {
+  const fh = inputs.fundamentalHealthScore;
+  const cat = inputs.catalystScore;
+  const sent = inputs.sentimentScore;
+  const risk = inputs.riskLevel;
+  const ret = inputs.weightedReturn;
+
+  // Count distinct module groups that have contributed an input. We
+  // only grade when at least two are present so a half-built profile
+  // doesn't get an A by default.
+  const present = [
+    fh !== null && fh !== undefined,
+    cat !== null && cat !== undefined,
+    sent !== null && sent !== undefined,
+    risk !== null && risk !== undefined,
+    ret !== null && ret !== undefined,
+  ].filter(Boolean).length;
+  if (present < 2) {
     return {
-      grade: "A",
-      reasoning: `Strong fundamentals (${fh}/10) with a rich catalyst landscape.`,
+      grade: null,
+      reasoning:
+        present === 0
+          ? "Not yet graded."
+          : "Run at least two modules to compute a grade.",
     };
   }
-  if ((fh ?? 0) >= 6 || cat === "rich") {
-    const why =
-      cat === "rich"
-        ? `Rich catalyst landscape${fh !== null ? ` and decent fundamentals (${fh}/10)` : ""}`
-        : `Decent fundamentals (${fh}/10)`;
-    return { grade: "B", reasoning: `${why}.` };
+
+  let score = 0;
+  const parts: string[] = [];
+
+  if (fh !== null && fh !== undefined) {
+    score += Math.max(0, Math.min(10, fh)) * 3;
+    parts.push(`fundamentals ${fh}/10`);
   }
-  if ((fh ?? 0) >= 4) {
-    return {
-      grade: "C",
-      reasoning: `Mixed signals — fundamentals ${fh}/10${cat ? `, catalysts ${cat}` : ""}.`,
-    };
+  if (cat) {
+    score += cat === "rich" ? 20 : cat === "moderate" ? 10 : 0;
+    parts.push(`${cat} catalysts`);
   }
-  return {
-    grade: "D",
-    reasoning: `Weak fundamentals${fh !== null ? ` (${fh}/10)` : ""}${cat === "sparse" ? " and sparse catalysts" : ""}.`,
-  };
+  if (sent !== null && sent !== undefined) {
+    score += Math.max(0, Math.min(10, sent)) * 2;
+    parts.push(`sentiment ${sent}/10`);
+  }
+  if (risk) {
+    score += risk === "low" ? 20 : risk === "medium" ? 10 : 0;
+    parts.push(`${risk} risk`);
+  }
+  if (ret !== null && ret !== undefined) {
+    if (ret > 0.5) score += 10;
+    else if (ret > 0.25) score += 5;
+    else if (ret > 0) score += 2;
+    const pct = (ret * 100).toFixed(0);
+    parts.push(`valuation ${ret >= 0 ? "+" : ""}${pct}%`);
+  }
+
+  const grade: OverallGrade =
+    score >= 80 ? "A" : score >= 65 ? "B" : score >= 45 ? "C" : "D";
+
+  // One-sentence reasoning, prepended with a qualitative leading clause
+  // tied to the grade so the tooltip reads naturally.
+  const lead =
+    grade === "A"
+      ? "Strong setup"
+      : grade === "B"
+        ? "Solid setup"
+        : grade === "C"
+          ? "Mixed signals"
+          : "Weak setup";
+  const reasoning = `${lead} — ${parts.join(", ")} (score ${score}/100).`;
+  return { grade, reasoning };
 }
 
 export async function recomputeOverallGrade(symbol: string): Promise<void> {
   const sb = createServerClient();
   const upper = symbol.toUpperCase();
-  const fh = await getLatestModule<{ healthScore?: number }>(
-    upper,
-    "fundamental_health",
-  );
-  const cs = await getLatestModule<{
-    overall_catalyst_score?: "rich" | "moderate" | "sparse";
-  }>(upper, "catalyst_scanner");
+  const [fh, cs, sm, rk, vm] = await Promise.all([
+    getLatestModule<{ healthScore?: number }>(upper, "fundamental_health"),
+    getLatestModule<{ overall_catalyst_score?: "rich" | "moderate" | "sparse" }>(
+      upper,
+      "catalyst_scanner",
+    ),
+    getLatestModule<{ sentiment_score?: number }>(upper, "sentiment"),
+    getLatestModule<{ overall_risk_level?: "low" | "medium" | "high" }>(
+      upper,
+      "risk_assessment",
+    ),
+    getLatestModule<unknown>(upper, "valuation_model"),
+  ]);
+
+  // Pull the weighted return from whichever valuation schema is on the
+  // row — tier1 (v2), legacy (v1), or absent.
+  let weightedReturn: number | null = null;
+  const vmOut = vm?.output as Record<string, unknown> | undefined;
+  if (vmOut) {
+    if (vmOut.schema_version === 2) {
+      const r = (vmOut.tier1 as { outputs?: { weighted_return_pct?: number } } | undefined)
+        ?.outputs?.weighted_return_pct;
+      weightedReturn = typeof r === "number" && Number.isFinite(r) ? r : null;
+    } else {
+      const r = (vmOut as { outputs?: { weighted_return_pct?: number } }).outputs
+        ?.weighted_return_pct;
+      weightedReturn = typeof r === "number" && Number.isFinite(r) ? r : null;
+    }
+  }
+
   const { grade, reasoning } = computeOverallGrade({
     fundamentalHealthScore: fh?.output?.healthScore ?? null,
     catalystScore: cs?.output?.overall_catalyst_score ?? null,
+    sentimentScore: sm?.output?.sentiment_score ?? null,
+    riskLevel: rk?.output?.overall_risk_level ?? null,
+    weightedReturn,
   });
   const upd = await sb
     .from("research_stocks")

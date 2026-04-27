@@ -8,6 +8,7 @@ import {
 } from "@/lib/sec-edgar";
 import {
   getModuleHistory,
+  recomputeOverallGrade,
   saveModule,
 } from "@/lib/research-modules";
 import { createServerClient } from "@/lib/supabase";
@@ -416,6 +417,7 @@ export async function POST(
     };
 
     const saved = await saveModule(symbol, "valuation_model", output);
+    await recomputeOverallGrade(symbol);
     return NextResponse.json({ module: saved });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -537,6 +539,11 @@ export async function PATCH(
       .update({ output: next })
       .eq("id", row.id);
     if (upd.error) throw new Error(`update failed: ${upd.error.message}`);
+
+    // User-edited assumptions can flip the weighted return, which feeds
+    // into the overall grade. Recompute so the home-page grade pill
+    // stays in sync after every edit.
+    await recomputeOverallGrade(symbol);
 
     return NextResponse.json({
       module: {

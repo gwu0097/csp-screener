@@ -21,6 +21,7 @@ type StockRow = {
   symbol: string;
   company_name: string | null;
   overall_grade: string | null;
+  grade_reasoning: string | null;
   last_researched_at: string | null;
 };
 
@@ -112,7 +113,9 @@ export async function GET(): Promise<NextResponse> {
   // column that isn't sortable anyway.
   const stocksRes = await sb
     .from("research_stocks")
-    .select("symbol,company_name,overall_grade,last_researched_at")
+    .select(
+      "symbol,company_name,overall_grade,grade_reasoning,last_researched_at",
+    )
     .order("last_researched_at", { ascending: false });
   if (stocksRes.error) {
     return NextResponse.json({ error: stocksRes.error.message }, { status: 500 });
