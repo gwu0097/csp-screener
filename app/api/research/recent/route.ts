@@ -1,7 +1,21 @@
 import { NextResponse } from "next/server";
+import YahooFinance from "yahoo-finance2";
 import { createServerClient } from "@/lib/supabase";
 
 export const dynamic = "force-dynamic";
+
+const yahooFinance = new (
+  YahooFinance as unknown as new () => Record<string, unknown>
+)();
+type YFClient = {
+  quote: (
+    symbols: string[] | string,
+    q?: Record<string, unknown>,
+    m?: { validateResult?: boolean },
+  ) => Promise<unknown>;
+};
+const yf = yahooFinance as unknown as YFClient;
+const QUOTE_OPTS = { validateResult: false } as const;
 
 type StockRow = {
   symbol: string;
@@ -50,7 +64,46 @@ export type RecentStockRow = StockRow & {
   // can show a one-line summary without having to open the stock.
   valuation_base_target: number | null;
   catalyst_score: "rich" | "moderate" | "sparse" | null;
+  current_price: number | null;
+  change_percent: number | null;
 };
+
+function unwrapNumber(v: unknown): number | null {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (v && typeof v === "object" && "raw" in (v as Record<string, unknown>)) {
+    const raw = (v as { raw?: unknown }).raw;
+    if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+  }
+  return null;
+}
+
+async function fetchQuotes(
+  symbols: string[],
+): Promise<Map<string, { price: number; changePct: number | null }>> {
+  const out = new Map<string, { price: number; changePct: number | null }>();
+  if (symbols.length === 0) return out;
+  try {
+    const result = (await yf.quote(symbols, undefined, QUOTE_OPTS)) as
+      | unknown[]
+      | unknown;
+    const arr: Record<string, unknown>[] = Array.isArray(result)
+      ? (result as Record<string, unknown>[])
+      : [result as Record<string, unknown>];
+    for (const q of arr) {
+      const sym = typeof q.symbol === "string" ? (q.symbol as string) : null;
+      const price = unwrapNumber(q.regularMarketPrice);
+      const changePct = unwrapNumber(q.regularMarketChangePercent);
+      if (sym && price !== null) {
+        out.set(sym.toUpperCase(), { price, changePct });
+      }
+    }
+  } catch (err) {
+    console.warn(
+      `[research/recent] Yahoo quote batch failed: ${err instanceof Error ? err.message : err}`,
+    );
+  }
+  return out;
+}
 
 export async function GET(): Promise<NextResponse> {
   const sb = createServerClient();
@@ -93,14 +146,14 @@ export async function GET(): Promise<NextResponse> {
     }
   }
 
-  // Latest catalyst + valuation outputs only — we need just two fields
-  // off each. Ordered desc by run_at, deduped to first per (symbol,
-  // module_type) on the way through.
+  // Latest catalyst + valuation + business_overview outputs — we need
+  // a few summary fields off each, plus business_overview gives us a
+  // companyName fallback for older rows where the upsert didn't land.
   const latestRes = await sb
     .from("research_modules")
     .select("symbol,module_type,output,run_at")
     .in("symbol", symbols)
-    .in("module_type", ["catalyst_scanner", "valuation_model"])
+    .in("module_type", ["catalyst_scanner", "valuation_model", "business_overview"])
     .order("run_at", { ascending: false });
   const latestRows = (latestRes.data ?? []) as LatestModuleRow[];
   if (latestRes.error) {
@@ -115,7 +168,6 @@ export async function GET(): Promise<NextResponse> {
   function pickValuationTarget(output: unknown): number | null {
     if (!output || typeof output !== "object") return null;
     const o = output as Record<string, unknown>;
-    // v2 → tier1.outputs.base.price_target. v1 → outputs.base.price_target.
     if (o.schema_version === 2) {
       const tier1 = o.tier1 as { outputs?: { base?: { price_target?: number } } };
       const v = tier1?.outputs?.base?.price_target;
@@ -139,14 +191,32 @@ export async function GET(): Promise<NextResponse> {
     return null;
   }
 
+  function pickCompanyName(output: unknown): string | null {
+    if (!output || typeof output !== "object") return null;
+    const o = output as { companyName?: unknown };
+    return typeof o.companyName === "string" && o.companyName.trim().length > 0
+      ? o.companyName
+      : null;
+  }
+
+  // Live prices in parallel with the rest. Failure is non-fatal — we
+  // just leave price/change as null on rows we couldn't quote.
+  const quotes = await fetchQuotes(symbols);
+
   const out: RecentStockRow[] = stocks.map((s) => {
     const val = latestBy.get(`${s.symbol}|valuation_model`);
     const cat = latestBy.get(`${s.symbol}|catalyst_scanner`);
+    const bo = latestBy.get(`${s.symbol}|business_overview`);
+    const fallbackName = bo ? pickCompanyName(bo.output) : null;
+    const q = quotes.get(s.symbol.toUpperCase()) ?? null;
     return {
       ...s,
+      company_name: s.company_name ?? fallbackName,
       modules: countsBySymbol.get(s.symbol) ?? { ...EMPTY_COUNTS },
       valuation_base_target: val ? pickValuationTarget(val.output) : null,
       catalyst_score: cat ? pickCatalystScore(cat.output) : null,
+      current_price: q?.price ?? null,
+      change_percent: q?.changePct ?? null,
     };
   });
   return NextResponse.json({ stocks: out });

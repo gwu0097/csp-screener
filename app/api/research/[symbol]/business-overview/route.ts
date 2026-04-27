@@ -181,21 +181,23 @@ export async function POST(
   try {
     const profile = await fetchYahooProfile(symbol);
 
-    // Backfill the parent stocks row with the profile fields so the home
-    // page can render them without re-querying Yahoo per row.
+    // Backfill the parent stocks row with company_name so the home
+    // page can render it without re-querying Yahoo per row. The
+    // production research_stocks table doesn't carry sector / industry
+    // / market_cap, so we keep those out of the upsert — including
+    // them was failing the whole row and leaving company_name blank.
     const sb = createServerClient();
-    await sb
+    const upsertRes = await sb
       .from("research_stocks")
       .upsert(
-        {
-          symbol,
-          company_name: profile.companyName,
-          sector: profile.sector,
-          industry: profile.industry,
-          market_cap: profile.marketCap,
-        },
+        { symbol, company_name: profile.companyName },
         { onConflict: "symbol" },
       );
+    if (upsertRes.error) {
+      console.warn(
+        `[business-overview] research_stocks upsert(${symbol}) failed: ${upsertRes.error.message}`,
+      );
+    }
 
     // Perplexity. Failure is non-fatal — we still save the Yahoo profile so
     // the user sees something (and the cache lasts 30 days).

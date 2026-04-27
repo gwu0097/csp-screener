@@ -24,6 +24,8 @@ type RecentStock = {
   modules: ModuleCounts;
   valuation_base_target: number | null;
   catalyst_score: "rich" | "moderate" | "sparse" | null;
+  current_price: number | null;
+  change_percent: number | null;
 };
 
 const RECENT_KEY = "research_recent_searches";
@@ -418,6 +420,7 @@ function StockTable({
         <thead className="bg-background/60">
           <tr>
             <Th>Symbol</Th>
+            <Th>Price</Th>
             <Th>Company</Th>
             <ThSortable
               label="Grade"
@@ -518,6 +521,36 @@ function ThSortable({
   );
 }
 
+function PriceCell({
+  price,
+  changePct,
+}: {
+  price: number | null;
+  changePct: number | null;
+}) {
+  if (price === null) return <span className="text-muted-foreground">—</span>;
+  // Yahoo's regularMarketChangePercent is already in percent form (e.g.
+  // 1.51 means +1.51%). The arrow + colour indicate direction.
+  const hasChange = changePct !== null && Number.isFinite(changePct);
+  const up = hasChange && (changePct as number) >= 0;
+  const cls = !hasChange
+    ? "text-muted-foreground"
+    : up
+      ? "text-emerald-300"
+      : "text-rose-300";
+  return (
+    <span className="inline-flex items-baseline gap-1">
+      <span className="text-foreground">${price.toFixed(2)}</span>
+      {hasChange && (
+        <span className={`text-[10px] ${cls}`}>
+          {up ? "▲" : "▼"}
+          {Math.abs(changePct as number).toFixed(2)}%
+        </span>
+      )}
+    </span>
+  );
+}
+
 function Row({ s }: { s: RecentStock }) {
   return (
     <tr className="border-t border-border hover:bg-white/[0.02]">
@@ -528,6 +561,9 @@ function Row({ s }: { s: RecentStock }) {
         >
           {s.symbol}
         </Link>
+      </td>
+      <td className="px-3 py-2 font-mono">
+        <PriceCell price={s.current_price} changePct={s.change_percent} />
       </td>
       <td className="max-w-[14rem] truncate px-3 py-2 text-muted-foreground">
         {s.company_name ?? "—"}
