@@ -1571,6 +1571,7 @@ function ExpandedDetail({
         events={r.stageThree?.details?.crushHistory}
         todayEmPct={r.stageThree?.details?.expectedMovePct ?? null}
         todaySymbol={r.symbol}
+        todayEarningsDate={r.earningsDate}
       />
 
       <CustomStrikeAnalyzer

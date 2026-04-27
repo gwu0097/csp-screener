@@ -26,6 +26,7 @@ import {
 } from "@/lib/classification";
 import {
   getCrushHistory,
+  persistFlowSnapshot,
   persistLiveImpliedMove,
   type CrushHistoryEvent,
 } from "@/lib/earnings-history-table";
@@ -1308,6 +1309,18 @@ export async function runStagesThreeFour(base: ScreenerResult): Promise<Screener
   ]);
   stageThree.details.crushHistory = crushHistory;
   stageThree.details.optionsFlow = optionsFlow;
+
+  // Persist the flow snapshot to the earnings_history row for this
+  // upcoming event so future quarters can compare pre-print positioning
+  // against the actual outcome. Same row that holds implied_move_pct;
+  // upsert keys on (symbol, earnings_date). Non-blocking.
+  if (optionsFlow) {
+    await persistFlowSnapshot(
+      candidate.symbol,
+      candidate.earningsDate,
+      optionsFlow,
+    );
+  }
 
   const spreadTooWide = isSpreadTooWide();
   // Spread-too-wide is a hard kill regardless of any other signal.

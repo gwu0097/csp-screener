@@ -21,10 +21,15 @@ function validSymbol(symbol: string): boolean {
   return /^[A-Z][A-Z0-9.-]{0,9}$/.test(symbol);
 }
 
+function validIsoDate(s: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}$/.test(s);
+}
+
 type Body = {
   symbol?: unknown;
   companyName?: unknown;
   currentEM?: unknown;
+  earningsDate?: unknown;
   outlierQuarters?: unknown;
 };
 
@@ -54,6 +59,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
   const companyName =
     typeof body.companyName === "string" ? body.companyName.trim() : "";
+  const earningsDate =
+    typeof body.earningsDate === "string" && validIsoDate(body.earningsDate)
+      ? body.earningsDate
+      : "";
+  if (!earningsDate) {
+    return NextResponse.json(
+      { error: "earningsDate (YYYY-MM-DD) is required" },
+      { status: 400 },
+    );
+  }
   const outlierQuartersRaw = Array.isArray(body.outlierQuarters)
     ? (body.outlierQuarters as unknown[])
     : [];
@@ -69,14 +84,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const today = todayIso();
 
   // ---- Cache lookup ----
-  // One row per (symbol, analyzed_date). PostgREST upserts via
-  // onConflict; we're keyed on the unique constraint already present
-  // in the table (see DDL in the route comment below).
+  // One row per (symbol, earnings_date) — see migration 009. The cache
+  // is now event-scoped, not day-scoped, so historical context for a
+  // past quarter survives the next quarter's run.
   const cacheRes = await sb
     .from("screener_crush_context")
     .select("context")
     .eq("symbol", symbol)
-    .eq("analyzed_date", today)
+    .eq("earnings_date", earningsDate)
     .limit(1);
   if (cacheRes.error) {
     console.warn(
@@ -116,13 +131,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   // ---- Cache write ----
-  // Upsert keyed on (symbol, analyzed_date). The table's UNIQUE
-  // constraint protects against duplicates if two requests race.
+  // Upsert keyed on (symbol, earnings_date). analyzed_date is still
+  // recorded so we can tell when the context was researched, but the
+  // unique key is the earnings event so re-running on a different day
+  // updates rather than orphans the row.
   const writeRes = await sb
     .from("screener_crush_context")
     .upsert(
-      { symbol, analyzed_date: today, context },
-      { onConflict: "symbol,analyzed_date" },
+      { symbol, earnings_date: earningsDate, analyzed_date: today, context },
+      { onConflict: "symbol,earnings_date" },
     );
   if (writeRes.error) {
     // Cache write failure is non-fatal — return the context we computed.

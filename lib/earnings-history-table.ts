@@ -3,6 +3,7 @@
 // per-event ratio + grade, and labels each row by calendar quarter.
 
 import { createServerClient } from "@/lib/supabase";
+import type { OptionsFlow } from "@/lib/options-flow";
 
 export type CrushHistoryEvent = {
   earningsDate: string;
@@ -116,6 +117,49 @@ export async function persistLiveImpliedMove(
   if (upsert.error) {
     console.warn(
       `[earnings-history-table] persist live EM ${symbol}@${earningsDate} failed: ${upsert.error.message}`,
+    );
+  }
+}
+
+// Persists a small options-flow snapshot for the upcoming earnings
+// event alongside implied_move_pct. Captured during the screener's
+// stage-3 analyze pass so future quarters can compare pre-print
+// positioning against the actual outcome. Non-blocking on failure;
+// the screener UI doesn't depend on this row write succeeding.
+export async function persistFlowSnapshot(
+  symbol: string,
+  earningsDate: string,
+  flow: OptionsFlow,
+): Promise<void> {
+  if (!earningsDate || !Number.isFinite(flow.putCallRatio)) return;
+  const top3 = flow.unusualStrikes.slice(0, 3).map((u) => ({
+    type: u.type,
+    strike: u.strike,
+    volume: u.volume,
+    oi: u.oi,
+    ratio: Number(u.volOiRatio.toFixed(2)),
+    note: u.note,
+  }));
+  const sb = createServerClient();
+  const upsert = await sb
+    .from("earnings_history")
+    .upsert(
+      {
+        symbol: symbol.toUpperCase(),
+        earnings_date: earningsDate,
+        flow_pc_ratio: Number(flow.putCallRatio.toFixed(3)),
+        flow_bias: flow.flowBias,
+        flow_deep_otm_put_pct: Number(
+          flow.deepOtmPutCluster.pctOfTotalPutVolume.toFixed(2),
+        ),
+        flow_unusual_top3: top3,
+        flow_captured_at: new Date().toISOString(),
+      },
+      { onConflict: "symbol,earnings_date" },
+    );
+  if (upsert.error) {
+    console.warn(
+      `[earnings-history-table] persist flow ${symbol}@${earningsDate} failed: ${upsert.error.message}`,
     );
   }
 }

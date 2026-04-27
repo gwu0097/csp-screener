@@ -76,10 +76,12 @@ export function CrushHistoryTable({
   events,
   todayEmPct,
   todaySymbol,
+  todayEarningsDate,
 }: {
   events: CrushHistoryEvent[] | undefined | null;
   todayEmPct: number | null;
   todaySymbol: string;
+  todayEarningsDate: string;
 }) {
   if (!events || events.length === 0) return null;
 
@@ -239,6 +241,7 @@ export function CrushHistoryTable({
       {outliers.length > 0 && (
         <TradeDecisionContext
           symbol={todaySymbol}
+          earningsDate={todayEarningsDate}
           outliers={outliers}
           todayEmPct={todayEmPct ?? null}
         />
@@ -256,10 +259,12 @@ export function CrushHistoryTable({
 // spinner during the fetch so the user knows research is in flight.
 function TradeDecisionContext({
   symbol,
+  earningsDate,
   outliers,
   todayEmPct,
 }: {
   symbol: string;
+  earningsDate: string;
   outliers: CrushHistoryEvent[];
   todayEmPct: number | null;
 }) {
@@ -313,6 +318,7 @@ function TradeDecisionContext({
             symbol,
             companyName: "",
             currentEM: todayEmPct ?? 0,
+            earningsDate,
             outlierQuarters,
           }),
           cache: "no-store",
