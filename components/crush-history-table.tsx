@@ -5,7 +5,24 @@
 // by runStagesThreeFour. ★ marks events within ±2pp of today's IV-
 // implied move (today's EM is the only fair comparison set).
 
-import { AlertTriangle } from "lucide-react";
+import { useEffect, useState } from "react";
+import { AlertTriangle, CheckCircle2, Loader2, XCircle } from "lucide-react";
+
+type CrushContext = {
+  outlier_analyses: Array<{
+    quarter: string;
+    date: string;
+    cause: string;
+    similar_today: boolean;
+    similarity_explanation: string;
+  }>;
+  overall_risk: "high" | "medium" | "low";
+  key_metric_to_watch: string;
+  current_setup_resembles: "outlier" | "normal";
+  verdict: string;
+  safe_to_trade: boolean;
+  confidence: "high" | "medium" | "low";
+};
 
 type CrushHistoryEvent = {
   earningsDate: string;
@@ -60,7 +77,9 @@ export function CrushHistoryTable({
       }
     }
   }
-  const similarFs = similar.filter((e) => e.grade === "F");
+  // Trigger Trade Decision Context on F or D similar-EM quarters per
+  // spec — "at least one is grade F or D".
+  const outliers = similar.filter((e) => e.grade === "F" || e.grade === "D");
 
   const gradeCounts = (() => {
     const out: Record<string, number> = { A: 0, B: 0, C: 0, D: 0, F: 0 };
@@ -198,24 +217,232 @@ export function CrushHistoryTable({
         )}
       </div>
 
-      {similarFs.length > 0 && (
-        <div className="mt-2 flex items-start gap-2 rounded border border-amber-500/40 bg-amber-500/10 p-2 text-[11px] text-amber-200">
-          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-          <div>
-            <div className="font-medium">
-              ⚠️ {similarFs.length} similar-EM quarter
-              {similarFs.length === 1 ? "" : "s"} resulted in a larger-than-
-              expected move.
-            </div>
-            <div className="mt-0.5 text-[10px] text-amber-200/80">
-              Pull up {todaySymbol}&apos;s{" "}
-              {similarFs.map((e) => e.qtrLabel).join(", ")}{" "}
-              earnings news to understand what overshot the implied range —
-              [What caused it? →] (coming soon)
-            </div>
+      {outliers.length > 0 && (
+        <TradeDecisionContext
+          symbol={todaySymbol}
+          outliers={outliers}
+          todayEmPct={todayEmPct ?? null}
+        />
+      )}
+    </div>
+  );
+}
+
+// ---------- Trade Decision Context ----------
+
+// Auto-fetches /api/screener/crush-context on mount whenever the
+// caller has at least one F/D similar-EM quarter to explain. Cache
+// behaviour lives in the route — first call hits Perplexity, same-day
+// re-renders read from screener_crush_context. The UI shows a loading
+// spinner during the fetch so the user knows research is in flight.
+function TradeDecisionContext({
+  symbol,
+  outliers,
+  todayEmPct,
+}: {
+  symbol: string;
+  outliers: CrushHistoryEvent[];
+  todayEmPct: number | null;
+}) {
+  const [status, setStatus] = useState<"loading" | "loaded" | "error">("loading");
+  const [context, setContext] = useState<CrushContext | null>(null);
+  const [errMsg, setErrMsg] = useState<string | null>(null);
+
+  // Stable signature of the input list so the effect doesn't re-fire
+  // whenever the parent re-renders with the same data.
+  const sig = outliers
+    .map((o) => `${o.earningsDate}|${o.actualMovePct}|${o.impliedMovePct}|${o.grade}`)
+    .join(",");
+
+  useEffect(() => {
+    let cancelled = false;
+    async function run() {
+      setStatus("loading");
+      setErrMsg(null);
+      // Build the route's expected payload from our local rows. We
+      // only forward F/D quarters (the actual outliers) — non-outlier
+      // similar quarters are useful in the table but irrelevant here.
+      const outlierQuarters = outliers
+        .filter(
+          (o) =>
+            o.actualMovePct !== null &&
+            o.impliedMovePct !== null &&
+            o.ratio !== null,
+        )
+        .map((o) => ({
+          date: o.earningsDate,
+          qtrLabel: o.qtrLabel,
+          actualMove: o.actualMovePct as number,
+          direction: ((o.actualMovePct as number) >= 0
+            ? "up"
+            : "down") as "up" | "down",
+          ratio: o.ratio as number,
+          impliedMove: o.impliedMovePct as number,
+        }));
+      if (outlierQuarters.length === 0) {
+        if (!cancelled) {
+          setStatus("error");
+          setErrMsg("No outlier quarters with full data — cannot research.");
+        }
+        return;
+      }
+      try {
+        const res = await fetch("/api/screener/crush-context", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            symbol,
+            companyName: "",
+            currentEM: todayEmPct ?? 0,
+            outlierQuarters,
+          }),
+          cache: "no-store",
+        });
+        const json = (await res.json()) as
+          | { context: CrushContext; cached: boolean }
+          | { error: string };
+        if (cancelled) return;
+        if (!res.ok || !("context" in json)) {
+          setStatus("error");
+          setErrMsg(
+            "error" in json ? json.error : `HTTP ${res.status}`,
+          );
+          return;
+        }
+        setContext(json.context);
+        setStatus("loaded");
+      } catch (e) {
+        if (cancelled) return;
+        setStatus("error");
+        setErrMsg(e instanceof Error ? e.message : "Network error");
+      }
+    }
+    run();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [symbol, sig]);
+
+  if (status === "loading") {
+    return (
+      <div className="mt-2 flex items-center gap-2 rounded border border-border bg-background/40 p-3 text-[11px] text-muted-foreground">
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        <span>
+          🔍 <span className="font-semibold uppercase tracking-wide">Trade
+            decision context</span> — researching outlier quarters…
+        </span>
+      </div>
+    );
+  }
+
+  if (status === "error" || !context) {
+    return (
+      <div className="mt-2 flex items-start gap-2 rounded border border-rose-500/40 bg-rose-500/10 p-2 text-[11px] text-rose-200">
+        <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+        <div>
+          <div className="font-medium">Trade decision context unavailable</div>
+          <div className="mt-0.5 text-[10px] text-rose-200/80">
+            {errMsg ?? "Could not reach Perplexity."}
           </div>
         </div>
-      )}
+      </div>
+    );
+  }
+
+  const riskCls =
+    context.overall_risk === "low"
+      ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300"
+      : context.overall_risk === "medium"
+        ? "border-amber-500/40 bg-amber-500/15 text-amber-300"
+        : "border-rose-500/40 bg-rose-500/15 text-rose-300";
+
+  return (
+    <div className="mt-3 space-y-2 rounded-md border border-border bg-background/30 p-3">
+      <div className="flex items-center justify-between">
+        <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+          🔍 Trade decision context
+        </div>
+        <span
+          className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${riskCls}`}
+          title="Overall risk of another outsized move based on current conditions"
+        >
+          {context.overall_risk} risk
+        </span>
+      </div>
+
+      <div className="space-y-2">
+        {context.outlier_analyses.map((a, i) => {
+          const cls = a.similar_today
+            ? "border-rose-500/40 bg-rose-500/[0.05]"
+            : "border-emerald-500/40 bg-emerald-500/[0.05]";
+          return (
+            <div key={i} className={`rounded border p-2 text-[11px] ${cls}`}>
+              <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-foreground">
+                {a.quarter}
+                {a.date ? ` — ${a.date}` : ""}
+              </div>
+              <div className="mb-1">
+                <div className="text-[9px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  Cause
+                </div>
+                <div className="text-foreground/90">{a.cause}</div>
+              </div>
+              <div>
+                <div className="text-[9px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  Similar today?
+                </div>
+                <div className="flex items-start gap-1 text-foreground/90">
+                  {a.similar_today ? (
+                    <span className="text-rose-300">⚠️ YES —</span>
+                  ) : (
+                    <span className="text-emerald-300">✅ NO —</span>
+                  )}
+                  <span>{a.similarity_explanation}</span>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="rounded border border-border bg-background/40 p-2 text-[11px]">
+        <div className="text-[9px] font-semibold uppercase tracking-wide text-muted-foreground">
+          Key metric to watch
+        </div>
+        <div className="text-foreground/90 italic">{context.key_metric_to_watch}</div>
+      </div>
+
+      <div className="rounded border border-border bg-background/40 p-2 text-[11px]">
+        <div className="text-[9px] font-semibold uppercase tracking-wide text-muted-foreground">
+          Verdict
+        </div>
+        <div className="text-foreground/90">{context.verdict}</div>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2 border-t border-border pt-2 text-[11px]">
+        {context.safe_to_trade ? (
+          <span className="inline-flex items-center gap-1 rounded border border-emerald-500/40 bg-emerald-500/15 px-1.5 py-0.5 font-semibold text-emerald-300">
+            <CheckCircle2 className="h-3 w-3" /> SAFE TO TRADE
+          </span>
+        ) : (
+          <span className="inline-flex items-center gap-1 rounded border border-rose-500/40 bg-rose-500/15 px-1.5 py-0.5 font-semibold text-rose-300">
+            <XCircle className="h-3 w-3" /> NOT SAFE TO TRADE
+          </span>
+        )}
+        <span className="text-muted-foreground">
+          confidence:{" "}
+          <span className="font-mono uppercase text-foreground">
+            {context.confidence}
+          </span>
+        </span>
+        <span className="text-muted-foreground">
+          setup resembles:{" "}
+          <span className="font-mono uppercase text-foreground">
+            {context.current_setup_resembles}
+          </span>
+        </span>
+      </div>
     </div>
   );
 }
