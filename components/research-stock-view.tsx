@@ -46,7 +46,7 @@ type ModuleEnvelope<T> = {
   isCustomized: boolean;
 } | null;
 
-type BusinessOverview = {
+export type BusinessOverview = {
   companyName: string | null;
   sector: string | null;
   industry: string | null;
@@ -92,7 +92,7 @@ type CurrentMetrics = {
 
 type ScoreComponent = { label: string; earned: number; max: number; detail: string };
 
-type FundamentalHealth = {
+export type FundamentalHealth = {
   cik: string | null;
   annual: AnnualMetrics[];
   current: CurrentMetrics;
@@ -122,7 +122,7 @@ type CatalystEntry = {
   dismissed?: boolean;
 };
 
-type CatalystScanner = {
+export type CatalystScanner = {
   catalysts: CatalystEntry[];
   overall_catalyst_score: "rich" | "moderate" | "sparse";
   summary: string | null;
@@ -539,7 +539,7 @@ function BusinessOverviewCard({
   );
 }
 
-function BusinessOverviewBody({ data }: { data: BusinessOverview }) {
+export function BusinessOverviewBody({ data }: { data: BusinessOverview }) {
   return (
     <div className="space-y-3 text-xs">
       <div className="grid grid-cols-1 gap-x-4 gap-y-1 sm:grid-cols-2">
@@ -703,7 +703,7 @@ function trendCls(curr: number | null, prev: number | null): string {
   return "text-muted-foreground";
 }
 
-function FundamentalHealthBody({ data }: { data: FundamentalHealth }) {
+export function FundamentalHealthBody({ data }: { data: FundamentalHealth }) {
   // Sort ascending so the table reads oldest → newest.
   const annual = [...data.annual].sort((a, b) => a.year - b.year);
   const c = data.current;
@@ -1003,14 +1003,19 @@ function scoreFromCatalysts(
   return "sparse";
 }
 
-function CatalystBody({
+export function CatalystBody({
   symbol,
   data,
   onMutate,
+  readOnly = false,
 }: {
   symbol: string;
   data: CatalystScanner;
-  onMutate: (updater: (prev: CatalystScanner) => CatalystScanner) => void;
+  onMutate?: (updater: (prev: CatalystScanner) => CatalystScanner) => void;
+  // Encyclopedia historical view passes readOnly=true so dismiss /
+  // restore buttons are hidden — those mutate the latest run, which
+  // doesn't make sense when viewing an old version snapshot.
+  readOnly?: boolean;
 }) {
   const [horizonFilter, setHorizonFilter] = useState<HorizonFilter>("all");
   const [directionFilter, setDirectionFilter] = useState<DirectionFilter>("all");
@@ -1026,6 +1031,7 @@ function CatalystBody({
   });
 
   async function setDismissed(id: string, dismissed: boolean) {
+    if (readOnly || !onMutate) return;
     onMutate((prev) => {
       const nextCatalysts = prev.catalysts.map((c) =>
         c.id === id ? { ...c, dismissed } : c,
@@ -1080,10 +1086,12 @@ function CatalystBody({
                   key={c.id ?? i}
                   catalyst={c}
                   onDismiss={
-                    c.id ? () => setDismissed(c.id as string, true) : undefined
+                    !readOnly && c.id
+                      ? () => setDismissed(c.id as string, true)
+                      : undefined
                   }
                   onRestore={
-                    c.id
+                    !readOnly && c.id
                       ? () => setDismissed(c.id as string, false)
                       : undefined
                   }

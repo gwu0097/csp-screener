@@ -33,7 +33,7 @@ type EightK = {
   url: string | null;
 };
 
-type RiskOutput = {
+export type RiskOutput = {
   risks: Risk[];
   overall_risk_level: "high" | "medium" | "low";
   risk_score: number;
@@ -140,7 +140,7 @@ export function RiskTab({ symbol }: { symbol: string }) {
         onRun={run}
         error={error}
       />
-      {mod ? <Body data={mod.output} /> : null}
+      {mod ? <RiskBody data={mod.output} /> : null}
     </div>
   );
 }
@@ -204,7 +204,7 @@ function Header({
   );
 }
 
-function Body({ data }: { data: RiskOutput }) {
+export function RiskBody({ data }: { data: RiskOutput }) {
   const sorted = useMemo(
     () => [...data.risks].sort((a, b) => severityScore(b) - severityScore(a)),
     [data.risks],

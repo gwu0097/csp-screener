@@ -20,7 +20,7 @@ type InsiderTx = {
 
 type Holder = { name: string; pctHeld: number | null };
 
-type SentimentOutput = {
+export type SentimentOutput = {
   sentiment_score: number;
   insider: {
     transactions: InsiderTx[];
@@ -146,7 +146,7 @@ export function SentimentTab({ symbol }: { symbol: string }) {
         onRun={run}
         error={error}
       />
-      {mod ? <Body data={mod.output} /> : null}
+      {mod ? <SentimentBody data={mod.output} /> : null}
     </div>
   );
 }
@@ -217,7 +217,7 @@ function Header({
   );
 }
 
-function Body({ data }: { data: SentimentOutput }) {
+export function SentimentBody({ data }: { data: SentimentOutput }) {
   return (
     <div className="space-y-4">
       {data.retail.summary && (

@@ -32,6 +32,20 @@ import {
   TabsTrigger,
 } from "@/components/ui/tabs";
 import { CspHistoryTab } from "@/components/encyclopedia-csp-history";
+import {
+  BusinessOverviewBody,
+  FundamentalHealthBody,
+  CatalystBody,
+  type BusinessOverview,
+  type FundamentalHealth,
+  type CatalystScanner,
+} from "@/components/research-stock-view";
+import { RiskBody, type RiskOutput } from "@/components/research-risk";
+import {
+  SentimentBody,
+  type SentimentOutput,
+} from "@/components/research-sentiment";
+import { isV2, type ValuationModelV2 } from "@/lib/valuation";
 
 type StockEncyclopedia = {
   id: string;
@@ -64,15 +78,6 @@ type StockInfo = {
   overall_grade: string | null;
   grade_reasoning: string | null;
   last_researched_at: string | null;
-};
-
-type ModuleSummary = {
-  type: string;
-  label: string;
-  grade: string | null;
-  headline: string | null;
-  runAt: string;
-  isExpired: boolean;
 };
 
 type Outcome = "expired_worthless" | "assigned" | "closed";
@@ -848,8 +853,50 @@ function SwingsTab({ symbol }: { symbol: string }) {
 
 // ---------- research tab ----------
 
+// Module run from /api/encyclopedia/[symbol]/research-history. Output
+// is intentionally `unknown` here — each ModuleSection downcasts to
+// the type its renderer expects.
+type ModuleRun = {
+  id: string;
+  createdAt: string;
+  output: unknown;
+  isLatest: boolean;
+  isExpired: boolean;
+  isCustomized: boolean;
+};
+
+type ResearchHistoryPayload = {
+  modules: {
+    business_overview: ModuleRun[];
+    fundamental_health: ModuleRun[];
+    catalyst_scanner: ModuleRun[];
+    valuation: ModuleRun[];
+    sentiment: ModuleRun[];
+    risk_assessment: ModuleRun[];
+  };
+};
+
+const MODULE_DEFINITIONS: Array<{
+  key: keyof ResearchHistoryPayload["modules"];
+  label: string;
+  emoji: string;
+  // Maps to the `?tab=` value on /research/[symbol]. risk_assessment
+  // → risk; valuation → valuation; etc. None of the encyclopedia keys
+  // collide with the research tab values.
+  researchTab: string;
+}> = [
+  { key: "business_overview", label: "Business Overview", emoji: "📊", researchTab: "overview" },
+  { key: "fundamental_health", label: "Fundamental Health", emoji: "💪", researchTab: "overview" },
+  { key: "catalyst_scanner", label: "Catalyst Scanner", emoji: "🎯", researchTab: "catalysts" },
+  { key: "valuation", label: "Valuation", emoji: "📈", researchTab: "valuation" },
+  { key: "sentiment", label: "Sentiment", emoji: "👥", researchTab: "sentiment" },
+  { key: "risk_assessment", label: "Risk Assessment", emoji: "⚠️", researchTab: "risk" },
+];
+
 function ResearchTab({ symbol }: { symbol: string }) {
-  const [modules, setModules] = useState<ModuleSummary[] | null>(null);
+  const [modules, setModules] = useState<
+    ResearchHistoryPayload["modules"] | null
+  >(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -860,19 +907,17 @@ function ResearchTab({ symbol }: { symbol: string }) {
       setError(null);
       try {
         const res = await fetch(
-          `/api/encyclopedia/${encodeURIComponent(symbol)}/research-summary`,
+          `/api/encyclopedia/${encodeURIComponent(symbol)}/research-history`,
           { cache: "no-store" },
         );
-        const json = (await res.json()) as {
-          stock: StockInfo | null;
-          modules: ModuleSummary[];
+        const json = (await res.json()) as ResearchHistoryPayload & {
           error?: string;
         };
         if (cancelled) return;
         if (!res.ok || json.error) {
           throw new Error(json.error ?? `HTTP ${res.status}`);
         }
-        setModules(json.modules ?? []);
+        setModules(json.modules);
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : "Failed");
       } finally {
@@ -885,15 +930,16 @@ function ResearchTab({ symbol }: { symbol: string }) {
     };
   }, [symbol]);
 
-  if (loading) return <Spinner label={`Loading ${symbol} research summary…`} />;
+  if (loading) return <Spinner label={`Loading ${symbol} research history…`} />;
   if (error) return <ErrorBanner message={error} />;
+  if (!modules) return null;
 
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-baseline justify-between gap-2 text-xs text-muted-foreground">
         <span>
-          Latest run summary per research module. Open the full module
-          on the research page.
+          Every historical run of each research module — newest first.
+          Read-only here; use the Research page to re-run.
         </span>
         <Link
           href={`/research/${encodeURIComponent(symbol)}`}
@@ -903,50 +949,299 @@ function ResearchTab({ symbol }: { symbol: string }) {
           /research/{symbol}
         </Link>
       </div>
-      {!modules || modules.length === 0 ? (
-        <EmptyState>
-          No research modules have been run for {symbol} yet. Open the
-          research page to run the first one.
-        </EmptyState>
-      ) : (
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-          {modules.map((m) => (
-            <div
-              key={m.type}
-              className="rounded border border-border bg-background/40 p-3"
-            >
-              <div className="flex items-center justify-between">
-                <div className="text-sm font-semibold">{m.label}</div>
-                <div className="flex items-center gap-1.5">
-                  {m.grade && (
-                    <span
-                      className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold ${gradeColor(m.grade)}`}
-                    >
-                      {m.grade}
-                    </span>
-                  )}
-                  {m.isExpired && (
-                    <span
-                      className="rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-amber-300"
-                      title="Module is past its cache TTL — re-run on the research page"
-                    >
-                      stale
-                    </span>
-                  )}
-                </div>
-              </div>
-              {m.headline && (
-                <div className="mt-1.5 text-xs text-muted-foreground">
-                  {m.headline}
+      {MODULE_DEFINITIONS.map((def) => (
+        <ModuleSection
+          key={def.key}
+          symbol={symbol}
+          moduleKey={def.key}
+          label={def.label}
+          emoji={def.emoji}
+          researchTab={def.researchTab}
+          runs={modules[def.key] ?? []}
+        />
+      ))}
+    </div>
+  );
+}
+
+// One accordion-ish section per module type. Renders the latest run's
+// content inline, then a collapsed timeline of older runs the user can
+// click to expand. Each ModuleSection owns its own expanded-set state.
+function ModuleSection({
+  symbol,
+  moduleKey,
+  label,
+  emoji,
+  researchTab,
+  runs,
+}: {
+  symbol: string;
+  moduleKey: keyof ResearchHistoryPayload["modules"];
+  label: string;
+  emoji: string;
+  researchTab: string;
+  runs: ModuleRun[];
+}) {
+  // Set of older-run ids the user has expanded. Latest run is always
+  // expanded — it's the headline content of the section.
+  const [expandedOlder, setExpandedOlder] = useState<Set<string>>(new Set());
+  const toggleOlder = (id: string) => {
+    setExpandedOlder((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const latest = runs[0] ?? null;
+  const older = runs.slice(1);
+  const researchHref = `/research/${encodeURIComponent(symbol)}?tab=${researchTab}`;
+
+  return (
+    <div className="rounded-md border border-border bg-background/40">
+      <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-border/60 px-4 py-2.5">
+        <div className="flex items-baseline gap-2">
+          <span className="text-base">{emoji}</span>
+          <span className="text-sm font-semibold">{label}</span>
+          {latest && (
+            <span className="text-[11px] text-muted-foreground">
+              · Latest: {fmtDateTime(latest.createdAt)}
+            </span>
+          )}
+          <span className="text-[11px] text-muted-foreground">
+            · {runs.length} {runs.length === 1 ? "run" : "runs"}
+          </span>
+        </div>
+        <Link
+          href={researchHref}
+          className="inline-flex items-center gap-1 rounded border border-border bg-background/60 px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground"
+        >
+          <ExternalLink className="h-3 w-3" />
+          Open in Research
+        </Link>
+      </div>
+
+      <div className="space-y-3 p-3">
+        {!latest ? (
+          <ModuleEmpty label={label} researchHref={researchHref} />
+        ) : (
+          <>
+            <ModuleRunRender moduleKey={moduleKey} run={latest} symbol={symbol} />
+            {older.length > 0 && (
+              <VersionHistory
+                older={older}
+                expandedOlder={expandedOlder}
+                toggleOlder={toggleOlder}
+                renderRun={(run) => (
+                  <ModuleRunRender
+                    moduleKey={moduleKey}
+                    run={run}
+                    symbol={symbol}
+                  />
+                )}
+              />
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function VersionHistory({
+  older,
+  expandedOlder,
+  toggleOlder,
+  renderRun,
+}: {
+  older: ModuleRun[];
+  expandedOlder: Set<string>;
+  toggleOlder: (id: string) => void;
+  renderRun: (run: ModuleRun) => React.ReactNode;
+}) {
+  return (
+    <div className="rounded border border-border/40 bg-background/40 p-2">
+      <div className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+        Version history
+      </div>
+      <div className="space-y-1">
+        {older.map((run) => {
+          const open = expandedOlder.has(run.id);
+          return (
+            <div key={run.id} className="rounded border border-border/40">
+              <button
+                type="button"
+                onClick={() => toggleOlder(run.id)}
+                className="flex w-full items-center justify-between px-2 py-1.5 text-left text-xs hover:bg-background/60"
+              >
+                <span className="font-mono text-muted-foreground">
+                  {open ? "▾" : "▸"} {fmtDateTime(run.createdAt)}
+                </span>
+                {run.isCustomized && (
+                  <span className="text-[10px] uppercase text-amber-300">
+                    customized
+                  </span>
+                )}
+              </button>
+              {open && (
+                <div className="border-t border-border/40 p-3">
+                  {renderRun(run)}
                 </div>
               )}
-              <div className="mt-2 text-[10px] text-muted-foreground">
-                Last run: {fmtDateTime(m.runAt)}
-              </div>
             </div>
-          ))}
-        </div>
-      )}
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function ModuleEmpty({
+  label,
+  researchHref,
+}: {
+  label: string;
+  researchHref: string;
+}) {
+  return (
+    <div className="rounded-md border border-dashed border-border bg-background/40 p-6 text-center">
+      <div className="text-sm text-muted-foreground">
+        No {label} data yet. Run this module in Research to populate.
+      </div>
+      <Link
+        href={researchHref}
+        className="mt-2 inline-flex items-center gap-1 rounded-md border border-border bg-background/60 px-2 py-1 text-xs text-muted-foreground hover:text-foreground"
+      >
+        <ExternalLink className="h-3 w-3" />
+        Open Research
+      </Link>
+    </div>
+  );
+}
+
+// Dispatches a single run's output to the right Body component for its
+// module type. Each branch passes the output through a typed cast —
+// the API returns `unknown`, but the DB column is jsonb-typed by the
+// route handler that wrote it, so the shapes line up at runtime.
+function ModuleRunRender({
+  moduleKey,
+  run,
+  symbol,
+}: {
+  moduleKey: keyof ResearchHistoryPayload["modules"];
+  run: ModuleRun;
+  symbol: string;
+}) {
+  switch (moduleKey) {
+    case "business_overview":
+      return <BusinessOverviewBody data={run.output as BusinessOverview} />;
+    case "fundamental_health":
+      return <FundamentalHealthBody data={run.output as FundamentalHealth} />;
+    case "catalyst_scanner":
+      return (
+        <CatalystBody
+          symbol={symbol}
+          data={run.output as CatalystScanner}
+          readOnly
+        />
+      );
+    case "sentiment":
+      return <SentimentBody data={run.output as SentimentOutput} />;
+    case "risk_assessment":
+      return <RiskBody data={run.output as RiskOutput} />;
+    case "valuation":
+      return <ValuationSummary symbol={symbol} run={run} />;
+  }
+}
+
+// Read-only valuation summary. The full Tier 1 / Tier 2 / Comps view
+// lives at /research/[symbol]?tab=valuation and is editable; the
+// encyclopedia just surfaces the numbers it would compute, so a
+// reader can answer "what did the model say at this point in time?"
+// without bumping the auto-save state.
+function ValuationSummary({
+  symbol,
+  run,
+}: {
+  symbol: string;
+  run: ModuleRun;
+}) {
+  const output = run.output;
+  if (!isV2(output)) {
+    return (
+      <div className="rounded border border-dashed border-border bg-background/40 p-3 text-xs text-muted-foreground">
+        Legacy valuation model (V1). Open in Research for the full
+        view.
+      </div>
+    );
+  }
+  const m = output as ValuationModelV2;
+  const tier1Target = m.tier1?.outputs?.weighted_target ?? null;
+  const tier1Return = m.tier1?.outputs?.weighted_return_pct ?? null;
+  const tier2Target = m.tier2?.outputs?.weighted_target ?? null;
+  const tier2Return = m.tier2?.outputs?.weighted_return_pct ?? null;
+  return (
+    <div className="space-y-2 text-xs">
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+        <ValuationStat
+          label="Tier 1 — Comps weighted"
+          target={tier1Target}
+          ret={tier1Return}
+        />
+        <ValuationStat
+          label="Tier 2 — DCF weighted"
+          target={tier2Target}
+          ret={tier2Return}
+        />
+      </div>
+      <div className="text-muted-foreground">
+        At save:{" "}
+        <span className="font-mono text-foreground">
+          ${m.current_price.toFixed(2)}
+        </span>
+        {" · "}
+        Saved {fmtDateTime(m.saved_at)}
+      </div>
+      <Link
+        href={`/research/${encodeURIComponent(symbol)}?tab=valuation`}
+        className="inline-flex items-center gap-1 rounded border border-border bg-background/60 px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground"
+      >
+        <ExternalLink className="h-3 w-3" />
+        Open Tier 1 / Tier 2 detail
+      </Link>
+    </div>
+  );
+}
+
+function ValuationStat({
+  label,
+  target,
+  ret,
+}: {
+  label: string;
+  target: number | null;
+  ret: number | null;
+}) {
+  return (
+    <div className="rounded border border-border/40 bg-background/40 p-2">
+      <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
+        {label}
+      </div>
+      <div className="mt-0.5 flex items-baseline gap-2">
+        <span className="font-mono text-base font-semibold">
+          {target !== null && Number.isFinite(target)
+            ? `$${target.toFixed(2)}`
+            : "—"}
+        </span>
+        {ret !== null && Number.isFinite(ret) && (
+          <span
+            className={`font-mono text-xs ${ret >= 0 ? "text-emerald-300" : "text-rose-300"}`}
+          >
+            {(ret * 100).toFixed(1)}%
+          </span>
+        )}
+      </div>
     </div>
   );
 }
