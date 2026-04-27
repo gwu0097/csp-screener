@@ -41,10 +41,18 @@ export function buildCrushContextPrompt(args: {
   const { symbol, companyName, outlierQuarters } = args;
   const heading = companyName ? `${symbol} (${companyName})` : symbol;
   // Ratio displayed as 1.31x; moves shown as +/- whole-number percent.
+  // JS toFixed only adds the minus sign — prepend "+" explicitly for
+  // positive moves so Perplexity sees direction unambiguously and the
+  // generated cause/similarity text reflects up vs down correctly.
+  const fmtSigned = (pctFraction: number): string => {
+    const v = pctFraction * 100;
+    if (v > 0) return `+${v.toFixed(2)}%`;
+    return `${v.toFixed(2)}%`;
+  };
   const lines = outlierQuarters
     .map(
       (q) =>
-        `${q.qtrLabel ?? q.date}: stock moved ${(q.actualMove * 100).toFixed(2)}% (${q.ratio.toFixed(2)}x the implied move of ${(q.impliedMove * 100).toFixed(2)}%)`,
+        `${q.qtrLabel ?? q.date}: stock moved ${fmtSigned(q.actualMove)} (${q.ratio.toFixed(2)}x the implied move of ${(q.impliedMove * 100).toFixed(2)}%)`,
     )
     .join("\n");
   return `You are helping a trader decide whether to sell a cash-secured put on ${heading} ahead of earnings tomorrow.

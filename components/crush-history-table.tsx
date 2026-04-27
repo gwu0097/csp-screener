@@ -41,6 +41,23 @@ function fmtPct(n: number | null, digits = 1): string {
   return `${(Math.abs(n) * 100).toFixed(digits)}%`;
 }
 
+// Signed version for the Actual column. Direction is encoded in the
+// sign of actualMovePct (positive = up, negative = down). Returns
+// "+14.8%" / "-11.6%" / "0.0%" / "?".
+function fmtSignedPct(n: number | null, digits = 1): string {
+  if (n === null || !Number.isFinite(n)) return "?";
+  const pct = n * 100;
+  if (pct > 0) return `+${pct.toFixed(digits)}%`;
+  if (pct < 0) return `${pct.toFixed(digits)}%`; // already has the minus
+  return `${pct.toFixed(digits)}%`;
+}
+
+// Tailwind color class keyed on the sign of actualMovePct.
+function signedPctCls(n: number | null): string {
+  if (n === null || !Number.isFinite(n) || n === 0) return "";
+  return n > 0 ? "text-emerald-300" : "text-rose-300";
+}
+
 function fmtRatio(n: number | null): string {
   if (n === null || !Number.isFinite(n)) return "?";
   return n.toFixed(2);
@@ -145,8 +162,10 @@ export function CrushHistoryTable({
                   <td className="px-2 py-1 text-right font-mono">
                     {fmtPct(e.impliedMovePct)}
                   </td>
-                  <td className="px-2 py-1 text-right font-mono">
-                    {fmtPct(e.actualMovePct)}
+                  <td
+                    className={`px-2 py-1 text-right font-mono ${signedPctCls(e.actualMovePct)}`}
+                  >
+                    {fmtSignedPct(e.actualMovePct)}
                   </td>
                   <td className="px-2 py-1 text-right font-mono">
                     {fmtRatio(e.ratio)}
