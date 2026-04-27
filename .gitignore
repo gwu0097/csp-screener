@@ -34,3 +34,8 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# local probe / debug scripts — never commit
+/test/
+*.probe.ts
+*.debug.ts
