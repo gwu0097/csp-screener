@@ -39,6 +39,22 @@ export function fmtDate(iso: string): string {
     year: "numeric",
   });
 }
+// Date + time, used wherever multiple entries can land on the same day
+// (version dropdown, version history list).
+export function fmtDateTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  const date = d.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+  const time = d.toLocaleTimeString("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+  return `${date} ${time}`;
+}
 export function fmtMillions(rawShares: number): string {
   if (!Number.isFinite(rawShares)) return "—";
   return `${(rawShares / 1e6).toFixed(1)}M`;

@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import {
   CalendarClock,
   ChevronLeft,
@@ -186,13 +187,28 @@ function capLabel(c: StockInfo["marketCapCategory"]): string {
 
 // ---------- Top-level view ----------
 
+const VALID_TABS = new Set([
+  "overview",
+  "catalysts",
+  "valuation",
+  "tenk",
+  "risk",
+  "sentiment",
+]);
+
 export function ResearchStockView({ symbol }: { symbol: string }) {
   const [stock, setStock] = useState<StockInfo | null>(null);
   const [stockError, setStockError] = useState<string | null>(null);
   const [overviewMod, setOverviewMod] = useState<ModuleEnvelope<BusinessOverview>>(null);
   const [healthMod, setHealthMod] = useState<ModuleEnvelope<FundamentalHealth>>(null);
   const [catalystMod, setCatalystMod] = useState<ModuleEnvelope<CatalystScanner>>(null);
-  const [tab, setTab] = useState("overview");
+  // Initial tab honours ?tab= so the research home page can deep-link
+  // straight to a module group ("/research/LULU?tab=valuation").
+  const searchParams = useSearchParams();
+  const initialTab = searchParams?.get("tab");
+  const [tab, setTab] = useState(
+    initialTab && VALID_TABS.has(initialTab) ? initialTab : "overview",
+  );
 
   async function loadStock() {
     try {

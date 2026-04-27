@@ -22,7 +22,7 @@ import {
 import { ValuationTier1 } from "@/components/valuation-tier1";
 import { ValuationTier2 } from "@/components/valuation-tier2";
 import { ValuationComps } from "@/components/valuation-comps";
-import { fmtDate, fmtRoundPrice } from "@/components/valuation-format";
+import { fmtDate, fmtDateTime, fmtRoundPrice } from "@/components/valuation-format";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
 type Version = {
@@ -252,7 +252,7 @@ function Header({
     <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-muted-foreground">Last generated:</span>
-        <span className="text-foreground">{fmtDate(savedAt)}</span>
+        <span className="text-foreground">{fmtDateTime(savedAt)}</span>
         <select
           value={selected.id}
           onChange={(e) => onSelect(e.target.value)}
@@ -263,7 +263,7 @@ function Header({
             const cust = anyCustomized(v);
             return (
               <option key={v.id} value={v.id}>
-                {fmtDate(sa)}
+                {fmtDateTime(sa)}
                 {cust ? "  ✏️" : ""}
               </option>
             );
@@ -677,7 +677,7 @@ function VersionHistory({
                 }`}
               >
                 <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
-                  <span className="text-foreground">{fmtDate(sa)}</span>
+                  <span className="text-foreground">{fmtDateTime(sa)}</span>
                   {peTarget !== null && (
                     <span className="text-muted-foreground">
                       P/E: Base {fmtRoundPrice(peTarget)}
