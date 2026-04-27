@@ -676,6 +676,69 @@ export function ScreenerView({ connected }: Props) {
     }
   }
 
+  // Per-symbol re-run of pass 2 + pass 3. Useful when the bulk analyze
+  // call returned partial data for one row (e.g. news fetch failed) or
+  // when the user wants to refresh a single candidate without re-running
+  // the whole table. Hits /api/screener/analyze-single, then merges the
+  // single enriched candidate back into `results` and persists to LS.
+  async function runAnalysisSingle(symbol: string) {
+    if (!results || !connected) return;
+    const upper = symbol.toUpperCase();
+    const candidate = results.find((r) => r.symbol.toUpperCase() === upper);
+    if (!candidate) return;
+    setError(null);
+    setMessage(null);
+    setAnalyzingSymbols((prev) => {
+      const next = new Set(prev);
+      next.add(upper);
+      return next;
+    });
+    try {
+      const res = await fetch("/api/screener/analyze-single", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ candidate }),
+        cache: "no-store",
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        setMessage(
+          `Analyze ${upper} failed: ${body.error ?? `HTTP ${res.status}`}`,
+        );
+        return;
+      }
+      const json = (await res.json()) as {
+        result: ScreenerResult;
+        vix: number | null;
+      };
+      const enriched = json.result;
+      const next = results.map((r) =>
+        r.symbol === enriched.symbol && r.earningsDate === enriched.earningsDate
+          ? enriched
+          : r,
+      );
+      try {
+        const timestampIso = (screenedAt ?? new Date()).toISOString();
+        localStorage.setItem(LS_RESULTS, JSON.stringify(next));
+        localStorage.setItem(LS_TIMESTAMP, timestampIso);
+      } catch (e) {
+        console.error("localStorage save failed", e);
+      }
+      setResults(next);
+      setMessage(`Analysis refreshed for ${upper}`);
+    } catch (e) {
+      setMessage(
+        `Analyze ${upper} failed: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    } finally {
+      setAnalyzingSymbols((prev) => {
+        const next = new Set(prev);
+        next.delete(upper);
+        return next;
+      });
+    }
+  }
+
   const hasResults = (results?.length ?? 0) > 0;
   const emptyAfterScreen = results !== null && results.length === 0 && status !== "screening";
   const busy = status === "screening" || status === "applying" || status === "analyzing";
@@ -1074,7 +1137,11 @@ export function ScreenerView({ connected }: Props) {
                       {open && (
                         <TableRow key={`${id}-detail`}>
                           <TableCell colSpan={15} className="bg-muted/30">
-                            <ExpandedDetail r={r} />
+                            <ExpandedDetail
+                              r={r}
+                              analyzing={analyzingSymbols.has(r.symbol.toUpperCase())}
+                              onAnalyze={connected ? runAnalysisSingle : null}
+                            />
                           </TableCell>
                         </TableRow>
                       )}
@@ -1220,36 +1287,71 @@ type CustomStrikeAnalysis = {
   finalGradeNew: "A" | "B" | "C" | "F";
 };
 
-function ExpandedDetail({ r }: { r: ScreenerResult }) {
+function ExpandedDetail({
+  r,
+  analyzing,
+  onAnalyze,
+}: {
+  r: ScreenerResult;
+  analyzing: boolean;
+  onAnalyze: ((symbol: string) => Promise<void>) | null;
+}) {
   const tl = r.threeLayer;
   if (!tl) {
     // Before Run Analysis has populated threeLayer, fall back to the
     // Stage-1/2 detail cards — Stage 1 + Stage 2 still run during Screen
     // Today so the user has SOMETHING to look at pre-analysis.
     return (
-      <div className="grid gap-4 p-3 md:grid-cols-2">
-        <StageCard title="Stage 1 · Context" pass={r.stageOne.pass} summary={r.stageOne.reason}>
-          {Object.entries(r.stageOne.details).map(([k, v]) => (
-            <Row key={k} k={k} v={String(v ?? "—")} />
-          ))}
-        </StageCard>
-        <StageCard
-          title="Stage 2 · Quality"
-          pass={r.stageTwo?.pass ?? false}
-          summary={r.stageTwo ? `${r.stageTwo.score}/9 — ${r.stageTwo.reason}` : "not reached"}
-        >
-          {r.stageTwo && (
-            <>
-              <Row k="Business simplicity" v={`${r.stageTwo.details.businessSimplicity}/3`} />
-              <Row k="Market cap tier" v={`${r.stageTwo.details.marketCapTier}/3`} />
-              <Row k="Analyst dispersion" v={`${r.stageTwo.details.analystDispersion}/3`} />
-              <Row k="Industry class" v={r.stageTwo.details.industryClass} />
-            </>
-          )}
-        </StageCard>
-        <div className="text-xs text-muted-foreground md:col-span-2">
-          Click <span className="font-medium">Run Analysis</span> to compute the
-          three-layer grade (industry/personal/regime).
+      <div className="space-y-3 p-3">
+        {onAnalyze && (
+          <div className="flex items-center justify-between rounded border border-amber-500/30 bg-amber-500/5 px-3 py-2">
+            <div className="text-xs text-amber-200">
+              Three-layer grade not yet computed for {r.symbol}.
+            </div>
+            <Button
+              size="sm"
+              onClick={() => onAnalyze(r.symbol)}
+              disabled={analyzing}
+            >
+              {analyzing ? (
+                <>
+                  <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                  Analyzing…
+                </>
+              ) : (
+                <>
+                  <Sparkles className="mr-1 h-3.5 w-3.5" />
+                  Analyze {r.symbol}
+                </>
+              )}
+            </Button>
+          </div>
+        )}
+        <div className="grid gap-4 md:grid-cols-2">
+          <StageCard title="Stage 1 · Context" pass={r.stageOne.pass} summary={r.stageOne.reason}>
+            {Object.entries(r.stageOne.details).map(([k, v]) => (
+              <Row key={k} k={k} v={String(v ?? "—")} />
+            ))}
+          </StageCard>
+          <StageCard
+            title="Stage 2 · Quality"
+            pass={r.stageTwo?.pass ?? false}
+            summary={r.stageTwo ? `${r.stageTwo.score}/9 — ${r.stageTwo.reason}` : "not reached"}
+          >
+            {r.stageTwo && (
+              <>
+                <Row k="Business simplicity" v={`${r.stageTwo.details.businessSimplicity}/3`} />
+                <Row k="Market cap tier" v={`${r.stageTwo.details.marketCapTier}/3`} />
+                <Row k="Analyst dispersion" v={`${r.stageTwo.details.analystDispersion}/3`} />
+                <Row k="Industry class" v={r.stageTwo.details.industryClass} />
+              </>
+            )}
+          </StageCard>
+          <div className="text-xs text-muted-foreground md:col-span-2">
+            Click <span className="font-medium">Run Analysis</span> at the top
+            of the table to grade every candidate, or use the per-symbol
+            button above for just {r.symbol}.
+          </div>
         </div>
       </div>
     );
@@ -1267,8 +1369,45 @@ function ExpandedDetail({ r }: { r: ScreenerResult }) {
     return null;
   })();
 
+  // News-context fetch failure is the most common reason a user wants
+  // to re-run a single symbol — surface a clearer CTA when that's the
+  // case, otherwise keep the refresh link unobtrusive.
+  const newsLooksFailed =
+    /failed|could not|—/i.test(tl.regimeFactors.newsSummary ?? "") ||
+    tl.regimeFactors.newsSummary.length < 8;
+
   return (
     <div className="space-y-3 p-3">
+      {onAnalyze && (
+        <div className="flex items-center justify-end">
+          <button
+            type="button"
+            onClick={() => onAnalyze(r.symbol)}
+            disabled={analyzing}
+            className={cn(
+              "inline-flex items-center gap-1 rounded px-2 py-1 text-xs transition",
+              newsLooksFailed
+                ? "border border-amber-500/40 bg-amber-500/10 text-amber-200 hover:bg-amber-500/20"
+                : "text-muted-foreground hover:text-foreground",
+              analyzing && "opacity-60",
+            )}
+          >
+            {analyzing ? (
+              <>
+                <Loader2 className="h-3 w-3 animate-spin" />
+                Analyzing…
+              </>
+            ) : (
+              <>
+                <RefreshCcw className="h-3 w-3" />
+                {newsLooksFailed
+                  ? `Re-analyze ${r.symbol} (news context missing)`
+                  : `Refresh analysis`}
+              </>
+            )}
+          </button>
+        </div>
+      )}
       <div className="grid gap-3 md:grid-cols-3">
         <LayerCard
           title="LAYER 1 — INDUSTRY STANDARD"
