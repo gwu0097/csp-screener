@@ -701,6 +701,9 @@ export function runStageFour(
   medianHistoricalMovePct: number | null,
   emPct: number | null,
 ): StageFourResult {
+  // Entry breadcrumb so we can confirm runStageFour is reached for a
+  // given symbol — earlier we suspected SPOT was bypassing this path.
+  console.log(`[DEBUG] runStageFour called for: ${candidate.symbol}`);
   // Strike picker: prefer the IV-implied weekly move (emPct, = weeklyIv ×
   // √(dte/365)) over historical median moves. Historical tells you what
   // the stock HAS done on recent quarters; emPct tells you what the
@@ -901,8 +904,18 @@ export function buildCandidateFromEarnings(
   price: number,
 ): EarningsCandidate {
   const earningsDate = new Date(row.date + "T00:00:00Z");
-  const friday = nextFridayOnOrAfter(earningsDate);
-  const dte = businessDaysBetween(earningsDate, friday);
+  // Guardrail: never select an expiry that's already in the past. A
+  // previously screened candidate cached for SPOT (earnings Apr 28)
+  // could have stamped expiry=Apr 24 if the row's `date` was a stale
+  // Finnhub value, then position-snapshots downstream would fall back
+  // through "[snapshots] expiry drift" warnings. Clamp the seed for
+  // nextFridayOnOrAfter to max(earningsDate, today+1 trading day) so
+  // the computed Friday is always strictly in the future.
+  const today = new Date();
+  today.setUTCHours(0, 0, 0, 0);
+  const seed = earningsDate < today ? today : earningsDate;
+  const friday = nextFridayOnOrAfter(seed);
+  const dte = businessDaysBetween(seed, friday);
   return {
     symbol: row.symbol,
     price,
@@ -1029,6 +1042,56 @@ export async function runStagesThreeFour(base: ScreenerResult): Promise<Screener
   };
 
   const chain = await safeGetChain(candidate.symbol, candidate.expiry, candidate.expiry);
+
+  // ---- DEBUG: SPOT-only chain dump (full Schwab response shape).
+  // Captures the actual response right after the Schwab fetch so we
+  // can compare against the broker UI without having to also reach
+  // runStageFour. Most useful when the picked contract's delta
+  // disagrees with the broker — the surrounding strikes will show
+  // whether it's a pick error or a Schwab data error.
+  if (candidate.symbol === "SPOT") {
+    const expKeys = Object.keys(chain?.putExpDateMap ?? {});
+    const matchedKey = chain
+      ? expKeys.find((k) => k.startsWith(candidate.expiry)) ?? null
+      : null;
+    const target = candidate.price > 0 ? candidate.price : 0;
+    const allPuts =
+      chain && matchedKey
+        ? Object.values(chain.putExpDateMap[matchedKey] ?? {})
+            .flat()
+            .filter((c) => !c.putCall || c.putCall === "PUT")
+        : [];
+    const sorted = [...allPuts].sort(
+      (a, b) =>
+        Math.abs(a.strikePrice - target) - Math.abs(b.strikePrice - target),
+    );
+    console.log(
+      "[DEBUG:SPOT chain] " +
+        JSON.stringify(
+          {
+            requestedExpiry: candidate.expiry,
+            availableExpiryKeys: expKeys,
+            matchedExpiryKey: matchedKey,
+            spotPrice: candidate.price,
+            putsNearSpot: sorted.slice(0, 10).map((c) => ({
+              strike: c.strikePrice,
+              putCall: c.putCall,
+              symbol: c.symbol,
+              delta: c.delta,
+              bid: c.bid,
+              ask: c.ask,
+              mark: c.mark,
+              expirationDate: c.expirationDate,
+            })),
+            chainPutCount: allPuts.length,
+            chainHasWeekly: chain ? chainHasWeeklyExpiry(chain, candidate.expiry) : false,
+          },
+          null,
+          2,
+        ),
+    );
+  }
+
   if (!chain || !chainHasWeeklyExpiry(chain, candidate.expiry)) {
     return {
       ...base,
