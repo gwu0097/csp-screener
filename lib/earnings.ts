@@ -251,6 +251,45 @@ export async function getFinnhubPastEarningsDates(
   }
 }
 
+// Insider transactions for a single symbol from Finnhub's
+// /stock/insider-transactions endpoint. Returns the raw rows trimmed to
+// the requested window so the swing screener can classify them downstream.
+export type FinnhubInsiderTx = {
+  name: string;
+  share: number; // negative for sells, positive for buys
+  change: number;
+  filingDate: string;
+  transactionDate: string;
+  transactionCode: string;
+  transactionPrice: number;
+  position?: string | null;
+};
+
+export async function getFinnhubInsiderTransactions(
+  symbol: string,
+  windowDays = 45,
+): Promise<FinnhubInsiderTx[]> {
+  const to = new Date();
+  const from = new Date(to.getTime() - windowDays * 24 * 60 * 60 * 1000);
+  const fromIso = from.toISOString().slice(0, 10);
+  const toIso = to.toISOString().slice(0, 10);
+
+  try {
+    const data = await finnhubGet<{ data?: FinnhubInsiderTx[]; symbol?: string }>(
+      "/stock/insider-transactions",
+      { symbol: symbol.toUpperCase(), from: fromIso, to: toIso },
+    );
+    const rows = data.data ?? [];
+    return rows;
+  } catch (e) {
+    console.warn(
+      `[finnhub] getFinnhubInsiderTransactions(${symbol}) failed:`,
+      e instanceof Error ? e.message : e,
+    );
+    return [];
+  }
+}
+
 // Next future earnings announcement for a single symbol within ~120 days,
 // pulled from Finnhub's /calendar/earnings endpoint. Returns null if the
 // window is empty (Finnhub typically only schedules ~1 quarter ahead, so

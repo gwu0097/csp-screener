@@ -263,6 +263,25 @@ export async function getOptionsChain(
   return schwabGet<SchwabOptionsChain>(`${MARKETDATA_BASE}/chains`, params);
 }
 
+// CALL options chain in a date window — used by the swing screener to
+// detect unusual call activity (volume / open interest spikes on OTM
+// strikes). Mirrors the PUT range variant just below.
+export async function getCallOptionsChainRange(
+  symbol: string,
+  fromDate: string,
+  toDate: string,
+): Promise<SchwabOptionsChain> {
+  return schwabGet<SchwabOptionsChain>(`${MARKETDATA_BASE}/chains`, {
+    symbol,
+    contractType: "CALL",
+    strikeCount: 30,
+    includeUnderlyingQuote: true,
+    strategy: "SINGLE",
+    fromDate,
+    toDate,
+  });
+}
+
 // Range variant — returns every expiration inside [fromDate, toDate] for the
 // symbol. Used for the monthly IV lookup, where targeting a single day is
 // unreliable (3rd-Friday expiries only rarely coincide with any particular
