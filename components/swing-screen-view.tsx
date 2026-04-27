@@ -15,6 +15,17 @@ import {
 } from "lucide-react";
 import { ImportStockScreenshotModal } from "@/components/import-stock-screenshot-modal";
 import {
+  Bar,
+  CartesianGrid,
+  ComposedChart,
+  Line,
+  ReferenceLine,
+  ResponsiveContainer,
+  Tooltip as RTooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
+import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
@@ -111,6 +122,15 @@ type SwingCandidate = {
   redFlags: string[];
   signalCount: number;
   setupScore: number;
+};
+
+// Mirror of /api/swings/screen/chart row shape — see route handler.
+type ChartPoint = {
+  date: string;
+  close: number;
+  volume: number;
+  ma50: number | null;
+  ma200: number | null;
 };
 
 type CachedResult = {
@@ -722,6 +742,42 @@ function CandidateRow({
   onEnterTrade: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
+  // Chart state lives at the row level (not in ExpandedDetail) so collapsing
+  // and re-expanding doesn't drop the cached payload.
+  const [chartData, setChartData] = useState<ChartPoint[] | null>(null);
+  const [chartLoading, setChartLoading] = useState(false);
+  const [chartError, setChartError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!expanded || chartData !== null || chartLoading) return;
+    let cancelled = false;
+    setChartLoading(true);
+    setChartError(null);
+    (async () => {
+      try {
+        const res = await fetch(
+          `/api/swings/screen/chart?symbol=${encodeURIComponent(c.symbol)}`,
+          { cache: "no-store" },
+        );
+        const json = (await res.json()) as {
+          data?: ChartPoint[];
+          error?: string;
+        };
+        if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+        if (!cancelled) setChartData(json.data ?? []);
+      } catch (e) {
+        if (!cancelled) {
+          setChartError(e instanceof Error ? e.message : "Chart load failed");
+        }
+      } finally {
+        if (!cancelled) setChartLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [expanded, c.symbol, chartData, chartLoading]);
+
   const changeColor =
     !Number.isFinite(c.priceChange1d)
       ? "text-muted-foreground"
@@ -802,7 +858,14 @@ function CandidateRow({
         expanded={expanded}
         onToggle={() => setExpanded((v) => !v)}
       />
-      {expanded && <ExpandedDetail candidate={c} />}
+      {expanded && (
+        <ExpandedDetail
+          candidate={c}
+          chartData={chartData}
+          chartLoading={chartLoading}
+          chartError={chartError}
+        />
+      )}
     </div>
   );
 }
@@ -996,7 +1059,17 @@ function Line2({
 
 // ---------- Expanded detail ----------
 
-function ExpandedDetail({ candidate: c }: { candidate: SwingCandidate }) {
+function ExpandedDetail({
+  candidate: c,
+  chartData,
+  chartLoading,
+  chartError,
+}: {
+  candidate: SwingCandidate;
+  chartData: ChartPoint[] | null;
+  chartLoading: boolean;
+  chartError: string | null;
+}) {
   const upsidePct =
     c.entryPrice > 0 ? (c.targetPrice - c.entryPrice) / c.entryPrice : 0;
   const stopPct =
@@ -1048,6 +1121,15 @@ function ExpandedDetail({ candidate: c }: { candidate: SwingCandidate }) {
             <DetailRow
               label="Volume"
               value={`${(c.volumeRatio).toFixed(2)}x avg (${formatVolume(c.todayVolume)} vs ${formatVolume(c.avgVolume10d)})`}
+            />
+          </DetailSection>
+
+          <DetailSection title="Price chart (6 months)">
+            <PriceChart
+              candidate={c}
+              data={chartData}
+              loading={chartLoading}
+              error={chartError}
             />
           </DetailSection>
         </div>
@@ -1622,3 +1704,249 @@ function ScoreBreakdown({ candidate: c }: { candidate: SwingCandidate }) {
   );
 }
 
+
+// ---------- Price chart ----------
+
+function PriceChart({
+  candidate: c,
+  data,
+  loading,
+  error,
+}: {
+  candidate: SwingCandidate;
+  data: ChartPoint[] | null;
+  loading: boolean;
+  error: string | null;
+}) {
+  if (loading || data === null) {
+    return (
+      <div
+        className="flex items-center justify-center rounded border border-border/30 bg-white/[0.02] text-[11px] text-muted-foreground"
+        style={{ height: 200 }}
+      >
+        {loading ? "Loading 6-month history…" : "—"}
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <div
+        className="flex items-center justify-center rounded border border-rose-500/40 bg-rose-500/10 text-[11px] text-rose-300"
+        style={{ height: 200 }}
+      >
+        {error}
+      </div>
+    );
+  }
+  if (data.length === 0) {
+    return (
+      <div
+        className="flex items-center justify-center rounded border border-border/30 bg-white/[0.02] text-[11px] text-muted-foreground"
+        style={{ height: 200 }}
+      >
+        Yahoo returned no historical data for {c.symbol}.
+      </div>
+    );
+  }
+
+  // X-axis tick density: ~5 evenly spaced labels across the window so the
+  // axis isn't crowded on a 6-month series. We pre-pick the tick positions
+  // and render only those.
+  const tickStep = Math.max(1, Math.floor(data.length / 5));
+  const ticks = data
+    .map((d, i) => (i % tickStep === 0 ? d.date : null))
+    .filter((d): d is string => d !== null);
+
+  return (
+    <div className="space-y-1">
+      <div style={{ width: "100%", height: 200 }}>
+        <ResponsiveContainer width="100%" height="100%">
+          <ComposedChart
+            data={data}
+            margin={{ top: 8, right: 60, left: 0, bottom: 0 }}
+          >
+            <CartesianGrid stroke="rgba(255,255,255,0.06)" vertical={false} />
+            <XAxis
+              dataKey="date"
+              ticks={ticks}
+              tickFormatter={(v: string) =>
+                new Date(v).toLocaleDateString("en-US", { month: "short" })
+              }
+              tick={{ fill: "rgba(255,255,255,0.5)", fontSize: 10 }}
+              axisLine={{ stroke: "rgba(255,255,255,0.1)" }}
+              tickLine={false}
+            />
+            <YAxis
+              yAxisId="price"
+              domain={["auto", "auto"]}
+              tickFormatter={(v: number) => `$${v.toFixed(0)}`}
+              tick={{ fill: "rgba(255,255,255,0.5)", fontSize: 10 }}
+              axisLine={false}
+              tickLine={false}
+              width={45}
+            />
+            <YAxis
+              yAxisId="volume"
+              orientation="right"
+              hide
+              domain={[0, (max: number) => max * 5]}
+            />
+            <RTooltip content={<ChartTooltip />} />
+            <Bar
+              yAxisId="volume"
+              dataKey="volume"
+              fill="rgba(96,165,250,0.18)"
+              isAnimationActive={false}
+            />
+            <Line
+              yAxisId="price"
+              type="monotone"
+              dataKey="ma200"
+              stroke="#ef4444"
+              strokeWidth={1.5}
+              strokeDasharray="4 2"
+              dot={false}
+              isAnimationActive={false}
+              connectNulls
+              name="200d MA"
+            />
+            <Line
+              yAxisId="price"
+              type="monotone"
+              dataKey="ma50"
+              stroke="#f97316"
+              strokeWidth={1.5}
+              strokeDasharray="4 2"
+              dot={false}
+              isAnimationActive={false}
+              connectNulls
+              name="50d MA"
+            />
+            <Line
+              yAxisId="price"
+              type="monotone"
+              dataKey="close"
+              stroke="#60a5fa"
+              strokeWidth={2}
+              dot={false}
+              isAnimationActive={false}
+              name="Price"
+            />
+            <ReferenceLine
+              yAxisId="price"
+              y={c.targetPrice}
+              stroke="#22c55e"
+              strokeDasharray="3 3"
+              label={{
+                value: "Target",
+                position: "right",
+                fill: "#22c55e",
+                fontSize: 10,
+              }}
+            />
+            <ReferenceLine
+              yAxisId="price"
+              y={c.entryPrice}
+              stroke="rgba(255,255,255,0.35)"
+              strokeDasharray="2 2"
+              label={{
+                value: "Entry",
+                position: "right",
+                fill: "rgba(255,255,255,0.65)",
+                fontSize: 10,
+              }}
+            />
+            <ReferenceLine
+              yAxisId="price"
+              y={c.stopPrice}
+              stroke="#ef4444"
+              strokeDasharray="3 3"
+              label={{
+                value: "Stop",
+                position: "right",
+                fill: "#ef4444",
+                fontSize: 10,
+              }}
+            />
+          </ComposedChart>
+        </ResponsiveContainer>
+      </div>
+      <div className="flex flex-wrap items-center gap-3 px-1 text-[10px] text-muted-foreground">
+        <LegendDot color="#60a5fa" label="Price" />
+        <LegendDot color="#f97316" label="50d MA" dashed />
+        <LegendDot color="#ef4444" label="200d MA" dashed />
+        <LegendDot color="#22c55e" label="Target" dashed />
+        <LegendDot color="rgba(255,255,255,0.6)" label="Entry" dashed />
+        <LegendDot color="#ef4444" label="Stop" dashed />
+      </div>
+    </div>
+  );
+}
+
+function LegendDot({
+  color,
+  label,
+  dashed,
+}: {
+  color: string;
+  label: string;
+  dashed?: boolean;
+}) {
+  return (
+    <span className="inline-flex items-center gap-1">
+      <span
+        className="inline-block h-[2px] w-3"
+        style={{
+          background: dashed
+            ? `repeating-linear-gradient(to right, ${color} 0 3px, transparent 3px 6px)`
+            : color,
+        }}
+      />
+      <span>{label}</span>
+    </span>
+  );
+}
+
+type ChartTooltipPayload = {
+  active?: boolean;
+  label?: string;
+  payload?: Array<{
+    name?: string;
+    dataKey?: string;
+    value?: number;
+    payload?: ChartPoint;
+  }>;
+};
+
+function ChartTooltip(props: ChartTooltipPayload) {
+  if (!props.active || !props.payload || props.payload.length === 0) return null;
+  const row = props.payload[0]?.payload;
+  if (!row) return null;
+  const fmt = (v: number | null | undefined) =>
+    v !== null && v !== undefined && Number.isFinite(v) ? `$${v.toFixed(2)}` : "—";
+  return (
+    <div className="rounded-md border border-border bg-popover px-2 py-1.5 text-[11px] text-popover-foreground shadow-md">
+      <div className="font-medium text-foreground">
+        {new Date(row.date).toLocaleDateString("en-US", {
+          month: "short",
+          day: "numeric",
+          year: "numeric",
+        })}
+      </div>
+      <div className="mt-0.5 space-y-0.5 font-mono">
+        <div>
+          <span className="text-muted-foreground">Price:</span>{" "}
+          <span style={{ color: "#60a5fa" }}>{fmt(row.close)}</span>
+        </div>
+        <div>
+          <span className="text-muted-foreground">50d MA:</span>{" "}
+          <span style={{ color: "#f97316" }}>{fmt(row.ma50)}</span>
+        </div>
+        <div>
+          <span className="text-muted-foreground">200d MA:</span>{" "}
+          <span style={{ color: "#ef4444" }}>{fmt(row.ma200)}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
