@@ -6,6 +6,7 @@
 // consistent units across both call sites.
 import {
   getOptionsChain,
+  getOptionsChainWide,
   type SchwabOptionContract,
   type SchwabOptionsChain,
 } from "@/lib/schwab";
@@ -227,6 +228,26 @@ export async function fetchChainSafe(
   } catch (e) {
     console.warn(
       `[snapshots] chain(${symbol}) failed: ${e instanceof Error ? e.message : e}`,
+    );
+    return null;
+  }
+}
+
+// Wide variant — narrows to a single expiry but bumps strikeCount=200
+// so deep-OTM positions are reachable. Use whenever the caller knows
+// the expiry and is picking ONE strike (close-time snapshot, refresh
+// snapshot for an open position). The default fetchChainSafe is
+// reserved for the runAutoExpire path where past expiries get null
+// regardless of strikeCount.
+export async function fetchChainWideSafe(
+  symbol: string,
+  expiry: string,
+): Promise<SchwabOptionsChain | null> {
+  try {
+    return await getOptionsChainWide(symbol, expiry);
+  } catch (e) {
+    console.warn(
+      `[snapshots] chainWide(${symbol},${expiry}) failed: ${e instanceof Error ? e.message : e}`,
     );
     return null;
   }

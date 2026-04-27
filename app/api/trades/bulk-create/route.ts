@@ -7,7 +7,7 @@ import {
   type Fill,
   type PositionRow,
 } from "@/lib/positions";
-import { buildSnapshotRow, fetchChainSafe } from "@/lib/snapshots";
+import { buildSnapshotRow, fetchChainWideSafe } from "@/lib/snapshots";
 import { recordPositionOutcome } from "@/lib/post-earnings";
 
 export const dynamic = "force-dynamic";
@@ -210,7 +210,7 @@ export async function POST(req: NextRequest) {
               .select("fill_type, contracts, premium, fill_date")
               .eq("position_id", positionId);
             const preFills = (preFillsRaw ?? []) as Fill[];
-            const chain = await fetchChainSafe(position.symbol);
+            const chain = await fetchChainWideSafe(position.symbol, position.expiry);
             const snapshotRow = buildSnapshotRow(position, chain, preFills, {
               nowIso: new Date().toISOString(),
               closeSnapshot: true,

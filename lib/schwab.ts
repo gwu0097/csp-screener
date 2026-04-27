@@ -263,6 +263,33 @@ export async function getOptionsChain(
   return schwabGet<SchwabOptionsChain>(`${MARKETDATA_BASE}/chains`, params);
 }
 
+// Wide PUT chain for an open-position lookup. The default
+// getOptionsChain (strikeCount=30 around ATM) silently misses deep-OTM
+// positions — e.g. a SPOT $410 put while spot is $495 falls outside
+// the 30-strike window, pickPutContract fuzzy-matches to the nearest
+// in-window strike (often the ATM contract), and the position card
+// shows the wrong mark + a wildly wrong P&L. strikeCount=200 narrowed
+// to the single expiry returns ~130 strikes covering well past 2× EM
+// in either direction without paying for a multi-expiry payload.
+//
+// Used by /api/positions/open and /api/trades/bulk-create's close
+// snapshot. Screener flow keeps the default + targeted-retry pattern
+// because it builds availableStrikes off the wide chain on demand.
+export async function getOptionsChainWide(
+  symbol: string,
+  expiry: string,
+): Promise<SchwabOptionsChain> {
+  return schwabGet<SchwabOptionsChain>(`${MARKETDATA_BASE}/chains`, {
+    symbol,
+    contractType: "PUT",
+    strikeCount: 200,
+    fromDate: expiry,
+    toDate: expiry,
+    includeUnderlyingQuote: true,
+    strategy: "SINGLE",
+  });
+}
+
 // CALL options chain in a date window — used by the swing screener to
 // detect unusual call activity (volume / open interest spikes on OTM
 // strikes). Mirrors the PUT range variant just below.

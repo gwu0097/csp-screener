@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
-import { getOptionsChain, SchwabOptionContract } from "@/lib/schwab";
+import {
+  getOptionsChain,
+  getOptionsChainWide,
+  SchwabOptionContract,
+} from "@/lib/schwab";
 import { getCurrentPrice, getHistoricalPrices } from "@/lib/yahoo";
 import { getMarketContext } from "@/lib/market";
 import {
@@ -366,8 +370,13 @@ export async function GET(req: NextRequest) {
     const dte = daysBetween(now, new Date(expiry + "T00:00:00Z"));
 
     const spotPromise = withTimeout(getCurrentPrice(p.symbol), 5000, `spot(${p.symbol})`);
+    // Wide chain (strikeCount=200) so deep-OTM positions like SPOT $410
+    // on a $495 stock are actually in the response — the default 30-
+    // strike chain centers on ATM and silently fuzzy-snaps a far-OTM
+    // strike to the nearest in-window contract, producing the wrong
+    // mark + a wildly wrong P&L on the position card.
     const chainPromise = live
-      ? withTimeout(getOptionsChain(p.symbol, expiry), 15000, `chain(${p.symbol})`)
+      ? withTimeout(getOptionsChainWide(p.symbol, expiry), 15000, `chain(${p.symbol})`)
       : Promise.resolve(null);
     const barsPromise = live
       ? withTimeout(
