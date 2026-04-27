@@ -719,11 +719,16 @@ function pickStrikeNearestWithDiff(
 // NOT use the `strike=<exact>` parameter — Schwab silently returns
 // an empty chain for non-grid values (e.g. strike=403.02 → 0 rows
 // while $402.50 actually exists), so rounding-by-guess is fragile.
+//
+// Returns BOTH the picked contract AND the wide chain so the caller
+// can reuse it to populate the availableStrikes snapshot — otherwise
+// the client-side custom-strike picker is still bounded by the
+// original 30-strike window and reproduces the same far-OTM bug.
 async function fetchTargetedStrike(
   symbol: string,
   expiry: string,
   targetStrike: number,
-): Promise<SchwabOptionContract | null> {
+): Promise<{ contract: SchwabOptionContract; chain: SchwabOptionsChain } | null> {
   try {
     const chain = await schwabGet<SchwabOptionsChain>("/marketdata/v1/chains", {
       symbol,
@@ -734,7 +739,9 @@ async function fetchTargetedStrike(
       includeUnderlyingQuote: true,
       strategy: "SINGLE",
     });
-    return pickStrikeNearest(chain, expiry, targetStrike);
+    const contract = pickStrikeNearest(chain, expiry, targetStrike);
+    if (!contract) return null;
+    return { contract, chain };
   } catch (e) {
     console.warn(
       `[screener] ${symbol}: targeted lookup failed: ${e instanceof Error ? e.message : e}`,
@@ -788,6 +795,11 @@ export async function runStageFour(
   const initialPick = pickStrikeNearestWithDiff(chain, candidate.expiry, suggestedStrike);
   let contract: SchwabOptionContract | null = initialPick?.contract ?? null;
   let usedTargetedLookup = false;
+  // When the targeted retry fires we also use its wide chain to
+  // populate availableStrikes. Otherwise the client custom-strike
+  // analyzer is stuck with the same ±15 strikes around ATM and
+  // typing 420 on SPOT keeps snapping to $475.
+  let strikesSourceChain: SchwabOptionsChain = chain;
 
   if (candidate.symbol === "SPOT") {
     const oneXStrike =
@@ -832,10 +844,11 @@ export async function runStageFour(
       suggestedStrike,
     );
     if (targeted) {
-      contract = targeted;
+      contract = targeted.contract;
+      strikesSourceChain = targeted.chain;
       usedTargetedLookup = true;
       console.log(
-        `[screener] ${candidate.symbol}: targeted lookup hit strike=${targeted.strikePrice} delta=${targeted.delta} mark=${targeted.mark}`,
+        `[screener] ${candidate.symbol}: targeted lookup hit strike=${targeted.contract.strikePrice} delta=${targeted.contract.delta} mark=${targeted.contract.mark}`,
       );
     } else {
       console.warn(
@@ -941,13 +954,17 @@ export async function runStageFour(
   const note: string | null = null;
 
   // Compact snapshot of the weekly put chain — the UI uses it to let
-  // users try a custom strike without another API round-trip.
-  const expKey = Object.keys(chain.putExpDateMap ?? {}).find((k) =>
+  // users try a custom strike without another API round-trip. When
+  // the targeted retry fired we use ITS wide chain (200 strikes)
+  // instead of the default 30, so a user typing a far-OTM strike
+  // (e.g. $420 on SPOT when default chain stops at $475) actually
+  // hits a real contract instead of snapping to the nearest ATM strike.
+  const expKey = Object.keys(strikesSourceChain.putExpDateMap ?? {}).find((k) =>
     k.startsWith(candidate.expiry),
   );
   const availableStrikes: StageFourResult["availableStrikes"] = [];
   if (expKey) {
-    for (const arr of Object.values(chain.putExpDateMap[expKey])) {
+    for (const arr of Object.values(strikesSourceChain.putExpDateMap[expKey])) {
       for (const c of arr) {
         if (c.putCall && c.putCall !== "PUT") continue;
         const strikeMid = (c.bid + c.ask) / 2 || c.mark || c.last || 0;
