@@ -254,19 +254,45 @@ export function PositionCard(props: Props) {
   // EXPIRED / ASSIGNED / WIN / LOSS derivation — the badge engine is
   // open-position-specific (expiry day, live snapshots, post-earnings
   // recs — all meaningless on a closed trade).
-  const rowTint = open
-    ? rowTintFromBadge(open.badge)
-    : rowTintClosed(closed?.realizedPnl ?? null);
-  const status = open
+  // An expired position whose outcome the user hasn't resolved yet is
+  // strictly more urgent than any live-data badge — those badges (HOLD,
+  // EXPIRING, MAX_PROFIT, etc.) are computed against future-expiry
+  // contracts and don't apply once the position is past its expiry.
+  // Override the collapsed row to a single "needs action" amber badge
+  // and tint the row background so it stands out in the list. Clicking
+  // the row expands it and reveals the Expire Worthless / Record
+  // Assignment buttons in VerifyAssignmentPanel.
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const needsExpiryAction =
+    open !== null &&
+    open.expiry < todayIso &&
+    (open.expiryStatus === "needs_verification" ||
+      open.expiryStatus === "pending");
+
+  const rowTint = needsExpiryAction
+    ? "bg-amber-950/30"
+    : open
+      ? rowTintFromBadge(open.badge)
+      : rowTintClosed(closed?.realizedPnl ?? null);
+  const status = needsExpiryAction
     ? {
-        label: open.badgeLabel,
-        className: badgePillClass(open.badgeColor),
-        tooltip: open.badgeTooltip,
+        label: "⚠ EXPIRED — click to resolve",
+        className: badgePillClass("amber"),
+        tooltip:
+          open && open.expiryStatus === "pending"
+            ? "Expired but no snapshot to auto-classify. Expand the row to confirm the outcome."
+            : "Expired close to strike — assignment possible. Expand the row to confirm.",
       }
-    : {
-        ...statusBadgeClosed(closed?.status ?? "closed", closed?.realizedPnl ?? null),
-        tooltip: "",
-      };
+    : open
+      ? {
+          label: open.badgeLabel,
+          className: badgePillClass(open.badgeColor),
+          tooltip: open.badgeTooltip,
+        }
+      : {
+          ...statusBadgeClosed(closed?.status ?? "closed", closed?.realizedPnl ?? null),
+          tooltip: "",
+        };
   const pnlDollars = open ? open.pnlDollars : (closed?.realizedPnl ?? null);
   const pnlPct = open ? open.pnlPct : null;
   const pnlColor =

@@ -88,6 +88,10 @@ function parseExpiryKeyDate(expKey: string): number | null {
   return Number.isFinite(ms) ? ms : null;
 }
 
+function todayIsoUtc(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
 export function pickPutContract(
   chain: SchwabOptionsChain,
   strike: number,
@@ -101,6 +105,13 @@ export function pickPutContract(
   //    b) if requested date is Sat/Sun, snap to preceding Friday and retry
   //       (broker screenshots sometimes show "settlement date" = Fri + 2)
   //    c) nearest expiry within ±7 days as a last-resort fuzzy match
+  //       — but only when the matched expiry is today or later. Past
+  //       expiries don't exist in the chain anymore, so a fuzzy match
+  //       would silently pull a live future-expiry contract's price
+  //       and report it as the expired position's value. Auto-expire
+  //       relies on null option_price for "no chain data" — so we
+  //       must return null here, not a wrong contract.
+  const today = todayIsoUtc();
   let expKey = keys.find((k) => k.startsWith(expiry));
   if (!expKey) {
     const d = new Date(expiry + "T00:00:00Z");
@@ -134,6 +145,15 @@ export function pickPutContract(
     if (!bestKey || bestDiff > EXPIRY_TOLERANCE_DAYS * 86400000) {
       console.warn(
         `[snapshots] no expiry within ±${EXPIRY_TOLERANCE_DAYS}d of ${expiry}; available=[${keys.slice(0, 5).join(",")}...]`,
+      );
+      return null;
+    }
+    // Reject any fuzzy match whose ISO date is strictly before today.
+    // Lexicographic compare on YYYY-MM-DD is correct here.
+    const matchedIso = bestKey.slice(0, 10);
+    if (matchedIso < today) {
+      console.warn(
+        `[snapshots] fuzzy expiry match ${matchedIso} for requested ${expiry} is in the past — returning null instead of a stale contract`,
       );
       return null;
     }

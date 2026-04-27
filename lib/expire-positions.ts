@@ -17,6 +17,22 @@ export type ExpiryClassification = "auto_expire" | "verify_assignment" | "pendin
 // Pure classifier — inputs only, no DB. Exposed so tests can hit the
 // rule logic in isolation and so classifyExpiredPosition stays a thin
 // wrapper over a snapshot fetch.
+//
+// Rule cascade (first match wins):
+//   1. pctFromStrike > 0.05                           → auto_expire
+//      Stock is >5% OTM at expiry — a put that far out is certainly
+//      worthless, so we don't need an option_price to confirm. This
+//      catches deep-OTM strikes that drop out of the chain entirely
+//      (option_price is null in the snapshot).
+//   2. pctFromStrike > 0.02 AND optionPrice < $0.15   → auto_expire
+//      Moderately OTM with a confirmed near-zero option price.
+//      $0.15 (not $0.05) tolerates intraday snapshots that haven't
+//      decayed all the way to zero by close.
+//   3. pctFromStrike < 0.02                           → verify_assignment
+//      Within 2% of strike — assignment is plausible, user must confirm.
+//   4. else                                           → pending
+//      Ambiguous (e.g. 2-5% OTM with no option_price): we don't auto-
+//      close, but flag for review.
 export function classifyFromSnapshot(
   strike: number,
   snapshot: { stock_price: number | null; option_price: number | null } | null,
@@ -31,10 +47,9 @@ export function classifyFromSnapshot(
     return { classification: "pending", pctFromStrike: null };
   }
   const pctFromStrike = (stockPrice - strike) / strike;
-  // Threshold set to < 0.15 (not < 0.05) because snapshots aren't
-  // always taken at market close — an option at $0.13 mid-day on
-  // expiry day with stock 2.4% OTM will decay to near-zero by close.
-  // $0.15 accounts for the timing gap between snapshot and expiry.
+  if (pctFromStrike > 0.05) {
+    return { classification: "auto_expire", pctFromStrike };
+  }
   if (pctFromStrike > 0.02 && optionPrice !== null && optionPrice < 0.15) {
     return { classification: "auto_expire", pctFromStrike };
   }
