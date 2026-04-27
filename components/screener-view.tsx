@@ -33,6 +33,7 @@ import { cn } from "@/lib/utils";
 import type { ScreenerResult, StageFourResult } from "@/lib/screener";
 import type { MarketContext } from "@/lib/market";
 import { CrushHistoryTable } from "@/components/crush-history-table";
+import { OptionsFlowSection } from "@/components/options-flow-section";
 
 // localStorage key for the Track checkbox state (screener_tracked is an
 // array of UPPERCASE symbols). Cleared whenever Screen Today runs.
@@ -1563,6 +1564,8 @@ function ExpandedDetail({
           </div>
         </LayerCard>
       </div>
+
+      <OptionsFlowSection flow={r.stageThree?.details?.optionsFlow ?? null} />
 
       <CrushHistoryTable
         events={r.stageThree?.details?.crushHistory}

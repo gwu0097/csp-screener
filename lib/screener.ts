@@ -29,6 +29,7 @@ import {
   persistLiveImpliedMove,
   type CrushHistoryEvent,
 } from "@/lib/earnings-history-table";
+import { computeOptionsFlow, type OptionsFlow } from "@/lib/options-flow";
 
 // ---------- Hard-kill thresholds ----------
 
@@ -91,6 +92,11 @@ export type StageThreeResult = {
     // after stage 3 completes; older rows may have null EM where
     // the backfill hasn't run.
     crushHistory?: CrushHistoryEvent[];
+    // Today's options flow for the candidate's expiry — P/C ratio,
+    // unusual strikes, deep-OTM put cluster, flow at the suggested
+    // strike. Stamped after stage 4 picks the strike. Null when the
+    // full chain fetch failed; UI hides the section.
+    optionsFlow?: OptionsFlow | null;
   };
 };
 
@@ -1279,14 +1285,29 @@ export async function runStagesThreeFour(base: ScreenerResult): Promise<Screener
     );
   }
 
-  // Crush history table data — fetched in parallel with the stage 3/4
-  // work above is overkill for a 1-row Supabase read, so just inline.
-  // Read the last 8 events with whatever EM we have; backfill from
-  // Perplexity fills the older gaps.
-  const crushHistory = await getCrushHistory(candidate.symbol, 8);
-  // Stamp on stageThree.details so the API response surfaces it for
-  // the expanded-row UI without changing the top-level result shape.
+  // Crush history (Supabase) + options flow (Schwab full chain) run
+  // concurrently. Both are stamped on stageThree.details so the API
+  // response surfaces them for the expanded-row UI without changing
+  // the top-level result shape.
+  const [crushHistory, optionsFlow] = await Promise.all([
+    getCrushHistory(candidate.symbol, 8),
+    stageThree.details.expectedMovePct !== null
+      ? computeOptionsFlow({
+          symbol: candidate.symbol,
+          expiry: candidate.expiry,
+          spotPrice: candidate.price,
+          emPct: stageThree.details.expectedMovePct,
+          suggestedStrike: stageFour.suggestedStrike,
+        }).catch((e: unknown) => {
+          console.warn(
+            `[options-flow] ${candidate.symbol} failed: ${e instanceof Error ? e.message : e}`,
+          );
+          return null;
+        })
+      : Promise.resolve<OptionsFlow | null>(null),
+  ]);
   stageThree.details.crushHistory = crushHistory;
+  stageThree.details.optionsFlow = optionsFlow;
 
   const spreadTooWide = isSpreadTooWide();
   // Spread-too-wide is a hard kill regardless of any other signal.
