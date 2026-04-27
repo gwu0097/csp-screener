@@ -1,12 +1,11 @@
 import { NextResponse } from "next/server";
-import { runSwingScreener, type ScreenerResult } from "@/lib/swing-screener";
-import { SWING_UNIVERSE } from "@/lib/stock-universe";
+import type { ScreenerResult } from "@/lib/swing-screener";
 import { createServerClient } from "@/lib/supabase";
 
 export const dynamic = "force-dynamic";
-// Full S&P 500 + Nasdaq 100 (~580 symbols) takes 3-5 minutes end-to-end.
-// 300s is the Vercel Pro plan ceiling.
-export const maxDuration = 300;
+// GET-only: returns the cached most-recent screen result. The actual
+// scan now runs through the split pair /pass1 + /pass2 and persists via
+// /save, so this route stays well under the default 60s ceiling.
 
 type Cached = ScreenerResult & { screenedAt: string | null };
 
@@ -51,36 +50,5 @@ export async function GET(): Promise<NextResponse> {
     durationMs: row.duration_ms ?? 0,
     errors: [],
     screenedAt: row.screened_at,
-  } satisfies Cached);
-}
-
-export async function POST(): Promise<NextResponse> {
-  const result = await runSwingScreener(SWING_UNIVERSE);
-
-  // Keep only the most recent run — the page only ever displays the
-  // latest, and JSONB rows for ~50 candidates are large enough that
-  // history stacking would balloon the table.
-  const sb = createServerClient();
-  const del = await sb
-    .from("swing_screen_results")
-    .delete()
-    .neq("id", "00000000-0000-0000-0000-000000000000");
-  if (del.error) {
-    console.warn(`[swings/screen] truncate failed: ${del.error.message}`);
-  }
-  const ins = await sb.from("swing_screen_results").insert({
-    screened: result.screened,
-    pass1_survivors: result.pass1Survivors,
-    pass2_results: result.pass2Results,
-    duration_ms: result.durationMs,
-    candidates: result.candidates,
-  });
-  if (ins.error) {
-    console.warn(`[swings/screen] insert failed: ${ins.error.message}`);
-  }
-
-  return NextResponse.json({
-    ...result,
-    screenedAt: new Date().toISOString(),
   } satisfies Cached);
 }

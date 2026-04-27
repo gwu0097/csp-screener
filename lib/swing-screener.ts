@@ -118,7 +118,7 @@ export type SwingCandidate = {
 
 // ---------- Pass 1 helpers ----------
 
-type Pass1Quote = {
+export type Pass1Quote = {
   symbol: string;
   companyName: string;
   currentPrice: number;
@@ -243,7 +243,7 @@ async function sleep(ms: number): Promise<void> {
 
 // Geometry: trade levels + R/R for a quote. Returns null if any field is
 // non-finite or stop sits at/above entry (degenerate setup).
-type TradeLevels = {
+export type TradeLevels = {
   entryPrice: number;
   targetPrice: number;
   stopPrice: number;
@@ -685,4 +685,63 @@ export async function runSwingScreener(
     durationMs: Date.now() - started,
     errors: p1.errors,
   };
+}
+
+// ---------- Wire format for the split route pair ----------
+//
+// Pass 1's result includes JS Maps that don't survive JSON.stringify, so
+// the route serializes to plain Records before sending to the client and
+// reconstitutes them in pass 2. Pass1Wire intentionally only carries data
+// for survivors (we don't need the full quote map cross-passed).
+
+export type Pass1Wire = {
+  survivors: string[];
+  screened: number;
+  errors: string[];
+  quotes: Record<string, Pass1Quote>;
+  trades: Record<string, TradeLevels>;
+  tier2ByCandidate: Record<string, string[]>;
+};
+
+export function serializePass1(
+  result: Awaited<ReturnType<typeof pass1Filter>>,
+  screened: number,
+): Pass1Wire {
+  const quotes: Record<string, Pass1Quote> = {};
+  const trades: Record<string, TradeLevels> = {};
+  const tier2ByCandidate: Record<string, string[]> = {};
+  // Strip non-survivor entries — the client doesn't need quotes for stocks
+  // we already dropped, and dragging them across the wire wastes ~150KB.
+  for (const sym of result.survivors) {
+    const q = result.quotes.get(sym);
+    const t = result.trades.get(sym);
+    const sigs = result.tier2ByCandidate.get(sym);
+    if (q) quotes[sym] = q;
+    if (t) trades[sym] = t;
+    if (sigs) tier2ByCandidate[sym] = sigs;
+  }
+  return {
+    survivors: result.survivors,
+    screened,
+    errors: result.errors,
+    quotes,
+    trades,
+    tier2ByCandidate,
+  };
+}
+
+export function deserializePass1(wire: Pass1Wire): {
+  quotes: Map<string, Pass1Quote>;
+  trades: Map<string, TradeLevels>;
+  tier2ByCandidate: Map<string, string[]>;
+} {
+  const quotes = new Map<string, Pass1Quote>();
+  const trades = new Map<string, TradeLevels>();
+  const tier2ByCandidate = new Map<string, string[]>();
+  for (const [k, v] of Object.entries(wire.quotes)) quotes.set(k, v);
+  for (const [k, v] of Object.entries(wire.trades)) trades.set(k, v);
+  for (const [k, v] of Object.entries(wire.tier2ByCandidate)) {
+    tier2ByCandidate.set(k, v);
+  }
+  return { quotes, trades, tier2ByCandidate };
 }

@@ -188,14 +188,31 @@ function sortCandidates(
   });
 }
 
+type RunPhase = "idle" | "pass1" | "pass2" | "saving";
+
+type Pass1Wire = {
+  survivors: string[];
+  screened: number;
+  errors: string[];
+  quotes: Record<string, unknown>;
+  trades: Record<string, unknown>;
+  tier2ByCandidate: Record<string, string[]>;
+  durationMs?: number;
+};
+
 export function SwingScreenView() {
   const [data, setData] = useState<CachedResult | null>(null);
   const [loading, setLoading] = useState(true);
-  const [running, setRunning] = useState(false);
+  const [phase, setPhase] = useState<RunPhase>("idle");
+  // Survivor count from pass 1 — shown in the inter-pass progress text so
+  // the user knows how many symbols pass 2 is enriching.
+  const [pass1Count, setPass1Count] = useState<number | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
   const [sort, setSort] = useState<SortState>(DEFAULT_SORT);
   const [importOpen, setImportOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+
+  const running = phase !== "idle";
 
   async function loadCached() {
     try {
@@ -215,20 +232,74 @@ export function SwingScreenView() {
   }, []);
 
   async function runScreen() {
-    setRunning(true);
     setRunError(null);
+    setPass1Count(null);
+    const started = Date.now();
     try {
-      const res = await fetch("/api/swings/screen", {
+      // Pass 1 — Yahoo technical filter on the full universe (~15-25s).
+      setPhase("pass1");
+      const r1 = await fetch("/api/swings/screen/pass1", {
         method: "POST",
         cache: "no-store",
       });
-      const json = (await res.json()) as CachedResult & { error?: string };
-      if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
-      setData(json);
+      const p1 = (await r1.json()) as Pass1Wire & { error?: string };
+      if (!r1.ok) throw new Error(p1.error ?? `Pass 1 failed: HTTP ${r1.status}`);
+      setPass1Count(p1.survivors.length);
+
+      // Pass 2 — Finnhub insider + earnings + Schwab options on survivors
+      // (~25-45s). The full pass1 wire payload is the body — pass2 needs
+      // quotes/trades/tier2 to build the candidates.
+      setPhase("pass2");
+      const r2 = await fetch("/api/swings/screen/pass2", {
+        method: "POST",
+        cache: "no-store",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(p1),
+      });
+      const p2 = (await r2.json()) as {
+        candidates?: SwingCandidate[];
+        durationMs?: number;
+        error?: string;
+      };
+      if (!r2.ok) throw new Error(p2.error ?? `Pass 2 failed: HTTP ${r2.status}`);
+      const candidates = p2.candidates ?? [];
+
+      const result: CachedResult = {
+        candidates,
+        screened: p1.screened,
+        pass1Survivors: p1.survivors.length,
+        pass2Results: candidates.length,
+        durationMs: Date.now() - started,
+        errors: p1.errors ?? [],
+        screenedAt: new Date().toISOString(),
+      };
+
+      // Save — fast (<1s). Failure here doesn't lose the visible result;
+      // the user just won't see it on next refresh.
+      setPhase("saving");
+      const rs = await fetch("/api/swings/screen/save", {
+        method: "POST",
+        cache: "no-store",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          candidates: result.candidates,
+          screened: result.screened,
+          pass1Survivors: result.pass1Survivors,
+          pass2Results: result.pass2Results,
+          durationMs: result.durationMs,
+        }),
+      });
+      if (!rs.ok) {
+        const j = (await rs.json().catch(() => ({}))) as { error?: string };
+        console.warn("[swing-screen] save failed:", j.error ?? rs.status);
+      }
+
+      setData(result);
     } catch (e) {
       setRunError(e instanceof Error ? e.message : "Screen failed");
     } finally {
-      setRunning(false);
+      setPhase("idle");
+      setPass1Count(null);
     }
   }
 
@@ -263,7 +334,7 @@ export function SwingScreenView() {
         onRun={runScreen}
       />
 
-      {running && <RunningBanner />}
+      {running && <RunningBanner phase={phase} pass1Count={pass1Count} />}
       {runError && (
         <div className="rounded border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-300">
           {runError}
@@ -349,17 +420,43 @@ function ControlsBar({
   );
 }
 
-function RunningBanner() {
+function RunningBanner({
+  phase,
+  pass1Count,
+}: {
+  phase: RunPhase;
+  pass1Count: number | null;
+}) {
+  const { title, detail } = (() => {
+    if (phase === "pass1") {
+      return {
+        title: "Pass 1 — technical filter",
+        detail:
+          "Scanning ~580 S&P 500 + Nasdaq 100 stocks for setups (price/MA/52w range/R-R). ~15-25 seconds.",
+      };
+    }
+    if (phase === "pass2") {
+      const n = pass1Count ?? "—";
+      return {
+        title: `Pass 2 — enriching ${n} survivors`,
+        detail:
+          "Pulling Finnhub insider transactions + earnings dates and Schwab options flow. ~25-45 seconds.",
+      };
+    }
+    if (phase === "saving") {
+      return {
+        title: "Saving results…",
+        detail: "Writing to swing_screen_results.",
+      };
+    }
+    return { title: "Working…", detail: "" };
+  })();
   return (
     <div className="flex items-start gap-3 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-200">
       <RefreshCw className="mt-0.5 h-4 w-4 animate-spin shrink-0" />
       <div className="space-y-1">
-        <div className="font-medium">Screening S&amp;P 500 + Nasdaq 100…</div>
-        <div className="text-xs text-amber-200/80">
-          Pass 1: technical filter on ~580 stocks · Pass 2: Finnhub insider data
-          and Schwab options flow on survivors. Takes 3-5 minutes — don&rsquo;t
-          close the page.
-        </div>
+        <div className="font-medium">{title}</div>
+        {detail && <div className="text-xs text-amber-200/80">{detail}</div>}
       </div>
     </div>
   );
