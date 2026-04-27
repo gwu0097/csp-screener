@@ -1,6 +1,7 @@
 import {
   getOptionsChain,
   getOptionsChainRange,
+  schwabGet,
   SchwabOptionContract,
   SchwabOptionsChain,
 } from "@/lib/schwab";
@@ -98,6 +99,12 @@ export type StageFourResult = {
     deltaScore: number;
     spreadScore: number;
     contractSymbol: string | null;
+    // Math-formula strike (currentPrice × (1 − 2 × emPct)). Surfaced
+    // alongside the picked contract's strike so the UI can show a
+    // "system targeted $X, picked $Y" hint when the chain didn't have
+    // the exact target. Optional — older saved rows lack it.
+    mathTargetStrike?: number | null;
+    usedTargetedLookup?: boolean;
   };
   // Compact snapshot of the weekly put chain so the UI can run a custom
   // strike analysis client-side without a new API call. Populated by
@@ -672,6 +679,14 @@ function gradeFromOpportunityScore(score: number): StageFourResult["opportunityG
 }
 
 function pickStrikeNearest(chain: SchwabOptionsChain, expiryPrefix: string, targetStrike: number): SchwabOptionContract | null {
+  return pickStrikeNearestWithDiff(chain, expiryPrefix, targetStrike)?.contract ?? null;
+}
+
+function pickStrikeNearestWithDiff(
+  chain: SchwabOptionsChain,
+  expiryPrefix: string,
+  targetStrike: number,
+): { contract: SchwabOptionContract; diff: number } | null {
   const expKey = Object.keys(chain.putExpDateMap ?? {}).find((k) => k.startsWith(expiryPrefix));
   if (!expKey) return null;
   // Defensive: Schwab puts the put chain in putExpDateMap, but if a
@@ -692,15 +707,44 @@ function pickStrikeNearest(chain: SchwabOptionsChain, expiryPrefix: string, targ
       bestDiff = diff;
     }
   }
-  return best;
+  return { contract: best, diff: bestDiff };
 }
 
-export function runStageFour(
+// When the default ATM-centred chain (strikeCount=30) doesn't reach
+// the math target — most common on high-IV names where 2× EM lands
+// far OTM — re-fetch with a `strike` filter for one specific strike.
+// Returns the picked contract from the targeted chain, or null if
+// Schwab didn't return anything useful.
+async function fetchTargetedStrike(
+  symbol: string,
+  expiry: string,
+  targetStrike: number,
+): Promise<SchwabOptionContract | null> {
+  try {
+    const chain = await schwabGet<SchwabOptionsChain>("/marketdata/v1/chains", {
+      symbol,
+      contractType: "PUT",
+      strike: Math.round(targetStrike * 100) / 100,
+      fromDate: expiry,
+      toDate: expiry,
+      includeUnderlyingQuote: true,
+      strategy: "SINGLE",
+    });
+    return pickStrikeNearest(chain, expiry, targetStrike);
+  } catch (e) {
+    console.warn(
+      `[screener] ${symbol}: targeted lookup failed: ${e instanceof Error ? e.message : e}`,
+    );
+    return null;
+  }
+}
+
+export async function runStageFour(
   candidate: EarningsCandidate,
   chain: SchwabOptionsChain,
   medianHistoricalMovePct: number | null,
   emPct: number | null,
-): StageFourResult {
+): Promise<StageFourResult> {
   // Entry breadcrumb so we can confirm runStageFour is reached for a
   // given symbol — earlier we suspected SPOT was bypassing this path.
   console.log(`[DEBUG] runStageFour called for: ${candidate.symbol}`);
@@ -737,7 +781,39 @@ export function runStageFour(
       details: { premiumYieldScore: 0, deltaScore: 0, spreadScore: 0, contractSymbol: null },
     };
   }
-  const contract = pickStrikeNearest(chain, candidate.expiry, suggestedStrike);
+  const initialPick = pickStrikeNearestWithDiff(chain, candidate.expiry, suggestedStrike);
+  let contract: SchwabOptionContract | null = initialPick?.contract ?? null;
+  let usedTargetedLookup = false;
+
+  // If the default chain (strikeCount=30 around ATM) doesn't reach
+  // the math target — common on high-IV names where 2× EM lands far
+  // OTM (SPOT 4-DTE put example: target $409, default chain stops at
+  // $475) — refetch the chain filtered to the specific strike. Tested
+  // via the test/probe-spot-delta script: the targeted call returns a
+  // single contract for the requested strike with correct delta.
+  if (initialPick && initialPick.diff > 10) {
+    console.log(
+      `[screener] ${candidate.symbol}: default chain missed target $${suggestedStrike.toFixed(
+        2,
+      )} by $${initialPick.diff.toFixed(2)} — retrying with targeted lookup`,
+    );
+    const targeted = await fetchTargetedStrike(
+      candidate.symbol,
+      candidate.expiry,
+      suggestedStrike,
+    );
+    if (targeted) {
+      contract = targeted;
+      usedTargetedLookup = true;
+      console.log(
+        `[screener] ${candidate.symbol}: targeted lookup hit strike=${targeted.strikePrice} delta=${targeted.delta} mark=${targeted.mark}`,
+      );
+    } else {
+      console.warn(
+        `[screener] ${candidate.symbol}: targeted lookup returned null; falling back to nearest at $${initialPick.contract.strikePrice} (diff $${initialPick.diff.toFixed(2)})`,
+      );
+    }
+  }
 
   // ---- DEBUG: SPOT-only options chain dump ----
   // Catches any of the failure modes we're hunting: wrong expiry,
@@ -862,7 +938,11 @@ export function runStageFour(
     score: rawScore,
     maxScore: 20,
     opportunityGrade,
-    suggestedStrike: Math.round(suggestedStrike * 100) / 100,
+    // suggestedStrike is the PICKED contract's strike, not the math
+    // target — otherwise the UI displays a strike whose delta /
+    // premium / mark are from a different contract. Math target is
+    // surfaced separately in details.mathTargetStrike for reference.
+    suggestedStrike: Math.round(contract.strikePrice * 100) / 100,
     premium: Math.round(premium * 100) / 100,
     delta: Math.round(delta * 1000) / 1000,
     bidAskSpreadPct: Math.round(spreadPctOfMid * 10) / 10,
@@ -875,6 +955,8 @@ export function runStageFour(
       // Kept at 0 for type compatibility — spread no longer scored.
       spreadScore: 0,
       contractSymbol: contract.symbol,
+      mathTargetStrike: Math.round(suggestedStrike * 100) / 100,
+      usedTargetedLookup,
     },
   };
 }
@@ -1121,7 +1203,7 @@ export async function runStagesThreeFour(base: ScreenerResult): Promise<Screener
   );
 
   const stageThree = await runStageThree(candidate, chain, monthlyChain, historicalMoves);
-  const stageFour = runStageFour(
+  const stageFour = await runStageFour(
     candidate,
     chain,
     stageThree.details.medianHistoricalMovePct,
