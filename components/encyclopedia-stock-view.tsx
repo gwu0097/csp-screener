@@ -45,6 +45,16 @@ type StockEncyclopedia = {
   updated_at: string | null;
 };
 
+// Crush stats derived live from earnings_history on the server, since
+// the stock_encyclopedia aggregate columns can be stale or null. Both
+// require BOTH implied + actual move to be present on a row.
+type ComputedCrushStats = {
+  totalEvents: number;
+  crushedCount: number;
+  crushRate: number | null;
+  avgRatio: number | null;
+};
+
 type StockInfo = {
   symbol: string;
   company_name: string | null;
@@ -180,6 +190,7 @@ export function EncyclopediaStockView({ symbol }: { symbol: string }) {
   // that own deeper data (CSP / Trades / Swings / Research) re-fetch
   // when activated to render full payloads.
   const [encyclopedia, setEncyclopedia] = useState<StockEncyclopedia | null>(null);
+  const [computed, setComputed] = useState<ComputedCrushStats | null>(null);
   const [stock, setStock] = useState<StockInfo | null>(null);
   const [tradesSummary, setTradesSummary] = useState<TradesPayload["summary"] | null>(null);
   const [swingsSummary, setSwingsSummary] = useState<SwingsPayload["summary"] | null>(null);
@@ -198,7 +209,14 @@ export function EncyclopediaStockView({ symbol }: { symbol: string }) {
         const fetches = await Promise.all([
           fetch(`/api/encyclopedia/${encodeURIComponent(symbol)}`, {
             cache: "no-store",
-          }).then((r) => r.json() as Promise<{ encyclopedia: StockEncyclopedia | null; error?: string }>),
+          }).then(
+            (r) =>
+              r.json() as Promise<{
+                encyclopedia: StockEncyclopedia | null;
+                computed?: ComputedCrushStats;
+                error?: string;
+              }>,
+          ),
           fetch(
             `/api/encyclopedia/${encodeURIComponent(symbol)}/research-summary`,
             { cache: "no-store" },
@@ -213,6 +231,7 @@ export function EncyclopediaStockView({ symbol }: { symbol: string }) {
         const [encJson, stockJson, tradesJson, swingsJson] = fetches;
         if (encJson.error) setOverviewError(encJson.error);
         setEncyclopedia(encJson.encyclopedia ?? null);
+        setComputed(encJson.computed ?? null);
         setStock(stockJson.stock ?? null);
         setTradesSummary(tradesJson.summary ?? null);
         setSwingsSummary(swingsJson.summary ?? null);
@@ -329,6 +348,7 @@ export function EncyclopediaStockView({ symbol }: { symbol: string }) {
             symbol={symbol}
             stock={stock}
             encyclopedia={encyclopedia}
+            computed={computed}
             tradesSummary={tradesSummary}
             swingsSummary={swingsSummary}
             loading={overviewLoading}
@@ -414,6 +434,7 @@ function Header({ symbol, stock }: { symbol: string; stock: StockInfo | null }) 
 function OverviewTab({
   symbol,
   encyclopedia,
+  computed,
   tradesSummary,
   swingsSummary,
   loading,
@@ -427,6 +448,7 @@ function OverviewTab({
   symbol: string;
   stock: StockInfo | null;
   encyclopedia: StockEncyclopedia | null;
+  computed: ComputedCrushStats | null;
   tradesSummary: TradesPayload["summary"] | null;
   swingsSummary: SwingsPayload["summary"] | null;
   loading: boolean;
@@ -462,9 +484,11 @@ function OverviewTab({
               : "—"
           }
           sub={
-            encyclopedia
-              ? `Crush rate ${fmtPct(encyclopedia.crush_rate, 0)} · avg ratio ${fmtNum(encyclopedia.avg_move_ratio, 2)}`
-              : "Click Refresh data to backfill from Finnhub"
+            computed && computed.totalEvents > 0
+              ? `Crush rate ${fmtPct(computed.crushRate, 0)} (${computed.crushedCount} of ${computed.totalEvents} quarters) · Avg ratio ${fmtNum(computed.avgRatio, 2)}×`
+              : encyclopedia
+                ? "No quarters with both implied + actual moves yet — Refresh or run the screener at the next event."
+                : "Click Refresh data to backfill from Finnhub"
           }
         />
         <StatCard

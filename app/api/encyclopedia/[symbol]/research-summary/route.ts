@@ -40,9 +40,6 @@ const MODULE_LABEL: Record<string, string> = {
 type StockRow = {
   symbol: string;
   company_name: string | null;
-  sector: string | null;
-  industry: string | null;
-  market_cap: number | null;
   overall_grade: string | null;
   grade_reasoning: string | null;
   last_researched_at: string | null;
@@ -113,8 +110,12 @@ export async function GET(
   const [stockRes, modRes] = await Promise.all([
     sb
       .from("research_stocks")
+      // sector / industry / market_cap don't exist on this table — the
+      // existing /api/research/[symbol] route also avoids them and
+      // sources market_cap live from Yahoo when needed. Keep this
+      // SELECT in sync with the actual schema or PostgREST 400s.
       .select(
-        "symbol,company_name,sector,industry,market_cap,overall_grade,grade_reasoning,last_researched_at",
+        "symbol,company_name,overall_grade,grade_reasoning,last_researched_at",
       )
       .eq("symbol", symbol)
       .limit(1),

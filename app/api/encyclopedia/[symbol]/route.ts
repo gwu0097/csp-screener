@@ -36,5 +36,30 @@ export async function GET(
   }
   const history = (histRes.data ?? []) as EarningsHistory[];
 
-  return NextResponse.json({ encyclopedia, history });
+  // Derived crush stats — computed live from earnings_history so the
+  // Overview tile always reflects current data instead of stock_encyclopedia
+  // aggregates that may be stale or never populated. Only counts rows
+  // where BOTH implied and actual moves are present (so an upcoming
+  // event with no actual yet doesn't pollute the average).
+  let crushedCount = 0;
+  let totalCount = 0;
+  let ratioSum = 0;
+  for (const r of history) {
+    const im = typeof r.implied_move_pct === "number" ? r.implied_move_pct : null;
+    const am = typeof r.actual_move_pct === "number" ? r.actual_move_pct : null;
+    if (im === null || am === null || !Number.isFinite(im) || im <= 0) continue;
+    const ratio = Math.abs(am) / im;
+    if (!Number.isFinite(ratio)) continue;
+    totalCount += 1;
+    ratioSum += ratio;
+    if (ratio < 1.0) crushedCount += 1;
+  }
+  const computed = {
+    totalEvents: totalCount,
+    crushedCount,
+    crushRate: totalCount > 0 ? crushedCount / totalCount : null,
+    avgRatio: totalCount > 0 ? ratioSum / totalCount : null,
+  };
+
+  return NextResponse.json({ encyclopedia, history, computed });
 }
