@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   deserializePass1,
   pass2Enrich,
+  pass3CatalystDiscovery,
   type Pass1Wire,
 } from "@/lib/swing-screener";
 
@@ -25,12 +26,18 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
   }
   const { quotes, trades, tier2ByCandidate } = deserializePass1(body);
-  const candidates = await pass2Enrich(
+  const enriched = await pass2Enrich(
     body.survivors,
     quotes,
     trades,
     tier2ByCandidate,
   );
+  // Pass 3 — catalyst discovery via Perplexity. Runs on the post-tier-1
+  // survivor set (typically 5-15 candidates × ~3s in batches of 3 with a
+  // 500ms gap = ~15-30s), keeping the route well under 60s. Re-sorts
+  // because catalyst bonus can shift ranking.
+  const candidates = await pass3CatalystDiscovery(enriched);
+  candidates.sort((a, b) => b.setupScore - a.setupScore);
   return NextResponse.json({
     candidates,
     durationMs: Date.now() - started,

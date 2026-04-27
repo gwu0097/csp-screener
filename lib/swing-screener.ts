@@ -48,6 +48,18 @@ const yf = yahooFinance as unknown as YFClient;
 
 // ---------- Types ----------
 
+export type CatalystType =
+  | "product_launch"
+  | "fda_decision"
+  | "contract_award"
+  | "rate_decision"
+  | "partnership"
+  | "regulatory"
+  | "analyst_upgrade"
+  | "restructuring"
+  | "other"
+  | "none";
+
 export type InsiderTransaction = {
   name: string;
   // Finnhub free tier doesn't expose officer titles, so we surface the
@@ -106,6 +118,17 @@ export type SwingCandidate = {
   optionsSignal: "bullish" | "neutral" | "bearish";
   topOptionsStrike: number | null;
   topOptionsExpiry: string | null;
+
+  // Pass 3 — Perplexity catalyst discovery. Earnings are NO LONGER a
+  // tier-1 signal (regular quarterly results aren't a catalyst), they're
+  // a risk flag only. The catalyst here is something specific and
+  // near-term: drug approval, contract award, product launch, etc.
+  catalystFound: boolean;
+  catalystType: CatalystType;
+  catalystDate: string | null;
+  catalystDescription: string | null;
+  catalystConfidence: "high" | "medium" | "low" | "none";
+  catalystRawResponse: string | null;
 
   // Display
   tier1Signals: string[];
@@ -567,18 +590,12 @@ export async function pass2Enrich(
     const volumeRatio =
       q.avgVolume10d > 0 ? q.todayVolume / q.avgVolume10d : 0;
 
+    // Tier-1 signals — earnings is no longer one of these (regular
+    // quarterly results aren't a catalyst). Pass 3 will discover real
+    // catalysts via Perplexity and add them post-enrichment.
     const tier1Signals: string[] = [];
     if (insider.signal === "strong_bullish" || insider.signal === "bullish") {
       tier1Signals.push("INSIDER_BUYING");
-    }
-    if (
-      daysToEarn !== null &&
-      daysToEarn >= 14 &&
-      daysToEarn <= 45 &&
-      q.analystTarget !== null &&
-      q.analystTarget > q.currentPrice * 1.15
-    ) {
-      tier1Signals.push("EARNINGS_CATALYST");
     }
     if (volumeRatio > 2.0 && q.priceChange1d > 0) {
       tier1Signals.push("VOLUME_SPIKE");
@@ -587,8 +604,8 @@ export async function pass2Enrich(
       tier1Signals.push("UNUSUAL_OPTIONS");
     }
 
-    // Red flags (post-Pass 1: short float was already disqualified at >40%,
-    // but we surface 25-40% as a flag; daysToEarnings <7 is filter-level).
+    // Red flags. Earnings <7 days is still a hard filter — we don't want
+    // to enter a swing the day before a binary print.
     const redFlags: string[] = [];
     if (daysToEarn !== null && daysToEarn < 7) redFlags.push("EARNINGS_TOO_SOON");
     if (q.shortPercentFloat !== null && q.shortPercentFloat > 0.25) {
@@ -599,11 +616,19 @@ export async function pass2Enrich(
     if (redFlags.includes("EARNINGS_TOO_SOON")) return null;
     if (tier1Signals.length === 0) return null;
 
+    // Score (out of 10). Catalyst points (+2/+1/0) are added in pass 3.
+    //   +2 strong_bullish insider (P-code purchase >$100K)
+    //   +1 bullish insider (net P buyer, no $100K trade)
+    //   +2 unusual options activity (was +1; promoted now that earnings
+    //      no longer occupies the +2 slot)
+    //   +1 volume spike (>2x avg + price up)
+    //   +1 R/R >= 3.0
+    //   +1 short float >15% (squeeze potential)
+    //   +1 within ±2% of 50d MA
     let setupScore = 0;
     if (insider.signal === "strong_bullish") setupScore += 2;
     else if (insider.signal === "bullish") setupScore += 1;
-    if (daysToEarn !== null && daysToEarn >= 14 && daysToEarn <= 45) setupScore += 2;
-    if (opts.unusualOptionsActivity) setupScore += 1;
+    if (opts.unusualOptionsActivity) setupScore += 2;
     if (volumeRatio > 2.0 && q.priceChange1d > 0) setupScore += 1;
     if (tl.rr >= 3.0) setupScore += 1;
     if (q.shortPercentFloat !== null && q.shortPercentFloat > 0.15) setupScore += 1;
@@ -647,6 +672,14 @@ export async function pass2Enrich(
       optionsSignal: opts.signal,
       topOptionsStrike: opts.topOptionsStrike,
       topOptionsExpiry: opts.topOptionsExpiry,
+      // Catalyst fields default to "not yet checked" / "none" — pass 3
+      // overwrites these when it runs.
+      catalystFound: false,
+      catalystType: "none",
+      catalystDate: null,
+      catalystDescription: null,
+      catalystConfidence: "none",
+      catalystRawResponse: null,
       tier1Signals,
       tier2Signals,
       redFlags,
@@ -658,6 +691,197 @@ export async function pass2Enrich(
 
   candidates.sort((a, b) => b.setupScore - a.setupScore);
   return candidates;
+}
+
+// ---------- Pass 3: catalyst discovery ----------
+
+import { askPerplexityRaw } from "./perplexity";
+
+const VALID_CATALYST_TYPES: ReadonlyArray<CatalystType> = [
+  "product_launch",
+  "fda_decision",
+  "contract_award",
+  "rate_decision",
+  "partnership",
+  "regulatory",
+  "analyst_upgrade",
+  "restructuring",
+  "other",
+  "none",
+];
+
+function tryParseObject(text: string): Record<string, unknown> | null {
+  const trimmed = text.trim();
+  const direct = (() => {
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      return null;
+    }
+  })();
+  if (direct && typeof direct === "object" && !Array.isArray(direct)) {
+    return direct as Record<string, unknown>;
+  }
+  // Strip code fences then retry.
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (fenced) {
+    try {
+      const parsed = JSON.parse(fenced[1].trim());
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      /* fall through */
+    }
+  }
+  // Last resort: find the outermost balanced { ... } block.
+  const objMatch = trimmed.match(/\{[\s\S]*\}/);
+  if (objMatch) {
+    try {
+      const parsed = JSON.parse(objMatch[0]);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      /* swallow */
+    }
+  }
+  return null;
+}
+
+function buildCatalystPrompt(symbol: string, companyName: string): string {
+  return `Research ${symbol} (${companyName}).
+
+Find SPECIFIC upcoming catalysts in the next 30-90 days that could cause a significant price move.
+
+Look for:
+- Product launches or major releases
+- FDA drug approval decisions (PDUFA dates)
+- Government contract awards or decisions
+- Federal Reserve or macro policy decisions that directly impact this company
+- Major partnership or licensing announcements
+- Regulatory approvals or decisions
+- Analyst day or investor day events
+- Index inclusion decisions
+- Activist investor campaigns
+- M&A or strategic review announcements
+
+Do NOT count:
+- Regular quarterly earnings (not a catalyst)
+- Normal dividend payments
+- Vague "momentum" or "market conditions"
+- Generic analyst upgrades without specific trigger
+
+If a specific catalyst exists, be precise: What is it? When exactly? What's the expected impact?
+
+Return ONLY this JSON, no markdown:
+{
+  "catalyst_found": true/false,
+  "catalyst_type": "product_launch|fda_decision|contract_award|rate_decision|partnership|regulatory|analyst_upgrade|restructuring|other|none",
+  "catalyst_date": "YYYY-MM-DD or null if unknown",
+  "catalyst_description": "one specific sentence describing the catalyst and expected timeline, or null if none found",
+  "catalyst_confidence": "high|medium|low|none",
+  "reasoning": "one sentence on why this is or isn't a real near-term catalyst"
+}`;
+}
+
+function applyCatalystResponse(
+  c: SwingCandidate,
+  raw: { text: string } | null,
+): SwingCandidate {
+  const out: SwingCandidate = { ...c };
+  if (!raw || !raw.text) {
+    out.catalystRawResponse = null;
+    return out;
+  }
+  out.catalystRawResponse = raw.text;
+  const parsed = tryParseObject(raw.text);
+  if (!parsed) {
+    return out;
+  }
+  const found = parsed.catalyst_found === true;
+  const typeRaw =
+    typeof parsed.catalyst_type === "string"
+      ? (parsed.catalyst_type as string)
+      : "none";
+  const type: CatalystType = (VALID_CATALYST_TYPES as readonly string[]).includes(
+    typeRaw,
+  )
+    ? (typeRaw as CatalystType)
+    : "other";
+  const dateRaw = parsed.catalyst_date;
+  const date =
+    typeof dateRaw === "string" && /^\d{4}-\d{2}-\d{2}$/.test(dateRaw)
+      ? dateRaw
+      : null;
+  const desc =
+    typeof parsed.catalyst_description === "string" &&
+    parsed.catalyst_description.trim().length > 0
+      ? parsed.catalyst_description.trim()
+      : null;
+  const confRaw =
+    typeof parsed.catalyst_confidence === "string"
+      ? parsed.catalyst_confidence.toLowerCase()
+      : "none";
+  const confidence: SwingCandidate["catalystConfidence"] =
+    confRaw === "high" || confRaw === "medium" || confRaw === "low"
+      ? confRaw
+      : "none";
+  out.catalystFound = found;
+  out.catalystType = found ? type : "none";
+  out.catalystDate = date;
+  out.catalystDescription = desc;
+  out.catalystConfidence = found ? confidence : "none";
+  return out;
+}
+
+export async function pass3CatalystDiscovery(
+  candidates: SwingCandidate[],
+): Promise<SwingCandidate[]> {
+  if (candidates.length === 0) return [];
+  // Process in fixed-size batches with a 500ms inter-batch gap so we don't
+  // burst the Perplexity rate limit. Concurrency 3 = 3 simultaneous calls;
+  // 5-15 candidates × ~3s = well under the 60s pass-2 ceiling.
+  const BATCH = 3;
+  const out: SwingCandidate[] = new Array(candidates.length);
+  for (let i = 0; i < candidates.length; i += BATCH) {
+    const batch = candidates.slice(i, i + BATCH);
+    const results = await Promise.all(
+      batch.map(async (c) => {
+        try {
+          const raw = await askPerplexityRaw(
+            buildCatalystPrompt(c.symbol, c.companyName),
+            { label: `catalyst:${c.symbol}`, maxTokens: 600 },
+          );
+          return applyCatalystResponse(c, raw);
+        } catch (e) {
+          console.warn(
+            `[pass3] ${c.symbol} catalyst failed: ${e instanceof Error ? e.message : e}`,
+          );
+          return c;
+        }
+      }),
+    );
+    for (let j = 0; j < batch.length; j += 1) {
+      out[i + j] = results[j];
+    }
+    if (i + BATCH < candidates.length) await sleep(500);
+  }
+
+  // Re-score with catalyst points: +2 high, +1 medium, +0 low/none.
+  // Cap at 10 — same total ceiling as before.
+  return out.map((c) => {
+    const bonus =
+      c.catalystConfidence === "high"
+        ? 2
+        : c.catalystConfidence === "medium"
+          ? 1
+          : 0;
+    return {
+      ...c,
+      setupScore: Math.min(10, c.setupScore + bonus),
+    };
+  });
 }
 
 // ---------- Top-level entry ----------
@@ -677,11 +901,14 @@ export async function runSwingScreener(
   const started = Date.now();
   const p1 = await pass1Filter(universe);
   const p2 = await pass2Enrich(p1.survivors, p1.quotes, p1.trades, p1.tier2ByCandidate);
+  const p3 = await pass3CatalystDiscovery(p2);
+  // Re-sort post-pass-3 since catalyst points can shift the ranking.
+  p3.sort((a, b) => b.setupScore - a.setupScore);
   return {
-    candidates: p2,
+    candidates: p3,
     screened: universe.length,
     pass1Survivors: p1.survivors.length,
-    pass2Results: p2.length,
+    pass2Results: p3.length,
     durationMs: Date.now() - started,
     errors: p1.errors,
   };

@@ -3,11 +3,11 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
-  CalendarClock,
   ChevronDown,
   ChevronRight,
   Loader2,
   RefreshCw,
+  Target,
   TrendingUp,
   Upload,
   Users,
@@ -117,6 +117,12 @@ type SwingCandidate = {
   optionsSignal: "bullish" | "neutral" | "bearish";
   topOptionsStrike: number | null;
   topOptionsExpiry: string | null;
+  catalystFound: boolean;
+  catalystType: string;
+  catalystDate: string | null;
+  catalystDescription: string | null;
+  catalystConfidence: "high" | "medium" | "low" | "none";
+  catalystRawResponse: string | null;
   tier1Signals: string[];
   tier2Signals: string[];
   redFlags: string[];
@@ -500,7 +506,7 @@ function RunningBanner({
       return {
         title: `Pass 2 — enriching ${n} survivors`,
         detail:
-          "Pulling Finnhub insider transactions + earnings dates and Schwab options flow. ~25-45 seconds.",
+          "Pulling Finnhub insider transactions + earnings dates, Schwab options flow, then Perplexity catalyst research on the candidates that survive Tier 1. ~25-45 seconds.",
       };
     }
     if (phase === "saving") {
@@ -661,8 +667,9 @@ function TableHeader({
         tooltip={
           "Setup score out of 10.\n\n" +
           "+2 open-market insider purchase >$100K\n" +
-          "+2 earnings 14–45 days + stock >15% below target\n" +
-          "+1 unusual options activity (vol/OI >0.5x)\n" +
+          "+2 unusual options activity (vol/OI >0.5x)\n" +
+          "+2 high-confidence near-term catalyst (Perplexity)\n" +
+          "+1 medium-confidence catalyst\n" +
           "+1 volume spike (>2× average, price up)\n" +
           "+1 R/R ≥ 3.0:1\n" +
           "+1 short float >15%\n" +
@@ -850,7 +857,11 @@ function CandidateRow({
         </div>
         {/* 9. Signals */}
         <div className="hidden flex-wrap justify-start gap-1 md:flex">
-          <SignalBadges tier1={c.tier1Signals} insiderSignal={c.insiderSignal} />
+          <SignalBadges
+            tier1={c.tier1Signals}
+            insiderSignal={c.insiderSignal}
+            catalystConfidence={c.catalystConfidence}
+          />
         </div>
         {/* 10. Actions */}
         <div
@@ -904,9 +915,11 @@ function ScoreBadge({ score }: { score: number }) {
 function SignalBadges({
   tier1,
   insiderSignal,
+  catalystConfidence,
 }: {
   tier1: string[];
   insiderSignal: SwingCandidate["insiderSignal"];
+  catalystConfidence: SwingCandidate["catalystConfidence"];
 }) {
   return (
     <>
@@ -932,13 +945,21 @@ function SignalBadges({
           OPTIONS
         </span>
       )}
-      {tier1.includes("EARNINGS_CATALYST") && (
+      {(catalystConfidence === "high" || catalystConfidence === "medium") && (
         <span
-          className="inline-flex items-center gap-1 rounded border border-blue-500/40 bg-blue-500/10 px-1 py-0.5 text-[9px] font-medium text-blue-300"
-          title="Earnings catalyst within 14-45 days with upside to target"
+          className={`inline-flex items-center gap-1 rounded border px-1 py-0.5 text-[9px] font-medium ${
+            catalystConfidence === "high"
+              ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
+              : "border-amber-500/40 bg-amber-500/10 text-amber-300"
+          }`}
+          title={
+            catalystConfidence === "high"
+              ? "High-confidence near-term catalyst identified"
+              : "Medium-confidence catalyst identified"
+          }
         >
-          <CalendarClock className="h-3 w-3" />
-          EARNINGS
+          <Target className="h-3 w-3" />
+          CATALYST
         </span>
       )}
       {tier1.includes("VOLUME_SPIKE") && (
@@ -957,7 +978,6 @@ function SignalBadges({
 function tier1Label(sig: string): string {
   if (sig === "INSIDER_BUYING") return "INSIDER BUYING";
   if (sig === "UNUSUAL_OPTIONS") return "UNUSUAL OPTIONS";
-  if (sig === "EARNINGS_CATALYST") return "EARNINGS CATALYST";
   if (sig === "VOLUME_SPIKE") return "VOLUME SPIKE";
   return sig;
 }
@@ -1060,6 +1080,32 @@ function Line2({
           Entry {fmtMoney(c.entryPrice)} → Target {fmtMoney(c.targetPrice)} →
           Stop {fmtMoney(c.stopPrice)}
         </Tipped>
+        <span className="px-1.5 text-muted-foreground/60">|</span>
+        {c.catalystConfidence === "high" || c.catalystConfidence === "medium" ? (
+          <>
+            <Target
+              className={`mr-1 inline h-3 w-3 align-text-bottom ${
+                c.catalystConfidence === "high"
+                  ? "text-emerald-300"
+                  : "text-amber-300"
+              }`}
+            />
+            <span
+              className={
+                c.catalystConfidence === "high"
+                  ? "text-emerald-200"
+                  : "text-amber-200"
+              }
+            >
+              {c.catalystDescription ?? "Catalyst identified"}
+            </span>
+          </>
+        ) : (
+          <>
+            <AlertTriangle className="mr-1 inline h-3 w-3 align-text-bottom text-muted-foreground" />
+            <span>No specific catalyst identified</span>
+          </>
+        )}
         {c.redFlags.length > 0 && (
           <>
             <span className="px-1.5 text-muted-foreground/60">|</span>
@@ -1152,6 +1198,7 @@ function ExpandedDetail({
         <div className="space-y-3">
           <InsiderSection candidate={c} />
           <OptionsSection candidate={c} />
+          <CatalystSection candidate={c} />
           <EarningsAndShortSection candidate={c} />
         </div>
       </div>
@@ -1384,13 +1431,73 @@ function OptionsSection({ candidate: c }: { candidate: SwingCandidate }) {
   );
 }
 
+function catalystTypeLabel(t: string): string {
+  if (t === "product_launch") return "Product launch";
+  if (t === "fda_decision") return "FDA decision";
+  if (t === "contract_award") return "Contract award";
+  if (t === "rate_decision") return "Rate decision";
+  if (t === "partnership") return "Partnership";
+  if (t === "regulatory") return "Regulatory";
+  if (t === "analyst_upgrade") return "Analyst upgrade";
+  if (t === "restructuring") return "Restructuring";
+  if (t === "other") return "Other";
+  return "—";
+}
+
+function CatalystSection({ candidate: c }: { candidate: SwingCandidate }) {
+  const sectionTooltip =
+    "Specific upcoming catalyst sourced via Perplexity research over the " +
+    "next 30-90 days.\n\n" +
+    "We exclude regular quarterly earnings and vague macro language — only " +
+    "real near-term events count: product launches, FDA decisions, contract " +
+    "awards, partnerships, regulatory rulings, etc.\n\n" +
+    "+2 score for high confidence · +1 for medium · 0 otherwise.";
+  const found =
+    c.catalystConfidence === "high" || c.catalystConfidence === "medium";
+  if (!found) {
+    return (
+      <DetailSection title="Upcoming catalyst" titleTooltip={sectionTooltip}>
+        <div className="text-muted-foreground">
+          No specific near-term catalyst identified. Insider activity and
+          options flow may reflect general business confidence or defensive
+          positioning.
+        </div>
+        <DetailRow
+          label="Confidence"
+          value={c.catalystConfidence === "low" ? "LOW" : "NONE"}
+        />
+      </DetailSection>
+    );
+  }
+  return (
+    <DetailSection title="Upcoming catalyst" titleTooltip={sectionTooltip}>
+      <DetailRow label="Type" value={catalystTypeLabel(c.catalystType)} />
+      {c.catalystDescription && (
+        <div className="italic text-foreground/90">
+          &ldquo;{c.catalystDescription}&rdquo;
+        </div>
+      )}
+      <DetailRow
+        label="Date"
+        value={c.catalystDate ? fmtCalendarDate(c.catalystDate) : "Estimated (no exact date)"}
+      />
+      <DetailRow
+        label="Confidence"
+        value={c.catalystConfidence.toUpperCase()}
+        tone={c.catalystConfidence === "high" ? "good" : "warn"}
+      />
+    </DetailSection>
+  );
+}
+
 function EarningsAndShortSection({ candidate: c }: { candidate: SwingCandidate }) {
+  // Risk-flag coloring (no longer a positive signal): closer = redder.
   const earningsTone =
     c.daysToEarnings === null
       ? undefined
-      : c.daysToEarnings < 14
+      : c.daysToEarnings < 30
         ? "bad"
-        : c.daysToEarnings < 30
+        : c.daysToEarnings <= 60
           ? "warn"
           : "good";
   const shortTone =
@@ -1404,13 +1511,14 @@ function EarningsAndShortSection({ candidate: c }: { candidate: SwingCandidate }
   const earningsTooltip =
     c.nextEarningsDate === null
       ? "No upcoming earnings date in next 120 days. Source: Finnhub earnings calendar."
-      : `Source: Finnhub earnings calendar.\n\n${c.daysToEarnings} days away.\n\n` +
-        `Screener targets 14–45 days — close enough to be a near-term ` +
-        `catalyst, far enough to enter before the crowd.\n\n` +
-        `<7 days = too close (disqualified)\n` +
-        `7–14 days = risky (earnings imminent)\n` +
-        `14–45 days = ideal window ✅\n` +
-        `>45 days = catalyst too far out`;
+      : `Earnings during your hold period is a binary risk event.\n\n` +
+        `${c.daysToEarnings} days away — a miss could trigger a sharp ` +
+        `decline. Size your position accordingly or plan to exit before ` +
+        `this date.\n\n` +
+        `<30 days = high risk (red)\n` +
+        `30–60 days = monitor (amber)\n` +
+        `>60 days = low risk (green)\n\n` +
+        `Source: Finnhub earnings calendar.`;
   const shortTooltip =
     c.shortPercentFloat === null
       ? "No short interest data."
@@ -1527,39 +1635,38 @@ function computeScoreBreakdown(c: SwingCandidate): ScoreComponent[] {
     });
   }
 
-  // ---- Earnings ----
-  const earningsHit =
-    c.daysToEarnings !== null && c.daysToEarnings >= 14 && c.daysToEarnings <= 45;
-  const upsidePct =
-    c.analystTarget !== null && c.currentPrice > 0
-      ? (c.analystTarget - c.currentPrice) / c.currentPrice
-      : null;
-  const upsideText =
-    upsidePct !== null
-      ? `${(Math.abs(upsidePct) * 100).toFixed(0)}% ${upsidePct >= 0 ? "below" : "above"} analyst target`
-      : "no analyst target";
+  // ---- Upcoming catalyst (Pass 3 / Perplexity) ----
+  const catalystEarned =
+    c.catalystConfidence === "high"
+      ? 2
+      : c.catalystConfidence === "medium"
+        ? 1
+        : 0;
+  const catalystDetail =
+    c.catalystConfidence === "high" && c.catalystDescription
+      ? c.catalystDescription
+      : c.catalystConfidence === "medium" && c.catalystDescription
+        ? c.catalystDescription
+        : c.catalystConfidence === "low"
+          ? "Possible catalyst found, but confidence too low to score"
+          : "No specific catalyst found in next 30-90 days";
   out.push({
-    label: "Earnings catalyst window",
-    earned: earningsHit ? 2 : 0,
+    label: "Upcoming catalyst",
+    earned: catalystEarned,
     max: 2,
-    detail:
-      c.daysToEarnings === null
-        ? "No upcoming earnings date"
-        : earningsHit
-          ? `${c.daysToEarnings} days to earnings (${fmtCalendarDate(c.nextEarningsDate)}) · ${upsideText}`
-          : `Earnings ${c.daysToEarnings} days away — outside 14-45 day window`,
-    tooltip: earningsHit
-      ? `Earnings in ${c.daysToEarnings} days (${fmtCalendarDate(c.nextEarningsDate)}).\n` +
-        `Analyst target: ${fmtMoney(c.analystTarget)}\n` +
-        `Current price: ${fmtMoney(c.currentPrice)}\n` +
-        `Gap to target: ${upsideText}\n\n` +
-        `Stock is in the 14-45 day window with analyst upside — catalyst for ` +
-        `repricing if they beat.`
-      : c.daysToEarnings === null
-        ? "No earnings date found in next 120 days."
-        : c.daysToEarnings < 14
-          ? `Earnings in ${c.daysToEarnings} days — too close (>14 days required).`
-          : `Earnings in ${c.daysToEarnings} days — too far out (<45 days required).`,
+    detail: catalystDetail,
+    tooltip:
+      c.catalystConfidence === "high" || c.catalystConfidence === "medium"
+        ? `Type: ${catalystTypeLabel(c.catalystType)}\n` +
+          (c.catalystDate ? `Date: ${fmtCalendarDate(c.catalystDate)}\n` : "") +
+          `Confidence: ${c.catalystConfidence.toUpperCase()}\n\n` +
+          (c.catalystDescription ? `"${c.catalystDescription}"\n\n` : "") +
+          `Source: Perplexity research over the last 30-90 day horizon.`
+        : c.catalystConfidence === "low"
+          ? `Perplexity surfaced a candidate catalyst but flagged confidence as low.\n\n` +
+            (c.catalystDescription ? `"${c.catalystDescription}"\n\n` : "") +
+            `No score awarded for low-confidence signals.`
+          : "Perplexity did not find a specific near-term catalyst (product launches, FDA decisions, contracts, partnerships, etc.). Regular quarterly earnings are intentionally excluded from this check.",
   });
 
   // ---- Unusual options ----
