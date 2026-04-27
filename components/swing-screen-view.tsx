@@ -1,8 +1,10 @@
 "use client";
 
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import {
   AlertTriangle,
+  BookSearch,
   ChevronDown,
   ChevronRight,
   Loader2,
@@ -868,6 +870,14 @@ function CandidateRow({
           className="flex items-center justify-end gap-1"
           onClick={(e) => e.stopPropagation()}
         >
+          <Link
+            href={`/research/${encodeURIComponent(c.symbol)}`}
+            className="inline-flex items-center gap-1 rounded border border-border px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground hover:bg-white/5 hover:text-foreground"
+            title="Open Deep Research for this symbol"
+          >
+            <BookSearch className="h-3 w-3" />
+            Research
+          </Link>
           <button
             type="button"
             onClick={onEnterTrade}

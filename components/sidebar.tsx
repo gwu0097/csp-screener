@@ -8,6 +8,7 @@ import {
   BarChart3,
   BookMarked,
   BookOpen,
+  BookSearch,
   Briefcase,
   ChevronDown,
   ChevronRight,
@@ -116,6 +117,11 @@ const LONGTERM_PORTFOLIO: NavItem = {
 };
 
 // ------------ TOOLS ------------
+const RESEARCH: NavItem = {
+  href: "/research",
+  label: "Deep Research",
+  icon: BookSearch,
+};
 const ENCYCLOPEDIA: NavItem = {
   href: "/encyclopedia",
   label: "Encyclopedia",
@@ -243,6 +249,7 @@ export function Sidebar() {
           <SidebarLink item={LONGTERM_PORTFOLIO} pathname={pathname} />
 
           <SectionHeader label="Tools" />
+          <SidebarLink item={RESEARCH} pathname={pathname} />
           <SidebarLink item={ENCYCLOPEDIA} pathname={pathname} />
           <SidebarLink item={SETTINGS} pathname={pathname} />
         </nav>

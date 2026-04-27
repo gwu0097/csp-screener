@@ -1,8 +1,10 @@
 "use client";
 
+import Link from "next/link";
 import { Fragment, useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
+  BookSearch,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
@@ -2072,6 +2074,14 @@ function DeepDiveDrawer({
 
         {/* Footer — sticky */}
         <div className="flex items-center justify-end gap-2 border-t border-border px-6 py-4">
+          {c && (
+            <Button asChild variant="outline" size="sm">
+              <Link href={`/research/${encodeURIComponent(c.symbol)}`}>
+                <BookSearch className="mr-1 h-3 w-3" />
+                Full Research
+              </Link>
+            </Button>
+          )}
           {!inIdeas && c && (
             <Button
               onClick={onAdd}
