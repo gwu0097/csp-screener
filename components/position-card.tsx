@@ -581,7 +581,7 @@ export function PositionCard(props: Props) {
               Research
             </Link>
             <Link
-              href={`/encyclopedia?symbol=${encodeURIComponent(p.symbol)}`}
+              href={`/encyclopedia/${encodeURIComponent(p.symbol)}`}
               className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-muted-foreground hover:text-foreground"
             >
               <ExternalLink className="h-3 w-3" />

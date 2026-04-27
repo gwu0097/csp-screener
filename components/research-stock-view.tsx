@@ -18,7 +18,6 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { ValuationTab } from "@/components/valuation-tab";
 import { SentimentTab } from "@/components/research-sentiment";
 import { RiskTab } from "@/components/research-risk";
-import { CspHistoryTab } from "@/components/research-csp-history";
 
 // ---------- Types mirrored from the API routes ----------
 
@@ -197,7 +196,6 @@ const VALID_TABS = new Set([
   "tenk",
   "risk",
   "sentiment",
-  "csp",
 ]);
 
 export function ResearchStockView({ symbol }: { symbol: string }) {
@@ -276,7 +274,6 @@ export function ResearchStockView({ symbol }: { symbol: string }) {
           <TabsTrigger value="tenk">📄 10-K</TabsTrigger>
           <TabsTrigger value="risk">⚠️ Risk</TabsTrigger>
           <TabsTrigger value="sentiment">👥 Sentiment</TabsTrigger>
-          <TabsTrigger value="csp">📈 CSP</TabsTrigger>
         </TabsList>
 
         <TabsContent value="overview" className="space-y-4">
@@ -355,9 +352,6 @@ export function ResearchStockView({ symbol }: { symbol: string }) {
         </TabsContent>
         <TabsContent value="sentiment">
           <SentimentTab symbol={symbol} />
-        </TabsContent>
-        <TabsContent value="csp">
-          <CspHistoryTab symbol={symbol} />
         </TabsContent>
       </Tabs>
     </div>

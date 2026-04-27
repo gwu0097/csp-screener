@@ -2358,7 +2358,7 @@ function ResearchQuickLinks({ candidate: c }: { candidate: Candidate }) {
     },
     {
       label: `📖 Encyclopedia`,
-      href: `/encyclopedia?symbol=${sym}`,
+      href: `/encyclopedia/${sym}`,
     },
   ];
   return (

@@ -137,7 +137,7 @@ export function CspHistoryTab({ symbol }: { symbol: string }) {
       setError(null);
       try {
         const res = await fetch(
-          `/api/research/${encodeURIComponent(symbol)}/csp-history`,
+          `/api/encyclopedia/${encodeURIComponent(symbol)}/csp-history`,
           { cache: "no-store" },
         );
         const json = (await res.json()) as {
