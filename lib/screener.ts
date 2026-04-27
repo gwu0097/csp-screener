@@ -712,9 +712,13 @@ function pickStrikeNearestWithDiff(
 
 // When the default ATM-centred chain (strikeCount=30) doesn't reach
 // the math target — most common on high-IV names where 2× EM lands
-// far OTM — re-fetch with a `strike` filter for one specific strike.
-// Returns the picked contract from the targeted chain, or null if
-// Schwab didn't return anything useful.
+// far OTM — refetch with strikeCount=200 narrowed to the candidate's
+// expiry. Verified live via test/probe-spot-grid: a SPOT 4-DTE call
+// with strikeCount=200 returns 132 strikes covering $300–$692.50,
+// which comfortably includes any 2× EM target. We deliberately do
+// NOT use the `strike=<exact>` parameter — Schwab silently returns
+// an empty chain for non-grid values (e.g. strike=403.02 → 0 rows
+// while $402.50 actually exists), so rounding-by-guess is fragile.
 async function fetchTargetedStrike(
   symbol: string,
   expiry: string,
@@ -724,7 +728,7 @@ async function fetchTargetedStrike(
     const chain = await schwabGet<SchwabOptionsChain>("/marketdata/v1/chains", {
       symbol,
       contractType: "PUT",
-      strike: Math.round(targetStrike * 100) / 100,
+      strikeCount: 200,
       fromDate: expiry,
       toDate: expiry,
       includeUnderlyingQuote: true,
@@ -784,6 +788,31 @@ export async function runStageFour(
   const initialPick = pickStrikeNearestWithDiff(chain, candidate.expiry, suggestedStrike);
   let contract: SchwabOptionContract | null = initialPick?.contract ?? null;
   let usedTargetedLookup = false;
+
+  if (candidate.symbol === "SPOT") {
+    const oneXStrike =
+      referenceMove !== null ? candidate.price * (1 - referenceMove) : null;
+    const twoXStrike =
+      referenceMove !== null ? candidate.price * (1 - 2 * referenceMove) : null;
+    console.log(
+      "[DEBUG:SPOT strike calc] " +
+        JSON.stringify(
+          {
+            price: candidate.price,
+            emPct,
+            referenceMove,
+            oneXStrike,
+            twoXStrike,
+            suggestedStrike,
+            initialPickStrike: initialPick?.contract.strikePrice ?? null,
+            bestDiff: initialPick?.diff ?? null,
+            willTriggerTargetedLookup: !!initialPick && initialPick.diff > 10,
+          },
+          null,
+          2,
+        ),
+    );
+  }
 
   // If the default chain (strikeCount=30 around ATM) doesn't reach
   // the math target — common on high-IV names where 2× EM lands far
