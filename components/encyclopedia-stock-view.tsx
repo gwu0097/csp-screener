@@ -16,7 +16,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   AlertTriangle,
   ChevronLeft,
@@ -878,27 +878,54 @@ type ResearchHistoryPayload = {
 
 const MODULE_DEFINITIONS: Array<{
   key: keyof ResearchHistoryPayload["modules"];
+  // URL-friendly id for ?subtab= — short, lowercase, no underscores.
+  slug: string;
   label: string;
+  // Sub-tab strip uses just the label; the emoji shows up in the
+  // section header so the strip itself stays compact.
   emoji: string;
-  // Maps to the `?tab=` value on /research/[symbol]. risk_assessment
-  // → risk; valuation → valuation; etc. None of the encyclopedia keys
-  // collide with the research tab values.
+  // Maps to the `?tab=` value on /research/[symbol]. None of the
+  // encyclopedia slugs collide with the research tab values.
   researchTab: string;
 }> = [
-  { key: "business_overview", label: "Business Overview", emoji: "📊", researchTab: "overview" },
-  { key: "fundamental_health", label: "Fundamental Health", emoji: "💪", researchTab: "overview" },
-  { key: "catalyst_scanner", label: "Catalyst Scanner", emoji: "🎯", researchTab: "catalysts" },
-  { key: "valuation", label: "Valuation", emoji: "📈", researchTab: "valuation" },
-  { key: "sentiment", label: "Sentiment", emoji: "👥", researchTab: "sentiment" },
-  { key: "risk_assessment", label: "Risk Assessment", emoji: "⚠️", researchTab: "risk" },
+  { key: "business_overview", slug: "overview", label: "Overview", emoji: "📊", researchTab: "overview" },
+  { key: "fundamental_health", slug: "fundamentals", label: "Fundamentals", emoji: "💪", researchTab: "overview" },
+  { key: "catalyst_scanner", slug: "catalysts", label: "Catalysts", emoji: "🎯", researchTab: "catalysts" },
+  { key: "valuation", slug: "valuation", label: "Valuation", emoji: "📈", researchTab: "valuation" },
+  { key: "risk_assessment", slug: "risk", label: "Risk", emoji: "⚠️", researchTab: "risk" },
+  { key: "sentiment", slug: "sentiment", label: "Sentiment", emoji: "👥", researchTab: "sentiment" },
 ];
 
+const VALID_SUBTABS = new Set(MODULE_DEFINITIONS.map((d) => d.slug));
+
 function ResearchTab({ symbol }: { symbol: string }) {
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
   const [modules, setModules] = useState<
     ResearchHistoryPayload["modules"] | null
   >(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Sub-tab is URL-driven so deep links like
+  // /encyclopedia/SPOT?tab=research&subtab=catalysts work end-to-end
+  // and Back/Forward navigates between sub-views.
+  const initialSubtab = searchParams?.get("subtab");
+  const [activeSubtab, setActiveSubtab] = useState<string>(
+    initialSubtab && VALID_SUBTABS.has(initialSubtab)
+      ? initialSubtab
+      : "overview",
+  );
+
+  function selectSubtab(slug: string) {
+    setActiveSubtab(slug);
+    if (!pathname) return;
+    const params = new URLSearchParams(searchParams?.toString() ?? "");
+    params.set("tab", "research");
+    params.set("subtab", slug);
+    router.replace(`${pathname}?${params.toString()}`, { scroll: false });
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -934,6 +961,10 @@ function ResearchTab({ symbol }: { symbol: string }) {
   if (error) return <ErrorBanner message={error} />;
   if (!modules) return null;
 
+  const activeDef =
+    MODULE_DEFINITIONS.find((d) => d.slug === activeSubtab) ??
+    MODULE_DEFINITIONS[0];
+
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-baseline justify-between gap-2 text-xs text-muted-foreground">
@@ -949,17 +980,50 @@ function ResearchTab({ symbol }: { symbol: string }) {
           /research/{symbol}
         </Link>
       </div>
-      {MODULE_DEFINITIONS.map((def) => (
-        <ModuleSection
-          key={def.key}
-          symbol={symbol}
-          moduleKey={def.key}
-          label={def.label}
-          emoji={def.emoji}
-          researchTab={def.researchTab}
-          runs={modules[def.key] ?? []}
-        />
-      ))}
+
+      {/* Sub-tab bar — underline style, deliberately distinct from the
+          main pill-style TabsList one level up. */}
+      <div className="flex flex-wrap items-end gap-x-4 gap-y-1 border-b border-border">
+        {MODULE_DEFINITIONS.map((def) => {
+          const count = (modules[def.key] ?? []).length;
+          const isActive = def.slug === activeSubtab;
+          return (
+            <button
+              key={def.slug}
+              type="button"
+              onClick={() => selectSubtab(def.slug)}
+              className={`-mb-px whitespace-nowrap border-b-2 px-1 pb-2 pt-1 text-xs font-medium transition-colors ${
+                isActive
+                  ? "border-foreground text-foreground"
+                  : "border-transparent text-muted-foreground hover:border-border hover:text-foreground"
+              }`}
+            >
+              {def.label}
+              {count > 0 && (
+                <span
+                  className={`ml-1.5 rounded px-1 py-0.5 text-[10px] font-normal ${
+                    isActive
+                      ? "bg-foreground/10 text-foreground"
+                      : "bg-muted/40 text-muted-foreground"
+                  }`}
+                >
+                  {count}
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+
+      <ModuleSection
+        key={activeDef.key}
+        symbol={symbol}
+        moduleKey={activeDef.key}
+        label={activeDef.label}
+        emoji={activeDef.emoji}
+        researchTab={activeDef.researchTab}
+        runs={modules[activeDef.key] ?? []}
+      />
     </div>
   );
 }
@@ -1106,15 +1170,13 @@ function ModuleEmpty({
 }) {
   return (
     <div className="rounded-md border border-dashed border-border bg-background/40 p-6 text-center">
-      <div className="text-sm text-muted-foreground">
-        No {label} data yet. Run this module in Research to populate.
-      </div>
+      <div className="text-sm text-muted-foreground">No {label} data yet.</div>
       <Link
         href={researchHref}
-        className="mt-2 inline-flex items-center gap-1 rounded-md border border-border bg-background/60 px-2 py-1 text-xs text-muted-foreground hover:text-foreground"
+        className="mt-3 inline-flex items-center gap-1 rounded-md border border-border bg-background/60 px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground"
       >
+        Run in Research
         <ExternalLink className="h-3 w-3" />
-        Open Research
       </Link>
     </div>
   );
