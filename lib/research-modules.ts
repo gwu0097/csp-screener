@@ -4,6 +4,7 @@
 // (symbol, type) pair. Cache TTL is per-module-type — fundamentals
 // update quarterly, catalysts daily-ish, etc.
 
+import { randomUUID } from "crypto";
 import { createServerClient } from "@/lib/supabase";
 
 export type ModuleType =
@@ -274,4 +275,175 @@ export function tryParseObject(text: string): Record<string, unknown> | null {
     }
   }
   return null;
+}
+
+// ---------- Catalyst accumulation ----------
+//
+// Catalysts are not versioned the way other modules are. Each scan adds to
+// a growing knowledge base — duplicates merge, dismissals stay sticky so
+// they don't get re-added on the next run. The valuation model keeps its
+// version-history semantics (Phase 2); only catalysts accumulate.
+
+export type CatalystHorizon = "near_term" | "medium_term" | "long_term";
+
+export type CatalystEntry = {
+  id: string;
+  title: string;
+  type: string;
+  horizon: CatalystHorizon;
+  description: string;
+  expected_date: string | null;
+  impact_direction: "bullish" | "bearish" | "neutral";
+  impact_magnitude: "high" | "medium" | "low";
+  confidence: "high" | "medium" | "low";
+  source_context: string | null;
+  first_found_at: string;
+  last_confirmed_at: string;
+  scan_count: number;
+  dismissed: boolean;
+};
+
+export type CatalystOutput = {
+  catalysts: CatalystEntry[];
+  overall_catalyst_score: "rich" | "moderate" | "sparse";
+  summary: string | null;
+  next_earnings: { date: string; daysAway: number | null } | null;
+};
+
+// What the parser hands back per Perplexity scan — no metadata yet.
+export type FreshCatalyst = Omit<
+  CatalystEntry,
+  "id" | "first_found_at" | "last_confirmed_at" | "scan_count" | "dismissed"
+>;
+
+const CATALYST_STOPWORDS = new Set([
+  "the", "a", "an", "of", "for", "and", "or", "to", "in", "on", "with",
+  "at", "by", "from", "into", "next", "new", "this",
+]);
+
+function catalystTokens(s: string): Set<string> {
+  return new Set(
+    s
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, " ")
+      .split(/\s+/)
+      .filter((w) => w.length > 2 && !CATALYST_STOPWORDS.has(w)),
+  );
+}
+
+function titleOverlapRatio(a: string, b: string): number {
+  const ta = catalystTokens(a);
+  const tb = catalystTokens(b);
+  if (ta.size === 0 || tb.size === 0) return 0;
+  let common = 0;
+  ta.forEach((w) => {
+    if (tb.has(w)) common++;
+  });
+  return common / Math.min(ta.size, tb.size);
+}
+
+function isMatch(existing: CatalystEntry, fresh: FreshCatalyst): boolean {
+  // Same type + same expected_date is a strong structural match — different
+  // wordings of the same upcoming event (e.g. "Q3 earnings guide" vs
+  // "guidance update Q3").
+  if (
+    existing.type === fresh.type &&
+    existing.expected_date &&
+    fresh.expected_date &&
+    existing.expected_date === fresh.expected_date
+  ) {
+    return true;
+  }
+  // Title overlap > 70% of the smaller token set — symmetric, robust to
+  // paraphrasing.
+  return titleOverlapRatio(existing.title, fresh.title) > 0.7;
+}
+
+export function catalystScoreFor(
+  catalysts: ReadonlyArray<Pick<CatalystEntry, "dismissed">>,
+): "rich" | "moderate" | "sparse" {
+  const active = catalysts.filter((c) => !c.dismissed).length;
+  if (active >= 4) return "rich";
+  if (active >= 2) return "moderate";
+  return "sparse";
+}
+
+function synthSummary(fresh: string | null, activeCount: number): string {
+  const word = activeCount === 1 ? "catalyst" : "catalysts";
+  const prefix = `Tracking ${activeCount} ${word} across all scans.`;
+  return fresh ? `${prefix} ${fresh}` : prefix;
+}
+
+export function mergeCatalystResults(
+  existing: CatalystOutput | null,
+  newResults: {
+    catalysts: FreshCatalyst[];
+    summary: string | null;
+    next_earnings: CatalystOutput["next_earnings"];
+  },
+): CatalystOutput {
+  const now = new Date().toISOString();
+  const stamp = (c: FreshCatalyst): CatalystEntry => ({
+    ...c,
+    id: randomUUID(),
+    first_found_at: now,
+    last_confirmed_at: now,
+    scan_count: 1,
+    dismissed: false,
+  });
+
+  if (!existing) {
+    const catalysts = newResults.catalysts.map(stamp);
+    return {
+      catalysts,
+      overall_catalyst_score: catalystScoreFor(catalysts),
+      summary: synthSummary(newResults.summary, catalysts.length),
+      next_earnings: newResults.next_earnings,
+    };
+  }
+
+  // Old rows pre-dating accumulation may lack id/dismissed — backfill so
+  // matching/dismiss behaviour stays consistent.
+  const merged: CatalystEntry[] = existing.catalysts.map((c) => ({
+    ...c,
+    id: c.id ?? randomUUID(),
+    first_found_at: c.first_found_at ?? now,
+    last_confirmed_at: c.last_confirmed_at ?? now,
+    scan_count: c.scan_count ?? 1,
+    dismissed: c.dismissed ?? false,
+  }));
+
+  for (const fresh of newResults.catalysts) {
+    const idx = merged.findIndex((m) => isMatch(m, fresh));
+    if (idx >= 0) {
+      const m = merged[idx];
+      // Update fields with newer wording but keep identity / dismissed /
+      // first_found_at intact. A previously-dismissed match stays dismissed
+      // — that's the whole point of dismissing it.
+      merged[idx] = {
+        ...m,
+        title: fresh.title,
+        type: fresh.type,
+        horizon: fresh.horizon,
+        description: fresh.description,
+        expected_date: fresh.expected_date ?? m.expected_date,
+        impact_direction: fresh.impact_direction,
+        impact_magnitude: fresh.impact_magnitude,
+        confidence: fresh.confidence,
+        source_context: fresh.source_context ?? m.source_context,
+        last_confirmed_at: now,
+        scan_count: m.scan_count + 1,
+      };
+    } else {
+      merged.push(stamp(fresh));
+    }
+  }
+
+  const activeCount = merged.filter((c) => !c.dismissed).length;
+  return {
+    catalysts: merged,
+    overall_catalyst_score: catalystScoreFor(merged),
+    summary: synthSummary(newResults.summary, activeCount),
+    next_earnings: newResults.next_earnings,
+  };
 }

@@ -2,7 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { askPerplexityRaw } from "@/lib/perplexity";
 import { getFinnhubNextEarningsDate } from "@/lib/earnings";
 import {
+  catalystScoreFor,
+  type CatalystOutput,
+  type FreshCatalyst,
   getLatestModule,
+  mergeCatalystResults,
   recomputeOverallGrade,
   saveModule,
   tryParseObject,
@@ -11,27 +15,6 @@ import { createServerClient } from "@/lib/supabase";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
-
-type CatalystHorizon = "near_term" | "medium_term" | "long_term";
-
-type CatalystEntry = {
-  title: string;
-  type: string;
-  horizon: CatalystHorizon;
-  description: string;
-  expected_date: string | null;
-  impact_direction: "bullish" | "bearish" | "neutral";
-  impact_magnitude: "high" | "medium" | "low";
-  confidence: "high" | "medium" | "low";
-  source_context: string | null;
-};
-
-type CatalystScanner = {
-  catalysts: CatalystEntry[];
-  overall_catalyst_score: "rich" | "moderate" | "sparse";
-  summary: string | null;
-  next_earnings: { date: string; daysAway: number | null } | null;
-};
 
 function validSymbol(symbol: string): boolean {
   return /^[A-Z][A-Z0-9.-]{0,9}$/.test(symbol);
@@ -102,7 +85,7 @@ function asEnum<T extends string>(v: unknown, allowed: readonly T[]): T | null {
   return null;
 }
 
-function parseCatalysts(parsed: Record<string, unknown> | null): CatalystEntry[] {
+function parseCatalysts(parsed: Record<string, unknown> | null): FreshCatalyst[] {
   if (!parsed) return [];
   const list = Array.isArray(parsed.catalysts) ? parsed.catalysts : [];
   return list.flatMap((entry) => {
@@ -165,7 +148,7 @@ export async function GET(
   if (!validSymbol(symbol)) {
     return NextResponse.json({ error: "Invalid symbol" }, { status: 400 });
   }
-  const mod = await getLatestModule<CatalystScanner>(symbol, "catalyst_scanner");
+  const mod = await getLatestModule<CatalystOutput>(symbol, "catalyst_scanner");
   return NextResponse.json({ module: mod });
 }
 
@@ -181,47 +164,112 @@ export async function POST(
   try {
     const companyName = await getCompanyName(symbol);
 
-    // Catalysts + earnings in parallel — they hit different APIs.
-    const [raw, earn] = await Promise.all([
+    // Catalysts + earnings + previous accumulated catalysts in parallel —
+    // the merge needs the prior set so dismissals stay sticky and duplicates
+    // collapse instead of multiplying across re-runs.
+    const [raw, earn, existingMod] = await Promise.all([
       askPerplexityRaw(buildPrompt(symbol, companyName), {
         label: `research-catalyst:${symbol}`,
         maxTokens: 2000,
       }),
       getFinnhubNextEarningsDate(symbol),
+      getLatestModule<CatalystOutput>(symbol, "catalyst_scanner"),
     ]);
 
     const parsed = raw?.text ? tryParseObject(raw.text) : null;
-    const catalysts = parseCatalysts(parsed);
-    const score =
-      asEnum(parsed?.overall_catalyst_score, [
-        "rich",
-        "moderate",
-        "sparse",
-      ] as const) ??
-      (catalysts.length >= 3
-        ? "rich"
-        : catalysts.length >= 1
-          ? "moderate"
-          : "sparse");
+    const fresh = parseCatalysts(parsed);
 
-    const output: CatalystScanner = {
-      catalysts,
-      overall_catalyst_score: score,
+    const merged = mergeCatalystResults(existingMod?.output ?? null, {
+      catalysts: fresh,
       summary: asStr(parsed?.summary),
       next_earnings: earn
-        ? {
-            date: earn.date,
-            daysAway: daysFromTodayUtc(earn.date),
-          }
+        ? { date: earn.date, daysAway: daysFromTodayUtc(earn.date) }
         : null,
-    };
+    });
 
-    const saved = await saveModule(symbol, "catalyst_scanner", output);
+    const saved = await saveModule(symbol, "catalyst_scanner", merged);
     await recomputeOverallGrade(symbol);
     return NextResponse.json({ module: saved });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[catalyst-scanner] POST(${symbol}) failed:`, err);
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
+}
+
+// PATCH /api/research/:symbol/catalyst-scanner
+// Body: { id: string, dismissed: boolean }
+// Updates the catalyst inside the most recent module row's output JSON.
+// We mutate the latest row in place rather than appending — dismissals
+// shouldn't pollute scan history.
+export async function PATCH(
+  req: NextRequest,
+  { params }: { params: { symbol: string } },
+): Promise<NextResponse> {
+  const symbol = (params.symbol ?? "").trim().toUpperCase();
+  if (!validSymbol(symbol)) {
+    return NextResponse.json({ error: "Invalid symbol" }, { status: 400 });
+  }
+
+  try {
+    const body = (await req.json()) as { id?: unknown; dismissed?: unknown };
+    const id = typeof body.id === "string" ? body.id : null;
+    const dismissed = !!body.dismissed;
+    if (!id) {
+      return NextResponse.json(
+        { error: "Missing catalyst id" },
+        { status: 400 },
+      );
+    }
+
+    const sb = createServerClient();
+    const latest = await sb
+      .from("research_modules")
+      .select("id, output")
+      .eq("symbol", symbol)
+      .eq("module_type", "catalyst_scanner")
+      .order("run_at", { ascending: false })
+      .limit(1);
+    if (latest.error) {
+      throw new Error(`fetch latest failed: ${latest.error.message}`);
+    }
+    const row = (latest.data ?? [])[0] as
+      | { id: string; output: CatalystOutput }
+      | undefined;
+    if (!row) {
+      return NextResponse.json(
+        { error: "No catalyst module on file" },
+        { status: 404 },
+      );
+    }
+
+    const idx = row.output.catalysts.findIndex((c) => c.id === id);
+    if (idx < 0) {
+      return NextResponse.json(
+        { error: "Catalyst not found" },
+        { status: 404 },
+      );
+    }
+
+    const nextCatalysts = row.output.catalysts.slice();
+    nextCatalysts[idx] = { ...nextCatalysts[idx], dismissed };
+    const nextOutput: CatalystOutput = {
+      ...row.output,
+      catalysts: nextCatalysts,
+      overall_catalyst_score: catalystScoreFor(nextCatalysts),
+    };
+
+    const upd = await sb
+      .from("research_modules")
+      .update({ output: nextOutput })
+      .eq("id", row.id);
+    if (upd.error) throw new Error(`update failed: ${upd.error.message}`);
+
+    await recomputeOverallGrade(symbol);
+    return NextResponse.json({ ok: true, catalyst: nextCatalysts[idx] });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[catalyst-scanner] PATCH(${symbol}) failed:`, err);
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

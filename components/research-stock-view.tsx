@@ -7,9 +7,11 @@ import {
   ChevronLeft,
   Loader2,
   RefreshCw,
+  RotateCcw,
   Target,
   TrendingDown,
   TrendingUp,
+  X,
 } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 
@@ -98,6 +100,9 @@ type FundamentalHealth = {
 type CatalystHorizon = "near_term" | "medium_term" | "long_term";
 
 type CatalystEntry = {
+  // Optional fields are absent on rows saved before catalyst accumulation
+  // landed — render defensively.
+  id?: string;
   title: string;
   type: string;
   horizon: CatalystHorizon;
@@ -107,6 +112,10 @@ type CatalystEntry = {
   impact_magnitude: "high" | "medium" | "low";
   confidence: "high" | "medium" | "low";
   source_context: string | null;
+  first_found_at?: string;
+  last_confirmed_at?: string;
+  scan_count?: number;
+  dismissed?: boolean;
 };
 
 type CatalystScanner = {
@@ -302,6 +311,11 @@ export function ResearchStockView({ symbol }: { symbol: string }) {
                 loadStock();
               }
             }}
+            onMutate={(updater) =>
+              setCatalystMod((prev) =>
+                prev ? { ...prev, output: updater(prev.output) } : prev,
+              )
+            }
           />
         </TabsContent>
 
@@ -919,12 +933,15 @@ function MarginRow({
 // ---------- Catalyst Scanner card ----------
 
 function CatalystScannerCard({
+  symbol,
   mod,
   onRun,
+  onMutate,
 }: {
   symbol: string;
   mod: ModuleEnvelope<CatalystScanner>;
   onRun: () => Promise<void>;
+  onMutate: (updater: (prev: CatalystScanner) => CatalystScanner) => void;
 }) {
   return (
     <div className="rounded-md border border-border bg-background/30 p-3">
@@ -957,7 +974,7 @@ function CatalystScannerCard({
             earnings (those are tracked separately as risk events).
           </div>
         ) : (
-          <CatalystBody data={mod.output} />
+          <CatalystBody symbol={symbol} data={mod.output} onMutate={onMutate} />
         )}
       </div>
     </div>
@@ -967,16 +984,62 @@ function CatalystScannerCard({
 type HorizonFilter = "all" | CatalystHorizon;
 type DirectionFilter = "all" | "bullish" | "bearish";
 
-function CatalystBody({ data }: { data: CatalystScanner }) {
+function scoreFromCatalysts(
+  catalysts: CatalystEntry[],
+): "rich" | "moderate" | "sparse" {
+  const active = catalysts.filter((c) => !c.dismissed).length;
+  if (active >= 4) return "rich";
+  if (active >= 2) return "moderate";
+  return "sparse";
+}
+
+function CatalystBody({
+  symbol,
+  data,
+  onMutate,
+}: {
+  symbol: string;
+  data: CatalystScanner;
+  onMutate: (updater: (prev: CatalystScanner) => CatalystScanner) => void;
+}) {
   const [horizonFilter, setHorizonFilter] = useState<HorizonFilter>("all");
   const [directionFilter, setDirectionFilter] = useState<DirectionFilter>("all");
+  const [showDismissed, setShowDismissed] = useState(false);
 
+  const dismissedCount = data.catalysts.filter((c) => c.dismissed).length;
   const filtered = data.catalysts.filter((c) => {
+    if (!showDismissed && c.dismissed) return false;
     if (horizonFilter !== "all" && c.horizon !== horizonFilter) return false;
     if (directionFilter !== "all" && c.impact_direction !== directionFilter)
       return false;
     return true;
   });
+
+  async function setDismissed(id: string, dismissed: boolean) {
+    onMutate((prev) => {
+      const nextCatalysts = prev.catalysts.map((c) =>
+        c.id === id ? { ...c, dismissed } : c,
+      );
+      return {
+        ...prev,
+        catalysts: nextCatalysts,
+        overall_catalyst_score: scoreFromCatalysts(nextCatalysts),
+      };
+    });
+    try {
+      await fetch(
+        `/api/research/${encodeURIComponent(symbol)}/catalyst-scanner`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id, dismissed }),
+          cache: "no-store",
+        },
+      );
+    } catch {
+      /* swallow — UI already reflects the change; next page load will resync */
+    }
+  }
 
   return (
     <>
@@ -1003,9 +1066,31 @@ function CatalystBody({ data }: { data: CatalystScanner }) {
           ) : (
             <div className="space-y-2">
               {filtered.map((c, i) => (
-                <CatalystCard key={i} catalyst={c} />
+                <CatalystCard
+                  key={c.id ?? i}
+                  catalyst={c}
+                  onDismiss={
+                    c.id ? () => setDismissed(c.id as string, true) : undefined
+                  }
+                  onRestore={
+                    c.id
+                      ? () => setDismissed(c.id as string, false)
+                      : undefined
+                  }
+                />
               ))}
             </div>
+          )}
+          {dismissedCount > 0 && (
+            <button
+              type="button"
+              onClick={() => setShowDismissed((v) => !v)}
+              className="text-[11px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+            >
+              {showDismissed
+                ? `Hide dismissed (${dismissedCount})`
+                : `Show dismissed (${dismissedCount})`}
+            </button>
           )}
         </>
       )}
@@ -1125,10 +1210,41 @@ function CatalystFilters({
   );
 }
 
-function CatalystCard({ catalyst: c }: { catalyst: CatalystEntry }) {
+function CatalystCard({
+  catalyst: c,
+  onDismiss,
+  onRestore,
+}: {
+  catalyst: CatalystEntry;
+  onDismiss?: () => void;
+  onRestore?: () => void;
+}) {
   return (
-    <div className="rounded border border-border bg-white/[0.02] p-2">
-      <div className="mb-1 flex flex-wrap items-center gap-2">
+    <div
+      className={`relative rounded border border-border bg-white/[0.02] p-2 ${
+        c.dismissed ? "opacity-50" : ""
+      }`}
+    >
+      {c.dismissed && onRestore ? (
+        <button
+          type="button"
+          onClick={onRestore}
+          title="Restore catalyst"
+          className="absolute right-1.5 top-1.5 inline-flex items-center gap-1 rounded border border-border bg-background/60 px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground"
+        >
+          <RotateCcw className="h-3 w-3" /> Restore
+        </button>
+      ) : !c.dismissed && onDismiss ? (
+        <button
+          type="button"
+          onClick={onDismiss}
+          title="Dismiss catalyst"
+          className="absolute right-1.5 top-1.5 rounded border border-transparent p-0.5 text-muted-foreground hover:border-border hover:bg-background/60 hover:text-foreground"
+        >
+          <X className="h-3.5 w-3.5" />
+        </button>
+      ) : null}
+      <div className="mb-1 flex flex-wrap items-center gap-2 pr-7">
         <Target className="h-3.5 w-3.5 text-emerald-300" />
         <span className="font-medium text-foreground">{c.title}</span>
         <span
@@ -1161,6 +1277,18 @@ function CatalystCard({ catalyst: c }: { catalyst: CatalystEntry }) {
       {c.source_context && (
         <div className="mt-1 text-[11px] text-muted-foreground">
           <span className="font-medium">Source context:</span> {c.source_context}
+        </div>
+      )}
+      {(c.first_found_at || c.scan_count) && (
+        <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] text-muted-foreground">
+          {c.first_found_at && (
+            <span>First found: {fmtRelDate(c.first_found_at)}</span>
+          )}
+          {c.scan_count !== undefined && (
+            <span>
+              Confirmed in {c.scan_count} {c.scan_count === 1 ? "scan" : "scans"}
+            </span>
+          )}
         </div>
       )}
     </div>
