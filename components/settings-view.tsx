@@ -74,6 +74,15 @@ export function SettingsView({ connected, lastRefresh, envFlags, schwabFlash, sc
 
       <Card>
         <CardHeader>
+          <CardTitle>Encyclopedia maintenance</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <ImpliedMoveBackfill />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
           <CardTitle>Environment variables</CardTitle>
         </CardHeader>
         <CardContent>
@@ -201,6 +210,85 @@ function ManualTokenSection({ onSaved }: { onSaved: () => void }) {
               </span>
             )}
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Calls /api/encyclopedia/backfill-em which processes up to 40 rows
+// per request inside the 60s Hobby ceiling. Re-clicking continues
+// against the remaining null rows.
+type BackfillResponse = {
+  scanned: number;
+  updated: number;
+  skippedNoData: number;
+  skippedLowConfidence: number;
+  skippedImplausible: number;
+  errors: string[];
+  firstSymbol: string | null;
+  lastSymbol: string | null;
+};
+
+function ImpliedMoveBackfill() {
+  const [busy, setBusy] = useState(false);
+  const [last, setLast] = useState<BackfillResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function run() {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/encyclopedia/backfill-em", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ maxBackfills: 40 }),
+        cache: "no-store",
+      });
+      const json = (await res.json()) as BackfillResponse | { error?: string };
+      if (!res.ok) {
+        throw new Error((json as { error?: string }).error ?? `HTTP ${res.status}`);
+      }
+      setLast(json as BackfillResponse);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Backfill failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="space-y-3 text-sm">
+      <p className="text-muted-foreground">
+        Backfills the <code>implied_move_pct</code> column on
+        <code className="mx-1">earnings_history</code> rows that are
+        missing it. Each row sends one Perplexity query and records the
+        value only when confidence is high or medium and the result is
+        between 5–25%. Processes up to 40 rows per click; re-run to
+        continue.
+      </p>
+      <Button size="sm" onClick={run} disabled={busy}>
+        {busy ? "Running…" : "Backfill historical implied moves"}
+      </Button>
+      {error && (
+        <div className="rounded border border-rose-500/40 bg-rose-500/10 p-2 text-xs text-rose-300">
+          {error}
+        </div>
+      )}
+      {last && (
+        <div className="rounded border border-border bg-background/40 p-2 text-xs">
+          <div className="font-mono text-muted-foreground">
+            scanned={last.scanned} · updated={last.updated} · skipped
+            no-data={last.skippedNoData} · low-confidence=
+            {last.skippedLowConfidence} · implausible={last.skippedImplausible}
+          </div>
+          {last.errors.length > 0 && (
+            <div className="mt-1 text-rose-300">
+              {last.errors.length} error
+              {last.errors.length === 1 ? "" : "s"}: {last.errors.slice(0, 3).join("; ")}
+              {last.errors.length > 3 && ` (+${last.errors.length - 3} more)`}
+            </div>
+          )}
         </div>
       )}
     </div>

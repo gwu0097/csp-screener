@@ -32,6 +32,7 @@ import {
 import { cn } from "@/lib/utils";
 import type { ScreenerResult, StageFourResult } from "@/lib/screener";
 import type { MarketContext } from "@/lib/market";
+import { CrushHistoryTable } from "@/components/crush-history-table";
 
 // localStorage key for the Track checkbox state (screener_tracked is an
 // array of UPPERCASE symbols). Cleared whenever Screen Today runs.
@@ -1153,7 +1154,13 @@ function ExpandedDetail({ r }: { r: ScreenerResult }) {
             </div>
           }
         >
-          <Row k="Crush" v={`${tl.industryFactors.crushGrade}`} />
+          <CrushRow
+            symbol={r.symbol}
+            crushGrade={tl.industryFactors.crushGrade}
+            emPct={r.stageThree?.details?.expectedMovePct ?? null}
+            medianHistoricalMovePct={r.stageThree?.details?.medianHistoricalMovePct ?? null}
+            currentPrice={r.price}
+          />
           <Row k="Opportunity" v={`${tl.industryFactors.opportunityGrade}`} />
           <Row
             k="Prob of profit"
@@ -1290,6 +1297,12 @@ function ExpandedDetail({ r }: { r: ScreenerResult }) {
           </div>
         </LayerCard>
       </div>
+
+      <CrushHistoryTable
+        events={r.stageThree?.details?.crushHistory}
+        todayEmPct={r.stageThree?.details?.expectedMovePct ?? null}
+        todaySymbol={r.symbol}
+      />
 
       <CustomStrikeAnalyzer
         suggestedStrike={tl.industryFactors.breakevenPrice + (r.stageFour?.premium ?? 0)}
@@ -1522,6 +1535,114 @@ function Row({ k, v }: { k: string; v: string }) {
     <div className="flex justify-between gap-2">
       <span className="text-muted-foreground">{k}</span>
       <span className="font-mono text-foreground">{v}</span>
+    </div>
+  );
+}
+
+// Crush row with a hoverable label that explains the grade bands and
+// shows today's emPct, implied dollar move, median historical, and
+// computed ratio. Replaces the plain <Row k="Crush" /> in Layer 1.
+function CrushRow({
+  symbol,
+  crushGrade,
+  emPct,
+  medianHistoricalMovePct,
+  currentPrice,
+}: {
+  symbol: string;
+  crushGrade: "A" | "B" | "C" | "F";
+  emPct: number | null;
+  medianHistoricalMovePct: number | null;
+  currentPrice: number;
+}) {
+  const ratio =
+    emPct !== null && emPct > 0 && medianHistoricalMovePct !== null
+      ? medianHistoricalMovePct / emPct
+      : null;
+  const ratioGrade =
+    ratio === null
+      ? null
+      : ratio < 0.7
+        ? "A"
+        : ratio < 0.85
+          ? "B"
+          : ratio < 1.0
+            ? "C"
+            : ratio < 1.2
+              ? "D"
+              : "F";
+  const impliedDollar =
+    emPct !== null && currentPrice > 0
+      ? Math.round(emPct * currentPrice)
+      : null;
+  return (
+    <div className="flex justify-between gap-2">
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span className="cursor-help text-muted-foreground underline decoration-dotted decoration-muted-foreground/60 underline-offset-4 hover:decoration-foreground/80">
+            Crush
+          </span>
+        </TooltipTrigger>
+        <TooltipContent side="right" className="max-w-[340px]">
+          <div className="space-y-2 text-xs leading-relaxed">
+            <div>
+              <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                Crush rating
+              </div>
+              <div>
+                Measures whether this stock&apos;s earnings moves stay
+                within what options pricing implies.
+              </div>
+            </div>
+            <div>
+              <span className="font-mono">crush ratio = actual ÷ implied</span>{" "}
+              · median across last 8 quarters → grade
+            </div>
+            <ul className="list-disc space-y-0.5 pl-4 font-mono text-[11px]">
+              <li>
+                <b>A</b> &lt; 0.70 — undershoots, best for sellers ✅
+              </li>
+              <li>
+                <b>B</b> 0.70–0.85 — slight edge ✅
+              </li>
+              <li>
+                <b>C</b> 0.85–1.00 — fairly priced
+              </li>
+              <li>
+                <b>D</b> 1.00–1.20 — slight disadvantage ⚠️
+              </li>
+              <li>
+                <b>F</b> &gt; 1.20 — overshoots, avoid ❌
+              </li>
+            </ul>
+            <div>
+              <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                {symbol} today
+              </div>
+              <div className="font-mono text-[11px]">
+                Implied move:{" "}
+                {emPct !== null ? `${(emPct * 100).toFixed(1)}%` : "—"}
+                {impliedDollar !== null && <> (~${impliedDollar})</>}
+                <br />
+                Median historical:{" "}
+                {medianHistoricalMovePct !== null
+                  ? `${(medianHistoricalMovePct * 100).toFixed(1)}%`
+                  : "—"}
+                <br />
+                Crush ratio:{" "}
+                {ratio !== null ? `${ratio.toFixed(2)}x` : "—"}
+                {ratioGrade && <> → {ratioGrade}</>}
+              </div>
+            </div>
+            <div className="border-t border-border pt-1.5 text-[10px] text-muted-foreground">
+              ★ in the history table marks quarters with similar implied
+              move to today (within ±2pp). Those are the most relevant
+              comparisons for THIS trade.
+            </div>
+          </div>
+        </TooltipContent>
+      </Tooltip>
+      <span className="font-mono text-foreground">{crushGrade}</span>
     </div>
   );
 }

@@ -24,6 +24,11 @@ import {
   cacheMarketCapBillions,
   getCachedMarketCapBillions,
 } from "@/lib/classification";
+import {
+  getCrushHistory,
+  persistLiveImpliedMove,
+  type CrushHistoryEvent,
+} from "@/lib/earnings-history-table";
 
 // ---------- Hard-kill thresholds ----------
 
@@ -81,6 +86,11 @@ export type StageThreeResult = {
     weeklyIv: number | null;
     monthlyIv: number | null;
     realizedVol30d: number | null;
+    // Per-quarter EM/actual/ratio/grade history for the expanded
+    // screener row's crush table. Stamped by runStagesThreeFour
+    // after stage 3 completes; older rows may have null EM where
+    // the backfill hasn't run.
+    crushHistory?: CrushHistoryEvent[];
   };
 };
 
@@ -1255,6 +1265,28 @@ export async function runStagesThreeFour(base: ScreenerResult): Promise<Screener
     stageThree.details.medianHistoricalMovePct,
     stageThree.details.expectedMovePct,
   );
+
+  // Persist today's live IV-implied move to earnings_history so the
+  // per-quarter crush table downstream has a real EM column for this
+  // event. Source 'schwab' marks the row as live-captured (vs the
+  // 'perplexity' backfill source). Non-blocking on failure.
+  if (stageThree.details.expectedMovePct !== null) {
+    await persistLiveImpliedMove(
+      candidate.symbol,
+      candidate.earningsDate,
+      stageThree.details.expectedMovePct,
+      "schwab",
+    );
+  }
+
+  // Crush history table data — fetched in parallel with the stage 3/4
+  // work above is overkill for a 1-row Supabase read, so just inline.
+  // Read the last 8 events with whatever EM we have; backfill from
+  // Perplexity fills the older gaps.
+  const crushHistory = await getCrushHistory(candidate.symbol, 8);
+  // Stamp on stageThree.details so the API response surfaces it for
+  // the expanded-row UI without changing the top-level result shape.
+  stageThree.details.crushHistory = crushHistory;
 
   const spreadTooWide = isSpreadTooWide();
   // Spread-too-wide is a hard kill regardless of any other signal.
