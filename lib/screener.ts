@@ -674,7 +674,14 @@ function gradeFromOpportunityScore(score: number): StageFourResult["opportunityG
 function pickStrikeNearest(chain: SchwabOptionsChain, expiryPrefix: string, targetStrike: number): SchwabOptionContract | null {
   const expKey = Object.keys(chain.putExpDateMap ?? {}).find((k) => k.startsWith(expiryPrefix));
   if (!expKey) return null;
-  const contracts = Object.values(chain.putExpDateMap[expKey]).flat();
+  // Defensive: Schwab puts the put chain in putExpDateMap, but if a
+  // CALL ever leaks into the map filter it out — a CALL delta picked
+  // here would silently torch POP (e.g. SPOT $410 call delta ≈ +0.97
+  // → "POP = 1 - 0.97 = 3%" or, after Math.abs in the EV path,
+  // appear as 0.97 → 3%). The PUT side gives -0.03 → 97%.
+  const contracts = Object.values(chain.putExpDateMap[expKey])
+    .flat()
+    .filter((c) => !c.putCall || c.putCall === "PUT");
   if (contracts.length === 0) return null;
   let best = contracts[0];
   let bestDiff = Math.abs(best.strikePrice - targetStrike);
@@ -728,6 +735,73 @@ export function runStageFour(
     };
   }
   const contract = pickStrikeNearest(chain, candidate.expiry, suggestedStrike);
+
+  // ---- DEBUG: SPOT-only options chain dump ----
+  // Catches any of the failure modes we're hunting: wrong expiry,
+  // strike rounding to the wrong contract, or Schwab returning a CALL
+  // inside the put map for a strike. Logs every expiry on the chain,
+  // the picked strike's full contract record, and the 5 surrounding
+  // strikes' deltas so a -0.26 vs -0.03 mismatch is visible at a
+  // glance.
+  if (candidate.symbol === "SPOT") {
+    const expKeys = Object.keys(chain.putExpDateMap ?? {});
+    const matchedKey = expKeys.find((k) => k.startsWith(candidate.expiry)) ?? null;
+    const allContracts = matchedKey
+      ? Object.values(chain.putExpDateMap[matchedKey] ?? {}).flat()
+      : [];
+    const sortedByStrike = [...allContracts].sort(
+      (a, b) =>
+        Math.abs(a.strikePrice - suggestedStrike) -
+        Math.abs(b.strikePrice - suggestedStrike),
+    );
+    const nearestFive = sortedByStrike.slice(0, 5).map((c) => ({
+      strike: c.strikePrice,
+      putCall: c.putCall,
+      symbol: c.symbol,
+      delta: c.delta,
+      bid: c.bid,
+      ask: c.ask,
+      mark: c.mark,
+    }));
+    console.log(
+      "[DEBUG:SPOT options] " +
+        JSON.stringify(
+          {
+            candidateExpiry: candidate.expiry,
+            availableExpiryKeys: expKeys,
+            matchedExpiryKey: matchedKey,
+            suggestedStrike,
+            pickedContract: contract
+              ? {
+                  symbol: contract.symbol,
+                  putCall: contract.putCall,
+                  strikePrice: contract.strikePrice,
+                  expirationDate: contract.expirationDate,
+                  delta: contract.delta,
+                  bid: contract.bid,
+                  ask: contract.ask,
+                  mark: contract.mark,
+                  daysToExpiration: contract.daysToExpiration,
+                }
+              : null,
+            nearestFiveByStrike: nearestFive,
+          },
+          null,
+          2,
+        ),
+    );
+    if (contract && contract.putCall && contract.putCall !== "PUT") {
+      console.warn(
+        `[DEBUG:SPOT options] picked contract has putCall=${contract.putCall} — expected PUT. This is the bug.`,
+      );
+    }
+    if (contract && contract.delta > 0) {
+      console.warn(
+        `[DEBUG:SPOT options] put contract has positive delta=${contract.delta}. Expected negative for OTM put.`,
+      );
+    }
+  }
+
   if (!contract) {
     return {
       score: 0,
@@ -767,6 +841,7 @@ export function runStageFour(
   if (expKey) {
     for (const arr of Object.values(chain.putExpDateMap[expKey])) {
       for (const c of arr) {
+        if (c.putCall && c.putCall !== "PUT") continue;
         const strikeMid = (c.bid + c.ask) / 2 || c.mark || c.last || 0;
         availableStrikes!.push({
           strike: c.strikePrice,
