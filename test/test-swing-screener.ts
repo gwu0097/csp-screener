@@ -154,7 +154,7 @@ async function main() {
       console.log(`  ${c.symbol} executive buys:`);
       for (const tx of c.executiveBuys) {
         console.log(
-          `    ${tx.date}  ${tx.name} (${tx.title})  ` +
+          `    ${tx.date}  ${tx.name} [${tx.action}]  ` +
             `${tx.shares} sh @ $${fmt(tx.price)} = $${fmt(tx.dollarValue, 0)}`,
         );
       }
