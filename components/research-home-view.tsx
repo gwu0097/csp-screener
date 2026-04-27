@@ -420,7 +420,6 @@ function StockTable({
         <thead className="bg-background/60">
           <tr>
             <Th>Symbol</Th>
-            <Th>Price</Th>
             <Th>Company</Th>
             <ThSortable
               label="Grade"
@@ -437,6 +436,7 @@ function StockTable({
               dir={sortDir}
               onSort={onSort}
             />
+            <Th>Price</Th>
             <ThSortable
               label="Catalyst Score"
               sortKey="catalyst"
@@ -562,9 +562,6 @@ function Row({ s }: { s: RecentStock }) {
           {s.symbol}
         </Link>
       </td>
-      <td className="px-3 py-2 font-mono">
-        <PriceCell price={s.current_price} changePct={s.change_percent} />
-      </td>
       <td className="max-w-[14rem] truncate px-3 py-2 text-muted-foreground">
         {s.company_name ?? "—"}
       </td>
@@ -611,6 +608,9 @@ function Row({ s }: { s: RecentStock }) {
         ) : (
           <span className="text-muted-foreground">—</span>
         )}
+      </td>
+      <td className="px-3 py-2 font-mono">
+        <PriceCell price={s.current_price} changePct={s.change_percent} />
       </td>
       <td className="px-3 py-2">
         {s.catalyst_score ? (
