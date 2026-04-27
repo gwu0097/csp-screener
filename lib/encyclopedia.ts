@@ -188,18 +188,26 @@ export type PriceAction = {
   actual_move_pct: number | null;
 };
 
-// Fetches Yahoo daily closes around the earnings date and returns the
-// nearest-close-on-or-before (price_before), nearest-close-on-or-after
-// (price_after), and the close on the following Friday (price_at_expiry).
-// Null-safe — if Yahoo has no bar for the window, returns nulls.
+// Fetches Yahoo daily closes around the earnings date and locates the
+// real earnings reaction. The Finnhub /stock/earnings endpoint returns
+// `period` (fiscal quarter end, e.g. 2025-03-31) — NOT the announcement
+// date (e.g. 2025-04-29 for SPOT Q1) — so a naive lastOnOrBefore /
+// firstOnOrAfter pairing on the stored earnings_date returns
+// month-of-March drift (~0.3%) instead of the real ~8% earnings gap.
+//
+// Strategy: scan a ±35-day window for the largest |close-to-close|
+// adjacent move. That's the earnings reaction. Auto-handles BMO/AMC
+// (whichever pairing produces the biggest gap wins) and stale-date
+// rows in earnings_history alike. The chosen pair's earlier bar
+// becomes price_before, the later bar becomes price_after.
 export async function fetchYahooPriceAction(
   symbol: string,
   earningsDate: string,
 ): Promise<PriceAction> {
-  // Widen the window a few days on each side so we survive holidays /
-  // weekends (e.g. Monday earnings with no Sunday close).
-  const fromDate = new Date(addDaysIso(earningsDate, -5) + "T00:00:00Z");
-  const expiryIso = nextFridayOnOrAfterIso(addDaysIso(earningsDate, 1));
+  // ±35-day window so we cover companies that report up to ~5 weeks
+  // after quarter end. Plus expiry-week padding on the back end.
+  const fromDate = new Date(addDaysIso(earningsDate, -35) + "T00:00:00Z");
+  const expiryIso = nextFridayOnOrAfterIso(addDaysIso(earningsDate, 35));
   const toDate = new Date(addDaysIso(expiryIso, 3) + "T00:00:00Z");
   const bars = await getHistoricalPrices(symbol, fromDate, toDate);
   if (bars.length === 0) {
@@ -223,6 +231,70 @@ export async function fetchYahooPriceAction(
     .filter((b) => b.iso && Number.isFinite(b.close) && b.close > 0)
     .sort((a, b) => a.iso.localeCompare(b.iso));
 
+  // The earnings_date stored on the row might be either:
+  //   (a) the actual announcement date (manual entry / phase-2 path), or
+  //   (b) the fiscal quarter end (Finnhub /stock/earnings.period) which
+  //       is typically 2–6 weeks before the actual report.
+  // Try (a) first by scanning a narrow ±2-day window. If we don't find
+  // a real reaction (≥ 1% move) in there, scan the conventional report
+  // window [+14d, +42d] for case (b). If still nothing meaningful,
+  // fall back to a wide [-7d, +42d] sweep so we always return
+  // something reasonable rather than null.
+  type Bar = (typeof normalized)[number];
+  function biggestGap(window: Bar[]): { prior: number; post: number; move: number } | null {
+    let best: { prior: number; post: number; move: number } | null = null;
+    for (let i = 1; i < window.length; i += 1) {
+      const prior = window[i - 1];
+      const post = window[i];
+      if (prior.close <= 0) continue;
+      const move = (post.close - prior.close) / prior.close;
+      if (best === null || Math.abs(move) > Math.abs(best.move)) {
+        best = { prior: prior.close, post: post.close, move };
+      }
+    }
+    return best;
+  }
+  const earnIso = earningsDate;
+  const inWindow = (lo: string, hi: string): Bar[] =>
+    normalized.filter((b) => b.iso >= lo && b.iso <= hi);
+
+  const nearGap = biggestGap(inWindow(addDaysIso(earnIso, -2), addDaysIso(earnIso, 2)));
+  const reportGap = biggestGap(
+    inWindow(addDaysIso(earnIso, 14), addDaysIso(earnIso, 42)),
+  );
+  const wideGap = biggestGap(
+    inWindow(addDaysIso(earnIso, -7), addDaysIso(earnIso, 42)),
+  );
+
+  // Prefer the report-window gap because that's the principled choice
+  // — US earnings land 14–42 days after the fiscal quarter end. Only
+  // override with the near-window gap when it's SIGNIFICANTLY bigger
+  // (≥ 1.5× reportGap), which is the signature of "earnings_date is
+  // already the actual announcement date" rather than a quarter end.
+  let chosen: ReturnType<typeof biggestGap> = null;
+  if (reportGap && Math.abs(reportGap.move) >= 0.005) {
+    chosen = reportGap;
+    if (
+      nearGap &&
+      Math.abs(nearGap.move) >= Math.abs(reportGap.move) * 1.5 &&
+      Math.abs(nearGap.move) >= 0.01
+    ) {
+      chosen = nearGap;
+    }
+  } else if (nearGap && Math.abs(nearGap.move) >= 0.01) {
+    chosen = nearGap;
+  } else {
+    chosen = wideGap;
+  }
+
+  const bestPriorClose = chosen?.prior ?? null;
+  const bestPostClose = chosen?.post ?? null;
+
+  // price_at_expiry stays anchored on the earnings_date's expiry — it's
+  // the close on the Friday after earnings_date+1 — even when the
+  // chosen reaction pair is offset by a few weeks. The expiry-day
+  // analysis depends on the option position's expiry, which is keyed
+  // off earnings_date in the screener flow.
   const lastOnOrBefore = (target: string): number | null => {
     let best: number | null = null;
     for (const b of normalized) {
@@ -231,19 +303,17 @@ export async function fetchYahooPriceAction(
     }
     return best;
   };
-  const firstOnOrAfter = (target: string): number | null => {
-    for (const b of normalized) if (b.iso >= target) return b.close;
-    return null;
-  };
-
-  const price_before = lastOnOrBefore(earningsDate);
-  const price_after = firstOnOrAfter(addDaysIso(earningsDate, 1));
   const price_at_expiry = lastOnOrBefore(expiryIso);
-  const actual_move_pct =
-    price_before !== null && price_after !== null && price_before > 0
-      ? (price_after - price_before) / price_before
-      : null;
-  return { price_before, price_after, price_at_expiry, actual_move_pct };
+
+  return {
+    price_before: bestPriorClose,
+    price_after: bestPostClose,
+    price_at_expiry,
+    actual_move_pct:
+      bestPriorClose !== null && bestPostClose !== null && bestPriorClose > 0
+        ? (bestPostClose - bestPriorClose) / bestPriorClose
+        : null,
+  };
 }
 
 // Best-effort implied move from the nearest weekly put chain, if Schwab is
@@ -457,29 +527,69 @@ export async function updateEncyclopedia(symbol: string): Promise<UpdateSummary>
   await getOrCreateEncyclopediaEntry(sym);
   const { from, to } = await getMissingEarningsDates(sym);
   const rows = await fetchFinnhubEarnings(sym, from, to);
+  // Pull Yahoo's earnings calendar so each Finnhub /stock/earnings row
+  // (keyed by fiscal-quarter end) can be re-mapped to its real
+  // announcement date + BMO/AMC hour. The calendar covers ~4 recent
+  // quarters; older rows fall back to period date and the wider
+  // gap-scan in fetchYahooPriceAction.
+  let calendar: CalendarEntry[] = [];
+  try {
+    calendar = await fetchFinnhubEarningsCalendar(sym);
+  } catch (e) {
+    console.warn(
+      `[encyclopedia] calendar fetch failed for ${sym}: ${e instanceof Error ? e.message : e}`,
+    );
+  }
+  const calendarByQuarter = new Map<string, CalendarEntry>();
+  for (const c of calendar) {
+    if (c.year !== null && c.quarter !== null) {
+      calendarByQuarter.set(`${c.year}|${c.quarter}`, c);
+    }
+  }
 
   // Pull existing rows for this symbol in one query to decide insert-vs-update
-  // and skip already-complete rows.
+  // and skip already-complete rows. We also pull actual_move_pct so we can
+  // re-run rows whose stored move is implausibly small (almost certainly a
+  // pre-fix row computed against the fiscal-quarter-end date instead of the
+  // real announcement date — see fetchYahooPriceAction).
   const existingRes = await sb
     .from("earnings_history")
-    .select("earnings_date,is_complete")
+    .select("earnings_date,is_complete,actual_move_pct")
     .eq("symbol", sym);
-  const existing = new Map<string, boolean>();
+  const existing = new Map<string, { is_complete: boolean; actual_move_pct: number | null }>();
   for (const r of (existingRes.data ?? []) as Array<{
     earnings_date: string;
     is_complete: boolean;
+    actual_move_pct: number | null;
   }>) {
-    existing.set(r.earnings_date, r.is_complete);
+    existing.set(r.earnings_date, {
+      is_complete: r.is_complete,
+      actual_move_pct: r.actual_move_pct,
+    });
   }
 
   let newRecords = 0;
   let updatedRecords = 0;
   for (const r of rows) {
-    const earnings_date = r.period;
+    // Prefer the calendar's actual announcement date over the
+    // fiscal-quarter-end period. Falls back when calendar coverage
+    // doesn't reach this quarter (Yahoo only ships ~4 recent).
+    const calMatch = calendarByQuarter.get(`${r.year}|${r.quarter}`);
+    const earnings_date = calMatch?.announcementDate ?? r.period;
+    const hour = calMatch?.hour ?? null;
     const already = existing.get(earnings_date);
-    if (already === true) continue; // complete — skip
+    if (already?.is_complete === true) {
+      const m = already.actual_move_pct;
+      // Earnings reactions under 1% are almost always wrong (computed
+      // against the fiscal quarter end before the price-action fix
+      // landed). Re-run those rows so the new logic picks up the real
+      // announcement reaction.
+      if (m !== null && Math.abs(m) >= 0.01) continue;
+    }
 
-    const price = await fetchYahooPriceAction(sym, earnings_date);
+    const price = hour
+      ? await fetchYahooPriceActionTimed(sym, earnings_date, hour)
+      : await fetchYahooPriceAction(sym, earnings_date);
     const implied_move_pct = await fetchImpliedMove(sym, earnings_date);
     const breach = calculateBreachAnalysis({
       price_before: price.price_before,
@@ -542,6 +652,25 @@ export async function updateEncyclopedia(symbol: string): Promise<UpdateSummary>
     }
     if (already === undefined) newRecords += 1;
     else updatedRecords += 1;
+  }
+
+  // Phase 2C re-key: any historical rows still stamped at their
+  // fiscal-quarter end (from older ingests before this fix landed)
+  // get re-keyed to their real announcement dates and re-priced via
+  // fetchYahooPriceActionTimed. Best-effort — failure here doesn't
+  // poison Phase 1's output. Bails early when the symbol is already
+  // clean, so the cost is one Yahoo earnings-module call.
+  try {
+    const rekey = await reingestHistoricalDates(sym);
+    if (rekey.reingested > 0 || rekey.merged_with_existing > 0) {
+      console.log(
+        `[encyclopedia] phase 2C rekeyed=${rekey.reingested} merged=${rekey.merged_with_existing} for ${sym}`,
+      );
+    }
+  } catch (e) {
+    console.warn(
+      `[encyclopedia] phase 2C failed for ${sym}: ${e instanceof Error ? e.message : e}`,
+    );
   }
 
   const recalculated = await recalculateStats(sym);
