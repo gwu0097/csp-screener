@@ -20,7 +20,12 @@ import { ImportStockScreenshotModal } from "@/components/import-stock-screenshot
 // constructs candidates itself, so a structural type is enough.
 type InsiderTransaction = {
   name: string;
-  title: string;
+  // Finnhub free tier doesn't return officer titles. We surface the
+  // SEC Form-4 transaction code as a human label instead — Purchase /
+  // Sale / Grant / Option Exercise — which is what actually distinguishes
+  // a conviction signal from comp.
+  action: string;
+  transactionCode: string;
   shares: number;
   price: number;
   date: string;
@@ -62,6 +67,7 @@ type SwingCandidate = {
   callVolumeOiRatio: number | null;
   optionsSignal: "bullish" | "neutral" | "bearish";
   topOptionsStrike: number | null;
+  topOptionsExpiry: string | null;
   tier1Signals: string[];
   tier2Signals: string[];
   redFlags: string[];
@@ -888,12 +894,15 @@ function formatVolume(v: number): string {
 }
 
 function InsiderSection({ candidate: c }: { candidate: SwingCandidate }) {
-  const buys = c.insiderTransactions.filter((t) => t.type === "buy");
-  const sells = c.insiderTransactions.filter((t) => t.type === "sell");
-  const totalBuyShares = buys.reduce((s, t) => s + t.shares, 0);
-  const totalBuyDollars = buys.reduce((s, t) => s + t.dollarValue, 0);
-  const totalSellDollars = sells.reduce((s, t) => s + t.dollarValue, 0);
-  const netDollars = totalBuyDollars - totalSellDollars;
+  // Real conviction signal = open-market purchases (code P) only. Grants /
+  // option exercises / dispositions are summarised separately so the user
+  // can see they happened but they don't drown out the buy/sell math.
+  const purchases = c.insiderTransactions.filter((t) => t.transactionCode === "P");
+  const sales = c.insiderTransactions.filter((t) => t.transactionCode === "S");
+  const buyShares = purchases.reduce((s, t) => s + t.shares, 0);
+  const buyDollars = purchases.reduce((s, t) => s + t.dollarValue, 0);
+  const sellDollars = sales.reduce((s, t) => s + t.dollarValue, 0);
+  const netDollars = buyDollars - sellDollars;
   const tone =
     c.insiderSignal === "strong_bullish" || c.insiderSignal === "bullish"
       ? "good"
@@ -911,7 +920,6 @@ function InsiderSection({ candidate: c }: { candidate: SwingCandidate }) {
               <thead className="bg-white/[0.03] text-muted-foreground">
                 <tr>
                   <th className="px-1.5 py-1 text-left font-medium">Name</th>
-                  <th className="px-1.5 py-1 text-left font-medium">Title</th>
                   <th className="px-1.5 py-1 text-left font-medium">Action</th>
                   <th className="px-1.5 py-1 text-right font-medium">Shares</th>
                   <th className="px-1.5 py-1 text-right font-medium">$ Value</th>
@@ -922,12 +930,15 @@ function InsiderSection({ candidate: c }: { candidate: SwingCandidate }) {
                 {c.insiderTransactions.slice(0, 8).map((tx, i) => (
                   <tr key={i} className="border-t border-border/30">
                     <td className="truncate px-1.5 py-1 text-foreground">{tx.name || "—"}</td>
-                    <td className="truncate px-1.5 py-1 text-muted-foreground">{tx.title || "—"}</td>
-                    <td className={`px-1.5 py-1 ${tx.type === "buy" ? "text-emerald-300" : "text-rose-300"}`}>
-                      {tx.type.toUpperCase()}
+                    <td className={`px-1.5 py-1 ${insiderActionTone(tx.transactionCode)}`}>
+                      {tx.action || "—"}
                     </td>
                     <td className="px-1.5 py-1 text-right font-mono">{tx.shares.toLocaleString()}</td>
-                    <td className="px-1.5 py-1 text-right font-mono">${(tx.dollarValue / 1_000_000).toFixed(2)}M</td>
+                    <td className="px-1.5 py-1 text-right font-mono">
+                      {tx.dollarValue > 0
+                        ? `$${(tx.dollarValue / 1_000_000).toFixed(2)}M`
+                        : "—"}
+                    </td>
                     <td className="px-1.5 py-1 text-right text-muted-foreground">{tx.date || "—"}</td>
                   </tr>
                 ))}
@@ -935,14 +946,20 @@ function InsiderSection({ candidate: c }: { candidate: SwingCandidate }) {
             </table>
           </div>
           <DetailRow
-            label="Net"
-            value={`${c.insiderSignal.replace("_", " ").toUpperCase()} · ${totalBuyShares.toLocaleString()} sh bought · $${(netDollars / 1_000_000).toFixed(2)}M net`}
+            label="Net (open market)"
+            value={`${c.insiderSignal.replace("_", " ").toUpperCase()} · ${buyShares.toLocaleString()} sh purchased · $${(netDollars / 1_000_000).toFixed(2)}M net`}
             tone={tone}
           />
         </>
       )}
     </DetailSection>
   );
+}
+
+function insiderActionTone(code: string): string {
+  if (code === "P") return "text-emerald-300";
+  if (code === "S") return "text-rose-300";
+  return "text-muted-foreground";
 }
 
 function OptionsSection({ candidate: c }: { candidate: SwingCandidate }) {
@@ -1045,22 +1062,27 @@ type ScoreComponent = {
 
 function computeScoreBreakdown(c: SwingCandidate): ScoreComponent[] {
   const out: ScoreComponent[] = [];
+
+  // Insider buying — engine considers only open-market purchases (code P)
+  // for the bullish signal, so the detail line cites a real purchase when
+  // available. Falls back to a count of P transactions when the named
+  // top-buy is missing (e.g. cached payload).
   if (c.insiderSignal === "strong_bullish") {
+    const top = c.executiveBuys?.[0] ?? null;
     out.push({
-      label: "Executive insider buying",
+      label: "Executive-grade open-market buying",
       earned: 2,
       max: 2,
-      detail:
-        c.executiveBuys.length > 0
-          ? `${c.executiveBuys[0].title || "Executive"} bought $${(c.executiveBuys[0].dollarValue / 1_000_000).toFixed(2)}M on ${c.executiveBuys[0].date}`
-          : "Executive buy detected",
+      detail: top
+        ? `${top.name || "Insider"} purchased $${(top.dollarValue / 1_000_000).toFixed(2)}M on ${top.date}`
+        : "Open-market purchase >$100K detected",
     });
   } else if (c.insiderSignal === "bullish") {
     out.push({
       label: "Insider buying",
       earned: 1,
       max: 2,
-      detail: "Net buyers, no executive-tier purchase",
+      detail: "Net open-market buyers — no $100K+ executive-tier purchase",
     });
   } else {
     out.push({
@@ -1069,13 +1091,23 @@ function computeScoreBreakdown(c: SwingCandidate): ScoreComponent[] {
       max: 2,
       detail:
         c.insiderSignal === "bearish"
-          ? "Insiders net selling"
-          : "No bullish insider activity",
+          ? "Insiders net selling on the open market"
+          : "No open-market buying — only grants / option exercises",
     });
   }
 
+  // Earnings catalyst — quote the % below analyst target so the user sees
+  // why this earnings is interesting (or isn't).
   const earningsHit =
     c.daysToEarnings !== null && c.daysToEarnings >= 14 && c.daysToEarnings <= 45;
+  const upsidePct =
+    c.analystTarget !== null && c.currentPrice > 0
+      ? (c.analystTarget - c.currentPrice) / c.currentPrice
+      : null;
+  const upsideText =
+    upsidePct !== null
+      ? `${(Math.abs(upsidePct) * 100).toFixed(0)}% ${upsidePct >= 0 ? "below" : "above"} analyst target`
+      : "no analyst target";
   out.push({
     label: "Earnings catalyst window",
     earned: earningsHit ? 2 : 0,
@@ -1084,37 +1116,46 @@ function computeScoreBreakdown(c: SwingCandidate): ScoreComponent[] {
       c.daysToEarnings === null
         ? "No upcoming earnings date"
         : earningsHit
-          ? `Reports ${fmtCalendarDate(c.nextEarningsDate)} (${c.daysToEarnings} days)`
+          ? `${c.daysToEarnings} days to earnings (${fmtCalendarDate(c.nextEarningsDate)}) · ${upsideText}`
           : `Earnings ${c.daysToEarnings} days away — outside 14-45 day window`,
   });
 
+  // Options — include expiry so user can see which contract.
   out.push({
-    label: "Unusual options",
+    label: "Unusual call activity",
     earned: c.unusualOptionsActivity ? 1 : 0,
     max: 1,
     detail: c.unusualOptionsActivity
-      ? `${c.callVolumeOiRatio?.toFixed(2)}x vol/OI on $${c.topOptionsStrike} strike`
-      : "No unusual call activity",
+      ? `${(c.callVolumeOiRatio ?? 0).toFixed(2)}x vol/OI on $${c.topOptionsStrike} strike${
+          c.topOptionsExpiry ? ` (exp ${fmtCalendarDate(c.topOptionsExpiry)})` : ""
+        }`
+      : c.callVolumeOiRatio !== null
+        ? `${c.callVolumeOiRatio.toFixed(2)}x vol/OI on top strike — below 0.5x threshold`
+        : "No options data (Schwab disconnected or no listed options)",
   });
 
+  // Volume — show today's vs 10d average in raw shares so the magnitude
+  // reads true.
   const volHit = c.volumeRatio > 2.0 && c.priceChange1d > 0;
   out.push({
     label: "Volume spike",
     earned: volHit ? 1 : 0,
     max: 1,
     detail: volHit
-      ? `${c.volumeRatio.toFixed(2)}x avg with price up`
-      : `${c.volumeRatio.toFixed(2)}x average — no unusual activity`,
+      ? `${c.volumeRatio.toFixed(2)}x avg (${formatVolume(c.todayVolume)} today vs ${formatVolume(c.avgVolume10d)} avg) with price up`
+      : `${c.volumeRatio.toFixed(2)}x avg (${formatVolume(c.todayVolume)} today vs ${formatVolume(c.avgVolume10d)} avg) — no spike`,
   });
 
+  // R/R bonus — quote the entry/target/stop levels behind the ratio.
   const rrHit = (c.rr ?? 0) >= 3.0;
+  const levels = `entry ${fmtMoney(c.entryPrice)} → target ${fmtMoney(c.targetPrice)} → stop ${fmtMoney(c.stopPrice)}`;
   out.push({
-    label: "R/R bonus",
+    label: "R/R bonus (≥3:1)",
     earned: rrHit ? 1 : 0,
     max: 1,
     detail: rrHit
-      ? `${(c.rr ?? 0).toFixed(2)}:1 — strong reward/risk`
-      : `${(c.rr ?? 0).toFixed(2)}:1 — meets minimum, below 3:1 ideal`,
+      ? `${(c.rr ?? 0).toFixed(2)}:1 ratio · ${levels}`
+      : `${(c.rr ?? 0).toFixed(2)}:1 ratio · ${levels} — meets 2:1 minimum, below 3:1 ideal`,
   });
 
   const squeezeHit = c.shortPercentFloat !== null && c.shortPercentFloat > 0.15;
@@ -1126,8 +1167,8 @@ function computeScoreBreakdown(c: SwingCandidate): ScoreComponent[] {
       c.shortPercentFloat === null
         ? "No short data"
         : squeezeHit
-          ? `${(c.shortPercentFloat * 100).toFixed(1)}% short float`
-          : `${(c.shortPercentFloat * 100).toFixed(1)}% short float — below 15% squeeze threshold`,
+          ? `${(c.shortPercentFloat * 100).toFixed(1)}% short float — squeeze possible if catalyst triggers`
+          : `${(c.shortPercentFloat * 100).toFixed(1)}% short float — below 15% threshold`,
   });
 
   const maPerfect = c.vsMA50 >= -0.02 && c.vsMA50 <= 0.02;

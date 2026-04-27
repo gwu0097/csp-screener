@@ -214,15 +214,21 @@ export async function getFinnhubPastEarningsDates(
 // Insider transactions for a single symbol from Finnhub's
 // /stock/insider-transactions endpoint. Returns the raw rows trimmed to
 // the requested window so the swing screener can classify them downstream.
+// Finnhub /stock/insider-transactions row shape (free tier — verified against
+// live API as of 2026-Q1). `share` is the insider's total holdings AFTER the
+// transaction, NOT the transaction direction. `change` is the signed delta
+// (positive = acquired shares, negative = disposed). The free tier does NOT
+// expose officer titles or roles — there is no `title`, `position`,
+// `officerTitle`, etc. field. Use `transactionCode` to distinguish open-
+// market purchases (P) from grants (A), option exercises (M), etc.
 export type FinnhubInsiderTx = {
   name: string;
-  share: number; // negative for sells, positive for buys
+  share: number;
   change: number;
   filingDate: string;
   transactionDate: string;
   transactionCode: string;
   transactionPrice: number;
-  position?: string | null;
 };
 
 export async function getFinnhubInsiderTransactions(

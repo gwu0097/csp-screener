@@ -50,7 +50,13 @@ const yf = yahooFinance as unknown as YFClient;
 
 export type InsiderTransaction = {
   name: string;
-  title: string;
+  // Finnhub free tier doesn't expose officer titles, so we surface the
+  // transaction code's human label instead — it tells the user whether
+  // an "acquisition" was a real open-market purchase (P) or just an RSU
+  // grant (A) / option exercise (M), which is what actually matters for
+  // signal quality.
+  action: string;
+  transactionCode: string;
   shares: number;
   price: number;
   date: string;
@@ -99,6 +105,7 @@ export type SwingCandidate = {
   callVolumeOiRatio: number | null;
   optionsSignal: "bullish" | "neutral" | "bearish";
   topOptionsStrike: number | null;
+  topOptionsExpiry: string | null;
 
   // Display
   tier1Signals: string[];
@@ -350,21 +357,23 @@ export async function pass1Filter(symbols: string[]): Promise<{
 
 // ---------- Pass 2 helpers ----------
 
-const KEY_TITLES = [
-  "ceo",
-  "cfo",
-  "president",
-  "coo",
-  "chairman",
-  "cto",
-  "chief executive",
-  "chief financial",
-];
+// SEC Form-4 transaction codes. Only the ones we actually surface — anything
+// else falls back to the raw code so the user knows we saw it.
+const TRANSACTION_CODE_LABELS: Record<string, string> = {
+  P: "Purchase",
+  S: "Sale",
+  A: "Grant",
+  M: "Option Exercise",
+  F: "Tax Withhold",
+  G: "Gift",
+  D: "Disposition",
+  X: "Option Expire",
+  C: "Conversion",
+};
 
-function isExecutive(title: string | null | undefined): boolean {
-  if (!title) return false;
-  const t = title.toLowerCase();
-  return KEY_TITLES.some((k) => t.includes(k));
+function transactionLabel(code: string): string {
+  if (!code) return "—";
+  return TRANSACTION_CODE_LABELS[code] ?? code;
 }
 
 function classifyInsiderTxs(rows: FinnhubInsiderTx[]): {
@@ -372,38 +381,48 @@ function classifyInsiderTxs(rows: FinnhubInsiderTx[]): {
   executiveBuys: InsiderTransaction[];
   signal: "strong_bullish" | "bullish" | "neutral" | "bearish";
 } {
+  // Direction comes from `change` (signed delta), not `share` (total post-tx
+  // holdings — always positive). `Math.abs(change)` is the actual transaction
+  // size in shares.
   const transactions: InsiderTransaction[] = rows.map((r) => {
-    const shares = Math.abs(r.share);
+    const shares = Math.abs(r.change);
     const price = r.transactionPrice;
-    const isBuy = r.share > 0;
+    const code = r.transactionCode ?? "";
     return {
       name: r.name ?? "",
-      title: r.position ?? "",
+      action: transactionLabel(code),
+      transactionCode: code,
       shares,
       price,
       date: r.transactionDate ?? r.filingDate ?? "",
-      type: isBuy ? "buy" : "sell",
+      type: r.change > 0 ? "buy" : "sell",
       dollarValue: shares * price,
     };
   });
+  // Real conviction signal = open-market PURCHASE (code P) where the insider
+  // spent personal money. Without a title field we can't filter to C-suite,
+  // but a $100K+ market purchase is itself the conviction proxy regardless of
+  // role — RSU grants (A) and option exercises (M) don't count.
   const executiveBuys = transactions.filter(
-    (t) => t.type === "buy" && isExecutive(t.title) && t.dollarValue > 100_000,
+    (t) => t.transactionCode === "P" && t.dollarValue > 100_000,
   );
+  // Sums use only real open-market buys/sells (P/S). Grants and exercises
+  // would otherwise drown out the conviction signal.
   let buyShares = 0;
   let sellShares = 0;
   let buyDollars = 0;
   for (const t of transactions) {
-    if (t.type === "buy") {
+    if (t.transactionCode === "P") {
       buyShares += t.shares;
       buyDollars += t.dollarValue;
-    } else {
+    } else if (t.transactionCode === "S") {
       sellShares += t.shares;
     }
   }
   let signal: "strong_bullish" | "bullish" | "neutral" | "bearish" = "neutral";
   if (executiveBuys.length > 0) signal = "strong_bullish";
   else if (buyShares > sellShares && buyDollars > 50_000) signal = "bullish";
-  else if (sellShares > buyShares * 2) signal = "bearish";
+  else if (sellShares > buyShares * 2 && sellShares > 0) signal = "bearish";
   return { transactions, executiveBuys, signal };
 }
 
@@ -411,6 +430,7 @@ type OptionsAnalysis = {
   unusualOptionsActivity: boolean;
   callVolumeOiRatio: number | null;
   topOptionsStrike: number | null;
+  topOptionsExpiry: string | null;
   signal: "bullish" | "neutral" | "bearish";
 };
 
@@ -423,14 +443,16 @@ function analyzeCallChain(
       unusualOptionsActivity: false,
       callVolumeOiRatio: null,
       topOptionsStrike: null,
+      topOptionsExpiry: null,
       signal: "neutral",
     };
   }
   let bestStrike: number | null = null;
+  let bestExpiry: string | null = null;
   let bestVolume = 0;
   let bestOi = 0;
   let totalCallVolume = 0;
-  for (const expEntry of Object.values(chain.callExpDateMap)) {
+  for (const [expDateKey, expEntry] of Object.entries(chain.callExpDateMap)) {
     for (const strikeStr of Object.keys(expEntry)) {
       const contracts = expEntry[strikeStr];
       const strike = Number(strikeStr);
@@ -443,6 +465,9 @@ function analyzeCallChain(
         bestVolume = vol;
         bestOi = oi;
         bestStrike = strike;
+        // Schwab's expDateKey looks like "2026-06-20:55" — strip the trailing
+        // `:N` (days-to-expiration) so the UI can render a clean date.
+        bestExpiry = c.expirationDate ?? expDateKey.split(":")[0] ?? null;
       }
     }
   }
@@ -453,6 +478,7 @@ function analyzeCallChain(
     unusualOptionsActivity: unusual,
     callVolumeOiRatio: ratio,
     topOptionsStrike: bestStrike,
+    topOptionsExpiry: bestExpiry,
     signal: unusual ? "bullish" : "neutral",
   };
 }
@@ -620,6 +646,7 @@ export async function pass2Enrich(
       callVolumeOiRatio: opts.callVolumeOiRatio,
       optionsSignal: opts.signal,
       topOptionsStrike: opts.topOptionsStrike,
+      topOptionsExpiry: opts.topOptionsExpiry,
       tier1Signals,
       tier2Signals,
       redFlags,
