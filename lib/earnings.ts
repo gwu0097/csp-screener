@@ -26,11 +26,6 @@ export async function finnhubGet<T>(path: string, params: Record<string, string 
   }
   url.searchParams.set("token", FINNHUB_KEY);
 
-  // Log the URL without the token so we can confirm the exact date range.
-  const safe = new URL(url.toString());
-  safe.searchParams.set("token", "***");
-  console.log(`[finnhub] GET ${safe.toString()}`);
-
   const res = await fetch(url.toString(), { cache: "no-store" });
   if (!res.ok) {
     const text = await res.text();
@@ -67,34 +62,12 @@ export async function getTodayEarnings(): Promise<EarningsCalendarItem[]> {
   const today = todayInEastern();
   const tomorrow = addOneDayIso(today);
 
-  console.log(`[earnings] window today=${today} tomorrow=${tomorrow}`);
-
   try {
     const data = await finnhubGet<{ earningsCalendar: FinnhubCalendarEntry[] }>("/calendar/earnings", {
       from: today,
       to: tomorrow,
     });
     const rows = data.earningsCalendar ?? [];
-
-    // Breakdown of the raw Finnhub payload by date and by timing so we can see
-    // exactly what the calendar returned before any filtering.
-    const byDate = new Map<string, number>();
-    const byTiming = { bmo: 0, amc: 0, dmh: 0, other: 0, missing: 0 };
-    for (const r of rows) {
-      byDate.set(r.date, (byDate.get(r.date) ?? 0) + 1);
-      const h = (r.hour ?? "").toLowerCase();
-      if (h === "bmo") byTiming.bmo += 1;
-      else if (h === "amc") byTiming.amc += 1;
-      else if (h === "dmh") byTiming.dmh += 1;
-      else if (!h) byTiming.missing += 1;
-      else byTiming.other += 1;
-    }
-    const dateBreakdown = Array.from(byDate.entries())
-      .map(([d, n]) => `${d}=${n}`)
-      .join(", ");
-    console.log(
-      `[earnings] raw rows=${rows.length} dates={${dateBreakdown}} timing=${JSON.stringify(byTiming)}`,
-    );
 
     const parsed: EarningsCalendarItem[] = [];
     for (const r of rows) {
@@ -111,19 +84,11 @@ export async function getTodayEarnings(): Promise<EarningsCalendarItem[]> {
       });
     }
 
-    const kept = parsed.filter(
+    return parsed.filter(
       (x) =>
         (x.date === today && x.timing === "AMC") ||
         (x.date === tomorrow && x.timing === "BMO"),
     );
-
-    console.log(
-      `[earnings] parsed=${parsed.length} kept=${kept.length} ` +
-        `(today=${today} AMC + tomorrow=${tomorrow} BMO) ` +
-        `symbols=${kept.map((k) => `${k.symbol}/${k.date}/${k.timing}`).join(",")}`,
-    );
-
-    return kept;
   } catch (e) {
     console.error("[earnings] getTodayEarnings failed:", e instanceof Error ? e.message : e);
     return [];
@@ -236,11 +201,6 @@ export async function getFinnhubPastEarningsDates(
       .filter((x): x is PastEarningsAnnouncement => x !== null)
       .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0))
       .slice(0, 8);
-    console.log(
-      `[finnhub] getFinnhubPastEarningsDates(${symbol}) window=${fromIso}→${toIso} ` +
-        `raw=${rows.length} matched=${matching.length} kept=${announcements.length}: ` +
-        announcements.map((a) => `${a.date}/${a.timing}`).join(", "),
-    );
     return announcements;
   } catch (e) {
     console.warn(
@@ -318,18 +278,10 @@ export async function getFinnhubNextEarningsDate(
       .filter((r) => typeof r.date === "string" && r.date >= todayIso)
       .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
     const next = matching[0];
-    if (!next) {
-      console.log(
-        `[finnhub] getFinnhubNextEarningsDate(${symbol}) window=${todayIso}→${toIso} raw=${rows.length} matched=0`,
-      );
-      return null;
-    }
+    if (!next) return null;
     const h = (next.hour ?? "").toLowerCase();
     const timing: NextEarningsAnnouncement["timing"] =
       h === "bmo" ? "BMO" : h === "amc" ? "AMC" : h === "dmh" ? "DMH" : "unknown";
-    console.log(
-      `[finnhub] getFinnhubNextEarningsDate(${symbol}) → ${next.date}/${timing}`,
-    );
     return { date: next.date, timing };
   } catch (e) {
     console.warn(
@@ -349,14 +301,10 @@ export async function getFinnhubEarningsPeriods(symbol: string): Promise<string[
     const rows = await finnhubGet<Array<{ period?: string }>>("/stock/earnings", {
       symbol: symbol.toUpperCase(),
     });
-    const periods = rows
+    return rows
       .map((r) => r.period)
       .filter((p): p is string => typeof p === "string" && /^\d{4}-\d{2}-\d{2}$/.test(p))
       .sort((a, b) => (a < b ? 1 : a > b ? -1 : 0));
-    console.log(
-      `[finnhub] getFinnhubEarningsPeriods(${symbol}) rows=${rows.length} kept=${periods.length}: ${periods.join(", ")}`,
-    );
-    return periods;
   } catch (e) {
     console.warn(
       `[finnhub] getFinnhubEarningsPeriods(${symbol}) failed:`,
@@ -375,25 +323,13 @@ export async function getEarningsSurpriseHistory(symbol: string): Promise<Earnin
     const recent = rows.slice(0, 8);
     let beatsInBand = 0;
     let counted = 0;
-    const perQuarter: string[] = [];
     for (const r of recent) {
-      if (r.actual === null || r.estimate === null || r.estimate === 0) {
-        perQuarter.push(`${r.period}:skip(${r.actual}/${r.estimate})`);
-        continue;
-      }
+      if (r.actual === null || r.estimate === null || r.estimate === 0) continue;
       counted += 1;
       const surprisePct = (r.actual - r.estimate) / Math.abs(r.estimate);
-      const inBand = surprisePct >= 0 && surprisePct <= 0.05;
-      if (inBand) beatsInBand += 1;
-      perQuarter.push(
-        `${r.period}:${(surprisePct * 100).toFixed(1)}%${inBand ? "✓" : ""}`,
-      );
+      if (surprisePct >= 0 && surprisePct <= 0.05) beatsInBand += 1;
     }
     const score = Math.min(4, Math.round((beatsInBand / Math.max(1, counted)) * 4));
-    console.log(
-      `[finnhub] getEarningsSurpriseHistory(${symbol}) raw=${rows.length} examined=${counted} ` +
-        `beatsInBand=${beatsInBand} score=${score}/4 — ${perQuarter.join(", ")}`,
-    );
     return { surpriseScore: score, beatsWithin5Pct: beatsInBand, quartersExamined: counted };
   } catch (e) {
     console.warn(
