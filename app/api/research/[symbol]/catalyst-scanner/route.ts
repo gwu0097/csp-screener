@@ -12,9 +12,12 @@ import { createServerClient } from "@/lib/supabase";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
+type CatalystHorizon = "near_term" | "medium_term" | "long_term";
+
 type CatalystEntry = {
   title: string;
   type: string;
+  horizon: CatalystHorizon;
   description: string;
   expected_date: string | null;
   impact_direction: "bullish" | "bearish" | "neutral";
@@ -37,13 +40,19 @@ function validSymbol(symbol: string): boolean {
 function buildPrompt(symbol: string, companyName: string): string {
   return `You are researching ${symbol} (${companyName}) for a swing/long-term investor.
 
-Find ALL specific upcoming catalysts in the next 6 months that could cause a significant price move (positive or negative).
+Find ALL specific catalysts in the next 1-3 years that could cause a significant price move (positive or negative). Capture near-term, medium-term, and long-term catalysts — do not restrict yourself to the next few months.
 
 For each catalyst be SPECIFIC:
 - What exactly is happening?
-- When exactly (date or quarter)?
+- When exactly (date, quarter, half, or year)?
 - What's the expected price impact?
 - How confident are you this will happen?
+- Which horizon does it fall in?
+
+Horizon classification:
+- "near_term": 0-3 months
+- "medium_term": 3-12 months
+- "long_term": 1-3 years
 
 Categories to look for:
 - Product launches or major releases
@@ -54,6 +63,7 @@ Categories to look for:
 - Index inclusion/exclusion
 - Activist investor activity
 - M&A or strategic review
+- China expansion / international rollouts
 - Macro events directly impacting this stock
 - Management changes or guidance updates
 
@@ -66,9 +76,10 @@ Return ONLY this JSON:
   "catalysts": [
     {
       "title": "short name",
-      "type": "product_launch|fda|contract|partnership|regulatory|management|macro|ma|other",
+      "type": "product_launch|fda|contract|partnership|regulatory|management|macro|ma|china_expansion|other",
+      "horizon": "near_term|medium_term|long_term",
       "description": "2-3 specific sentences",
-      "expected_date": "YYYY-MM-DD or 'Q2 2026' or 'H2 2026'",
+      "expected_date": "YYYY-MM-DD or 'Q2 2026' or 'H2 2026' or '2027'",
       "impact_direction": "bullish|bearish|neutral",
       "impact_magnitude": "high|medium|low",
       "confidence": "high|medium|low",
@@ -76,7 +87,7 @@ Return ONLY this JSON:
     }
   ],
   "overall_catalyst_score": "rich|moderate|sparse",
-  "summary": "1-2 sentence overview of catalyst landscape"
+  "summary": "1-2 sentence overview of catalyst landscape across all horizons"
 }`;
 }
 
@@ -107,10 +118,14 @@ function parseCatalysts(parsed: Record<string, unknown> | null): CatalystEntry[]
       asEnum(o.impact_magnitude, ["high", "medium", "low"] as const) ?? "low";
     const confidence =
       asEnum(o.confidence, ["high", "medium", "low"] as const) ?? "low";
+    const horizon =
+      asEnum(o.horizon, ["near_term", "medium_term", "long_term"] as const) ??
+      "medium_term";
     return [
       {
         title,
         type: asStr(o.type) ?? "other",
+        horizon,
         description,
         expected_date: asStr(o.expected_date),
         impact_direction: direction,
@@ -170,7 +185,7 @@ export async function POST(
     const [raw, earn] = await Promise.all([
       askPerplexityRaw(buildPrompt(symbol, companyName), {
         label: `research-catalyst:${symbol}`,
-        maxTokens: 1500,
+        maxTokens: 2000,
       }),
       getFinnhubNextEarningsDate(symbol),
     ]);

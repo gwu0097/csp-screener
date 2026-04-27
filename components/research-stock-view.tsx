@@ -95,9 +95,12 @@ type FundamentalHealth = {
   scoreLabel: string;
 };
 
+type CatalystHorizon = "near_term" | "medium_term" | "long_term";
+
 type CatalystEntry = {
   title: string;
   type: string;
+  horizon: CatalystHorizon;
   description: string;
   expected_date: string | null;
   impact_direction: "bullish" | "bearish" | "neutral";
@@ -949,9 +952,9 @@ function CatalystScannerCard({
       <div className="mt-3 space-y-3 text-xs">
         {!mod ? (
           <div className="rounded border border-dashed border-border bg-background/40 p-6 text-center text-muted-foreground">
-            Searches Perplexity for specific upcoming catalysts in the next 6
-            months. Excludes regular quarterly earnings (those are tracked
-            separately as risk events).
+            Searches Perplexity for specific catalysts across the next 1–3
+            years (near-term through long-term). Excludes regular quarterly
+            earnings (those are tracked separately as risk events).
           </div>
         ) : (
           <CatalystBody data={mod.output} />
@@ -961,7 +964,20 @@ function CatalystScannerCard({
   );
 }
 
+type HorizonFilter = "all" | CatalystHorizon;
+type DirectionFilter = "all" | "bullish" | "bearish";
+
 function CatalystBody({ data }: { data: CatalystScanner }) {
+  const [horizonFilter, setHorizonFilter] = useState<HorizonFilter>("all");
+  const [directionFilter, setDirectionFilter] = useState<DirectionFilter>("all");
+
+  const filtered = data.catalysts.filter((c) => {
+    if (horizonFilter !== "all" && c.horizon !== horizonFilter) return false;
+    if (directionFilter !== "all" && c.impact_direction !== directionFilter)
+      return false;
+    return true;
+  });
+
   return (
     <>
       {data.summary && (
@@ -969,15 +985,29 @@ function CatalystBody({ data }: { data: CatalystScanner }) {
       )}
       {data.catalysts.length === 0 ? (
         <div className="rounded border border-dashed border-border bg-background/40 p-4 text-muted-foreground">
-          No specific catalysts identified in next 6 months. Insider activity
-          and technical setup are the primary signals.
+          No specific catalysts identified across the next 1–3 years. Insider
+          activity and technical setup are the primary signals.
         </div>
       ) : (
-        <div className="space-y-2">
-          {data.catalysts.map((c, i) => (
-            <CatalystCard key={i} catalyst={c} />
-          ))}
-        </div>
+        <>
+          <CatalystFilters
+            horizon={horizonFilter}
+            direction={directionFilter}
+            onHorizonChange={setHorizonFilter}
+            onDirectionChange={setDirectionFilter}
+          />
+          {filtered.length === 0 ? (
+            <div className="rounded border border-dashed border-border bg-background/40 p-3 text-center text-muted-foreground">
+              No catalysts match the current filters.
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {filtered.map((c, i) => (
+                <CatalystCard key={i} catalyst={c} />
+              ))}
+            </div>
+          )}
+        </>
       )}
       {data.next_earnings && (
         <div className="rounded border border-amber-500/40 bg-amber-500/5 p-2 text-amber-200">
@@ -1009,6 +1039,18 @@ function impactPillClasses(direction: CatalystEntry["impact_direction"]): string
     return "border-rose-500/40 bg-rose-500/15 text-rose-300";
   return "border-zinc-500/40 bg-zinc-500/15 text-zinc-300";
 }
+function horizonPillClasses(h: CatalystHorizon): string {
+  if (h === "near_term")
+    return "border-blue-500/40 bg-blue-500/15 text-blue-300";
+  if (h === "medium_term")
+    return "border-teal-500/40 bg-teal-500/15 text-teal-300";
+  return "border-purple-500/40 bg-purple-500/15 text-purple-300";
+}
+function horizonLabel(h: CatalystHorizon): string {
+  if (h === "near_term") return "NEAR TERM (0–3M)";
+  if (h === "medium_term") return "MEDIUM TERM (3–12M)";
+  return "LONG TERM (1–3Y)";
+}
 function magnitudePillClasses(mag: CatalystEntry["impact_magnitude"]): string {
   if (mag === "high") return "border-purple-500/40 bg-purple-500/15 text-purple-300";
   if (mag === "medium") return "border-blue-500/40 bg-blue-500/15 text-blue-300";
@@ -1020,12 +1062,80 @@ function confidencePillClasses(conf: CatalystEntry["confidence"]): string {
   return "border-zinc-500/40 bg-zinc-500/15 text-zinc-400";
 }
 
+function CatalystFilters({
+  horizon,
+  direction,
+  onHorizonChange,
+  onDirectionChange,
+}: {
+  horizon: HorizonFilter;
+  direction: DirectionFilter;
+  onHorizonChange: (h: HorizonFilter) => void;
+  onDirectionChange: (d: DirectionFilter) => void;
+}) {
+  const horizonOpts: Array<{ value: HorizonFilter; label: string }> = [
+    { value: "all", label: "All" },
+    { value: "near_term", label: "Near Term" },
+    { value: "medium_term", label: "Medium Term" },
+    { value: "long_term", label: "Long Term" },
+  ];
+  return (
+    <div className="space-y-1.5">
+      <div className="flex flex-wrap gap-1.5">
+        {horizonOpts.map((o) => {
+          const active = horizon === o.value;
+          return (
+            <button
+              key={o.value}
+              type="button"
+              onClick={() => onHorizonChange(o.value)}
+              className={`rounded border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide transition-colors ${
+                active
+                  ? "border-foreground/60 bg-foreground/10 text-foreground"
+                  : "border-border bg-background/40 text-muted-foreground hover:bg-background/60"
+              }`}
+            >
+              {o.label}
+            </button>
+          );
+        })}
+      </div>
+      <div className="flex flex-wrap gap-1.5">
+        {(["bullish", "bearish"] as const).map((d) => {
+          const active = direction === d;
+          return (
+            <button
+              key={d}
+              type="button"
+              onClick={() => onDirectionChange(active ? "all" : d)}
+              className={`rounded border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide transition-colors ${
+                active
+                  ? d === "bullish"
+                    ? "border-emerald-500/60 bg-emerald-500/20 text-emerald-200"
+                    : "border-rose-500/60 bg-rose-500/20 text-rose-200"
+                  : "border-border bg-background/40 text-muted-foreground hover:bg-background/60"
+              }`}
+            >
+              {d}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function CatalystCard({ catalyst: c }: { catalyst: CatalystEntry }) {
   return (
     <div className="rounded border border-border bg-white/[0.02] p-2">
       <div className="mb-1 flex flex-wrap items-center gap-2">
         <Target className="h-3.5 w-3.5 text-emerald-300" />
         <span className="font-medium text-foreground">{c.title}</span>
+        <span
+          className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${horizonPillClasses(c.horizon)}`}
+        >
+          {horizonLabel(c.horizon)}
+        </span>
         <span
           className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase ${impactPillClasses(c.impact_direction)}`}
         >
