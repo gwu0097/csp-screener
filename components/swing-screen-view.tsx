@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   CalendarClock,
@@ -747,36 +747,51 @@ function CandidateRow({
   const [chartData, setChartData] = useState<ChartPoint[] | null>(null);
   const [chartLoading, setChartLoading] = useState(false);
   const [chartError, setChartError] = useState<string | null>(null);
+  // Tracks the symbol we've already kicked off a fetch for, so the effect
+  // doesn't re-trigger when chartLoading flips. Including chartLoading in
+  // the deps array dead-locked the effect: the cleanup fired on the
+  // re-render mid-fetch, every setState was gated behind !cancelled, and
+  // chartLoading was never reset to false → permanent skeleton.
+  const fetchedSymbolRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!expanded || chartData !== null || chartLoading) return;
+    if (!expanded) return;
+    if (fetchedSymbolRef.current === c.symbol) return;
+    fetchedSymbolRef.current = c.symbol;
+
     let cancelled = false;
     setChartLoading(true);
     setChartError(null);
+    setChartData(null);
     (async () => {
       try {
         const res = await fetch(
           `/api/swings/screen/chart?symbol=${encodeURIComponent(c.symbol)}`,
           { cache: "no-store" },
         );
-        const json = (await res.json()) as {
+        const json = (await res.json().catch(() => ({}))) as {
           data?: ChartPoint[];
           error?: string;
         };
-        if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+        if (!res.ok) {
+          throw new Error(json.error ?? `HTTP ${res.status}`);
+        }
         if (!cancelled) setChartData(json.data ?? []);
       } catch (e) {
-        if (!cancelled) {
-          setChartError(e instanceof Error ? e.message : "Chart load failed");
-        }
+        const msg = e instanceof Error ? e.message : "Chart load failed";
+        if (!cancelled) setChartError(msg);
+        // Allow a retry on next expand if the failure was transient.
+        fetchedSymbolRef.current = null;
       } finally {
-        if (!cancelled) setChartLoading(false);
+        // Always reset loading regardless of cancellation — leaving it
+        // true on cancel was the original deadlock.
+        setChartLoading(false);
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [expanded, c.symbol, chartData, chartLoading]);
+  }, [expanded, c.symbol]);
 
   const changeColor =
     !Number.isFinite(c.priceChange1d)
@@ -1718,6 +1733,19 @@ function PriceChart({
   loading: boolean;
   error: string | null;
 }) {
+  // Error first — even if `loading` is somehow stuck (deadlocked effect,
+  // network hang, etc.), the user gets an actionable message rather than
+  // staring at a permanent skeleton.
+  if (error) {
+    return (
+      <div
+        className="flex items-center justify-center rounded border border-rose-500/40 bg-rose-500/10 px-2 text-center text-[11px] text-rose-300"
+        style={{ height: 200 }}
+      >
+        Chart unavailable: {error}
+      </div>
+    );
+  }
   if (loading || data === null) {
     return (
       <div
@@ -1725,16 +1753,6 @@ function PriceChart({
         style={{ height: 200 }}
       >
         {loading ? "Loading 6-month history…" : "—"}
-      </div>
-    );
-  }
-  if (error) {
-    return (
-      <div
-        className="flex items-center justify-center rounded border border-rose-500/40 bg-rose-500/10 text-[11px] text-rose-300"
-        style={{ height: 200 }}
-      >
-        {error}
       </div>
     );
   }
