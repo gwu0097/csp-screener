@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   CalendarClock,
@@ -14,6 +14,44 @@ import {
   Zap,
 } from "lucide-react";
 import { ImportStockScreenshotModal } from "@/components/import-stock-screenshot-modal";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+
+// Hoverable text: dotted underline + cursor:help + tooltip with the
+// formula or the actual numbers behind a metric. Used everywhere a value
+// or label is non-obvious. NO icons — the dotted underline is the affordance.
+function Tipped({
+  children,
+  content,
+  side = "top",
+}: {
+  children: React.ReactNode;
+  content: React.ReactNode;
+  side?: "top" | "right" | "bottom" | "left";
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span
+          className="cursor-help"
+          style={{ borderBottom: "1px dotted rgba(255,255,255,0.4)" }}
+        >
+          {children}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent
+        side={side}
+        className="max-w-sm whitespace-pre-line text-xs leading-relaxed"
+      >
+        {content}
+      </TooltipContent>
+    </Tooltip>
+  );
+}
 
 // Mirror of lib/swing-screener.ts SwingCandidate. Kept in sync by hand —
 // the API serializes the engine type as JSON, and the component never
@@ -326,6 +364,7 @@ export function SwingScreenView() {
   }
 
   return (
+    <TooltipProvider delayDuration={200}>
     <div className="space-y-4">
       <ControlsBar
         data={data}
@@ -372,6 +411,7 @@ export function SwingScreenView() {
         }}
       />
     </div>
+    </TooltipProvider>
   );
 }
 
@@ -554,6 +594,13 @@ function TableHeader({
         onSort={onSort}
         align="right"
         className="hidden md:block"
+        tooltip={
+          "How far below the 52-week high.\n" +
+          "Formula: (Price − 52w High) / 52w High\n\n" +
+          "Best swing setups: −20% to −60%.\n" +
+          "Too little = no room to recover.\n" +
+          "Too much = may be fundamentally broken."
+        }
       />
       <SortHeader
         label="vs 50MA"
@@ -562,6 +609,13 @@ function TableHeader({
         onSort={onSort}
         align="right"
         className="hidden md:block"
+        tooltip={
+          "% difference from the 50-day moving average.\n" +
+          "Formula: (Price − 50d MA) / 50d MA\n\n" +
+          "Below 0% = price in downtrend.\n" +
+          "Above 0% = price in uptrend.\n" +
+          "Near 0% = potential momentum shift."
+        }
       />
       <SortHeader
         label="R/R"
@@ -570,6 +624,13 @@ function TableHeader({
         onSort={onSort}
         align="right"
         className="hidden md:block"
+        tooltip={
+          "Risk/Reward ratio.\n" +
+          "Formula: (Target − Entry) / (Entry − Stop)\n\n" +
+          "Minimum useful threshold: 2.0:1\n" +
+          "At 2:1 you need to be right 34% of the time to be profitable long-term.\n" +
+          "At 5:1 you only need to be right 17%."
+        }
       />
       <SortHeader
         label="Score"
@@ -577,6 +638,17 @@ function TableHeader({
         sort={sort}
         onSort={onSort}
         align="center"
+        tooltip={
+          "Setup score out of 10.\n\n" +
+          "+2 open-market insider purchase >$100K\n" +
+          "+2 earnings 14–45 days + stock >15% below target\n" +
+          "+1 unusual options activity (vol/OI >0.5x)\n" +
+          "+1 volume spike (>2× average, price up)\n" +
+          "+1 R/R ≥ 3.0:1\n" +
+          "+1 short float >15%\n" +
+          "+1 within 2% of 50d MA\n\n" +
+          "7–10 = strong · 4–6 = decent · <4 = marginal"
+        }
       />
       <SortHeader
         label="Signals"
@@ -597,6 +669,7 @@ function SortHeader({
   onSort,
   className = "",
   align = "left",
+  tooltip,
 }: {
   label: string;
   sortKey?: SortKey;
@@ -604,6 +677,7 @@ function SortHeader({
   onSort?: (k: SortKey) => void;
   className?: string;
   align?: "left" | "right" | "center";
+  tooltip?: React.ReactNode;
 }) {
   const justify =
     align === "right"
@@ -611,10 +685,13 @@ function SortHeader({
       : align === "center"
         ? "justify-center"
         : "justify-start";
+  // The label itself is the dotted-underline target when a tooltip is set
+  // — keeps the affordance on the text, not the surrounding button chrome.
+  const labelEl = tooltip ? <Tipped content={tooltip}>{label}</Tipped> : <span>{label}</span>;
   if (!sortKey || !sort || !onSort) {
     return (
       <div className={`flex items-center gap-1 ${justify} ${className}`}>
-        <span>{label}</span>
+        {labelEl}
       </div>
     );
   }
@@ -627,7 +704,7 @@ function SortHeader({
         isActive ? "text-foreground" : "hover:text-foreground"
       }`}
     >
-      <span>{label}</span>
+      {labelEl}
       {isActive && (
         <span className="text-[9px]">{sort.dir === "asc" ? "▲" : "▼"}</span>
       )}
@@ -815,6 +892,35 @@ function tier2Label(sig: string): string {
   return sig;
 }
 
+function tier2Tooltip(sig: string, c: SwingCandidate): string {
+  if (sig === "AT_SUPPORT") {
+    return (
+      `Price is within 5% above the 52-week low of ${fmtMoney(c.week52Low)}.\n\n` +
+      `Buyers historically step in at 52w lows.\n` +
+      `Risk is well-defined — stop goes just below this level.`
+    );
+  }
+  if (sig === "MA50_RECLAIM") {
+    return (
+      `Price has crossed back above the 50d MA (${fmtMoney(c.ma50)}) after a drawdown — a fresh trend reclaim.\n\n` +
+      `Currently ${fmtPct(c.vsMA50, 1)} from 50d MA, ${fmtPct(c.pctFromHigh, 0)} from 52w high.`
+    );
+  }
+  if (sig === "PULLBACK_TO_MA") {
+    return (
+      `Price is within ±2% of the 50d MA (${fmtMoney(c.ma50)}) — testing the trendline as support.\n\n` +
+      `Currently ${fmtPct(c.vsMA50, 1)} vs 50d MA, ${fmtPct(c.pctFromHigh, 0)} from 52w high.`
+    );
+  }
+  if (sig === "OVERSOLD_BOUNCE") {
+    return (
+      `Stock is >40% off its 52-week high (${fmtPct(c.pctFromHigh, 0)}) with elevated volume and price up today (+${c.priceChange1d.toFixed(2)}%).\n\n` +
+      `Volume ${c.volumeRatio.toFixed(2)}x 10-day average — capitulation/reversal signal.`
+    );
+  }
+  return sig;
+}
+
 function Line2({
   candidate: c,
   expanded,
@@ -825,7 +931,15 @@ function Line2({
   onToggle: () => void;
 }) {
   const tier1Text = c.tier1Signals.map(tier1Label).join(" · ");
-  const tier2Text = c.tier2Signals.map(tier2Label).join(" · ");
+  const tradeTooltip =
+    `Entry:  ${fmtMoney(c.entryPrice)} (current price)\n` +
+    `Target: ${fmtMoney(c.targetPrice)}\n` +
+    `  = lower of analyst mean (${fmtMoney(c.analystTarget)})\n` +
+    `    and 60% recovery to 52w high\n` +
+    `Stop:   ${fmtMoney(c.stopPrice)}\n` +
+    `  = 3% below 52w low (${fmtMoney(c.week52Low)})\n\n` +
+    `R/R = (${fmtMoney(c.targetPrice)} − ${fmtMoney(c.entryPrice)}) / ` +
+    `(${fmtMoney(c.entryPrice)} − ${fmtMoney(c.stopPrice)}) = ${(c.rr ?? 0).toFixed(2)}:1`;
   return (
     <div
       role="button"
@@ -848,17 +962,26 @@ function Line2({
       </span>
       <div className="min-w-0 flex-1 line-clamp-2">
         <span className="text-foreground/90">📡 {tier1Text || "No tier-1 signals"}</span>
-        {tier2Text && (
+        {c.tier2Signals.length > 0 && (
           <>
             <span className="px-1.5 text-muted-foreground/60">·</span>
-            <span>{tier2Text}</span>
+            {c.tier2Signals.map((sig, i) => (
+              <Fragment key={sig}>
+                {i > 0 && (
+                  <span className="px-1.5 text-muted-foreground/60">·</span>
+                )}
+                <Tipped content={tier2Tooltip(sig, c)}>
+                  {tier2Label(sig)}
+                </Tipped>
+              </Fragment>
+            ))}
           </>
         )}
         <span className="px-1.5 text-muted-foreground/60">|</span>
-        <span>
+        <Tipped content={tradeTooltip}>
           Entry {fmtMoney(c.entryPrice)} → Target {fmtMoney(c.targetPrice)} →
           Stop {fmtMoney(c.stopPrice)}
-        </span>
+        </Tipped>
         {c.redFlags.length > 0 && (
           <>
             <span className="px-1.5 text-muted-foreground/60">|</span>
@@ -943,15 +1066,17 @@ function ExpandedDetail({ candidate: c }: { candidate: SwingCandidate }) {
 
 function DetailSection({
   title,
+  titleTooltip,
   children,
 }: {
   title: string;
+  titleTooltip?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
     <div className="rounded border border-border/50 bg-white/[0.02] p-2">
       <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-        {title}
+        {titleTooltip ? <Tipped content={titleTooltip}>{title}</Tipped> : title}
       </div>
       <div className="space-y-0.5">{children}</div>
     </div>
@@ -962,10 +1087,12 @@ function DetailRow({
   label,
   value,
   tone,
+  valueTooltip,
 }: {
   label: string;
   value: string;
   tone?: "good" | "warn" | "bad";
+  valueTooltip?: React.ReactNode;
 }) {
   const cls =
     tone === "good"
@@ -975,10 +1102,15 @@ function DetailRow({
         : tone === "bad"
           ? "text-rose-300"
           : "text-foreground";
+  const valueEl = valueTooltip ? (
+    <Tipped content={valueTooltip}>{value}</Tipped>
+  ) : (
+    value
+  );
   return (
     <div className="flex items-center justify-between gap-2">
       <span className="text-muted-foreground">{label}</span>
-      <span className={`font-mono ${cls}`}>{value}</span>
+      <span className={`font-mono ${cls}`}>{valueEl}</span>
     </div>
   );
 }
@@ -1006,8 +1138,27 @@ function InsiderSection({ candidate: c }: { candidate: SwingCandidate }) {
       : c.insiderSignal === "bearish"
         ? "bad"
         : undefined;
+  const sectionTooltip =
+    "Open-market stock purchases reported to the SEC via Form 4 filings " +
+    "(required within 2 business days of transaction).\n\n" +
+    "Only counts transaction code P (open-market purchase) — excludes RSU " +
+    "grants, option exercises, and gifts, which are compensation not " +
+    "conviction.\n\n" +
+    "Signal: someone spent personal cash buying their own company's stock.\n" +
+    "Data: Finnhub (SEC EDGAR)";
+  const dollarHeaderTooltip =
+    "Shares × transaction price = personal dollars committed. Large amounts " +
+    "signal high personal conviction — this is real money, not compensation.";
+  const netTooltip =
+    "Net = total open-market buy dollars minus total open-market sell dollars " +
+    "across all insiders in the last 45 days.\n\n" +
+    "Multiple insiders buying simultaneously is a stronger signal than one " +
+    "person buying.";
   return (
-    <DetailSection title="Insider activity (last 45 days)">
+    <DetailSection
+      title="Insider activity (last 45 days)"
+      titleTooltip={sectionTooltip}
+    >
       {c.insiderTransactions.length === 0 ? (
         <div className="text-muted-foreground">No insider transactions reported.</div>
       ) : (
@@ -1019,7 +1170,9 @@ function InsiderSection({ candidate: c }: { candidate: SwingCandidate }) {
                   <th className="px-1.5 py-1 text-left font-medium">Name</th>
                   <th className="px-1.5 py-1 text-left font-medium">Action</th>
                   <th className="px-1.5 py-1 text-right font-medium">Shares</th>
-                  <th className="px-1.5 py-1 text-right font-medium">$ Value</th>
+                  <th className="px-1.5 py-1 text-right font-medium">
+                    <Tipped content={dollarHeaderTooltip}>$ Value</Tipped>
+                  </th>
                   <th className="px-1.5 py-1 text-right font-medium">Date</th>
                 </tr>
               </thead>
@@ -1046,6 +1199,7 @@ function InsiderSection({ candidate: c }: { candidate: SwingCandidate }) {
             label="Net (open market)"
             value={`${c.insiderSignal.replace("_", " ").toUpperCase()} · ${buyShares.toLocaleString()} sh purchased · $${(netDollars / 1_000_000).toFixed(2)}M net`}
             tone={tone}
+            valueTooltip={netTooltip}
           />
         </>
       )}
@@ -1060,18 +1214,54 @@ function insiderActionTone(code: string): string {
 }
 
 function OptionsSection({ candidate: c }: { candidate: SwingCandidate }) {
+  const sectionTooltip =
+    "Unusual call options activity from Schwab real-time options chain.\n\n" +
+    "Detects when today's trading volume on a specific call strike is " +
+    "unusually large relative to existing open positions — suggesting " +
+    "someone is opening a large new directional bet.";
+  const ratioTooltip = (() => {
+    if (c.callVolumeOiRatio === null) return "No call chain data returned.";
+    return (
+      `Volume / Open Interest ratio.\n\n` +
+      `Volume = contracts traded TODAY\n` +
+      `Open Interest = all existing open contracts\n\n` +
+      `${c.symbol} $${c.topOptionsStrike} strike:\n` +
+      `Ratio: ${c.callVolumeOiRatio.toFixed(2)}x\n\n` +
+      `>0.5x = unusual\n>1.0x = very unusual\n>2.0x = highly unusual\n\n` +
+      `A ratio above 1.0 means more contracts traded today than existed ` +
+      `yesterday — new money entering the position.`
+    );
+  })();
+  const strikeTooltip = (() => {
+    if (c.topOptionsStrike === null) return "No top-strike data.";
+    const isOTM = c.topOptionsStrike > c.currentPrice;
+    return (
+      `The call strike with highest volume today.\n\n` +
+      `$${c.topOptionsStrike.toFixed(0)} is ${isOTM ? "OTM (above" : "ITM/ATM (at or below"} ` +
+      `current price of $${c.currentPrice.toFixed(2)})${
+        isOTM
+          ? ` — a speculative bet that price will exceed $${c.topOptionsStrike.toFixed(0)} by expiry.`
+          : "."
+      }\n\n` +
+      `Investors rarely buy OTM calls in size unless expecting a significant ` +
+      `move. The strike level tells you where informed money thinks price ` +
+      `is going.`
+    );
+  })();
   return (
-    <DetailSection title="Options flow">
+    <DetailSection title="Options flow" titleTooltip={sectionTooltip}>
       {c.unusualOptionsActivity ? (
         <>
           <DetailRow label="Signal" value="BULLISH (unusual call activity)" tone="good" />
           <DetailRow
             label="Top strike"
             value={c.topOptionsStrike !== null ? `$${c.topOptionsStrike.toFixed(0)} (OTM)` : "—"}
+            valueTooltip={strikeTooltip}
           />
           <DetailRow
             label="Vol / OI ratio"
             value={c.callVolumeOiRatio !== null ? `${c.callVolumeOiRatio.toFixed(2)}x` : "—"}
+            valueTooltip={ratioTooltip}
           />
         </>
       ) : c.callVolumeOiRatio !== null ? (
@@ -1080,10 +1270,12 @@ function OptionsSection({ candidate: c }: { candidate: SwingCandidate }) {
           <DetailRow
             label="Top strike"
             value={c.topOptionsStrike !== null ? `$${c.topOptionsStrike.toFixed(0)}` : "—"}
+            valueTooltip={strikeTooltip}
           />
           <DetailRow
             label="Vol / OI ratio"
             value={`${c.callVolumeOiRatio.toFixed(2)}x (below 0.5x threshold)`}
+            valueTooltip={ratioTooltip}
           />
         </>
       ) : (
@@ -1112,6 +1304,35 @@ function EarningsAndShortSection({ candidate: c }: { candidate: SwingCandidate }
         : c.shortPercentFloat > 0.15
           ? "warn"
           : undefined;
+  const earningsTooltip =
+    c.nextEarningsDate === null
+      ? "No upcoming earnings date in next 120 days. Source: Finnhub earnings calendar."
+      : `Source: Finnhub earnings calendar.\n\n${c.daysToEarnings} days away.\n\n` +
+        `Screener targets 14–45 days — close enough to be a near-term ` +
+        `catalyst, far enough to enter before the crowd.\n\n` +
+        `<7 days = too close (disqualified)\n` +
+        `7–14 days = risky (earnings imminent)\n` +
+        `14–45 days = ideal window ✅\n` +
+        `>45 days = catalyst too far out`;
+  const shortTooltip =
+    c.shortPercentFloat === null
+      ? "No short interest data."
+      : `% of available shares currently sold short. Source: Yahoo Finance.\n\n` +
+        `${(c.shortPercentFloat * 100).toFixed(1)}% of ${c.symbol} float is short.\n\n` +
+        `High short + positive catalyst = squeeze: shorts must buy to cover, ` +
+        `accelerating moves.\n\n` +
+        `<10% = low short interest\n` +
+        `10–15% = moderate\n` +
+        `>15% = elevated (squeeze possible)\n` +
+        `>25% = high squeeze potential`;
+  const revenueTooltip =
+    c.revenueGrowth === null
+      ? ""
+      : c.revenueGrowth > 0
+        ? `Revenue growing ${(c.revenueGrowth * 100).toFixed(1)}% YoY. ` +
+          `Fundamental business momentum intact.`
+        : `Revenue declining ${(Math.abs(c.revenueGrowth) * 100).toFixed(1)}% YoY. ` +
+          `Screener allows up to −20% before disqualifying. Monitor closely.`;
   return (
     <DetailSection title="Earnings & short interest">
       <DetailRow
@@ -1122,6 +1343,7 @@ function EarningsAndShortSection({ candidate: c }: { candidate: SwingCandidate }
             : "—"
         }
         tone={earningsTone}
+        valueTooltip={earningsTooltip}
       />
       <DetailRow
         label="Short float"
@@ -1131,12 +1353,14 @@ function EarningsAndShortSection({ candidate: c }: { candidate: SwingCandidate }
             : "—"
         }
         tone={shortTone}
+        valueTooltip={shortTooltip}
       />
       {c.revenueGrowth !== null && (
         <DetailRow
           label="Revenue growth (YoY)"
           value={fmtPct(c.revenueGrowth, 1)}
           tone={c.revenueGrowth > 0.15 ? "good" : c.revenueGrowth >= 0.05 ? "warn" : "bad"}
+          valueTooltip={revenueTooltip}
         />
       )}
       <DetailRow
@@ -1155,15 +1379,13 @@ type ScoreComponent = {
   earned: number;
   max: number;
   detail: string;
+  tooltip: string;
 };
 
 function computeScoreBreakdown(c: SwingCandidate): ScoreComponent[] {
   const out: ScoreComponent[] = [];
 
-  // Insider buying — engine considers only open-market purchases (code P)
-  // for the bullish signal, so the detail line cites a real purchase when
-  // available. Falls back to a count of P transactions when the named
-  // top-buy is missing (e.g. cached payload).
+  // ---- Insider ----
   if (c.insiderSignal === "strong_bullish") {
     const top = c.executiveBuys?.[0] ?? null;
     out.push({
@@ -1173,6 +1395,14 @@ function computeScoreBreakdown(c: SwingCandidate): ScoreComponent[] {
       detail: top
         ? `${top.name || "Insider"} purchased $${(top.dollarValue / 1_000_000).toFixed(2)}M on ${top.date}`
         : "Open-market purchase >$100K detected",
+      tooltip: top
+        ? `${top.name} made an open-market purchase:\n` +
+          `${top.shares.toLocaleString()} shares\n` +
+          `@ $${top.price.toFixed(2)} = $${(top.dollarValue / 1_000_000).toFixed(2)}M\n` +
+          `on ${top.date}\n\n` +
+          `Code P = open-market purchase with personal funds (not compensation).\n` +
+          `>$100K threshold confirms conviction.`
+        : "Open-market purchase >$100K detected.",
     });
   } else if (c.insiderSignal === "bullish") {
     out.push({
@@ -1180,6 +1410,10 @@ function computeScoreBreakdown(c: SwingCandidate): ScoreComponent[] {
       earned: 1,
       max: 2,
       detail: "Net open-market buyers — no $100K+ executive-tier purchase",
+      tooltip:
+        "Multiple insiders made open-market purchases on net, but none crossed " +
+        "the $100K conviction threshold.\n\n" +
+        "Half-credit signal — net buying is positive but no single high-conviction trade.",
     });
   } else {
     out.push({
@@ -1190,11 +1424,13 @@ function computeScoreBreakdown(c: SwingCandidate): ScoreComponent[] {
         c.insiderSignal === "bearish"
           ? "Insiders net selling on the open market"
           : "No open-market buying — only grants / option exercises",
+      tooltip:
+        "No open-market purchases >$100K detected in last 45 days.\n\n" +
+        "RSU grants and option exercises excluded — those are compensation, not conviction.",
     });
   }
 
-  // Earnings catalyst — quote the % below analyst target so the user sees
-  // why this earnings is interesting (or isn't).
+  // ---- Earnings ----
   const earningsHit =
     c.daysToEarnings !== null && c.daysToEarnings >= 14 && c.daysToEarnings <= 45;
   const upsidePct =
@@ -1215,9 +1451,21 @@ function computeScoreBreakdown(c: SwingCandidate): ScoreComponent[] {
         : earningsHit
           ? `${c.daysToEarnings} days to earnings (${fmtCalendarDate(c.nextEarningsDate)}) · ${upsideText}`
           : `Earnings ${c.daysToEarnings} days away — outside 14-45 day window`,
+    tooltip: earningsHit
+      ? `Earnings in ${c.daysToEarnings} days (${fmtCalendarDate(c.nextEarningsDate)}).\n` +
+        `Analyst target: ${fmtMoney(c.analystTarget)}\n` +
+        `Current price: ${fmtMoney(c.currentPrice)}\n` +
+        `Gap to target: ${upsideText}\n\n` +
+        `Stock is in the 14-45 day window with analyst upside — catalyst for ` +
+        `repricing if they beat.`
+      : c.daysToEarnings === null
+        ? "No earnings date found in next 120 days."
+        : c.daysToEarnings < 14
+          ? `Earnings in ${c.daysToEarnings} days — too close (>14 days required).`
+          : `Earnings in ${c.daysToEarnings} days — too far out (<45 days required).`,
   });
 
-  // Options — include expiry so user can see which contract.
+  // ---- Unusual options ----
   out.push({
     label: "Unusual call activity",
     earned: c.unusualOptionsActivity ? 1 : 0,
@@ -1229,10 +1477,15 @@ function computeScoreBreakdown(c: SwingCandidate): ScoreComponent[] {
       : c.callVolumeOiRatio !== null
         ? `${c.callVolumeOiRatio.toFixed(2)}x vol/OI on top strike — below 0.5x threshold`
         : "No options data (Schwab disconnected or no listed options)",
+    tooltip: c.unusualOptionsActivity
+      ? `Vol/OI ${(c.callVolumeOiRatio ?? 0).toFixed(2)}x on $${c.topOptionsStrike} strike (OTM` +
+        `${c.topOptionsExpiry ? `, exp ${fmtCalendarDate(c.topOptionsExpiry)}` : ""}).\n` +
+        `Threshold: >0.5x = unusual activity.\n` +
+        `${(c.callVolumeOiRatio ?? 0).toFixed(2)}x detected ✅`
+      : "No call strike with vol/OI >0.5x found. Either options activity is normal today or Schwab returned no chain data.",
   });
 
-  // Volume — show today's vs 10d average in raw shares so the magnitude
-  // reads true.
+  // ---- Volume ----
   const volHit = c.volumeRatio > 2.0 && c.priceChange1d > 0;
   out.push({
     label: "Volume spike",
@@ -1241,11 +1494,23 @@ function computeScoreBreakdown(c: SwingCandidate): ScoreComponent[] {
     detail: volHit
       ? `${c.volumeRatio.toFixed(2)}x avg (${formatVolume(c.todayVolume)} today vs ${formatVolume(c.avgVolume10d)} avg) with price up`
       : `${c.volumeRatio.toFixed(2)}x avg (${formatVolume(c.todayVolume)} today vs ${formatVolume(c.avgVolume10d)} avg) — no spike`,
+    tooltip:
+      `Today's volume: ${c.todayVolume.toLocaleString()}\n` +
+      `10-day avg vol: ${c.avgVolume10d.toLocaleString()}\n` +
+      `Ratio: ${c.volumeRatio.toFixed(2)}x average\n\n` +
+      `Threshold: >2.0x average AND price up today.\n\n` +
+      (volHit
+        ? "✅ Volume spike with positive price = accumulation signal"
+        : c.volumeRatio >= 2
+          ? "✗ High volume but price down = distribution, not accumulation"
+          : "✗ Normal volume — no unusual activity"),
   });
 
-  // R/R bonus — quote the entry/target/stop levels behind the ratio.
+  // ---- R/R bonus ----
   const rrHit = (c.rr ?? 0) >= 3.0;
   const levels = `entry ${fmtMoney(c.entryPrice)} → target ${fmtMoney(c.targetPrice)} → stop ${fmtMoney(c.stopPrice)}`;
+  const rewardPct = c.entryPrice > 0 ? ((c.targetPrice - c.entryPrice) / c.entryPrice) * 100 : 0;
+  const riskPct = c.entryPrice > 0 ? ((c.entryPrice - c.stopPrice) / c.entryPrice) * 100 : 0;
   out.push({
     label: "R/R bonus (≥3:1)",
     earned: rrHit ? 1 : 0,
@@ -1253,9 +1518,19 @@ function computeScoreBreakdown(c: SwingCandidate): ScoreComponent[] {
     detail: rrHit
       ? `${(c.rr ?? 0).toFixed(2)}:1 ratio · ${levels}`
       : `${(c.rr ?? 0).toFixed(2)}:1 ratio · ${levels} — meets 2:1 minimum, below 3:1 ideal`,
+    tooltip:
+      `Entry:  ${fmtMoney(c.entryPrice)}\n` +
+      `Target: ${fmtMoney(c.targetPrice)} (+${rewardPct.toFixed(1)}%)\n` +
+      `Stop:   ${fmtMoney(c.stopPrice)}  (−${riskPct.toFixed(1)}%)\n` +
+      `R/R = ${(c.rr ?? 0).toFixed(2)}:1\n\n` +
+      `Threshold for point: ≥3.0:1\n` +
+      (rrHit ? "✅ Qualifies" : "✗ Below 3.0 — still a valid setup at 2:1+"),
   });
 
+  // ---- Short squeeze ----
   const squeezeHit = c.shortPercentFloat !== null && c.shortPercentFloat > 0.15;
+  const shortPct =
+    c.shortPercentFloat !== null ? (c.shortPercentFloat * 100).toFixed(1) : null;
   out.push({
     label: "Short squeeze potential",
     earned: squeezeHit ? 1 : 0,
@@ -1264,10 +1539,19 @@ function computeScoreBreakdown(c: SwingCandidate): ScoreComponent[] {
       c.shortPercentFloat === null
         ? "No short data"
         : squeezeHit
-          ? `${(c.shortPercentFloat * 100).toFixed(1)}% short float — squeeze possible if catalyst triggers`
-          : `${(c.shortPercentFloat * 100).toFixed(1)}% short float — below 15% threshold`,
+          ? `${shortPct}% short float — squeeze possible if catalyst triggers`
+          : `${shortPct}% short float — below 15% threshold`,
+    tooltip:
+      shortPct === null
+        ? "No short interest data."
+        : `${shortPct}% short float.\n` +
+          `Threshold for point: >15%\n\n` +
+          (squeezeHit
+            ? "✅ Elevated short interest — squeeze possible if catalyst triggers"
+            : "✗ Below 15% threshold"),
   });
 
+  // ---- 50d MA setup ----
   const maPerfect = c.vsMA50 >= -0.02 && c.vsMA50 <= 0.02;
   out.push({
     label: "Perfect MA setup",
@@ -1276,6 +1560,14 @@ function computeScoreBreakdown(c: SwingCandidate): ScoreComponent[] {
     detail: maPerfect
       ? `Within ±2% of 50d MA (${fmtPct(c.vsMA50, 1)})`
       : `${fmtPct(c.vsMA50, 1)} from 50d MA — outside ±2% sweet spot`,
+    tooltip:
+      `Price: ${fmtMoney(c.currentPrice)}\n` +
+      `50d MA: ${fmtMoney(c.ma50)}\n` +
+      `vs MA: ${fmtPct(c.vsMA50, 1)}\n\n` +
+      `Threshold: within ±2% of 50d MA\n\n` +
+      (maPerfect
+        ? "✅ At the MA — key decision point"
+        : "✗ Not at MA level"),
   });
 
   return out;
@@ -1313,7 +1605,9 @@ function ScoreBreakdown({ candidate: c }: { candidate: SwingCandidate }) {
                 <div className="flex items-center gap-2">
                   <span className="text-foreground/90">{comp.label}</span>
                   <span className={`font-mono ${cls}`}>
-                    {comp.earned}/{comp.max}
+                    <Tipped content={comp.tooltip}>
+                      {comp.earned}/{comp.max}
+                    </Tipped>
                   </span>
                 </div>
                 <div className="text-[10px] text-muted-foreground">
