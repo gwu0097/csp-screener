@@ -16,7 +16,11 @@ import { runEncyclopediaMaintenance } from "@/lib/encyclopedia";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
-export const maxDuration = 60;
+// Stage 3-4 analysis pulls Schwab options chains for every candidate +
+// Perplexity earnings news per symbol + market context + per-position
+// snapshots. Heavy users with many open positions easily exceed 60s on
+// cold runs. Pro-plan ceiling.
+export const maxDuration = 300;
 
 type Body = {
   candidates?: unknown;

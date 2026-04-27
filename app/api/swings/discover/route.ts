@@ -4,9 +4,10 @@ import { createServerClient } from "@/lib/supabase";
 import { getQuoteEnrichment } from "@/lib/yahoo";
 
 export const dynamic = "force-dynamic";
-// Three Perplexity calls + Yahoo enrichment typically lands around 15-25s.
-// Vercel's default Hobby limit is 10s, so we need to raise it explicitly.
-export const maxDuration = 60;
+// Three Perplexity calls in parallel + Yahoo enrichment per returned
+// symbol. Typical run is 15-25s but bursty Perplexity latency or a
+// long candidate list can push past 60s. Pro-plan ceiling.
+export const maxDuration = 300;
 
 // ------------------------------------------------------------
 // Prompts — three passes targeting different flavors of setup.

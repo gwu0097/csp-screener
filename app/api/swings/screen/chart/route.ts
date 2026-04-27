@@ -2,8 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { getHistoricalPrices } from "@/lib/yahoo";
 
 export const dynamic = "force-dynamic";
-// Yahoo historical for 6 months runs ~1-2s per symbol — well under the
-// 60s default. Lazy-fetched per row only when the user expands it.
+// Yahoo historical for 6 months runs ~1-2s per symbol — well under
+// the 60s ceiling we set for safety on slow-Yahoo days.
+export const maxDuration = 60;
 
 export type ChartPoint = {
   date: string; // YYYY-MM-DD

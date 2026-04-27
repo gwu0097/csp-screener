@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { exchangeCodeForTokens } from "@/lib/schwab";
 
 export const dynamic = "force-dynamic";
+// Single Schwab token-exchange round-trip — fast, but bump above the
+// hobby-default safety net just in case Schwab's auth host stalls.
+export const maxDuration = 30;
 
 export async function GET(req: NextRequest) {
   const params = Object.fromEntries(req.nextUrl.searchParams.entries());

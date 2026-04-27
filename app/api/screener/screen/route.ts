@@ -17,6 +17,10 @@ import {
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
+// Stages 1-2 screener: Finnhub earnings calendar + Schwab connection
+// check + batch Yahoo prices + per-symbol classification across the
+// watchlist. Easily exceeds 60s on a fresh watchlist. Pro-plan ceiling.
+export const maxDuration = 300;
 
 const MAX_RESULTS = 20;
 const YAHOO_FALLBACK_BUDGET = 10;

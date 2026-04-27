@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { saveManualTokens } from "@/lib/schwab";
 
 export const dynamic = "force-dynamic";
+// Persists tokens to Supabase. No outbound API call but kept on a 30s
+// safety net so a slow DB doesn't time out at 10s on the Hobby plan.
+export const maxDuration = 30;
 
 type Body = { access_token?: unknown; refresh_token?: unknown };
 

@@ -7,9 +7,13 @@ import {
 } from "@/lib/swing-screener";
 
 export const dynamic = "force-dynamic";
-// Pass 2 = Finnhub insider + earnings + Schwab options on Pass 1's
-// survivors. With concurrency=5 and ~30-50 survivors, total enrichment
-// runs 25-45s — comfortably under the 60s default.
+// Pass 2 = Finnhub insider + earnings + Schwab options across all of
+// Pass 1's survivors, then Pass 3 = Perplexity catalyst discovery in
+// batches of 3. With ~30-50 survivors and a 200ms anti-burst gap on
+// Finnhub, the whole route can run 60-180s — way past the default
+// ceiling. Sit at the Pro-plan 300s budget the predecessor
+// /swings/screen used before the split.
+export const maxDuration = 300;
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   const started = Date.now();

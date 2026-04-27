@@ -20,7 +20,10 @@ import { runAutoExpire, type AutoExpireReport } from "@/lib/expire-positions";
 import { buildSnapshotRow, shouldWriteSnapshot } from "@/lib/snapshots";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 60;
+// Loops over every open position to pull a Schwab options chain + Yahoo
+// quote + earnings snapshot — heavy users can have dozens of legs.
+// Pro-plan ceiling so the daily refresh doesn't truncate mid-list.
+export const maxDuration = 300;
 
 type PostEarningsRecView = {
   recommendation: "CLOSE" | "HOLD" | "PARTIAL" | "MONITOR";

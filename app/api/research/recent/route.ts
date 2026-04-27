@@ -3,6 +3,10 @@ import YahooFinance from "yahoo-finance2";
 import { createServerClient } from "@/lib/supabase";
 
 export const dynamic = "force-dynamic";
+// Yahoo batch quote across every researched symbol + two Supabase
+// fetches. Single round-trip for quotes, but a slow day or a user
+// with 100+ stocks can crawl. 60s is plenty.
+export const maxDuration = 60;
 
 const yahooFinance = new (
   YahooFinance as unknown as new () => Record<string, unknown>
