@@ -130,6 +130,73 @@ export type AnnualMetrics = {
   debt: number | null;
 };
 
+// Extra annual concepts the DCF needs — D&A, capex, operating cash flow,
+// working-capital components. We keep this in a separate extract so the
+// fundamental-health module's lighter pull doesn't drag in extra rows.
+export type DCFAnnualExtras = {
+  year: number;
+  da: number | null;
+  capex: number | null;
+  ocf: number | null;
+  ar: number | null;
+  inventory: number | null;
+};
+
+export function extractDCFExtras(
+  facts: CompanyFacts | null,
+  years = 5,
+): DCFAnnualExtras[] {
+  if (!facts) return [];
+  const da = latestAnnualByYear(
+    facts,
+    [
+      "DepreciationDepletionAndAmortization",
+      "DepreciationAndAmortization",
+      "Depreciation",
+    ],
+    "USD",
+  );
+  // Capex is reported as a negative cash flow on the statement of cash
+  // flows; we flip sign so downstream math treats it as a positive
+  // outflow magnitude.
+  const capex = latestAnnualByYear(
+    facts,
+    [
+      "PaymentsToAcquirePropertyPlantAndEquipment",
+      "PaymentsToAcquireProductiveAssets",
+    ],
+    "USD",
+  );
+  const ocf = latestAnnualByYear(
+    facts,
+    ["NetCashProvidedByUsedInOperatingActivities"],
+    "USD",
+  );
+  const ar = latestAnnualByYear(
+    facts,
+    ["AccountsReceivableNetCurrent"],
+    "USD",
+  );
+  const inventory = latestAnnualByYear(facts, ["InventoryNet"], "USD");
+
+  const allYears = new Set<number>();
+  for (const m of [da, capex, ocf, ar, inventory]) {
+    for (const y of Array.from(m.keys())) allYears.add(y);
+  }
+  const sorted = Array.from(allYears).sort((a, b) => b - a).slice(0, years);
+  sorted.sort((a, b) => a - b);
+
+  return sorted.map((year) => ({
+    year,
+    da: da.get(year)?.val ?? null,
+    capex:
+      capex.get(year)?.val !== undefined ? Math.abs(capex.get(year)!.val!) : null,
+    ocf: ocf.get(year)?.val ?? null,
+    ar: ar.get(year)?.val ?? null,
+    inventory: inventory.get(year)?.val ?? null,
+  }));
+}
+
 export function extractAnnualMetrics(
   facts: CompanyFacts | null,
   years = 5,

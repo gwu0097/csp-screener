@@ -1,109 +1,42 @@
 "use client";
 
-// Phase 2 — Valuation tab. Editable bear/base/bull scenarios with live
-// recomputation, debounced PATCH auto-save, version history dropdown,
-// sensitivity grid, and weighted-target summary card.
+// Valuation tab orchestrator. Owns the version list and the active
+// version's user inputs; dispatches to Tier 1 / Tier 2 / Comps
+// subviews; debounces PATCH on every edit (2s).
+//
+// Version history shows both tier targets per saved row. Selecting an
+// older version puts the UI in read-only mode — only the latest row is
+// editable.
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Loader2, Pencil, RefreshCw } from "lucide-react";
 import {
-  computeAllOutputs,
-  type HistoricalRow,
+  isV2,
+  type DCFScenarioInputs,
+  type DCFScenarioSet,
   type ScenarioInputs,
   type ScenarioKey,
   type ScenarioSet,
-  type ValuationModelOutput,
+  type ValuationModelV2,
 } from "@/lib/valuation";
+import { ValuationTier1 } from "@/components/valuation-tier1";
+import { ValuationTier2 } from "@/components/valuation-tier2";
+import { ValuationComps } from "@/components/valuation-comps";
+import { fmtDate, fmtRoundPrice } from "@/components/valuation-format";
 
 type Version = {
   id: string;
   symbol: string;
   moduleType: string;
-  output: ValuationModelOutput;
+  output: ValuationModelV2 | Record<string, unknown>;
   runAt: string;
   expiresAt: string | null;
   isExpired: boolean;
   isCustomized: boolean;
 };
 
-const SCENARIO_LABEL: Record<ScenarioKey, string> = {
-  bear: "BEAR",
-  base: "BASE",
-  bull: "BULL",
-};
-
-const SCENARIO_PILL: Record<ScenarioKey, string> = {
-  bear: "border-rose-500/40 bg-rose-500/15 text-rose-300",
-  base: "border-amber-500/40 bg-amber-500/15 text-amber-300",
-  bull: "border-emerald-500/40 bg-emerald-500/15 text-emerald-300",
-};
-
-type Field = keyof ScenarioInputs;
-const FIELD_ROWS: Array<{ key: Field; label: string; format: "pct" | "pe" }> = [
-  { key: "rev_growth_y1", label: "Rev Growth Y1", format: "pct" },
-  { key: "rev_growth_y2", label: "Rev Growth Y2", format: "pct" },
-  { key: "rev_growth_y3", label: "Rev Growth Y3", format: "pct" },
-  { key: "op_margin", label: "Op Margin", format: "pct" },
-  { key: "exit_pe", label: "Exit P/E", format: "pe" },
-  { key: "probability", label: "Probability", format: "pct" },
-];
-
-// ---------- Formatters ----------
-
-function fmtPct(n: number, digits = 1): string {
-  if (!Number.isFinite(n)) return "—";
-  return `${(n * 100).toFixed(digits)}%`;
-}
-function fmtSignedPct(n: number, digits = 1): string {
-  if (!Number.isFinite(n)) return "—";
-  const v = (n * 100).toFixed(digits);
-  return n >= 0 ? `+${v}%` : `${v}%`;
-}
-function fmtPE(n: number): string {
-  if (!Number.isFinite(n)) return "—";
-  return `${n.toFixed(1)}x`;
-}
-function fmtBigDollars(n: number): string {
-  if (!Number.isFinite(n)) return "—";
-  if (Math.abs(n) >= 1e12) return `$${(n / 1e12).toFixed(2)}T`;
-  if (Math.abs(n) >= 1e9) return `$${(n / 1e9).toFixed(2)}B`;
-  if (Math.abs(n) >= 1e6) return `$${(n / 1e6).toFixed(1)}M`;
-  return `$${n.toFixed(0)}`;
-}
-function fmtPrice(n: number): string {
-  if (!Number.isFinite(n)) return "—";
-  return `$${n.toFixed(2)}`;
-}
-function fmtRoundPrice(n: number): string {
-  if (!Number.isFinite(n)) return "—";
-  return `$${Math.round(n)}`;
-}
-function fmtDate(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleDateString("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  });
-}
-function parseInputValue(raw: string, field: Field): number | null {
-  const trimmed = raw.replace(/[%xX]/g, "").trim();
-  if (trimmed === "" || trimmed === "-") return null;
-  const n = Number(trimmed);
-  if (!Number.isFinite(n)) return null;
-  if (field === "exit_pe") return n;
-  // Percent fields — accept "5" or "0.05" interchangeably. Anything ≥ 1.5
-  // (or ≤ -1.5 for negative growth) is read as a whole-number percent.
-  if (Math.abs(n) >= 1.5) return n / 100;
-  return n;
-}
-function formatInputValue(value: number, field: Field): string {
-  if (field === "exit_pe") return value.toFixed(1);
-  return (value * 100).toFixed(1);
-}
-
-// ---------- Tab entry ----------
+type Tier1Field = keyof ScenarioInputs;
+type Tier2Field = keyof DCFScenarioInputs;
 
 export function ValuationTab({ symbol }: { symbol: string }) {
   const [versions, setVersions] = useState<Version[]>([]);
@@ -111,6 +44,7 @@ export function ValuationTab({ symbol }: { symbol: string }) {
   const [generating, setGenerating] = useState(false);
   const [generationError, setGenerationError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<"tier1" | "tier2">("tier1");
 
   async function load() {
     setLoading(true);
@@ -158,9 +92,9 @@ export function ValuationTab({ symbol }: { symbol: string }) {
   }
 
   const latest = versions[0] ?? null;
-  const selected =
-    versions.find((v) => v.id === selectedId) ?? latest;
+  const selected = versions.find((v) => v.id === selectedId) ?? latest;
   const isLatest = selected?.id === latest?.id;
+  const isV2Selected = selected ? isV2(selected.output) : false;
 
   return (
     <div className="rounded-md border border-border bg-background/30 p-3 text-xs">
@@ -176,25 +110,46 @@ export function ValuationTab({ symbol }: { symbol: string }) {
           onGenerate={generate}
         />
       ) : (
-        <ModelView
-          symbol={symbol}
-          versions={versions}
-          selected={selected as Version}
-          onSelect={setSelectedId}
-          onGenerate={generate}
-          generating={generating}
-          generationError={generationError}
-          isLatest={isLatest}
-          onPersist={(updated) =>
-            setVersions((prev) =>
-              prev.map((v) => (v.id === updated.id ? updated : v)),
-            )
-          }
-        />
+        <>
+          <Header
+            versions={versions}
+            selected={selected as Version}
+            onSelect={setSelectedId}
+            onGenerate={generate}
+            generating={generating}
+            generationError={generationError}
+            isLatest={isLatest}
+          />
+          {!isV2Selected ? (
+            <V1Notice
+              version={selected as Version}
+              onGenerate={generate}
+              generating={generating}
+            />
+          ) : (
+            <V2View
+              symbol={symbol}
+              version={selected as Version}
+              isLatest={isLatest}
+              activeTab={activeTab}
+              setActiveTab={setActiveTab}
+              onPersist={(v) =>
+                setVersions((prev) => prev.map((x) => (x.id === v.id ? v : x)))
+              }
+            />
+          )}
+          <VersionHistory
+            versions={versions}
+            selectedId={(selected as Version).id}
+            onSelect={setSelectedId}
+          />
+        </>
       )}
     </div>
   );
 }
+
+// ---------- Empty state ----------
 
 function EmptyState({
   generating,
@@ -209,7 +164,8 @@ function EmptyState({
     <div className="flex flex-col items-center gap-3 p-6 text-center">
       <div className="text-muted-foreground">
         Pulls 5 years of SEC EDGAR data and analyst estimates to build
-        bear/base/bull scenarios.
+        bear/base/bull scenarios for both a P/E Multiple model and a full
+        DCF.
       </div>
       <button
         type="button"
@@ -233,10 +189,44 @@ function EmptyState({
   );
 }
 
-// ---------- Main view ----------
+// ---------- v1 compatibility notice ----------
 
-function ModelView({
-  symbol,
+function V1Notice({
+  version,
+  onGenerate,
+  generating,
+}: {
+  version: Version;
+  onGenerate: () => void;
+  generating: boolean;
+}) {
+  return (
+    <div className="mt-3 rounded border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-200">
+      This is a legacy v1 model from{" "}
+      {fmtDate((version.output as { saved_at?: string }).saved_at ?? version.runAt)}.
+      Generate a new version to enable the upgraded P/E + DCF tiers and editing.
+      <div className="mt-2">
+        <button
+          type="button"
+          onClick={onGenerate}
+          disabled={generating}
+          className="inline-flex items-center gap-1 rounded border border-amber-500/50 bg-amber-500/20 px-2 py-1 text-xs hover:bg-amber-500/30 disabled:opacity-60"
+        >
+          {generating ? (
+            <Loader2 className="h-3 w-3 animate-spin" />
+          ) : (
+            <RefreshCw className="h-3 w-3" />
+          )}
+          Generate v2
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Header ----------
+
+function Header({
   versions,
   selected,
   onSelect,
@@ -244,9 +234,7 @@ function ModelView({
   generating,
   generationError,
   isLatest,
-  onPersist,
 }: {
-  symbol: string;
   versions: Version[];
   selected: Version;
   onSelect: (id: string) => void;
@@ -254,95 +242,177 @@ function ModelView({
   generating: boolean;
   generationError: string | null;
   isLatest: boolean;
+}) {
+  const savedAt =
+    (selected.output as { saved_at?: string }).saved_at ?? selected.runAt;
+  return (
+    <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-muted-foreground">Last generated:</span>
+        <span className="text-foreground">{fmtDate(savedAt)}</span>
+        <select
+          value={selected.id}
+          onChange={(e) => onSelect(e.target.value)}
+          className="rounded border border-border bg-background px-1.5 py-0.5 text-xs"
+        >
+          {versions.map((v) => {
+            const sa = (v.output as { saved_at?: string }).saved_at ?? v.runAt;
+            const cust = anyCustomized(v);
+            return (
+              <option key={v.id} value={v.id}>
+                {fmtDate(sa)}
+                {cust ? "  ✏️" : ""}
+              </option>
+            );
+          })}
+        </select>
+        {!isLatest && (
+          <span className="rounded border border-amber-500/40 bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-amber-300">
+            Read-only history
+          </span>
+        )}
+      </div>
+      <button
+        type="button"
+        onClick={onGenerate}
+        disabled={generating}
+        className="inline-flex items-center gap-1 rounded border border-border bg-background/40 px-2 py-1 text-xs hover:bg-background/60 disabled:opacity-60"
+      >
+        {generating ? (
+          <Loader2 className="h-3 w-3 animate-spin" />
+        ) : (
+          <RefreshCw className="h-3 w-3" />
+        )}
+        New Version
+      </button>
+      {generationError && (
+        <div className="basis-full rounded border border-rose-500/40 bg-rose-500/10 p-2 text-rose-300">
+          {generationError}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function anyCustomized(v: Version): boolean {
+  if (isV2(v.output)) {
+    return (
+      v.output.tier1.customized_fields.length > 0 ||
+      v.output.tier2.customized_fields.length > 0
+    );
+  }
+  const c = (v.output as { customized_fields?: string[] }).customized_fields ?? [];
+  return c.length > 0;
+}
+
+// ---------- v2 view (tabs + tier dispatch + auto-save) ----------
+
+function V2View({
+  symbol,
+  version,
+  isLatest,
+  activeTab,
+  setActiveTab,
+  onPersist,
+}: {
+  symbol: string;
+  version: Version;
+  isLatest: boolean;
+  activeTab: "tier1" | "tier2";
+  setActiveTab: (t: "tier1" | "tier2") => void;
   onPersist: (v: Version) => void;
 }) {
-  // Editable user inputs live here so live recomputation doesn't go
-  // through the network. We re-seed on version change so flipping in the
-  // dropdown shows the right numbers.
-  const [userInputs, setUserInputs] = useState<ScenarioSet>(selected.output.user);
+  const model = version.output as ValuationModelV2;
+  const [tier1User, setTier1User] = useState<ScenarioSet>(model.tier1.user);
+  const [tier2User, setTier2User] = useState<DCFScenarioSet>(model.tier2.user);
+  const [shares, setShares] = useState<number>(model.shares_outstanding);
+  const [taxRate, setTaxRate] = useState<number>(model.tax_rate);
   const [savedState, setSavedState] = useState<"idle" | "saving" | "saved">("idle");
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const seedingRef = useRef(false);
+  const dirtyRef = useRef<{
+    tier1?: ScenarioSet;
+    tier2?: DCFScenarioSet;
+    shares_outstanding?: number;
+    tax_rate?: number;
+  }>({});
 
+  // Re-seed when user picks a different version. We mark seedingRef so
+  // the auto-save effect doesn't fire on the synthetic state change.
   useEffect(() => {
     seedingRef.current = true;
-    setUserInputs(selected.output.user);
+    setTier1User(model.tier1.user);
+    setTier2User(model.tier2.user);
+    setShares(model.shares_outstanding);
+    setTaxRate(model.tax_rate);
+    dirtyRef.current = {};
     setSavedState("idle");
-    // Allow the next user-driven change to trigger save again.
     queueMicrotask(() => {
       seedingRef.current = false;
     });
-  }, [selected.id, selected.output.user]);
+  }, [version.id, model.tier1.user, model.tier2.user, model.shares_outstanding, model.tax_rate]);
 
-  const ctx = useMemo(
-    () => ({
-      last_revenue: selected.output.last_revenue,
-      shares_outstanding: selected.output.shares_outstanding,
-      tax_rate: selected.output.tax_rate,
-      current_price: selected.output.current_price,
-    }),
-    [
-      selected.output.last_revenue,
-      selected.output.shares_outstanding,
-      selected.output.tax_rate,
-      selected.output.current_price,
-    ],
+  // The display model has live values for shares + tax rate so children
+  // see edits before they're saved.
+  const displayModel: ValuationModelV2 = useMemo(
+    () => ({ ...model, shares_outstanding: shares, tax_rate: taxRate }),
+    [model, shares, taxRate],
   );
 
-  const liveOutputs = useMemo(
-    () => computeAllOutputs(userInputs, ctx),
-    [userInputs, ctx],
-  );
-
-  const customized = useMemo(() => {
-    const set = new Set<string>();
-    for (const s of ["bear", "base", "bull"] as ScenarioKey[]) {
-      for (const f of [
-        "rev_growth_y1",
-        "rev_growth_y2",
-        "rev_growth_y3",
-        "op_margin",
-        "exit_pe",
-        "probability",
-      ] as Field[]) {
-        if (Math.abs(userInputs[s][f] - selected.output.system[s][f]) > 1e-6) {
-          set.add(`${s}.${f}`);
-        }
-      }
-    }
-    return set;
-  }, [userInputs, selected.output.system]);
-
-  const probSum =
-    userInputs.bear.probability +
-    userInputs.base.probability +
-    userInputs.bull.probability;
-  const probValid = Math.abs(probSum - 1) < 0.001;
-
-  function setField(scenario: ScenarioKey, field: Field, value: number) {
+  function setTier1Field(s: ScenarioKey, f: Tier1Field, v: number) {
     if (!isLatest) return;
-    setUserInputs((prev) => ({
-      ...prev,
-      [scenario]: { ...prev[scenario], [field]: value },
-    }));
+    setTier1User((prev) => {
+      const next = { ...prev, [s]: { ...prev[s], [f]: v } };
+      dirtyRef.current.tier1 = next;
+      return next;
+    });
+  }
+  function setTier2Field(s: ScenarioKey, f: Tier2Field, v: number) {
+    if (!isLatest) return;
+    setTier2User((prev) => {
+      const next = { ...prev, [s]: { ...prev[s], [f]: v } };
+      dirtyRef.current.tier2 = next;
+      return next;
+    });
+  }
+  function setTier2Method(s: ScenarioKey, m: "gordon" | "exit_multiple") {
+    if (!isLatest) return;
+    setTier2User((prev) => {
+      const next = { ...prev, [s]: { ...prev[s], terminal_method: m } };
+      dirtyRef.current.tier2 = next;
+      return next;
+    });
+  }
+  function setSharesGlobal(rawShares: number) {
+    if (!isLatest) return;
+    setShares(rawShares);
+    dirtyRef.current.shares_outstanding = rawShares;
+  }
+  function setTaxRateGlobal(rate: number) {
+    if (!isLatest) return;
+    setTaxRate(rate);
+    dirtyRef.current.tax_rate = rate;
   }
 
-  // Debounced PATCH. We capture the latest userInputs each time the
-  // setter fires; only the last debounce fire actually hits the network.
+  // Debounced PATCH. Whatever's dirty gets sent; the route recomputes
+  // outputs and customized_fields server-side and we replace the
+  // version with the response.
   useEffect(() => {
     if (!isLatest) return;
     if (seedingRef.current) return;
     if (debounceRef.current) clearTimeout(debounceRef.current);
+    if (Object.keys(dirtyRef.current).length === 0) return;
     setSavedState("saving");
     debounceRef.current = setTimeout(async () => {
+      const body: Record<string, unknown> = { id: version.id, ...dirtyRef.current };
       try {
         const res = await fetch(
           `/api/research/${encodeURIComponent(symbol)}/valuation`,
           {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ id: selected.id, user: userInputs }),
+            body: JSON.stringify(body),
             cache: "no-store",
           },
         );
@@ -352,6 +422,7 @@ function ModelView({
         }
         const json = (await res.json()) as { module: Version };
         onPersist(json.module);
+        dirtyRef.current = {};
         setSavedState("saved");
         if (savedTimerRef.current) clearTimeout(savedTimerRef.current);
         savedTimerRef.current = setTimeout(() => setSavedState("idle"), 2000);
@@ -364,161 +435,99 @@ function ModelView({
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [userInputs, isLatest, selected.id]);
+  }, [tier1User, tier2User, shares, taxRate, isLatest, version.id]);
 
   return (
     <div className="space-y-4">
-      <ModelHeader
-        versions={versions}
-        selected={selected}
-        onSelect={onSelect}
-        onGenerate={onGenerate}
-        generating={generating}
-        generationError={generationError}
-        savedState={savedState}
-        isLatest={isLatest}
-      />
+      <div className="flex items-center justify-between gap-2">
+        <div className="inline-flex rounded border border-border bg-background/40 p-0.5">
+          <TierTab
+            label="P/E Multiple"
+            active={activeTab === "tier1"}
+            onClick={() => setActiveTab("tier1")}
+          />
+          <TierTab
+            label="DCF Model"
+            active={activeTab === "tier2"}
+            onClick={() => setActiveTab("tier2")}
+          />
+        </div>
+        <div className="text-[10px]">
+          {savedState === "saving" && (
+            <span className="text-muted-foreground">Saving…</span>
+          )}
+          {savedState === "saved" && (
+            <span className="text-emerald-300">Saved</span>
+          )}
+        </div>
+      </div>
 
-      <HistoricalTable rows={selected.output.historical} />
+      <HistoricalTable model={model} />
 
-      <AssumptionsTable
-        userInputs={userInputs}
-        system={selected.output.system}
-        customized={customized}
-        editable={isLatest}
-        onChange={setField}
-        probValid={probValid}
-        probSum={probSum}
-      />
+      {activeTab === "tier1" ? (
+        <ValuationTier1
+          model={displayModel}
+          userInputs={tier1User}
+          editable={isLatest}
+          onChangeField={setTier1Field}
+          onChangeShares={setSharesGlobal}
+          onChangeTaxRate={setTaxRateGlobal}
+        />
+      ) : (
+        <ValuationTier2
+          model={displayModel}
+          userInputs={tier2User}
+          editable={isLatest}
+          onChangeField={setTier2Field}
+          onChangeTerminalMethod={setTier2Method}
+        />
+      )}
 
-      <OutputsTable
-        outputs={liveOutputs}
-        systemOutputs={selected.output.system_outputs}
-        showSystemRow={customized.size > 0}
-      />
-
-      <WeightedTargetCard
-        outputs={liveOutputs}
-        userInputs={userInputs}
-        currentPrice={selected.output.current_price}
-        systemOutputs={selected.output.system_outputs}
-        showSystem={customized.size > 0}
-        analystMean={selected.output.analyst_target_mean}
-        analystHigh={selected.output.analyst_target_high}
-        analystLow={selected.output.analyst_target_low}
-        analystCount={selected.output.analyst_count}
-      />
-
-      <SensitivityTable
-        baseEps={liveOutputs.base.eps_y3}
-        basePE={userInputs.base.exit_pe}
-        currentPrice={selected.output.current_price}
-      />
-
-      <VersionHistory
-        versions={versions}
-        selectedId={selected.id}
-        onSelect={onSelect}
-      />
+      <ValuationComps symbol={symbol} comps={model.comps} />
     </div>
   );
 }
 
-// ---------- Header ----------
-
-function ModelHeader({
-  versions,
-  selected,
-  onSelect,
-  onGenerate,
-  generating,
-  generationError,
-  savedState,
-  isLatest,
+function TierTab({
+  label,
+  active,
+  onClick,
 }: {
-  versions: Version[];
-  selected: Version;
-  onSelect: (id: string) => void;
-  onGenerate: () => void;
-  generating: boolean;
-  generationError: string | null;
-  savedState: "idle" | "saving" | "saved";
-  isLatest: boolean;
+  label: string;
+  active: boolean;
+  onClick: () => void;
 }) {
   return (
-    <div className="flex flex-wrap items-center justify-between gap-2">
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="text-muted-foreground">Last generated:</span>
-        <span className="text-foreground">{fmtDate(selected.output.saved_at)}</span>
-        <select
-          value={selected.id}
-          onChange={(e) => onSelect(e.target.value)}
-          className="rounded border border-border bg-background px-1.5 py-0.5 text-xs"
-        >
-          {versions.map((v) => (
-            <option key={v.id} value={v.id}>
-              {fmtDate(v.output.saved_at)}
-              {v.output.customized_fields.length > 0 ? "  ✏️" : ""}
-            </option>
-          ))}
-        </select>
-        {!isLatest && (
-          <span className="rounded border border-amber-500/40 bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-amber-300">
-            Read-only history
-          </span>
-        )}
-      </div>
-      <div className="flex items-center gap-2">
-        {savedState === "saving" && (
-          <span className="text-[10px] text-muted-foreground">Saving…</span>
-        )}
-        {savedState === "saved" && (
-          <span className="text-[10px] text-emerald-300">Saved</span>
-        )}
-        <button
-          type="button"
-          onClick={onGenerate}
-          disabled={generating}
-          className="inline-flex items-center gap-1 rounded border border-border bg-background/40 px-2 py-1 text-xs hover:bg-background/60 disabled:opacity-60"
-        >
-          {generating ? (
-            <Loader2 className="h-3 w-3 animate-spin" />
-          ) : (
-            <RefreshCw className="h-3 w-3" />
-          )}
-          New Version
-        </button>
-      </div>
-      {generationError && (
-        <div className="basis-full rounded border border-rose-500/40 bg-rose-500/10 p-2 text-rose-300">
-          {generationError}
-        </div>
-      )}
-    </div>
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded px-3 py-1 text-xs font-medium transition-colors ${
+        active
+          ? "bg-foreground text-background"
+          : "text-muted-foreground hover:text-foreground"
+      }`}
+    >
+      {label}
+    </button>
   );
 }
 
-// ---------- Historical financials ----------
+// ---------- Historical table (shared above both tiers) ----------
 
-function HistoricalTable({ rows }: { rows: HistoricalRow[] }) {
-  if (rows.length === 0) {
-    return (
-      <div className="rounded border border-dashed border-border bg-background/40 p-3 text-muted-foreground">
-        No historical financials available.
-      </div>
-    );
-  }
-  // Color: green if value improved over prior column, red if it dropped.
+function HistoricalTable({ model }: { model: ValuationModelV2 }) {
+  const rows = model.historical;
+  if (rows.length === 0) return null;
   const trendCls = (cur: number | null, prev: number | null): string => {
     if (cur === null || prev === null) return "";
     if (cur > prev) return "text-emerald-300";
     if (cur < prev) return "text-rose-300";
     return "";
   };
-
   return (
     <div>
-      <SectionLabel>Historical financials (5y)</SectionLabel>
+      <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+        Historical financials (5y)
+      </div>
       <div className="overflow-x-auto rounded border border-border">
         <table className="min-w-full text-xs">
           <thead className="bg-background/60">
@@ -541,7 +550,9 @@ function HistoricalTable({ rows }: { rows: HistoricalRow[] }) {
               <td className="px-2 py-1 text-foreground">Revenue</td>
               {rows.map((r) => (
                 <td key={r.year} className="px-2 py-1 text-right font-mono">
-                  {r.revenue !== null ? fmtBigDollars(r.revenue) : "—"}
+                  {r.revenue !== null
+                    ? `$${(r.revenue / 1e9).toFixed(2)}B`
+                    : "—"}
                 </td>
               ))}
             </tr>
@@ -554,7 +565,9 @@ function HistoricalTable({ rows }: { rows: HistoricalRow[] }) {
                     key={r.year}
                     className={`px-2 py-1 text-right font-mono ${trendCls(r.rev_growth, prev)}`}
                   >
-                    {r.rev_growth !== null ? fmtSignedPct(r.rev_growth) : "—"}
+                    {r.rev_growth !== null
+                      ? `${(r.rev_growth * 100).toFixed(1)}%`
+                      : "—"}
                   </td>
                 );
               })}
@@ -568,7 +581,9 @@ function HistoricalTable({ rows }: { rows: HistoricalRow[] }) {
                     key={r.year}
                     className={`px-2 py-1 text-right font-mono ${trendCls(r.op_margin, prev)}`}
                   >
-                    {r.op_margin !== null ? fmtPct(r.op_margin) : "—"}
+                    {r.op_margin !== null
+                      ? `${(r.op_margin * 100).toFixed(1)}%`
+                      : "—"}
                   </td>
                 );
               })}
@@ -582,7 +597,9 @@ function HistoricalTable({ rows }: { rows: HistoricalRow[] }) {
                     key={r.year}
                     className={`px-2 py-1 text-right font-mono ${trendCls(r.net_margin, prev)}`}
                   >
-                    {r.net_margin !== null ? fmtPct(r.net_margin) : "—"}
+                    {r.net_margin !== null
+                      ? `${(r.net_margin * 100).toFixed(1)}%`
+                      : "—"}
                   </td>
                 );
               })}
@@ -608,429 +625,6 @@ function HistoricalTable({ rows }: { rows: HistoricalRow[] }) {
   );
 }
 
-// ---------- Editable assumptions ----------
-
-function AssumptionsTable({
-  userInputs,
-  system,
-  customized,
-  editable,
-  onChange,
-  probValid,
-  probSum,
-}: {
-  userInputs: ScenarioSet;
-  system: ScenarioSet;
-  customized: Set<string>;
-  editable: boolean;
-  onChange: (s: ScenarioKey, f: Field, v: number) => void;
-  probValid: boolean;
-  probSum: number;
-}) {
-  return (
-    <div>
-      <SectionLabel>Projection assumptions</SectionLabel>
-      <div className="overflow-x-auto rounded border border-border">
-        <table className="min-w-full text-xs">
-          <thead className="bg-background/60">
-            <tr>
-              <th className="px-2 py-1 text-left font-medium text-muted-foreground"></th>
-              {(["bear", "base", "bull"] as ScenarioKey[]).map((s) => (
-                <th
-                  key={s}
-                  className="px-2 py-1 text-center font-medium uppercase text-muted-foreground"
-                >
-                  <span
-                    className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold ${SCENARIO_PILL[s]}`}
-                  >
-                    {SCENARIO_LABEL[s]}
-                  </span>
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {FIELD_ROWS.map((row) => (
-              <tr key={row.key} className="border-t border-border">
-                <td className="px-2 py-1 text-foreground">{row.label}</td>
-                {(["bear", "base", "bull"] as ScenarioKey[]).map((s) => {
-                  const fieldKey = `${s}.${row.key}`;
-                  const isCustom = customized.has(fieldKey);
-                  return (
-                    <td key={s} className="px-2 py-1 text-center">
-                      <EditableCell
-                        value={userInputs[s][row.key]}
-                        systemValue={system[s][row.key]}
-                        field={row.key}
-                        format={row.format}
-                        editable={editable}
-                        customized={isCustom}
-                        onCommit={(v) => onChange(s, row.key, v)}
-                      />
-                    </td>
-                  );
-                })}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      {!probValid && (
-        <div className="mt-1 rounded border border-rose-500/40 bg-rose-500/10 p-1.5 text-[11px] text-rose-300">
-          Probabilities must sum to 100% (currently {fmtPct(probSum, 1)}).
-        </div>
-      )}
-    </div>
-  );
-}
-
-function EditableCell({
-  value,
-  systemValue,
-  field,
-  format,
-  editable,
-  customized,
-  onCommit,
-}: {
-  value: number;
-  systemValue: number;
-  field: Field;
-  format: "pct" | "pe";
-  editable: boolean;
-  customized: boolean;
-  onCommit: (v: number) => void;
-}) {
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState("");
-  const inputRef = useRef<HTMLInputElement | null>(null);
-
-  useEffect(() => {
-    if (editing && inputRef.current) {
-      inputRef.current.focus();
-      inputRef.current.select();
-    }
-  }, [editing]);
-
-  const display = format === "pct" ? fmtPct(value) : fmtPE(value);
-  const sysDisplay = format === "pct" ? fmtPct(systemValue) : fmtPE(systemValue);
-
-  function start() {
-    if (!editable) return;
-    setDraft(formatInputValue(value, field));
-    setEditing(true);
-  }
-
-  function commit() {
-    const parsed = parseInputValue(draft, field);
-    if (parsed !== null && Number.isFinite(parsed)) onCommit(parsed);
-    setEditing(false);
-  }
-
-  function cancel() {
-    setEditing(false);
-  }
-
-  return (
-    <div className="inline-flex flex-col items-center">
-      {editing ? (
-        <input
-          ref={inputRef}
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onBlur={commit}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") commit();
-            else if (e.key === "Escape") cancel();
-          }}
-          className="w-16 rounded border border-emerald-500/60 bg-background px-1 py-0.5 text-center font-mono text-xs"
-        />
-      ) : (
-        <button
-          type="button"
-          onClick={start}
-          disabled={!editable}
-          title={
-            customized
-              ? `System: ${sysDisplay} · You: ${display}`
-              : editable
-                ? "Click to edit"
-                : "Read-only"
-          }
-          className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 font-mono text-xs ${
-            customized
-              ? "border-amber-500/40 bg-amber-500/10 text-amber-200"
-              : "border-border bg-background/40 text-foreground"
-          } ${editable ? "hover:border-emerald-500/40 hover:bg-emerald-500/10" : "cursor-default opacity-80"}`}
-        >
-          {display}
-          {customized && <Pencil className="h-2.5 w-2.5" />}
-        </button>
-      )}
-      {customized ? (
-        <span className="mt-0.5 text-[9px] text-amber-300/70">
-          sys: {sysDisplay}
-        </span>
-      ) : (
-        <span className="mt-0.5 text-[9px] text-transparent">.</span>
-      )}
-    </div>
-  );
-}
-
-// ---------- Computed outputs ----------
-
-function OutputsTable({
-  outputs,
-  systemOutputs,
-  showSystemRow,
-}: {
-  outputs: ReturnType<typeof computeAllOutputs>;
-  systemOutputs: ReturnType<typeof computeAllOutputs>;
-  showSystemRow: boolean;
-}) {
-  const scenarios: ScenarioKey[] = ["bear", "base", "bull"];
-  return (
-    <div>
-      <SectionLabel>Projected outputs (3-year)</SectionLabel>
-      <div className="overflow-x-auto rounded border border-border">
-        <table className="min-w-full text-xs">
-          <thead className="bg-background/60">
-            <tr>
-              <th className="px-2 py-1 text-left font-medium text-muted-foreground"></th>
-              {scenarios.map((s) => (
-                <th
-                  key={s}
-                  className="px-2 py-1 text-center font-medium uppercase text-muted-foreground"
-                >
-                  <span
-                    className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold ${SCENARIO_PILL[s]}`}
-                  >
-                    {SCENARIO_LABEL[s]}
-                  </span>
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            <tr className="border-t border-border">
-              <td className="px-2 py-1 text-foreground">Revenue Y3</td>
-              {scenarios.map((s) => (
-                <td key={s} className="px-2 py-1 text-center font-mono">
-                  {fmtBigDollars(outputs[s].rev_y3)}
-                </td>
-              ))}
-            </tr>
-            <tr className="border-t border-border">
-              <td className="px-2 py-1 text-foreground">EPS Y3</td>
-              {scenarios.map((s) => (
-                <td key={s} className="px-2 py-1 text-center font-mono">
-                  {fmtPrice(outputs[s].eps_y3)}
-                </td>
-              ))}
-            </tr>
-            <tr className="border-t border-border">
-              <td className="px-2 py-1 text-foreground">Price Target</td>
-              {scenarios.map((s) => (
-                <td
-                  key={s}
-                  className="px-2 py-1 text-center font-mono font-semibold text-foreground"
-                >
-                  {fmtRoundPrice(outputs[s].price_target)}
-                </td>
-              ))}
-            </tr>
-            <tr className="border-t border-border">
-              <td className="px-2 py-1 text-foreground">Return</td>
-              {scenarios.map((s) => {
-                const r = outputs[s].return_pct;
-                const cls = r >= 0 ? "text-emerald-300" : "text-rose-300";
-                return (
-                  <td key={s} className={`px-2 py-1 text-center font-mono ${cls}`}>
-                    {fmtSignedPct(r, 0)}
-                  </td>
-                );
-              })}
-            </tr>
-            {showSystemRow && (
-              <tr className="border-t border-border bg-amber-500/[0.04]">
-                <td className="px-2 py-1 text-amber-300/80">System target</td>
-                {scenarios.map((s) => (
-                  <td
-                    key={s}
-                    className="px-2 py-1 text-center font-mono text-amber-200/90"
-                  >
-                    {fmtRoundPrice(systemOutputs[s].price_target)}
-                  </td>
-                ))}
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
-// ---------- Weighted target ----------
-
-function WeightedTargetCard({
-  outputs,
-  userInputs,
-  currentPrice,
-  systemOutputs,
-  showSystem,
-  analystMean,
-  analystHigh,
-  analystLow,
-  analystCount,
-}: {
-  outputs: ReturnType<typeof computeAllOutputs>;
-  userInputs: ScenarioSet;
-  currentPrice: number;
-  systemOutputs: ReturnType<typeof computeAllOutputs>;
-  showSystem: boolean;
-  analystMean: number | null;
-  analystHigh: number | null;
-  analystLow: number | null;
-  analystCount: number | null;
-}) {
-  const scenarios: ScenarioKey[] = ["bear", "base", "bull"];
-  return (
-    <div className="rounded-md border border-emerald-500/30 bg-emerald-500/[0.04] p-3">
-      <div className="text-[10px] font-semibold uppercase tracking-wide text-emerald-300/80">
-        Weighted price target
-      </div>
-      <div className="mt-1 text-2xl font-bold text-foreground">
-        {fmtRoundPrice(outputs.weighted_target)}{" "}
-        <span
-          className={`text-sm font-medium ${outputs.weighted_return_pct >= 0 ? "text-emerald-300" : "text-rose-300"}`}
-        >
-          ({fmtSignedPct(outputs.weighted_return_pct, 1)} from{" "}
-          {fmtPrice(currentPrice)})
-        </span>
-      </div>
-      <div className="mt-2 space-y-0.5 font-mono text-[11px] text-muted-foreground">
-        {scenarios.map((s) => (
-          <div key={s}>
-            {SCENARIO_LABEL[s]} {fmtRoundPrice(outputs[s].price_target)} ×{" "}
-            {fmtPct(userInputs[s].probability, 0)} ={" "}
-            {fmtRoundPrice(outputs[s].price_target * userInputs[s].probability)}
-          </div>
-        ))}
-      </div>
-      {showSystem && (
-        <div className="mt-2 text-[11px] text-amber-300/80">
-          System weighted: {fmtRoundPrice(systemOutputs.weighted_target)}
-        </div>
-      )}
-      {analystMean !== null && (
-        <div className="mt-2 border-t border-emerald-500/20 pt-2 text-[11px] text-muted-foreground">
-          Analyst consensus:{" "}
-          <span className="text-foreground">{fmtRoundPrice(analystMean)}</span>
-          {analystCount !== null && <> ({analystCount} analysts)</>}
-          {analystLow !== null && analystHigh !== null && (
-            <>
-              {" "}
-              · Range:{" "}
-              <span className="text-foreground">
-                {fmtRoundPrice(analystLow)} – {fmtRoundPrice(analystHigh)}
-              </span>
-            </>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ---------- Sensitivity grid ----------
-
-function SensitivityTable({
-  baseEps,
-  basePE,
-  currentPrice,
-}: {
-  baseEps: number;
-  basePE: number;
-  currentPrice: number;
-}) {
-  if (!Number.isFinite(baseEps) || baseEps <= 0) return null;
-
-  // Build EPS rows around the base case (-30% to +30%) and P/E columns
-  // around the user's chosen base P/E.
-  const epsRows = [
-    baseEps * 0.6,
-    baseEps * 0.8,
-    baseEps,
-    baseEps * 1.2,
-    baseEps * 1.4,
-  ];
-  const peCols = [
-    Math.max(8, basePE * 0.7),
-    Math.max(10, basePE * 0.9),
-    basePE,
-    basePE * 1.15,
-    basePE * 1.4,
-  ];
-  // Round P/E columns for cleaner headers.
-  const peColsRounded = peCols.map((x) => Math.round(x));
-
-  return (
-    <div>
-      <SectionLabel>
-        Sensitivity: Price target by EPS × P/E
-      </SectionLabel>
-      <div className="overflow-x-auto rounded border border-border">
-        <table className="min-w-full text-xs">
-          <thead className="bg-background/60">
-            <tr>
-              <th className="px-2 py-1 text-left font-medium text-muted-foreground">
-                EPS \\ P/E
-              </th>
-              {peColsRounded.map((pe, i) => (
-                <th
-                  key={i}
-                  className="px-2 py-1 text-center font-medium text-muted-foreground"
-                >
-                  {pe}x
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {epsRows.map((eps, i) => (
-              <tr key={i} className="border-t border-border">
-                <td className="px-2 py-1 font-mono">${eps.toFixed(2)}</td>
-                {peColsRounded.map((pe, j) => {
-                  const target = eps * pe;
-                  const isBaseCell = i === 2 && j === 2;
-                  const cls = isBaseCell
-                    ? "border border-emerald-500/60 bg-emerald-500/15 text-emerald-200 font-semibold"
-                    : "";
-                  return (
-                    <td
-                      key={j}
-                      className={`px-2 py-1 text-center font-mono ${cls}`}
-                    >
-                      {fmtRoundPrice(target)}
-                    </td>
-                  );
-                })}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      {currentPrice > 0 && (
-        <div className="mt-1 text-[11px] text-muted-foreground">
-          Current price: <span className="text-foreground">{fmtPrice(currentPrice)}</span>
-        </div>
-      )}
-    </div>
-  );
-}
-
 // ---------- Version history ----------
 
 function VersionHistory({
@@ -1044,9 +638,8 @@ function VersionHistory({
 }) {
   const [expanded, setExpanded] = useState(false);
   if (versions.length === 0) return null;
-
   return (
-    <div>
+    <div className="mt-4">
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
@@ -1058,10 +651,17 @@ function VersionHistory({
       {expanded && (
         <div className="mt-2 space-y-1 rounded border border-border bg-background/40 p-2">
           {versions.map((v) => {
-            const baseTarget = v.output.outputs.base.price_target;
-            const sysBase = v.output.system_outputs.base.price_target;
-            const isCust = v.output.customized_fields.length > 0;
             const isSelected = v.id === selectedId;
+            const sa = (v.output as { saved_at?: string }).saved_at ?? v.runAt;
+            const cust = anyCustomized(v);
+            const v2 = isV2(v.output);
+            const peTarget = v2
+              ? (v.output as ValuationModelV2).tier1.outputs.base.price_target
+              : (v.output as { outputs?: { base?: { price_target?: number } } })
+                  .outputs?.base?.price_target ?? null;
+            const dcfTarget = v2
+              ? (v.output as ValuationModelV2).tier2.outputs.base.intrinsic_value
+              : null;
             return (
               <button
                 key={v.id}
@@ -1073,51 +673,34 @@ function VersionHistory({
                     : "border-border bg-background/40 hover:bg-background/60"
                 }`}
               >
-                <div className="flex items-center gap-2">
-                  <span className="text-foreground">
-                    {fmtDate(v.output.saved_at)}
-                  </span>
-                  <span className="text-muted-foreground">
-                    Base: {fmtRoundPrice(sysBase)}
-                  </span>
-                  {isCust ? (
-                    <span className="inline-flex items-center gap-1 text-amber-300">
-                      <Pencil className="h-2.5 w-2.5" /> You:{" "}
-                      {fmtRoundPrice(baseTarget)}
-                    </span>
-                  ) : (
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
+                  <span className="text-foreground">{fmtDate(sa)}</span>
+                  {peTarget !== null && (
                     <span className="text-muted-foreground">
-                      Agreed with system
+                      P/E: Base {fmtRoundPrice(peTarget)}
+                    </span>
+                  )}
+                  {dcfTarget !== null && (
+                    <span className="text-muted-foreground">
+                      DCF: Base {fmtRoundPrice(dcfTarget)}
+                    </span>
+                  )}
+                  {!v2 && (
+                    <span className="rounded border border-amber-500/40 bg-amber-500/15 px-1 py-0.5 text-[9px] uppercase text-amber-300">
+                      v1
+                    </span>
+                  )}
+                  {cust && (
+                    <span className="inline-flex items-center gap-1 text-amber-300">
+                      <Pencil className="h-2.5 w-2.5" /> customized
                     </span>
                   )}
                 </div>
-                {isCust && (
-                  <div className="mt-1 text-[10px] text-muted-foreground">
-                    {summarizeCustomization(v.output)}
-                  </div>
-                )}
               </button>
             );
           })}
         </div>
       )}
-    </div>
-  );
-}
-
-function summarizeCustomization(o: ValuationModelOutput): string {
-  const ratio = o.outputs.weighted_target / o.system_outputs.weighted_target;
-  if (ratio > 1.05) return "More bullish than system";
-  if (ratio < 0.95) return "More bearish than system";
-  return `${o.customized_fields.length} fields customized`;
-}
-
-// ---------- Tiny helpers ----------
-
-function SectionLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-      {children}
     </div>
   );
 }
