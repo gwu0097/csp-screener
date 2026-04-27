@@ -4,7 +4,9 @@ import { SWING_UNIVERSE } from "@/lib/stock-universe";
 import { createServerClient } from "@/lib/supabase";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 120;
+// Full S&P 500 + Nasdaq 100 (~580 symbols) takes 3-5 minutes end-to-end.
+// 300s is the Vercel Pro plan ceiling.
+export const maxDuration = 300;
 
 type Cached = ScreenerResult & { screenedAt: string | null };
 
