@@ -42,6 +42,75 @@ type Props = { connected: boolean };
 
 type RunStatus = "idle" | "screening" | "applying" | "analyzing" | "error";
 
+// Per-pass analyze error. When pass3 fails the user has already seen
+// pass2 results merged into the table; the banner explains what's
+// missing. When pass2 fails the table still shows the pass1 candidates
+// (no grade columns); the banner says options data is unavailable.
+type AnalysisError = {
+  pass: "pass2" | "pass3";
+  status: number | null; // null = network / fetch threw before response
+  rawMessage: string;
+  partialAvailable: boolean;
+};
+
+// Friendly copy + suggested action for a failed analyze pass.
+function describeAnalysisError(err: AnalysisError): {
+  title: string;
+  detail: string;
+  action: "retry" | "settings" | null;
+} {
+  const passLabel =
+    err.pass === "pass2"
+      ? "Pass 2 (Schwab options + grading)"
+      : "Pass 3 (Perplexity news + final grade)";
+  if (err.status === null) {
+    return {
+      title: `${passLabel} failed`,
+      detail:
+        "Could not reach the server. Check your internet connection and retry.",
+      action: "retry",
+    };
+  }
+  if (err.status === 504) {
+    return {
+      title: `${passLabel} timed out`,
+      detail:
+        err.pass === "pass2"
+          ? "Schwab options chain or earnings history took too long. Try again, or run during market hours when Schwab is fastest."
+          : "Perplexity / EDGAR call exceeded the 60s ceiling. Retry usually works.",
+      action: "retry",
+    };
+  }
+  if (err.status === 503) {
+    return {
+      title: `${passLabel} — service unavailable`,
+      detail:
+        "Schwab, Finnhub, or Perplexity is temporarily down. Try again in a few minutes.",
+      action: "retry",
+    };
+  }
+  if (err.status === 401 || err.status === 403) {
+    return {
+      title: `${passLabel} — Schwab auth expired`,
+      detail:
+        "Schwab access tokens have expired. Open Settings and reconnect Schwab, then re-run analysis.",
+      action: "settings",
+    };
+  }
+  if (err.status === 500) {
+    return {
+      title: `${passLabel} — server error`,
+      detail: `Check Vercel logs for the full stack. Error: ${err.rawMessage || "(no message)"}`,
+      action: "retry",
+    };
+  }
+  return {
+    title: `${passLabel} failed (HTTP ${err.status})`,
+    detail: err.rawMessage || "Unexpected response from the server.",
+    action: "retry",
+  };
+}
+
 type ScreenStats = {
   finnhub: number;
   afterEtfAndBlacklist: number;
@@ -161,6 +230,10 @@ export function ScreenerView({ connected }: Props) {
   const [screenedAt, setScreenedAt] = useState<Date | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Richer per-pass error so the analyze banner can show a friendly
+  // explanation + targeted retry button. Plain `error` keeps holding
+  // strings for screen / apply-watchlist failures.
+  const [analysisError, setAnalysisError] = useState<AnalysisError | null>(null);
   const [lastStats, setLastStats] = useState<ScreenStats | null>(null);
   const [analyzingSymbols, setAnalyzingSymbols] = useState<Set<string>>(new Set());
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
@@ -484,12 +557,17 @@ export function ScreenerView({ connected }: Props) {
     if (!results || !connected) return;
     setStatus("analyzing");
     setError(null);
+    setAnalysisError(null);
     setMessage(null);
     setAnalyzingSymbols(new Set(results.map((r) => r.symbol.toUpperCase())));
+
+    // ---- Pass 2 — Schwab options + stages 3/4 ----
+    let p2: {
+      results: ScreenerResult[];
+      prices: Record<string, number>;
+      vix: number | null;
+    } | null = null;
     try {
-      // Pass 2 — Schwab options chain + stages 3/4 grading per
-      // candidate. No Perplexity / encyclopedia work yet so this fits
-      // under the 60s Hobby ceiling on its own.
       const r2 = await fetch("/api/screener/analyze/pass2", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -497,31 +575,66 @@ export function ScreenerView({ connected }: Props) {
         cache: "no-store",
       });
       if (!r2.ok) {
-        const body = await r2.json().catch(() => ({}));
-        throw new Error((body as { error?: string }).error ?? `HTTP ${r2.status}`);
+        const body = (await r2.json().catch(() => ({}))) as { error?: string };
+        setAnalysisError({
+          pass: "pass2",
+          status: r2.status,
+          rawMessage: body.error ?? "",
+          partialAvailable: false,
+        });
+        setStatus("error");
+        setAnalyzingSymbols(new Set());
+        return;
       }
-      const p2 = (await r2.json()) as {
-        results: ScreenerResult[];
-        prices: Record<string, number>;
-        vix: number | null;
-      };
+      p2 = await r2.json();
+    } catch (e) {
+      setAnalysisError({
+        pass: "pass2",
+        status: null,
+        rawMessage: e instanceof Error ? e.message : String(e),
+        partialAvailable: false,
+      });
+      setStatus("error");
+      setAnalyzingSymbols(new Set());
+      return;
+    }
 
-      // Pass 3 — Perplexity news + final three-layer grade + tracked
-      // tickers + position snapshots + encyclopedia maintenance. Split
-      // off so neither pass hits 60s on heavy users.
+    // Merge pass 2 results into the table immediately so a pass 3
+    // failure doesn't lose the options grades. Three-layer grade
+    // stays null on each row until pass 3 lands.
+    const byKey2 = new Map(
+      (p2!.results ?? []).map((r) => [`${r.symbol}|${r.earningsDate}`, r]),
+    );
+    const merged2 = results.map(
+      (r) => byKey2.get(`${r.symbol}|${r.earningsDate}`) ?? r,
+    );
+    const mergedPrices = { ...prices, ...p2!.prices };
+    setResults(merged2);
+    setPrices(mergedPrices);
+
+    // ---- Pass 3 — Perplexity + grade + post-actions ----
+    try {
       const r3 = await fetch("/api/screener/analyze/pass3", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          candidates: p2.results,
-          vix: p2.vix,
+          candidates: p2!.results,
+          vix: p2!.vix,
           trackedSymbols: Array.from(tracked),
         }),
         cache: "no-store",
       });
       if (!r3.ok) {
-        const body = await r3.json().catch(() => ({}));
-        throw new Error((body as { error?: string }).error ?? `HTTP ${r3.status}`);
+        const body = (await r3.json().catch(() => ({}))) as { error?: string };
+        setAnalysisError({
+          pass: "pass3",
+          status: r3.status,
+          rawMessage: body.error ?? "",
+          partialAvailable: true,
+        });
+        setStatus("error");
+        setAnalyzingSymbols(new Set());
+        return;
       }
       const json = (await r3.json()) as {
         results: ScreenerResult[];
@@ -531,9 +644,7 @@ export function ScreenerView({ connected }: Props) {
         encyclopediaUpdates?: number;
       };
       const byKey = new Map(json.results.map((r) => [`${r.symbol}|${r.earningsDate}`, r]));
-      const next = results.map((r) => byKey.get(`${r.symbol}|${r.earningsDate}`) ?? r);
-      const mergedPrices = { ...prices, ...p2.prices };
-      // Save BEFORE setState
+      const next = merged2.map((r) => byKey.get(`${r.symbol}|${r.earningsDate}`) ?? r);
       const timestampIso = (screenedAt ?? new Date()).toISOString();
       try {
         localStorage.setItem(LS_RESULTS, JSON.stringify(next));
@@ -543,7 +654,6 @@ export function ScreenerView({ connected }: Props) {
         console.error("localStorage save failed", e);
       }
       setResults(next);
-      setPrices(mergedPrices);
       setGroupMode(null);
       const scored = json.scoredCount ?? json.results.length;
       const trackedCount = json.trackedUpserted ?? 0;
@@ -554,7 +664,12 @@ export function ScreenerView({ connected }: Props) {
       );
       setStatus("idle");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Analysis failed");
+      setAnalysisError({
+        pass: "pass3",
+        status: null,
+        rawMessage: e instanceof Error ? e.message : String(e),
+        partialAvailable: true,
+      });
       setStatus("error");
     } finally {
       setAnalyzingSymbols(new Set());
@@ -672,7 +787,19 @@ export function ScreenerView({ connected }: Props) {
           </div>
         </div>
 
-        {error && (
+        {analysisError && (
+          <AnalysisErrorBanner
+            err={analysisError}
+            onRetry={() => {
+              // Pass 3 retries from the existing pass2 results merged
+              // into `results`; pass2 retry replays the whole thing.
+              setAnalysisError(null);
+              runAnalysis();
+            }}
+            onDismiss={() => setAnalysisError(null)}
+          />
+        )}
+        {!analysisError && error && (
           <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-200">
             <div className="mb-1 flex items-center gap-2 font-medium">
               <AlertTriangle className="h-4 w-4" /> {error}
@@ -1526,6 +1653,57 @@ function StageCard({
       </div>
       <div className="mb-2 text-muted-foreground">{summary}</div>
       <div className="space-y-0.5">{children}</div>
+    </div>
+  );
+}
+
+function AnalysisErrorBanner({
+  err,
+  onRetry,
+  onDismiss,
+}: {
+  err: AnalysisError;
+  onRetry: () => void;
+  onDismiss: () => void;
+}) {
+  const { title, detail, action } = describeAnalysisError(err);
+  return (
+    <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-200">
+      <div className="mb-1 flex items-start gap-2 font-medium">
+        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" /> {title}
+      </div>
+      <div className="mb-2 ml-6 text-rose-200/80">{detail}</div>
+      <div className="ml-6 flex flex-wrap items-center gap-2">
+        {action === "retry" && (
+          <Button size="sm" variant="outline" onClick={onRetry}>
+            Retry {err.pass === "pass2" ? "Pass 2" : "Pass 3"}
+          </Button>
+        )}
+        {action === "settings" && (
+          <Button size="sm" variant="outline" asChild>
+            <a href="/settings">Open Settings</a>
+          </Button>
+        )}
+        {err.partialAvailable && (
+          <span className="text-xs text-rose-200/70">
+            ✓ Pass 2 grades already shown in the table — Pass 3 (news /
+            regime / final grade) is missing.
+          </span>
+        )}
+        {!err.partialAvailable && err.pass === "pass2" && (
+          <span className="text-xs text-rose-200/70">
+            Showing ungraded candidates — options data unavailable until
+            Pass 2 succeeds.
+          </span>
+        )}
+        <button
+          type="button"
+          onClick={onDismiss}
+          className="ml-auto text-xs text-rose-200/60 hover:text-rose-200"
+        >
+          Dismiss
+        </button>
+      </div>
     </div>
   );
 }
