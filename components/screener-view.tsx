@@ -486,22 +486,44 @@ export function ScreenerView({ connected }: Props) {
     setMessage(null);
     setAnalyzingSymbols(new Set(results.map((r) => r.symbol.toUpperCase())));
     try {
-      const res = await fetch("/api/screener/analyze", {
+      // Pass 2 — Schwab options chain + stages 3/4 grading per
+      // candidate. No Perplexity / encyclopedia work yet so this fits
+      // under the 60s Hobby ceiling on its own.
+      const r2 = await fetch("/api/screener/analyze/pass2", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ candidates: results }),
+        cache: "no-store",
+      });
+      if (!r2.ok) {
+        const body = await r2.json().catch(() => ({}));
+        throw new Error((body as { error?: string }).error ?? `HTTP ${r2.status}`);
+      }
+      const p2 = (await r2.json()) as {
+        results: ScreenerResult[];
+        prices: Record<string, number>;
+        vix: number | null;
+      };
+
+      // Pass 3 — Perplexity news + final three-layer grade + tracked
+      // tickers + position snapshots + encyclopedia maintenance. Split
+      // off so neither pass hits 60s on heavy users.
+      const r3 = await fetch("/api/screener/analyze/pass3", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          candidates: results,
+          candidates: p2.results,
+          vix: p2.vix,
           trackedSymbols: Array.from(tracked),
         }),
         cache: "no-store",
       });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`);
+      if (!r3.ok) {
+        const body = await r3.json().catch(() => ({}));
+        throw new Error((body as { error?: string }).error ?? `HTTP ${r3.status}`);
       }
-      const json = (await res.json()) as {
+      const json = (await r3.json()) as {
         results: ScreenerResult[];
-        prices: Record<string, number>;
         scoredCount?: number;
         trackedUpserted?: number;
         snapshotsWritten?: number;
@@ -509,7 +531,7 @@ export function ScreenerView({ connected }: Props) {
       };
       const byKey = new Map(json.results.map((r) => [`${r.symbol}|${r.earningsDate}`, r]));
       const next = results.map((r) => byKey.get(`${r.symbol}|${r.earningsDate}`) ?? r);
-      const mergedPrices = { ...prices, ...json.prices };
+      const mergedPrices = { ...prices, ...p2.prices };
       // Save BEFORE setState
       const timestampIso = (screenedAt ?? new Date()).toISOString();
       try {

@@ -14,10 +14,10 @@ import {
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
-// Watchlist apply runs the same heavy stage-1-2 path as the screener
+// Watchlist apply runs the same stage-1-2 path as the screener
 // (Finnhub + Schwab + per-symbol classification + Yahoo fallbacks).
-// Pro-plan ceiling so big watchlists don't truncate.
-export const maxDuration = 300;
+// Hobby plan ceiling.
+export const maxDuration = 60;
 
 const YAHOO_FALLBACK_BUDGET = 10;
 

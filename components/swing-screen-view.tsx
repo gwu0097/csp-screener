@@ -255,7 +255,7 @@ function sortCandidates(
   });
 }
 
-type RunPhase = "idle" | "pass1" | "pass2" | "saving";
+type RunPhase = "idle" | "pass1" | "pass2" | "pass3" | "saving";
 
 type Pass1Wire = {
   survivors: string[];
@@ -329,7 +329,25 @@ export function SwingScreenView() {
         error?: string;
       };
       if (!r2.ok) throw new Error(p2.error ?? `Pass 2 failed: HTTP ${r2.status}`);
-      const candidates = p2.candidates ?? [];
+      const enriched = p2.candidates ?? [];
+
+      // Pass 3 — Perplexity catalyst discovery on the post-tier-1 set
+      // (~15-30s). Split out from pass 2 so neither route exceeds the
+      // 60s Hobby ceiling.
+      setPhase("pass3");
+      const r3 = await fetch("/api/swings/screen/pass3", {
+        method: "POST",
+        cache: "no-store",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ candidates: enriched }),
+      });
+      const p3 = (await r3.json()) as {
+        candidates?: SwingCandidate[];
+        durationMs?: number;
+        error?: string;
+      };
+      if (!r3.ok) throw new Error(p3.error ?? `Pass 3 failed: HTTP ${r3.status}`);
+      const candidates = p3.candidates ?? enriched;
 
       const result: CachedResult = {
         candidates,
@@ -509,7 +527,14 @@ function RunningBanner({
       return {
         title: `Pass 2 — enriching ${n} survivors`,
         detail:
-          "Pulling Finnhub insider transactions + earnings dates, Schwab options flow, then Perplexity catalyst research on the candidates that survive Tier 1. ~25-45 seconds.",
+          "Pulling Finnhub insider transactions + earnings dates and Schwab options flow on candidates that survive the technical filter. ~25-45 seconds.",
+      };
+    }
+    if (phase === "pass3") {
+      return {
+        title: "Pass 3 — finding catalysts",
+        detail:
+          "Perplexity catalyst research on the Tier-1 survivors (product launches, FDA decisions, partnerships, etc.). ~15-30 seconds.",
       };
     }
     if (phase === "saving") {

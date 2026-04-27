@@ -21,9 +21,10 @@ import { buildSnapshotRow, shouldWriteSnapshot } from "@/lib/snapshots";
 
 export const dynamic = "force-dynamic";
 // Loops over every open position to pull a Schwab options chain + Yahoo
-// quote + earnings snapshot — heavy users can have dozens of legs.
-// Pro-plan ceiling so the daily refresh doesn't truncate mid-list.
-export const maxDuration = 300;
+// quote + earnings snapshot. Per-call timeouts in lib/positions keep a
+// single slow upstream from blowing the 60s Hobby ceiling on users
+// with many open legs.
+export const maxDuration = 60;
 
 type PostEarningsRecView = {
   recommendation: "CLOSE" | "HOLD" | "PARTIAL" | "MONITOR";

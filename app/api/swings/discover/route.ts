@@ -4,10 +4,11 @@ import { createServerClient } from "@/lib/supabase";
 import { getQuoteEnrichment } from "@/lib/yahoo";
 
 export const dynamic = "force-dynamic";
-// Three Perplexity calls in parallel + Yahoo enrichment per returned
-// symbol. Typical run is 15-25s but bursty Perplexity latency or a
-// long candidate list can push past 60s. Pro-plan ceiling.
-export const maxDuration = 300;
+// Four Perplexity calls in parallel + Yahoo enrichment per returned
+// symbol. Typical run lands in 15-25s, well under the 60s Hobby
+// ceiling; the Perplexity client times each call out at 45s to keep
+// us safely inside if one of them stalls.
+export const maxDuration = 60;
 
 // ------------------------------------------------------------
 // Prompts — three passes targeting different flavors of setup.

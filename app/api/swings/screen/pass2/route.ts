@@ -2,18 +2,15 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   deserializePass1,
   pass2Enrich,
-  pass3CatalystDiscovery,
   type Pass1Wire,
 } from "@/lib/swing-screener";
 
 export const dynamic = "force-dynamic";
-// Pass 2 = Finnhub insider + earnings + Schwab options across all of
-// Pass 1's survivors, then Pass 3 = Perplexity catalyst discovery in
-// batches of 3. With ~30-50 survivors and a 200ms anti-burst gap on
-// Finnhub, the whole route can run 60-180s — way past the default
-// ceiling. Sit at the Pro-plan 300s budget the predecessor
-// /swings/screen used before the split.
-export const maxDuration = 300;
+// Pass 2 = Finnhub insider + earnings + Schwab options across Pass 1
+// survivors. Catalyst discovery moved to /pass3 so this stays under
+// the 60s Hobby ceiling even with 30-50 survivors and the 200ms
+// anti-burst gap on Finnhub.
+export const maxDuration = 60;
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   const started = Date.now();
@@ -30,18 +27,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
   }
   const { quotes, trades, tier2ByCandidate } = deserializePass1(body);
-  const enriched = await pass2Enrich(
+  const candidates = await pass2Enrich(
     body.survivors,
     quotes,
     trades,
     tier2ByCandidate,
   );
-  // Pass 3 — catalyst discovery via Perplexity. Runs on the post-tier-1
-  // survivor set (typically 5-15 candidates × ~3s in batches of 3 with a
-  // 500ms gap = ~15-30s), keeping the route well under 60s. Re-sorts
-  // because catalyst bonus can shift ranking.
-  const candidates = await pass3CatalystDiscovery(enriched);
-  candidates.sort((a, b) => b.setupScore - a.setupScore);
   return NextResponse.json({
     candidates,
     durationMs: Date.now() - started,

@@ -3,7 +3,7 @@ import { updateEncyclopedia } from "@/lib/encyclopedia";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
-export const maxDuration = 300;
+export const maxDuration = 60;
 
 type Body = { symbols?: unknown };
 
