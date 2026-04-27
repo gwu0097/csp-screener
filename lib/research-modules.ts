@@ -110,8 +110,7 @@ export async function saveModule<T>(
   symbol: string,
   moduleType: ModuleType,
   output: T,
-  customized = false,
-): Promise<ResearchModule<T> | null> {
+): Promise<ResearchModule<T>> {
   const sb = createServerClient();
   const expiryDays = MODULE_EXPIRY_DAYS[moduleType];
   const expiresAt =
@@ -125,17 +124,15 @@ export async function saveModule<T>(
       symbol: symbol.toUpperCase(),
       module_type: moduleType,
       output,
-      is_customized: customized,
       run_at: new Date().toISOString(),
       expires_at: expiresAt,
     })
     .select()
     .single();
   if (ins.error) {
-    console.warn(
+    throw new Error(
       `[research-modules] save(${symbol}, ${moduleType}) failed: ${ins.error.message}`,
     );
-    return null;
   }
 
   // Touch the parent stock row's last_researched_at so the home page can
@@ -150,7 +147,7 @@ export async function saveModule<T>(
       { onConflict: "symbol" },
     );
   if (upsert.error) {
-    console.warn(
+    throw new Error(
       `[research-modules] touch stock(${symbol}) failed: ${upsert.error.message}`,
     );
   }

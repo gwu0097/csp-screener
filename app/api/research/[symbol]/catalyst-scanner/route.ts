@@ -163,44 +163,50 @@ export async function POST(
     return NextResponse.json({ error: "Invalid symbol" }, { status: 400 });
   }
 
-  const companyName = await getCompanyName(symbol);
+  try {
+    const companyName = await getCompanyName(symbol);
 
-  // Catalysts + earnings in parallel — they hit different APIs.
-  const [raw, earn] = await Promise.all([
-    askPerplexityRaw(buildPrompt(symbol, companyName), {
-      label: `research-catalyst:${symbol}`,
-      maxTokens: 1500,
-    }),
-    getFinnhubNextEarningsDate(symbol),
-  ]);
+    // Catalysts + earnings in parallel — they hit different APIs.
+    const [raw, earn] = await Promise.all([
+      askPerplexityRaw(buildPrompt(symbol, companyName), {
+        label: `research-catalyst:${symbol}`,
+        maxTokens: 1500,
+      }),
+      getFinnhubNextEarningsDate(symbol),
+    ]);
 
-  const parsed = raw?.text ? tryParseObject(raw.text) : null;
-  const catalysts = parseCatalysts(parsed);
-  const score =
-    asEnum(parsed?.overall_catalyst_score, [
-      "rich",
-      "moderate",
-      "sparse",
-    ] as const) ??
-    (catalysts.length >= 3
-      ? "rich"
-      : catalysts.length >= 1
-        ? "moderate"
-        : "sparse");
+    const parsed = raw?.text ? tryParseObject(raw.text) : null;
+    const catalysts = parseCatalysts(parsed);
+    const score =
+      asEnum(parsed?.overall_catalyst_score, [
+        "rich",
+        "moderate",
+        "sparse",
+      ] as const) ??
+      (catalysts.length >= 3
+        ? "rich"
+        : catalysts.length >= 1
+          ? "moderate"
+          : "sparse");
 
-  const output: CatalystScanner = {
-    catalysts,
-    overall_catalyst_score: score,
-    summary: asStr(parsed?.summary),
-    next_earnings: earn
-      ? {
-          date: earn.date,
-          daysAway: daysFromTodayUtc(earn.date),
-        }
-      : null,
-  };
+    const output: CatalystScanner = {
+      catalysts,
+      overall_catalyst_score: score,
+      summary: asStr(parsed?.summary),
+      next_earnings: earn
+        ? {
+            date: earn.date,
+            daysAway: daysFromTodayUtc(earn.date),
+          }
+        : null,
+    };
 
-  const saved = await saveModule(symbol, "catalyst_scanner", output);
-  await recomputeOverallGrade(symbol);
-  return NextResponse.json({ module: saved });
+    const saved = await saveModule(symbol, "catalyst_scanner", output);
+    await recomputeOverallGrade(symbol);
+    return NextResponse.json({ module: saved });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[catalyst-scanner] POST(${symbol}) failed:`, err);
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
 }

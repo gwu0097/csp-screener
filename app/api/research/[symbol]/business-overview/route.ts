@@ -178,59 +178,65 @@ export async function POST(
     return NextResponse.json({ error: "Invalid symbol" }, { status: 400 });
   }
 
-  const profile = await fetchYahooProfile(symbol);
+  try {
+    const profile = await fetchYahooProfile(symbol);
 
-  // Backfill the parent stocks row with the profile fields so the home
-  // page can render them without re-querying Yahoo per row.
-  const sb = createServerClient();
-  await sb
-    .from("research_stocks")
-    .upsert(
-      {
-        symbol,
-        company_name: profile.companyName,
-        sector: profile.sector,
-        industry: profile.industry,
-        market_cap: profile.marketCap,
-      },
-      { onConflict: "symbol" },
-    );
+    // Backfill the parent stocks row with the profile fields so the home
+    // page can render them without re-querying Yahoo per row.
+    const sb = createServerClient();
+    await sb
+      .from("research_stocks")
+      .upsert(
+        {
+          symbol,
+          company_name: profile.companyName,
+          sector: profile.sector,
+          industry: profile.industry,
+          market_cap: profile.marketCap,
+        },
+        { onConflict: "symbol" },
+      );
 
-  // Perplexity. Failure is non-fatal — we still save the Yahoo profile so
-  // the user sees something (and the cache lasts 30 days).
-  let parsed: Record<string, unknown> | null = null;
-  if (profile.companyName) {
-    const raw = await askPerplexityRaw(
-      buildOverviewPrompt(symbol, profile.companyName),
-      { label: `research-overview:${symbol}`, maxTokens: 1200 },
-    );
-    if (raw?.text) parsed = tryParseObject(raw.text);
+    // Perplexity. Failure is non-fatal — we still save the Yahoo profile so
+    // the user sees something (and the cache lasts 30 days).
+    let parsed: Record<string, unknown> | null = null;
+    if (profile.companyName) {
+      const raw = await askPerplexityRaw(
+        buildOverviewPrompt(symbol, profile.companyName),
+        { label: `research-overview:${symbol}`, maxTokens: 1200 },
+      );
+      if (raw?.text) parsed = tryParseObject(raw.text);
+    }
+
+    const output: BusinessOverview = {
+      ...profile,
+      business_model:
+        typeof parsed?.business_model === "string" ? parsed.business_model : null,
+      revenue_streams: toStringArray(parsed?.revenue_streams),
+      moat_type:
+        typeof parsed?.moat_type === "string" ? parsed.moat_type : null,
+      moat_description:
+        typeof parsed?.moat_description === "string"
+          ? parsed.moat_description
+          : null,
+      competitors: toCompetitors(parsed?.competitors),
+      growth_drivers: toStringArray(parsed?.growth_drivers),
+      management_notes:
+        typeof parsed?.management_notes === "string"
+          ? parsed.management_notes
+          : null,
+      bull_summary:
+        typeof parsed?.bull_summary === "string" ? parsed.bull_summary : null,
+      bear_summary:
+        typeof parsed?.bear_summary === "string" ? parsed.bear_summary : null,
+    };
+
+    const saved = await saveModule(symbol, "business_overview", output);
+    await recomputeOverallGrade(symbol);
+    return NextResponse.json({ module: saved });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[business-overview] POST(${symbol}) failed:`, err);
+    return NextResponse.json({ error: message }, { status: 500 });
   }
-
-  const output: BusinessOverview = {
-    ...profile,
-    business_model:
-      typeof parsed?.business_model === "string" ? parsed.business_model : null,
-    revenue_streams: toStringArray(parsed?.revenue_streams),
-    moat_type:
-      typeof parsed?.moat_type === "string" ? parsed.moat_type : null,
-    moat_description:
-      typeof parsed?.moat_description === "string"
-        ? parsed.moat_description
-        : null,
-    competitors: toCompetitors(parsed?.competitors),
-    growth_drivers: toStringArray(parsed?.growth_drivers),
-    management_notes:
-      typeof parsed?.management_notes === "string"
-        ? parsed.management_notes
-        : null,
-    bull_summary:
-      typeof parsed?.bull_summary === "string" ? parsed.bull_summary : null,
-    bear_summary:
-      typeof parsed?.bear_summary === "string" ? parsed.bear_summary : null,
-  };
-
-  const saved = await saveModule(symbol, "business_overview", output);
-  await recomputeOverallGrade(symbol);
-  return NextResponse.json({ module: saved });
 }

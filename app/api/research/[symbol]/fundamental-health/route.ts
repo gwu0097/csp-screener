@@ -297,22 +297,28 @@ export async function POST(
     return NextResponse.json({ error: "Invalid symbol" }, { status: 400 });
   }
 
-  const cik = await getCIK(symbol);
-  const facts = cik ? await getCompanyFacts(cik) : null;
-  const annual = extractAnnualMetrics(facts, 5);
-  const current = await fetchCurrentMetrics(symbol);
-  const { score, components, label } = computeHealth(annual, current);
+  try {
+    const cik = await getCIK(symbol);
+    const facts = cik ? await getCompanyFacts(cik) : null;
+    const annual = extractAnnualMetrics(facts, 5);
+    const current = await fetchCurrentMetrics(symbol);
+    const { score, components, label } = computeHealth(annual, current);
 
-  const output: FundamentalHealth = {
-    cik,
-    annual,
-    current,
-    healthScore: score,
-    scoreComponents: components,
-    scoreLabel: label,
-  };
+    const output: FundamentalHealth = {
+      cik,
+      annual,
+      current,
+      healthScore: score,
+      scoreComponents: components,
+      scoreLabel: label,
+    };
 
-  const saved = await saveModule(symbol, "fundamental_health", output);
-  await recomputeOverallGrade(symbol);
-  return NextResponse.json({ module: saved });
+    const saved = await saveModule(symbol, "fundamental_health", output);
+    await recomputeOverallGrade(symbol);
+    return NextResponse.json({ module: saved });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[fundamental-health] POST(${symbol}) failed:`, err);
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
 }
