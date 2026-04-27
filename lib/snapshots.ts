@@ -129,6 +129,17 @@ export function pickPutContract(
     }
   }
   if (!expKey) {
+    // If the requested expiry is in the past, the contract no longer
+    // exists in any live chain. Fuzzy-matching across the expiration
+    // boundary picks a different (live) contract whose price has
+    // nothing to do with this position. Auto-expire relies on null
+    // option_price for "no chain data" — so we must return null here.
+    if (expiry < today) {
+      console.warn(
+        `[snapshots] requested expiry ${expiry} is in the past and not in chain — returning null (no fuzzy fallback for past expiries)`,
+      );
+      return null;
+    }
     const targetMs = new Date(expiry + "T00:00:00Z").getTime();
     if (!Number.isFinite(targetMs)) return null;
     let bestKey: string | null = null;
@@ -149,11 +160,12 @@ export function pickPutContract(
       return null;
     }
     // Reject any fuzzy match whose ISO date is strictly before today.
-    // Lexicographic compare on YYYY-MM-DD is correct here.
+    // (Belt-and-suspenders alongside the past-requested-expiry guard
+    // above — covers an edge case where Schwab returns a stale chain.)
     const matchedIso = bestKey.slice(0, 10);
     if (matchedIso < today) {
       console.warn(
-        `[snapshots] fuzzy expiry match ${matchedIso} for requested ${expiry} is in the past — returning null instead of a stale contract`,
+        `[snapshots] fuzzy expiry match ${matchedIso} for requested ${expiry} is in the past — returning null`,
       );
       return null;
     }

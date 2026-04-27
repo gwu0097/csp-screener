@@ -11,6 +11,7 @@
 // assigned position.
 import { createServerClient } from "@/lib/supabase";
 import { recordPositionOutcome } from "@/lib/post-earnings";
+import { fetchChainSafe, pickPutContract } from "@/lib/snapshots";
 
 export type ExpiryClassification = "auto_expire" | "verify_assignment" | "pending";
 
@@ -98,6 +99,29 @@ type ExpiredOpenPosition = {
 
 function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
+}
+
+// Pulls a live Schwab chain and returns the stock price + put price at
+// the position's strike. Used by runAutoExpire to bypass any stale
+// position_snapshots row written before today's deploy. Returns nulls
+// when the chain or contract isn't available — the classifier's
+// deep-OTM rule (>5% pctFromStrike) handles a null option_price
+// correctly, so partial data is still actionable.
+export async function fetchFreshExpirySnapshot(
+  symbol: string,
+  strike: number,
+  expiry: string,
+): Promise<{ stock_price: number | null; option_price: number | null }> {
+  const chain = await fetchChainSafe(symbol);
+  if (!chain) return { stock_price: null, option_price: null };
+  const stock_price =
+    chain.underlying?.mark ??
+    chain.underlying?.last ??
+    chain.underlyingPrice ??
+    null;
+  const contract = pickPutContract(chain, strike, expiry);
+  const option_price = contract?.mark ?? null;
+  return { stock_price, option_price };
 }
 
 // Returns every position still flagged open whose expiry date is
@@ -284,6 +308,14 @@ export type AutoExpireReport = {
 // before Monday assignment notices clear. Auto-closes clearly-worthless
 // positions in place; returns the remaining (needs_verification +
 // pending) positions for the UI to surface as warnings.
+//
+// Classification reads a FRESH chain rather than the latest
+// position_snapshots row. Snapshots written earlier in the day may
+// hold a future-expiry contract's price (a pre-fix bug in
+// pickPutContract's fuzzy fallback) — re-fetching forces today's
+// post-expiration view, which correctly returns null option_price
+// for past-expiry contracts. The deep-OTM rule (>5%) closes the
+// position from stock_price alone in that case.
 export async function runAutoExpire(): Promise<AutoExpireReport> {
   const empty: AutoExpireReport = {
     auto_expired: [],
@@ -296,11 +328,36 @@ export async function runAutoExpire(): Promise<AutoExpireReport> {
   }
 
   const positions = await getExpiredPositions();
-  const report: AutoExpireReport = { ...empty };
+  if (positions.length === 0) return empty;
 
+  // Parallelize the per-position chain fetch — each is ~1-3s, 5 in
+  // serial would chew most of the 60s route budget.
+  const freshByPosition = new Map<
+    string,
+    { stock_price: number | null; option_price: number | null }
+  >();
+  await Promise.all(
+    positions.map(async (p) => {
+      const fresh = await fetchFreshExpirySnapshot(
+        p.symbol,
+        Number(p.strike),
+        p.expiry,
+      );
+      freshByPosition.set(p.id, fresh);
+    }),
+  );
+
+  const report: AutoExpireReport = { ...empty };
   for (const p of positions) {
-    const c = await classifyExpiredPosition(p);
-    if (c.classification === "auto_expire") {
+    const fresh = freshByPosition.get(p.id) ?? {
+      stock_price: null,
+      option_price: null,
+    };
+    const { classification, pctFromStrike } = classifyFromSnapshot(
+      Number(p.strike),
+      fresh,
+    );
+    if (classification === "auto_expire") {
       const r = await autoExpirePosition(p.id);
       if (r.ok) {
         report.auto_expired.push({
@@ -311,29 +368,27 @@ export async function runAutoExpire(): Promise<AutoExpireReport> {
           realized_pnl: r.realized_pnl,
         });
       } else {
-        // Treat as pending on failure so it surfaces in the UI and we
-        // don't silently lose the position.
         report.pending.push({
           positionId: p.id,
           symbol: p.symbol,
           strike: Number(p.strike),
           expiry: p.expiry,
-          pctFromStrike: c.pctFromStrike,
-          stockPrice: c.stockPrice,
-          optionPrice: c.optionPrice,
+          pctFromStrike,
+          stockPrice: fresh.stock_price,
+          optionPrice: fresh.option_price,
           classification: "pending",
         });
       }
-    } else if (c.classification === "verify_assignment") {
+    } else if (classification === "verify_assignment") {
       report.needs_verification.push({
         positionId: p.id,
         symbol: p.symbol,
         strike: Number(p.strike),
         expiry: p.expiry,
-        pctFromStrike: c.pctFromStrike,
-        stockPrice: c.stockPrice,
-        optionPrice: c.optionPrice,
-        classification: c.classification,
+        pctFromStrike,
+        stockPrice: fresh.stock_price,
+        optionPrice: fresh.option_price,
+        classification,
       });
     } else {
       report.pending.push({
@@ -341,10 +396,10 @@ export async function runAutoExpire(): Promise<AutoExpireReport> {
         symbol: p.symbol,
         strike: Number(p.strike),
         expiry: p.expiry,
-        pctFromStrike: c.pctFromStrike,
-        stockPrice: c.stockPrice,
-        optionPrice: c.optionPrice,
-        classification: c.classification,
+        pctFromStrike,
+        stockPrice: fresh.stock_price,
+        optionPrice: fresh.option_price,
+        classification,
       });
     }
   }
