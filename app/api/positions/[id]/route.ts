@@ -4,9 +4,9 @@ import { createServerClient } from "@/lib/supabase";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-// Hard-delete a single position. Used by the position card's Remove
-// button to clean up bad imports (broker screenshots that produced a
-// wrong strike, accidental duplicate entry, etc.).
+// Hard-delete a single position by id. Used by the position card's
+// inline Remove control to clean up bad imports (broker screenshots
+// that produced wrong strikes, accidental duplicate entries).
 //
 // fills / position_snapshots / post_earnings_recommendations all
 // reference positions.id; we don't know whether the schema has
@@ -19,10 +19,33 @@ export async function DELETE(
 ) {
   const id = params.id;
   if (!id || typeof id !== "string") {
-    return NextResponse.json({ error: "id required" }, { status: 400 });
+    return NextResponse.json(
+      { success: false, error: "id required" },
+      { status: 400 },
+    );
   }
 
   const sb = createServerClient();
+
+  // Existence check — return 404 instead of silently no-op'ing so the
+  // client can distinguish "stale list" from "delete actually ran".
+  const exists = await sb
+    .from("positions")
+    .select("id")
+    .eq("id", id)
+    .limit(1);
+  if (exists.error) {
+    return NextResponse.json(
+      { success: false, error: exists.error.message },
+      { status: 500 },
+    );
+  }
+  if (!exists.data || (exists.data as Array<unknown>).length === 0) {
+    return NextResponse.json(
+      { success: false, error: "position not found" },
+      { status: 404 },
+    );
+  }
 
   for (const table of [
     "fills",
@@ -31,8 +54,6 @@ export async function DELETE(
   ]) {
     const r = await sb.from(table).delete().eq("position_id", id);
     if (r.error) {
-      // Log and continue — child-table failures shouldn't block the
-      // primary delete in case the table doesn't exist or RLS rejects.
       console.warn(
         `[positions/delete] child cleanup ${table} for ${id} failed: ${r.error.message}`,
       );
@@ -41,7 +62,10 @@ export async function DELETE(
 
   const del = await sb.from("positions").delete().eq("id", id);
   if (del.error) {
-    return NextResponse.json({ error: del.error.message }, { status: 500 });
+    return NextResponse.json(
+      { success: false, error: del.error.message },
+      { status: 500 },
+    );
   }
-  return NextResponse.json({ ok: true, id });
+  return NextResponse.json({ success: true, id });
 }

@@ -124,11 +124,11 @@ type Props =
       kind: "open";
       position: OpenPositionClientView;
       onCloseSubmitted: (msg: string) => void;
-      // Position ids of every other position with the same symbol in
-      // the open list (does NOT include this position's own id). Used
-      // to surface the "Remove all SYMBOL positions" bulk action when
-      // a bad import produced multiple rows at once.
-      siblingIds?: string[];
+      // Optimistic-removal hook: parent splices the id out of its
+      // local positions array on a successful DELETE so the row
+      // disappears instantly without a full /api/positions/open
+      // round-trip. Optional so closed-list usage can ignore it.
+      onPositionRemoved?: (id: string) => void;
     }
   | { kind: "closed"; position: ClosedPositionClientView };
 
@@ -252,6 +252,49 @@ function recDotColor(r: PostEarningsRecView): string {
 
 export function PositionCard(props: Props) {
   const [expanded, setExpanded] = useState(false);
+  // Inline-remove state. Trash icon in the collapsed-row's status cell
+  // toggles `removeOpen`; the confirmation strip renders directly
+  // below the row, still inside the card border, so the user keeps
+  // visual context of what they're about to delete.
+  const [removeOpen, setRemoveOpen] = useState(false);
+  const [removing, setRemoving] = useState(false);
+  const [removeError, setRemoveError] = useState<string | null>(null);
+
+  const onRemoveClick = (e: React.MouseEvent | React.KeyboardEvent) => {
+    e.stopPropagation();
+    setRemoveOpen(true);
+    setRemoveError(null);
+  };
+  const cancelRemove = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setRemoveOpen(false);
+    setRemoveError(null);
+  };
+  const confirmRemove = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (removing) return;
+    setRemoving(true);
+    setRemoveError(null);
+    try {
+      const res = await fetch(
+        `/api/positions/${encodeURIComponent(props.position.id)}`,
+        { method: "DELETE" },
+      );
+      const json = (await res.json()) as { success?: boolean; error?: string };
+      if (!res.ok || !json.success) {
+        throw new Error(json.error ?? `HTTP ${res.status}`);
+      }
+      // Optimistic-removal: parent splices its positions array. We
+      // don't reset removeOpen / removing here — the row is about to
+      // unmount once the parent re-renders.
+      if (props.kind === "open" && props.onPositionRemoved) {
+        props.onPositionRemoved(props.position.id);
+      }
+    } catch (err) {
+      setRemoveError(err instanceof Error ? err.message : "Delete failed");
+      setRemoving(false);
+    }
+  };
   // Narrow the union up front so the rest of the render doesn't need a
   // guard on every field access.
   const open = props.kind === "open" ? props.position : null;
@@ -427,6 +470,28 @@ export function PositionCard(props: Props) {
               {status.label}
             </span>
           )}
+          {props.kind === "open" && (
+            <span
+              role="button"
+              tabIndex={0}
+              aria-label="Remove position"
+              title="Remove position"
+              onClick={onRemoveClick}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  onRemoveClick(e);
+                }
+              }}
+              className={cn(
+                "inline-flex items-center justify-center rounded p-0.5 text-muted-foreground transition-[opacity,colors] duration-150",
+                "hover:bg-rose-500/15 hover:text-rose-300",
+                "opacity-100 sm:opacity-0 sm:group-hover:opacity-100",
+              )}
+            >
+              <Trash2 className="h-3 w-3" />
+            </span>
+          )}
           <ChevronRight
             className={cn(
               "h-3 w-3 text-muted-foreground transition-[opacity,transform] duration-150",
@@ -436,6 +501,42 @@ export function PositionCard(props: Props) {
           />
         </div>
       </button>
+
+      {/* Inline remove-confirmation strip — sits between the collapsed
+          row and the expanded detail so the user keeps visual context
+          of which row they're about to delete. */}
+      {removeOpen && props.kind === "open" && (
+        <div className="flex flex-wrap items-center gap-2 border-t border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs">
+          <span className="font-medium text-rose-200">
+            ⚠ Remove this position permanently?
+          </span>
+          <Button
+            size="sm"
+            onClick={confirmRemove}
+            disabled={removing}
+            className="bg-rose-500/80 hover:bg-rose-500"
+          >
+            {removing ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              "Remove"
+            )}
+          </Button>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={cancelRemove}
+            disabled={removing}
+          >
+            Cancel
+          </Button>
+          {removeError && (
+            <span className="basis-full rounded border border-rose-500/40 bg-rose-500/15 px-2 py-1 text-rose-200">
+              {removeError}
+            </span>
+          )}
+        </div>
+      )}
 
       {/* Expanded detail — slides open below */}
       <div
@@ -486,13 +587,6 @@ export function PositionCard(props: Props) {
               <ExternalLink className="h-3 w-3" />
               View in Encyclopedia
             </Link>
-            {props.kind === "open" && (
-              <RemovePositionInline
-                position={props.position}
-                siblingIds={props.siblingIds ?? []}
-                onRemoved={props.onCloseSubmitted}
-              />
-            )}
           </div>
         </div>
       </div>
@@ -659,143 +753,6 @@ function PostEarningsPanel({ rec }: { rec: PostEarningsRecView }) {
         {rec.analystSentiment && <span>Sentiment: {rec.analystSentiment}</span>}
         {rec.recoveryLikelihood && <span>Recovery: {rec.recoveryLikelihood}</span>}
       </div>
-    </div>
-  );
-}
-
-// Hard-delete control for cleaning up a bad import. Two-step flow so a
-// stray click can't wipe a real position: trash icon → expanded
-// confirmation buttons → DELETE call. When the parent passes sibling
-// ids (other open rows for the same symbol from one import), a second
-// "Remove all N {symbol} positions" button appears alongside.
-function RemovePositionInline({
-  position,
-  siblingIds,
-  onRemoved,
-}: {
-  position: OpenPositionClientView;
-  siblingIds: string[];
-  onRemoved: (msg: string) => void;
-}) {
-  const [confirming, setConfirming] = useState(false);
-  const [submitting, setSubmitting] = useState<"single" | "all" | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const totalForSymbol = siblingIds.length + 1; // includes this row
-
-  async function removeOne() {
-    setSubmitting("single");
-    setError(null);
-    try {
-      const res = await fetch(
-        `/api/positions/${encodeURIComponent(position.id)}`,
-        { method: "DELETE" },
-      );
-      const json = (await res.json()) as { ok?: boolean; error?: string };
-      if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
-      onRemoved(`Removed ${position.symbol} $${position.strike}`);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Delete failed");
-      setSubmitting(null);
-    }
-  }
-
-  async function removeAll() {
-    setSubmitting("all");
-    setError(null);
-    try {
-      const ids = [position.id, ...siblingIds];
-      const res = await fetch("/api/positions/bulk-delete", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ids }),
-      });
-      const json = (await res.json()) as {
-        ok?: boolean;
-        deletedCount?: number;
-        error?: string;
-      };
-      if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
-      onRemoved(
-        `Removed ${json.deletedCount ?? ids.length} ${position.symbol} position${
-          (json.deletedCount ?? ids.length) === 1 ? "" : "s"
-        }`,
-      );
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Delete failed");
-      setSubmitting(null);
-    }
-  }
-
-  if (!confirming) {
-    return (
-      <button
-        type="button"
-        onClick={(e) => {
-          e.stopPropagation();
-          setConfirming(true);
-        }}
-        title="Remove this position"
-        className="ml-auto inline-flex items-center gap-1 rounded-md border border-rose-500/30 bg-rose-500/5 px-2 py-1 text-xs text-rose-300 hover:bg-rose-500/15"
-      >
-        <Trash2 className="h-3 w-3" />
-        Remove
-      </button>
-    );
-  }
-
-  return (
-    <div className="ml-auto flex flex-wrap items-center gap-2 rounded-md border border-rose-500/40 bg-rose-500/10 px-2 py-1 text-xs">
-      <span className="text-rose-200">Remove this position? This cannot be undone.</span>
-      <Button
-        size="sm"
-        onClick={(e) => {
-          e.stopPropagation();
-          void removeOne();
-        }}
-        disabled={submitting !== null}
-        className="bg-rose-500/80 hover:bg-rose-500"
-      >
-        {submitting === "single" ? (
-          <Loader2 className="h-3 w-3 animate-spin" />
-        ) : (
-          "Remove this"
-        )}
-      </Button>
-      {totalForSymbol > 1 && (
-        <Button
-          size="sm"
-          onClick={(e) => {
-            e.stopPropagation();
-            void removeAll();
-          }}
-          disabled={submitting !== null}
-          className="bg-rose-500/80 hover:bg-rose-500"
-        >
-          {submitting === "all" ? (
-            <Loader2 className="h-3 w-3 animate-spin" />
-          ) : (
-            `Remove all ${totalForSymbol} ${position.symbol} positions`
-          )}
-        </Button>
-      )}
-      <Button
-        size="sm"
-        variant="secondary"
-        onClick={(e) => {
-          e.stopPropagation();
-          setConfirming(false);
-          setError(null);
-        }}
-        disabled={submitting !== null}
-      >
-        Cancel
-      </Button>
-      {error && (
-        <span className="basis-full rounded border border-rose-500/40 bg-rose-500/10 px-2 py-1 text-rose-200">
-          {error}
-        </span>
-      )}
     </div>
   );
 }
