@@ -354,19 +354,38 @@ function crushThresholdForDte(dte: number): number {
   return 20; // 1 DTE or less
 }
 
+// Loosened from the original (A>=20, B>=16, C>=14) — the old C
+// threshold meant anything below 56% of max scored F, which over-
+// penalised stocks where one or two of the five sub-scores were
+// thin. New brackets demand a 72% finish for an A, 56% for a B, and
+// 40% for a C; stocks below 10/25 still skip out as F.
 function gradeFromCrushScore(score: number): StageThreeResult["crushGrade"] {
-  if (score >= 20) return "A";
-  if (score >= 16) return "B";
-  if (score >= 14) return "C";
+  if (score >= 18) return "A";
+  if (score >= 14) return "B";
+  if (score >= 10) return "C";
   return "F";
 }
 
+// Score the median historical move against today's IV-implied move.
+// We don't store per-event historical IV (Phase 2), so the denominator
+// is the CURRENT weekly emPct for every event in the window — same as
+// the per-event ratio shown in [DEBUG:SPOT crush].
+//
+// Bucketing tracks the user-facing crush narrative:
+//   ratio < 0.7   stock historically undershoots the implied move (A)
+//   ratio < 0.85  comfortable margin                             (B)
+//   ratio < 1.0   median ≤ implied                               (C)
+//   ratio < 1.2   stock typically prints close to / over implied (D)
+//   ratio ≥ 1.2   stock consistently overshoots                  (F)
+// Mapped onto the existing 0-8 sub-score scale (no D in the
+// composite grade type — D collapses to a small partial-credit point).
 function scoreHistoricalMove(medianMovePct: number | null, emPct: number | null): number {
   if (medianMovePct === null || emPct === null || emPct <= 0) return 0;
   const ratio = medianMovePct / emPct;
-  if (ratio < 0.5) return 8;
-  if (ratio < 0.7) return 5;
-  if (ratio < 0.9) return 2;
+  if (ratio < 0.7) return 8;
+  if (ratio < 0.85) return 5;
+  if (ratio < 1.0) return 2;
+  if (ratio < 1.2) return 1;
   return 0;
 }
 
@@ -532,6 +551,74 @@ export async function runStageThree(
       `grade=${gradeFromCrushScore(score)}`,
   );
   void monthlyExpiryKey;
+
+  // ---- DEBUG: SPOT-only validation dump (CRUSH inputs/intermediates). ----
+  // NOTE: per-event implied move is NOT stored in EarningsMove — only `date`,
+  // `actualMovePct`, `direction`. Ratio below uses the CURRENT weekly
+  // IV-implied move (emPct) as denominator for every historical row, which
+  // is the same denominator the median-vs-EM ratio uses in scoreHistoricalMove.
+  if (sym === "SPOT") {
+    const events = historicalMoves.map((m) => ({
+      date: m.date,
+      actualMovePct: m.actualMovePct,
+      direction: m.direction,
+      impliedMovePct_current: emPct,
+      ratio_actualOverImplied: emPct && emPct > 0 ? m.actualMovePct / emPct : null,
+    }));
+    const crushRatio =
+      medianMove !== null && emPct !== null && emPct > 0
+        ? medianMove / emPct
+        : null;
+    const ratioGrade =
+      crushRatio === null
+        ? "—"
+        : crushRatio < 0.7
+          ? "A"
+          : crushRatio < 0.85
+            ? "B"
+            : crushRatio < 1.0
+              ? "C"
+              : crushRatio < 1.2
+                ? "D"
+                : "F";
+    console.log(
+      "[DEBUG:SPOT crush] " +
+        JSON.stringify(
+          {
+            historicalEventCount: historicalMoves.length,
+            events,
+            // Raw historical move array per spec — easy to eyeball.
+            historicalMoves: movePcts,
+            medianHistoricalMove: medianMove,
+            currentImpliedMove: emPct,
+            crushRatio,
+            crushRatioGrade: ratioGrade,
+            weeklyIv,
+            monthlyIv,
+            realizedVol30d: realizedVol,
+            dte: candidate.daysToExpiry,
+            scores: {
+              historicalMoveScore,
+              consistencyScore,
+              termStructureScore,
+              ivEdgeScore,
+              surpriseScore,
+              total: score,
+              maxScore: 25,
+              threshold,
+              pass: score >= threshold,
+              grade: gradeFromCrushScore(score),
+            },
+            gradeThresholds: "A>=18, B>=14, C>=10, else F",
+            historicalMoveScoreRule:
+              "ratio = medianMove/emPct: <0.7 => 8pts, <0.85 => 5pts, <1.0 => 2pts, <1.2 => 1pt, else 0",
+            note: "Per-event impliedMove is not stored. crushRatio uses today's weekly IV-implied move for every event.",
+          },
+          null,
+          2,
+        ),
+    );
+  }
 
   return {
     score,
@@ -1033,6 +1120,7 @@ export function calculateThreeLayerGrade(
   newsContext: PerplexityNewsResult,
   personalHistory: PersonalHistory | null,
   vix: number | null,
+  currentPrice: number = 0,
 ): ThreeLayerGrade {
   const crushGrade = stageThreeResult.crushGrade;
   const opportunityGrade = stageFourResult.opportunityGrade;
@@ -1042,9 +1130,25 @@ export function calculateThreeLayerGrade(
   const premium = stageFourResult.premium ?? 0;
   const strike = stageFourResult.suggestedStrike ?? 0;
   const breakevenPrice = strike - premium;
-  // EV per contract (dollars): POP × premium − (1 − POP) × breakeven-to-zero loss.
-  // Rough proxy — assumes the put assigns and stock drops to 0 on the miss side.
-  const expectedValue = probabilityOfProfit * premium * 100 - (1 - probabilityOfProfit) * strike * 100;
+  // EV per contract (dollars). The assignment-loss leg uses a realistic
+  // 2× expected-move downside instead of "stock goes to zero", which
+  // was the old proxy and made every CSP look terrible.
+  //
+  //   expectedDownsidePrice = currentPrice × (1 − emPct × 2)
+  //   assignmentLoss        = max(strike − expectedDownsidePrice, 0) × 100
+  //   EV                    = POP × premium × 100 − (1 − POP) × assignmentLoss
+  //
+  // If the 2× downside still lands above the strike, assignmentLoss = 0
+  // and EV collapses to POP × premium × 100 (pure premium expectation).
+  const emPct = stageThreeResult.details.expectedMovePct ?? 0;
+  const expectedDownsidePrice =
+    currentPrice > 0 ? currentPrice * (1 - emPct * 2) : 0;
+  const assignmentLoss =
+    currentPrice > 0
+      ? Math.max(strike - expectedDownsidePrice, 0) * 100
+      : strike * 100; // pre-currentPrice fallback keeps old behaviour
+  const expectedValue =
+    probabilityOfProfit * premium * 100 - (1 - probabilityOfProfit) * assignmentLoss;
 
   const weeklyIv = stageThreeResult.details.weeklyIv ?? null;
   const realizedVol = stageThreeResult.details.realizedVol30d ?? null;

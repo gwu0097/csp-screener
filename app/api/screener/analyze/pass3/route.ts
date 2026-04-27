@@ -200,7 +200,66 @@ export async function POST(req: NextRequest) {
         news,
         personal,
         vix,
+        base.price,
       );
+
+      // ---- DEBUG: SPOT-only EV / POP validation dump. ----
+      // Mirrors the new EV math in calculateThreeLayerGrade. POP comes
+      // from Schwab's per-contract delta (lib/screener.ts:663,
+      // contract.delta), NOT from the expected-move calculation. The
+      // assignment-loss leg now uses a 2× expected-move downside
+      // instead of strike-to-zero.
+      if (base.symbol === "SPOT") {
+        const delta = base.stageFour.delta ?? 0;
+        const premium = base.stageFour.premium ?? 0;
+        const strike = base.stageFour.suggestedStrike ?? 0;
+        const pop = 1 - Math.abs(delta);
+        const currentPrice = base.price;
+        const emPct = base.stageThree.details.expectedMovePct ?? 0;
+        const expectedDownsidePrice =
+          currentPrice > 0 ? currentPrice * (1 - emPct * 2) : 0;
+        const assignmentLoss =
+          currentPrice > 0
+            ? Math.max(strike - expectedDownsidePrice, 0) * 100
+            : strike * 100;
+        const winLeg = pop * premium * 100;
+        const lossLeg = (1 - pop) * assignmentLoss;
+        const ev_new = winLeg - lossLeg;
+        // Old formula for side-by-side comparison while we validate.
+        const ev_old = pop * premium * 100 - (1 - pop) * strike * 100;
+        console.log(
+          "[DEBUG:SPOT ev_pop] " +
+            JSON.stringify(
+              {
+                pop_source:
+                  "1 - |delta|, where delta is from Schwab contract.delta (lib/screener.ts:663)",
+                schwab_delta: delta,
+                pop,
+                pop_pct: `${(pop * 100).toFixed(1)}%`,
+                currentPrice,
+                emPct,
+                expectedDownsidePrice,
+                assignmentLoss,
+                strike,
+                premium,
+                breakeven: strike - premium,
+                contractSymbol: base.stageFour.details?.contractSymbol ?? null,
+                ev_formula:
+                  "EV = POP * premium * 100 - (1 - POP) * max(strike - downside, 0) * 100",
+                ev_components: {
+                  winLeg_dollars: winLeg,
+                  lossLeg_dollars: lossLeg,
+                  expectedValue_dollars_new: ev_new,
+                  expectedValue_dollars_old: ev_old,
+                },
+                note: "Old formula assumed stock → $0 on assignment. New formula uses 2× expected-move downside.",
+              },
+              null,
+              2,
+            ),
+        );
+      }
+
       return { ...base, threeLayer };
     }),
   );
