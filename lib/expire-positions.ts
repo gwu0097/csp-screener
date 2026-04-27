@@ -324,10 +324,22 @@ export async function runAutoExpire(): Promise<AutoExpireReport> {
     skipped: false,
   };
   if (isWeekendUTC(new Date())) {
+    console.log("[expire] weekend gate — skipping");
     return { ...empty, skipped: true, skipReason: "weekend" };
   }
 
-  const positions = await getExpiredPositions();
+  let positions: ExpiredOpenPosition[];
+  try {
+    positions = await getExpiredPositions();
+  } catch (e) {
+    console.log(
+      `[expire] ERROR getExpiredPositions: ${e instanceof Error ? e.message : e}`,
+    );
+    return { ...empty, skipped: true, skipReason: "getExpiredPositions failed" };
+  }
+  console.log(
+    `[expire] found expired: ${JSON.stringify(positions.map((p) => `${p.symbol} ${p.strike}`))}`,
+  );
   if (positions.length === 0) return empty;
 
   // Parallelize the per-position chain fetch — each is ~1-3s, 5 in
@@ -338,12 +350,32 @@ export async function runAutoExpire(): Promise<AutoExpireReport> {
   >();
   await Promise.all(
     positions.map(async (p) => {
-      const fresh = await fetchFreshExpirySnapshot(
-        p.symbol,
-        Number(p.strike),
-        p.expiry,
-      );
-      freshByPosition.set(p.id, fresh);
+      try {
+        const fresh = await fetchFreshExpirySnapshot(
+          p.symbol,
+          Number(p.strike),
+          p.expiry,
+        );
+        const pct =
+          fresh.stock_price !== null && Number(p.strike) > 0
+            ? ((fresh.stock_price - Number(p.strike)) / Number(p.strike)) * 100
+            : null;
+        console.log(
+          `[expire] fresh snapshot: ${JSON.stringify({
+            symbol: p.symbol,
+            strike: Number(p.strike),
+            stockPrice: fresh.stock_price,
+            optionPrice: fresh.option_price,
+            pctFromStrike: pct !== null ? `${pct.toFixed(2)}%` : null,
+          })}`,
+        );
+        freshByPosition.set(p.id, fresh);
+      } catch (e) {
+        console.log(
+          `[expire] ERROR fetchFreshExpirySnapshot ${p.symbol} ${p.strike}: ${e instanceof Error ? e.message : e}`,
+        );
+        freshByPosition.set(p.id, { stock_price: null, option_price: null });
+      }
     }),
   );
 
@@ -357,9 +389,23 @@ export async function runAutoExpire(): Promise<AutoExpireReport> {
       Number(p.strike),
       fresh,
     );
+    console.log(
+      `[expire] classified: ${p.symbol} ${p.strike} → ${classification} (pct=${pctFromStrike !== null ? (pctFromStrike * 100).toFixed(2) + "%" : "—"})`,
+    );
     if (classification === "auto_expire") {
-      const r = await autoExpirePosition(p.id);
+      let r: { ok: boolean; realized_pnl: number; reason?: string };
+      try {
+        r = await autoExpirePosition(p.id);
+      } catch (e) {
+        console.log(
+          `[expire] ERROR autoExpirePosition ${p.symbol} ${p.strike}: ${e instanceof Error ? e.message : e}`,
+        );
+        r = { ok: false, realized_pnl: 0, reason: "threw" };
+      }
       if (r.ok) {
+        console.log(
+          `[expire] auto-expired: ${p.symbol} ${p.strike} pnl=$${r.realized_pnl.toFixed(2)}`,
+        );
         report.auto_expired.push({
           positionId: p.id,
           symbol: p.symbol,
@@ -368,6 +414,9 @@ export async function runAutoExpire(): Promise<AutoExpireReport> {
           realized_pnl: r.realized_pnl,
         });
       } else {
+        console.log(
+          `[expire] auto-expire FAILED: ${p.symbol} ${p.strike} reason=${r.reason ?? "unknown"}`,
+        );
         report.pending.push({
           positionId: p.id,
           symbol: p.symbol,
