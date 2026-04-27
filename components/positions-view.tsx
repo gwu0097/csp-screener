@@ -504,25 +504,41 @@ export function PositionsView() {
         </div>
       )}
 
-      {groupByBroker(positions).map((group) => (
-        <div key={group.key} className="space-y-2">
-          <div className="flex items-baseline gap-2 pt-2 text-xs font-semibold uppercase text-muted-foreground">
-            <span>{group.label}</span>
-            <span className="font-normal normal-case">
-              ({group.contractCount} {group.contractCount === 1 ? "contract" : "contracts"})
-            </span>
+      {(() => {
+        // Sibling map: for each open position, the OTHER open ids
+        // sharing the same symbol. Powers the "Remove all SYMBOL
+        // positions" bulk button on the position card. Computed once
+        // from the full positions list, not per-broker, so a bad
+        // import that hit two brokers can still be wiped in one click.
+        const idsBySymbol = new Map<string, string[]>();
+        for (const p of positions) {
+          const arr = idsBySymbol.get(p.symbol) ?? [];
+          arr.push(p.id);
+          idsBySymbol.set(p.symbol, arr);
+        }
+        return groupByBroker(positions).map((group) => (
+          <div key={group.key} className="space-y-2">
+            <div className="flex items-baseline gap-2 pt-2 text-xs font-semibold uppercase text-muted-foreground">
+              <span>{group.label}</span>
+              <span className="font-normal normal-case">
+                ({group.contractCount} {group.contractCount === 1 ? "contract" : "contracts"})
+              </span>
+            </div>
+            <PositionsTableHeader />
+            {group.items.map((p) => (
+              <PositionCard
+                key={p.id}
+                kind="open"
+                position={p}
+                onCloseSubmitted={onImportSuccess}
+                siblingIds={(idsBySymbol.get(p.symbol) ?? []).filter(
+                  (id) => id !== p.id,
+                )}
+              />
+            ))}
           </div>
-          <PositionsTableHeader />
-          {group.items.map((p) => (
-            <PositionCard
-              key={p.id}
-              kind="open"
-              position={p}
-              onCloseSubmitted={onImportSuccess}
-            />
-          ))}
-        </div>
-      ))}
+        ));
+      })()}
 
       {/* Closed positions — collapsed by default, fetched lazily */}
       <div className="pt-4">

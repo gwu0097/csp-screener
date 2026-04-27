@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronRight, ExternalLink, Loader2 } from "lucide-react";
+import { ChevronRight, ExternalLink, Loader2, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import {
@@ -120,7 +120,16 @@ export type ClosedPositionClientView = {
 };
 
 type Props =
-  | { kind: "open"; position: OpenPositionClientView; onCloseSubmitted: (msg: string) => void }
+  | {
+      kind: "open";
+      position: OpenPositionClientView;
+      onCloseSubmitted: (msg: string) => void;
+      // Position ids of every other position with the same symbol in
+      // the open list (does NOT include this position's own id). Used
+      // to surface the "Remove all SYMBOL positions" bulk action when
+      // a bad import produced multiple rows at once.
+      siblingIds?: string[];
+    }
   | { kind: "closed"; position: ClosedPositionClientView };
 
 // Grid template shared between the collapsed row and the column-header
@@ -477,6 +486,13 @@ export function PositionCard(props: Props) {
               <ExternalLink className="h-3 w-3" />
               View in Encyclopedia
             </Link>
+            {props.kind === "open" && (
+              <RemovePositionInline
+                position={props.position}
+                siblingIds={props.siblingIds ?? []}
+                onRemoved={props.onCloseSubmitted}
+              />
+            )}
           </div>
         </div>
       </div>
@@ -643,6 +659,143 @@ function PostEarningsPanel({ rec }: { rec: PostEarningsRecView }) {
         {rec.analystSentiment && <span>Sentiment: {rec.analystSentiment}</span>}
         {rec.recoveryLikelihood && <span>Recovery: {rec.recoveryLikelihood}</span>}
       </div>
+    </div>
+  );
+}
+
+// Hard-delete control for cleaning up a bad import. Two-step flow so a
+// stray click can't wipe a real position: trash icon → expanded
+// confirmation buttons → DELETE call. When the parent passes sibling
+// ids (other open rows for the same symbol from one import), a second
+// "Remove all N {symbol} positions" button appears alongside.
+function RemovePositionInline({
+  position,
+  siblingIds,
+  onRemoved,
+}: {
+  position: OpenPositionClientView;
+  siblingIds: string[];
+  onRemoved: (msg: string) => void;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const [submitting, setSubmitting] = useState<"single" | "all" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const totalForSymbol = siblingIds.length + 1; // includes this row
+
+  async function removeOne() {
+    setSubmitting("single");
+    setError(null);
+    try {
+      const res = await fetch(
+        `/api/positions/${encodeURIComponent(position.id)}`,
+        { method: "DELETE" },
+      );
+      const json = (await res.json()) as { ok?: boolean; error?: string };
+      if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
+      onRemoved(`Removed ${position.symbol} $${position.strike}`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Delete failed");
+      setSubmitting(null);
+    }
+  }
+
+  async function removeAll() {
+    setSubmitting("all");
+    setError(null);
+    try {
+      const ids = [position.id, ...siblingIds];
+      const res = await fetch("/api/positions/bulk-delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids }),
+      });
+      const json = (await res.json()) as {
+        ok?: boolean;
+        deletedCount?: number;
+        error?: string;
+      };
+      if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
+      onRemoved(
+        `Removed ${json.deletedCount ?? ids.length} ${position.symbol} position${
+          (json.deletedCount ?? ids.length) === 1 ? "" : "s"
+        }`,
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Delete failed");
+      setSubmitting(null);
+    }
+  }
+
+  if (!confirming) {
+    return (
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          setConfirming(true);
+        }}
+        title="Remove this position"
+        className="ml-auto inline-flex items-center gap-1 rounded-md border border-rose-500/30 bg-rose-500/5 px-2 py-1 text-xs text-rose-300 hover:bg-rose-500/15"
+      >
+        <Trash2 className="h-3 w-3" />
+        Remove
+      </button>
+    );
+  }
+
+  return (
+    <div className="ml-auto flex flex-wrap items-center gap-2 rounded-md border border-rose-500/40 bg-rose-500/10 px-2 py-1 text-xs">
+      <span className="text-rose-200">Remove this position? This cannot be undone.</span>
+      <Button
+        size="sm"
+        onClick={(e) => {
+          e.stopPropagation();
+          void removeOne();
+        }}
+        disabled={submitting !== null}
+        className="bg-rose-500/80 hover:bg-rose-500"
+      >
+        {submitting === "single" ? (
+          <Loader2 className="h-3 w-3 animate-spin" />
+        ) : (
+          "Remove this"
+        )}
+      </Button>
+      {totalForSymbol > 1 && (
+        <Button
+          size="sm"
+          onClick={(e) => {
+            e.stopPropagation();
+            void removeAll();
+          }}
+          disabled={submitting !== null}
+          className="bg-rose-500/80 hover:bg-rose-500"
+        >
+          {submitting === "all" ? (
+            <Loader2 className="h-3 w-3 animate-spin" />
+          ) : (
+            `Remove all ${totalForSymbol} ${position.symbol} positions`
+          )}
+        </Button>
+      )}
+      <Button
+        size="sm"
+        variant="secondary"
+        onClick={(e) => {
+          e.stopPropagation();
+          setConfirming(false);
+          setError(null);
+        }}
+        disabled={submitting !== null}
+      >
+        Cancel
+      </Button>
+      {error && (
+        <span className="basis-full rounded border border-rose-500/40 bg-rose-500/10 px-2 py-1 text-rose-200">
+          {error}
+        </span>
+      )}
     </div>
   );
 }
