@@ -112,16 +112,43 @@ export async function saveModule<T>(
   output: T,
 ): Promise<ResearchModule<T>> {
   const sb = createServerClient();
+  const upper = symbol.toUpperCase();
   const expiryDays = MODULE_EXPIRY_DAYS[moduleType];
   const expiresAt =
     expiryDays === null
       ? null
       : new Date(Date.now() + expiryDays * 24 * 60 * 60 * 1000).toISOString();
 
+  // Upsert the parent stock row first so we can grab its id — research_modules
+  // has a NOT NULL stock_id FK in production. .select() flips the upsert's
+  // Prefer header to include return=representation so PostgREST sends the row
+  // back regardless of whether it was inserted or updated.
+  const stockUp = await sb
+    .from("research_stocks")
+    .upsert(
+      { symbol: upper, last_researched_at: new Date().toISOString() },
+      { onConflict: "symbol" },
+    )
+    .select()
+    .single();
+  if (stockUp.error) {
+    throw new Error(
+      `[research-modules] research_stocks upsert(${symbol}) failed: ${stockUp.error.message}`,
+    );
+  }
+  const stockId = (stockUp.data as { id?: string } | null)?.id ?? null;
+  if (!stockId) {
+    throw new Error(
+      `[research-modules] research_stocks upsert(${symbol}) returned no id`,
+    );
+  }
+  console.log(`[saveModule] stock_id: ${stockId} (${upper}, ${moduleType})`);
+
   const ins = await sb
     .from("research_modules")
     .insert({
-      symbol: symbol.toUpperCase(),
+      stock_id: stockId,
+      symbol: upper,
       module_type: moduleType,
       output,
       run_at: new Date().toISOString(),
@@ -132,23 +159,6 @@ export async function saveModule<T>(
   if (ins.error) {
     throw new Error(
       `[research-modules] save(${symbol}, ${moduleType}) failed: ${ins.error.message}`,
-    );
-  }
-
-  // Touch the parent stock row's last_researched_at so the home page can
-  // show a recently-researched list. Upserts the row if first time.
-  const upsert = await sb
-    .from("research_stocks")
-    .upsert(
-      {
-        symbol: symbol.toUpperCase(),
-        last_researched_at: new Date().toISOString(),
-      },
-      { onConflict: "symbol" },
-    );
-  if (upsert.error) {
-    throw new Error(
-      `[research-modules] touch stock(${symbol}) failed: ${upsert.error.message}`,
     );
   }
 
