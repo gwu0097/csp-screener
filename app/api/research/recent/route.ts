@@ -6,14 +6,20 @@ export const dynamic = "force-dynamic";
 type StockRow = {
   symbol: string;
   company_name: string | null;
-  sector: string | null;
   overall_grade: string | null;
   last_researched_at: string | null;
 };
 
-type ModuleRow = {
+type ModuleCountRow = {
   symbol: string;
   module_type: string;
+};
+
+type LatestModuleRow = {
+  symbol: string;
+  module_type: string;
+  output: unknown;
+  run_at: string | null;
 };
 
 export type ModuleCounts = {
@@ -38,15 +44,22 @@ const EMPTY_COUNTS: ModuleCounts = {
   technical: 0,
 };
 
-export type RecentStockRow = StockRow & { modules: ModuleCounts };
+export type RecentStockRow = StockRow & {
+  modules: ModuleCounts;
+  // Pulled from the most recent module of each type so the home page
+  // can show a one-line summary without having to open the stock.
+  valuation_base_target: number | null;
+  catalyst_score: "rich" | "moderate" | "sparse" | null;
+};
 
 export async function GET(): Promise<NextResponse> {
   const sb = createServerClient();
-  // Pull every researched stock — the home page now lists all of them
-  // grouped by last_researched_at desc, not just the top 10.
+  // research_stocks doesn't carry sector — we leave it off the home
+  // page rather than join to business_overview output for a single
+  // column that isn't sortable anyway.
   const stocksRes = await sb
     .from("research_stocks")
-    .select("symbol,company_name,sector,overall_grade,last_researched_at")
+    .select("symbol,company_name,overall_grade,last_researched_at")
     .order("last_researched_at", { ascending: false });
   if (stocksRes.error) {
     return NextResponse.json({ error: stocksRes.error.message }, { status: 500 });
@@ -57,33 +70,84 @@ export async function GET(): Promise<NextResponse> {
   }
 
   const symbols = stocks.map((s) => s.symbol);
-  const modulesRes = await sb
+
+  // Counts: cheap projection (no output JSON) so we can tally every
+  // module type per stock without dragging the heavy payloads.
+  const countsRes = await sb
     .from("research_modules")
     .select("symbol,module_type")
     .in("symbol", symbols);
-  if (modulesRes.error) {
-    // Modules query failure is non-fatal — render stocks with zero
-    // counts rather than a 500 for the whole page.
-    console.warn(`[research/recent] modules fetch failed: ${modulesRes.error.message}`);
+  if (countsRes.error) {
+    console.warn(`[research/recent] counts fetch failed: ${countsRes.error.message}`);
   }
-  const moduleRows = (modulesRes.data ?? []) as ModuleRow[];
-
+  const countRows = (countsRes.data ?? []) as ModuleCountRow[];
   const countsBySymbol = new Map<string, ModuleCounts>();
-  for (const row of moduleRows) {
-    const key = row.symbol;
-    let counts = countsBySymbol.get(key);
-    if (!counts) {
-      counts = { ...EMPTY_COUNTS };
-      countsBySymbol.set(key, counts);
+  for (const row of countRows) {
+    let c = countsBySymbol.get(row.symbol);
+    if (!c) {
+      c = { ...EMPTY_COUNTS };
+      countsBySymbol.set(row.symbol, c);
     }
-    if (row.module_type in counts) {
-      counts[row.module_type as keyof ModuleCounts] += 1;
+    if (row.module_type in c) {
+      c[row.module_type as keyof ModuleCounts] += 1;
     }
   }
 
-  const out: RecentStockRow[] = stocks.map((s) => ({
-    ...s,
-    modules: countsBySymbol.get(s.symbol) ?? { ...EMPTY_COUNTS },
-  }));
+  // Latest catalyst + valuation outputs only — we need just two fields
+  // off each. Ordered desc by run_at, deduped to first per (symbol,
+  // module_type) on the way through.
+  const latestRes = await sb
+    .from("research_modules")
+    .select("symbol,module_type,output,run_at")
+    .in("symbol", symbols)
+    .in("module_type", ["catalyst_scanner", "valuation_model"])
+    .order("run_at", { ascending: false });
+  const latestRows = (latestRes.data ?? []) as LatestModuleRow[];
+  if (latestRes.error) {
+    console.warn(`[research/recent] latest fetch failed: ${latestRes.error.message}`);
+  }
+  const latestBy = new Map<string, LatestModuleRow>();
+  for (const r of latestRows) {
+    const key = `${r.symbol}|${r.module_type}`;
+    if (!latestBy.has(key)) latestBy.set(key, r);
+  }
+
+  function pickValuationTarget(output: unknown): number | null {
+    if (!output || typeof output !== "object") return null;
+    const o = output as Record<string, unknown>;
+    // v2 → tier1.outputs.base.price_target. v1 → outputs.base.price_target.
+    if (o.schema_version === 2) {
+      const tier1 = o.tier1 as { outputs?: { base?: { price_target?: number } } };
+      const v = tier1?.outputs?.base?.price_target;
+      return typeof v === "number" && Number.isFinite(v) ? v : null;
+    }
+    const v1 = (o as { outputs?: { base?: { price_target?: number } } }).outputs
+      ?.base?.price_target;
+    return typeof v1 === "number" && Number.isFinite(v1) ? v1 : null;
+  }
+
+  function pickCatalystScore(output: unknown): "rich" | "moderate" | "sparse" | null {
+    if (!output || typeof output !== "object") return null;
+    const o = output as { overall_catalyst_score?: unknown };
+    if (
+      o.overall_catalyst_score === "rich" ||
+      o.overall_catalyst_score === "moderate" ||
+      o.overall_catalyst_score === "sparse"
+    ) {
+      return o.overall_catalyst_score;
+    }
+    return null;
+  }
+
+  const out: RecentStockRow[] = stocks.map((s) => {
+    const val = latestBy.get(`${s.symbol}|valuation_model`);
+    const cat = latestBy.get(`${s.symbol}|catalyst_scanner`);
+    return {
+      ...s,
+      modules: countsBySymbol.get(s.symbol) ?? { ...EMPTY_COUNTS },
+      valuation_base_target: val ? pickValuationTarget(val.output) : null,
+      catalyst_score: cat ? pickCatalystScore(cat.output) : null,
+    };
+  });
   return NextResponse.json({ stocks: out });
 }
