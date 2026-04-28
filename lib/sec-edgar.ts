@@ -692,6 +692,158 @@ export function convertQuarterlyToUsd(
   }));
 }
 
+// ---------------- Recent filings list (8-K / 10-Q / 10-K) ----------------
+//
+// Returns a slice of the company's recent filings filtered to the
+// requested forms. EDGAR's full-text search endpoint at
+// efts.sec.gov is flaky (returns 500 unauthenticated); the
+// submissions JSON at data.sec.gov is the stable path and includes
+// every form along with the accession number, primary document,
+// filing date, and primary-doc description we need to construct the
+// archive URL.
+
+export type SecFiling = {
+  form: string; // "8-K" | "10-Q" | "10-K" | "20-F" | etc.
+  accessionNumber: string; // "0001783879-26-000061"
+  primaryDocument: string; // "hood-20260428.htm"
+  filingDate: string; // YYYY-MM-DD
+  reportDate: string | null; // YYYY-MM-DD (period end / event date)
+  primaryDocDescription: string | null;
+};
+
+// Convert "0001783879-26-000061" → "000178387926000061" for archive
+// directory paths.
+function accessionNoDashes(acc: string): string {
+  return acc.replace(/-/g, "");
+}
+
+export function filingArchiveDirUrl(
+  cik: string,
+  accessionNumber: string,
+): string {
+  const accNoDash = accessionNoDashes(accessionNumber);
+  // CIK in the archive URL is unpadded, but the data.sec.gov CIK we
+  // already pad to 10 digits — strip leading zeros for the archive path.
+  const cikInt = String(parseInt(cik, 10));
+  return `${EDGAR_FILES_BASE}/Archives/edgar/data/${cikInt}/${accNoDash}`;
+}
+
+export async function getRecentFilings(
+  cik: string,
+  forms: string[],
+  limit = 25,
+): Promise<SecFiling[]> {
+  const url = `${EDGAR_DATA_BASE}/submissions/CIK${cik}.json`;
+  let res: Response;
+  try {
+    res = await fetch(url, { headers: DEFAULT_HEADERS, cache: "no-store" });
+  } catch {
+    return [];
+  }
+  if (!res.ok) return [];
+  const json = (await res.json()) as {
+    filings?: {
+      recent?: {
+        form?: string[];
+        accessionNumber?: string[];
+        primaryDocument?: string[];
+        filingDate?: string[];
+        reportDate?: string[];
+        primaryDocDescription?: string[];
+      };
+    };
+  };
+  const recent = json.filings?.recent;
+  if (!recent || !Array.isArray(recent.form)) return [];
+  const wanted = new Set(forms);
+  const out: SecFiling[] = [];
+  const len = recent.form.length;
+  for (let i = 0; i < len; i += 1) {
+    const form = recent.form[i];
+    if (!form || !wanted.has(form)) continue;
+    const accessionNumber = recent.accessionNumber?.[i] ?? "";
+    const primaryDocument = recent.primaryDocument?.[i] ?? "";
+    if (!accessionNumber || !primaryDocument) continue;
+    out.push({
+      form,
+      accessionNumber,
+      primaryDocument,
+      filingDate: recent.filingDate?.[i] ?? "",
+      reportDate: recent.reportDate?.[i] || null,
+      primaryDocDescription: recent.primaryDocDescription?.[i] ?? null,
+    });
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+// Lists the files inside a filing's archive directory by parsing the
+// directory listing HTML EDGAR serves. Returns absolute file URLs and
+// their basenames so callers can pick the right exhibit (e.g. the
+// q1*exhibit991.htm earnings press release inside an 8-K).
+export async function listFilingFiles(
+  cik: string,
+  accessionNumber: string,
+): Promise<Array<{ url: string; name: string }>> {
+  const dir = filingArchiveDirUrl(cik, accessionNumber);
+  let res: Response;
+  try {
+    res = await fetch(dir + "/", {
+      headers: DEFAULT_HEADERS,
+      cache: "no-store",
+    });
+  } catch {
+    return [];
+  }
+  if (!res.ok) return [];
+  const html = await res.text();
+  const matches = Array.from(
+    html.matchAll(/href="([^"]*\/(?:[^/"]+\.(?:htm|html|txt|pdf)))"/gi),
+  );
+  const out: Array<{ url: string; name: string }> = [];
+  for (const m of matches) {
+    const path = m[1];
+    if (!path) continue;
+    const name = path.slice(path.lastIndexOf("/") + 1);
+    const url = path.startsWith("http") ? path : `${EDGAR_FILES_BASE}${path}`;
+    if (out.find((o) => o.name === name)) continue;
+    out.push({ url, name });
+  }
+  return out;
+}
+
+// Fetches a filing-archive HTML file and returns it stripped to plain
+// text (script/style removed, tags collapsed, whitespace normalized)
+// so it can be passed to an LLM extractor without burning tokens on
+// boilerplate.
+export async function fetchFilingTextPlain(
+  url: string,
+  maxChars = 60_000,
+): Promise<string | null> {
+  let res: Response;
+  try {
+    res = await fetch(url, { headers: DEFAULT_HEADERS, cache: "no-store" });
+  } catch {
+    return null;
+  }
+  if (!res.ok) return null;
+  const raw = await res.text();
+  const stripped = raw
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&#8220;|&#8221;|&ldquo;|&rdquo;/g, '"')
+    .replace(/&#8216;|&#8217;|&lsquo;|&rsquo;/g, "'")
+    .replace(/&#8211;|&#8212;|&ndash;|&mdash;/g, "-")
+    .replace(/\s+/g, " ")
+    .trim();
+  return stripped.length > maxChars ? stripped.slice(0, maxChars) : stripped;
+}
+
 // TTM revenue from a sorted-newest-first quarterly array. Returns null
 // when fewer than 4 quarters are available OR any of the most recent
 // 4 has a null revenue value.

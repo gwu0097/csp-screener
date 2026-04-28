@@ -18,6 +18,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { ValuationTab } from "@/components/valuation-tab";
 import { SentimentTab } from "@/components/research-sentiment";
 import { RiskTab } from "@/components/research-risk";
+import { SecFilingsTab } from "@/components/research-sec-filings";
 
 // ---------- Types mirrored from the API routes ----------
 
@@ -357,10 +358,7 @@ export function ResearchStockView({ symbol }: { symbol: string }) {
           <ValuationTab symbol={symbol} />
         </TabsContent>
         <TabsContent value="tenk">
-          <ComingSoon
-            title="10-K Deep Read"
-            blurb="Distilled risk factors, MD&A highlights, and segment financials from the latest annual filing."
-          />
+          <SecFilingsTab symbol={symbol} healthMod={healthMod} />
         </TabsContent>
         <TabsContent value="risk">
           <RiskTab symbol={symbol} />
@@ -1436,13 +1434,3 @@ function DetailLine({ label, value }: { label: string; value: string }) {
   );
 }
 
-function ComingSoon({ title, blurb }: { title: string; blurb: string }) {
-  return (
-    <div className="rounded-md border border-dashed border-border bg-background/40 p-10 text-center">
-      <div className="text-lg font-medium">{title} — Coming Soon</div>
-      <p className="mx-auto mt-2 max-w-xl text-sm text-muted-foreground">
-        {blurb}
-      </p>
-    </div>
-  );
-}
