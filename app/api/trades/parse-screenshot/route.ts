@@ -66,37 +66,65 @@ The Price column shows values like '.60 LMT' or '7.15 LMT'. The premium is the n
 
 const currentYear = new Date().getUTCFullYear();
 
-// Robinhood position detail cards don't show strike directly — strike is
-// computed from (breakeven + average credit). If the screenshot scrolls
-// across multiple open positions, each card becomes its own fill.
-const PROMPT_ROBINHOOD = `This is one or more Robinhood options position detail cards. Each card represents one open short options position.
+// Robinhood ships two screenshot shapes for options. Format A (Position
+// Detail cards) and Format B (Recent Activity transaction list). The
+// prompt asks the model to identify which one it's looking at and emit
+// the same ParsedTrade[] schema either way; downstream bulk-create
+// routes Sell→open / Buy→close transparently.
+const PROMPT_ROBINHOOD = `This is a Robinhood options screenshot. First decide which format it shows, then parse accordingly.
 
-Each card shows fields like:
-- Market value (e.g. "-$10.00")
-- Current price (e.g. "$0.01") — current option price
-- Current {SYMBOL} price (e.g. "$81.19") — current stock price
-- Today's return
-- Total return
-- Expiration date (e.g. "4/24")
-- Average credit (e.g. "$0.17") — premium received when the position was sold
-- {SYMBOL} breakeven price (e.g. "$53.83")
-- Contracts (e.g. "-10") — negative because short; take the absolute value
-- Date sold (e.g. "4/23") — the date the short was opened
+FORMAT A — Position Detail cards.
+  Identifying fields visible on the card: "Market value", "Average credit", "Contracts", "Date sold", and "{SYMBOL} breakeven price". Each card represents ONE open short options position.
 
-Extract every visible position card as a separate fill.
+  Each card shows fields like:
+  - Market value (e.g. "-$10.00")
+  - Current price (e.g. "$0.01") — current option price
+  - Current {SYMBOL} price (e.g. "$81.19") — current stock price
+  - Expiration date (e.g. "4/24")
+  - Average credit (e.g. "$0.17") — premium received when the position was sold
+  - {SYMBOL} breakeven price (e.g. "$53.83")
+  - Contracts (e.g. "-10") — negative because short; take the absolute value
+  - Date sold (e.g. "4/23") — the date the short was opened
 
-For each card:
-- symbol: the ticker. It appears inside the field labels "Current {SYMBOL} price" and "{SYMBOL} breakeven price". Example: "Current INTC price" → symbol = "INTC".
-- action: always "open" — Robinhood position cards represent existing short positions.
-- contracts: absolute value of the Contracts field. "-10" → 10.
-- premium: numeric value of "Average credit". Strip the "$" prefix. "$0.17" → 0.17.
-- expiry: "Expiration date" converted to YYYY-MM-DD. If the year is missing (e.g. "4/24"), use the current year ${currentYear}. So "4/24" → "${currentYear}-04-24".
-- strike: breakeven_price + average_credit, then rounded to the nearest $0.50 increment (standard option strike granularity). Example: breakeven=53.83, credit=0.17 → 54.00. breakeven=347.13, credit=0.37 → 347.50.
-- optionType: default to "put" for a CSP screening context. If the card text explicitly says "Call", use "call".
-- timePlaced: "Date sold" converted to YYYY-MM-DD. Same year-inference rule as expiry. "4/23" → "${currentYear}-04-23".
-- broker: always "robinhood".
+  Emit one object per card:
+  - symbol: the ticker. It appears inside "Current {SYMBOL} price" and "{SYMBOL} breakeven price" labels. Example: "Current INTC price" → "INTC".
+  - action: always "open".
+  - contracts: absolute value of the Contracts field ("-10" → 10).
+  - premium: numeric value of "Average credit", strip "$" ("$0.17" → 0.17).
+  - expiry: "Expiration date" → YYYY-MM-DD; if the year is missing (e.g. "4/24"), use ${currentYear}. So "4/24" → "${currentYear}-04-24".
+  - strike: breakeven_price + average_credit, rounded to the nearest $0.50 increment (standard option strike granularity). Examples: breakeven=53.83 + credit=0.17 → 54.00; breakeven=347.13 + credit=0.37 → 347.50.
+  - optionType: default "put" for a CSP screening context. Use "call" only if the card explicitly says "Call".
+  - timePlaced: "Date sold" → YYYY-MM-DD, same year-inference as expiry.
+  - broker: "robinhood".
 
-Return ONLY a JSON array, no explanation, no markdown. One object per card.`;
+FORMAT B — Recent Activity list.
+  Identifying fields: a vertical list of rows that start with "Buy" or "Sell" followed by a contract description, with an "Individual · Xm" subtitle. Each row's right-side amount is either a dollar value (filled) or the literal text "Canceled".
+
+  Example rows (the layout shows the title on the left and the amount on the right; the second line is the subtitle plus the per-contract detail):
+
+    Buy SPOT $410 Put 5/1               $212.00
+    Individual · 5m              1 contract at $2.12
+
+    Buy SPOT $410 Put 5/1               Canceled
+    Individual · 6m
+
+    Sell ETSY $52 Put 5/1               $169.00
+    Individual · 7m              5 contracts at $0.338
+
+  SKIP any row whose right-side amount column reads "Canceled" — do not emit it.
+
+  For every non-canceled row, emit one object:
+  - symbol: the ticker right after "Buy"/"Sell" ("SPOT", "ETSY").
+  - action: "open" if the row starts with "Sell" (selling to open a short); "close" if it starts with "Buy" (buying to close).
+  - contracts: integer from "X contract(s) at $Y" ("5 contracts at $0.338" → 5).
+  - premium: per-contract value from "at $Y" ("$2.12" → 2.12, "$0.338" → 0.338). Do NOT use the row total.
+  - strike: numeric after "$" in the description ("$410 Put" → 410, "$52 Put" → 52).
+  - optionType: "put" if "Put" appears in the description, "call" if "Call" appears.
+  - expiry: M/D appearing after the option type → YYYY-MM-DD. If the year is missing (e.g. "5/1"), use ${currentYear}. So "5/1" → "${currentYear}-05-01".
+  - timePlaced: omit if no clear date is shown for the row (the "Xm" relative timestamp is not a date).
+  - broker: "robinhood".
+
+Return ONLY a JSON array (no explanation, no markdown). For Format A, one object per card. For Format B, one object per non-canceled row. If no parseable rows are found, return [].`;
 
 // Stock-trade prompts. These target STOCK fills, not options — used by the
 // swing trading import flow. The shape is intentionally narrower so
