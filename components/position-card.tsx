@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronRight, ExternalLink, Loader2, Trash2 } from "lucide-react";
+import { ChevronRight, ExternalLink, ListChecks, Loader2, Plus, Trash2, X } from "lucide-react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import {
@@ -259,6 +259,11 @@ export function PositionCard(props: Props) {
   const [removeOpen, setRemoveOpen] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [removeError, setRemoveError] = useState<string | null>(null);
+  // Edit-fills panel toggle. Open positions only — closed positions
+  // intentionally don't expose this surface (no `onCloseSubmitted` to
+  // refresh the parent list, and edits should ideally happen before
+  // a position is closed out anyway).
+  const [editsOpen, setEditsOpen] = useState(false);
 
   const onRemoveClick = (e: React.MouseEvent | React.KeyboardEvent) => {
     e.stopPropagation();
@@ -573,6 +578,16 @@ export function PositionCard(props: Props) {
                 onCloseSubmitted={props.onCloseSubmitted}
               />
             )}
+            {props.kind === "open" && (
+              <button
+                type="button"
+                onClick={() => setEditsOpen((v) => !v)}
+                className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-muted-foreground hover:text-foreground"
+              >
+                <ListChecks className="h-3 w-3" />
+                {editsOpen ? "Hide Fills" : "Edit Fills"}
+              </button>
+            )}
             <Link
               href={`/research/${encodeURIComponent(p.symbol)}`}
               className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-muted-foreground hover:text-foreground"
@@ -588,6 +603,14 @@ export function PositionCard(props: Props) {
               View in Encyclopedia
             </Link>
           </div>
+
+          {props.kind === "open" && editsOpen && (
+            <EditFillsPanel
+              positionId={props.position.id}
+              fills={props.position.fills}
+              onChanged={props.onCloseSubmitted}
+            />
+          )}
         </div>
       </div>
     </div>
@@ -1017,6 +1040,338 @@ function ClosePositionInline({
         <span className="rounded border border-rose-500/40 bg-rose-500/10 px-2 py-0.5 text-xs text-rose-200">
           {error}
         </span>
+      )}
+    </div>
+  );
+}
+
+// Edit Fills — inline panel that shows every row in the fills table for
+// one position, with delete + inline qty edit + manual-add. After any
+// mutation we call onChanged() (the same callback PositionsView wires to
+// onCloseSubmitted), which refetches /api/positions/open and re-renders
+// this card with fresh fills.
+//
+// fill_date is the only timestamp the schema currently stores — there's
+// no separate fill_time column — so the table shows date only. The
+// user's "4/28 9:07" mockup would need a schema migration first.
+function EditFillsPanel({
+  positionId,
+  fills,
+  onChanged,
+}: {
+  positionId: string;
+  fills: Fill[];
+  onChanged: (msg: string) => void;
+}) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editVal, setEditVal] = useState("");
+  const [addOpen, setAddOpen] = useState(false);
+  const [addSide, setAddSide] = useState<"open" | "close">("open");
+  const [addQty, setAddQty] = useState("");
+  const [addPrice, setAddPrice] = useState("");
+  const [addDate, setAddDate] = useState(() =>
+    new Date().toISOString().slice(0, 10),
+  );
+
+  const sorted = [...fills].sort((a, b) =>
+    a.fill_date.localeCompare(b.fill_date),
+  );
+  const totalOpened = fills
+    .filter((f) => f.fill_type === "open")
+    .reduce((s, f) => s + f.contracts, 0);
+  const totalClosed = fills
+    .filter((f) => f.fill_type === "close")
+    .reduce((s, f) => s + f.contracts, 0);
+  const remaining = totalOpened - totalClosed;
+  const avgOpen = (() => {
+    const opens = fills.filter((f) => f.fill_type === "open");
+    const totalQ = opens.reduce((s, f) => s + f.contracts, 0);
+    if (totalQ === 0) return null;
+    return (
+      opens.reduce((s, f) => s + f.contracts * f.premium, 0) / totalQ
+    );
+  })();
+
+  async function handleDelete(fillId: string) {
+    setBusy(fillId);
+    setError(null);
+    try {
+      const res = await fetch(
+        `/api/positions/${positionId}/fills/${fillId}`,
+        { method: "DELETE" },
+      );
+      if (!res.ok) {
+        const j = (await res.json().catch(() => ({}))) as { error?: string };
+        setError(j.error ?? `HTTP ${res.status}`);
+        return;
+      }
+      onChanged("Fill deleted");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Network error");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function handleQtyEdit(fillId: string, contracts: number) {
+    setBusy(fillId);
+    setError(null);
+    try {
+      const res = await fetch(
+        `/api/positions/${positionId}/fills/${fillId}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ contracts }),
+        },
+      );
+      if (!res.ok) {
+        const j = (await res.json().catch(() => ({}))) as { error?: string };
+        setError(j.error ?? `HTTP ${res.status}`);
+        return;
+      }
+      onChanged("Fill updated");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Network error");
+    } finally {
+      setEditingId(null);
+      setBusy(null);
+    }
+  }
+
+  async function handleAdd() {
+    const qty = Number(addQty);
+    const price = Number(addPrice);
+    if (!Number.isFinite(qty) || qty <= 0) {
+      setError("Qty must be > 0");
+      return;
+    }
+    if (!Number.isFinite(price) || price < 0) {
+      setError("Price must be ≥ 0");
+      return;
+    }
+    setBusy("add");
+    setError(null);
+    try {
+      const res = await fetch(`/api/positions/${positionId}/fills`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          side: addSide,
+          contracts: qty,
+          premium: price,
+          fill_date: addDate,
+        }),
+      });
+      if (!res.ok) {
+        const j = (await res.json().catch(() => ({}))) as { error?: string };
+        setError(j.error ?? `HTTP ${res.status}`);
+        return;
+      }
+      setAddSide("open");
+      setAddQty("");
+      setAddPrice("");
+      setAddDate(new Date().toISOString().slice(0, 10));
+      setAddOpen(false);
+      onChanged("Fill added");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Network error");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <div className="mt-4 rounded-md border border-border bg-background/40 p-3 text-xs">
+      <div className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+        Fills
+      </div>
+      {error && (
+        <div className="mb-2 rounded border border-rose-500/40 bg-rose-500/10 p-1.5 text-rose-200">
+          {error}
+        </div>
+      )}
+      <div className="overflow-hidden rounded border border-border">
+        <table className="min-w-full text-[11px]">
+          <thead className="bg-background/60 text-muted-foreground">
+            <tr>
+              <th className="px-2 py-1 text-left font-medium">Date</th>
+              <th className="px-2 py-1 text-left font-medium">Side</th>
+              <th className="px-2 py-1 text-right font-medium">Qty</th>
+              <th className="px-2 py-1 text-right font-medium">Price</th>
+              <th className="w-8" />
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.length === 0 && (
+              <tr>
+                <td
+                  colSpan={5}
+                  className="px-2 py-3 text-center text-muted-foreground"
+                >
+                  No fills recorded.
+                </td>
+              </tr>
+            )}
+            {sorted.map((f) => {
+              const id = f.id ?? "";
+              const editing = editingId === id;
+              return (
+                <tr
+                  key={id || `${f.fill_date}-${f.fill_type}-${f.premium}`}
+                  className="border-t border-border"
+                >
+                  <td className="px-2 py-1 font-mono">{f.fill_date}</td>
+                  <td className="px-2 py-1">
+                    <span
+                      className={cn(
+                        "font-mono font-semibold",
+                        f.fill_type === "open"
+                          ? "text-rose-300"
+                          : "text-emerald-300",
+                      )}
+                    >
+                      {f.fill_type === "open" ? "SELL" : "BUY"}
+                    </span>
+                  </td>
+                  <td className="px-2 py-1 text-right font-mono">
+                    {editing ? (
+                      <input
+                        autoFocus
+                        type="number"
+                        step="1"
+                        value={editVal}
+                        onChange={(e) => setEditVal(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            const n = Number(editVal);
+                            if (Number.isFinite(n) && n > 0 && id) {
+                              void handleQtyEdit(id, n);
+                            } else {
+                              setEditingId(null);
+                            }
+                          } else if (e.key === "Escape") {
+                            setEditingId(null);
+                          }
+                        }}
+                        onBlur={() => setEditingId(null)}
+                        className="w-14 rounded border border-border bg-background px-1 py-0.5 text-right font-mono"
+                      />
+                    ) : (
+                      <span
+                        className="cursor-text rounded px-1 hover:bg-white/5"
+                        onClick={() => {
+                          if (!id || busy) return;
+                          setEditingId(id);
+                          setEditVal(String(f.contracts));
+                        }}
+                        title="Click to edit qty"
+                      >
+                        {f.contracts}
+                      </span>
+                    )}
+                  </td>
+                  <td className="px-2 py-1 text-right font-mono">
+                    ${f.premium.toFixed(2)}
+                  </td>
+                  <td className="px-2 py-1 text-center">
+                    {id && (
+                      <button
+                        type="button"
+                        onClick={() => void handleDelete(id)}
+                        disabled={busy === id}
+                        className="text-muted-foreground hover:text-rose-300 disabled:opacity-50"
+                        title="Delete fill"
+                      >
+                        {busy === id ? (
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                        ) : (
+                          <X className="h-3 w-3" />
+                        )}
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div className="mt-2 flex justify-between text-[11px] text-muted-foreground">
+        <span>
+          Total: {remaining} contracts ({totalOpened} opened
+          {totalClosed > 0 ? `, ${totalClosed} closed` : ""})
+        </span>
+        {avgOpen !== null && <span>Avg: ${avgOpen.toFixed(2)}</span>}
+      </div>
+
+      {addOpen ? (
+        <div className="mt-3 flex flex-wrap items-center gap-2 rounded border border-border bg-background/60 p-2">
+          <input
+            type="date"
+            value={addDate}
+            onChange={(e) => setAddDate(e.target.value)}
+            className="rounded border border-border bg-background px-2 py-1 text-xs"
+          />
+          <select
+            value={addSide}
+            onChange={(e) => setAddSide(e.target.value as "open" | "close")}
+            className="rounded border border-border bg-background px-2 py-1 text-xs"
+          >
+            <option value="open">SELL (open)</option>
+            <option value="close">BUY (close)</option>
+          </select>
+          <input
+            type="number"
+            step="1"
+            placeholder="Qty"
+            value={addQty}
+            onChange={(e) => setAddQty(e.target.value)}
+            className="w-20 rounded border border-border bg-background px-2 py-1 text-xs"
+          />
+          <input
+            type="number"
+            step="0.01"
+            placeholder="Price"
+            value={addPrice}
+            onChange={(e) => setAddPrice(e.target.value)}
+            className="w-24 rounded border border-border bg-background px-2 py-1 text-xs"
+          />
+          <button
+            type="button"
+            onClick={() => void handleAdd()}
+            disabled={busy === "add"}
+            className="inline-flex items-center gap-1 rounded border border-border bg-background px-2 py-1 text-xs hover:bg-background/80 disabled:opacity-50"
+          >
+            {busy === "add" ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              <Plus className="h-3 w-3" />
+            )}
+            Add
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setAddOpen(false);
+              setError(null);
+            }}
+            className="text-xs text-muted-foreground hover:text-foreground"
+          >
+            Cancel
+          </button>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={() => setAddOpen(true)}
+          className="mt-2 inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+        >
+          <Plus className="h-3 w-3" />
+          Add fill manually
+        </button>
       )}
     </div>
   );

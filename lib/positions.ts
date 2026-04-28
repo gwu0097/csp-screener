@@ -13,6 +13,10 @@
 export type FillType = "open" | "close";
 
 export type Fill = {
+  // Present when the row was hydrated from /api/positions/open. Optional
+  // so the type stays compatible with paths that don't carry the id
+  // (tests, internal aggregators).
+  id?: string;
   fill_type: FillType;
   contracts: number;
   premium: number;
@@ -73,6 +77,67 @@ export function realizedPnl(fills: Fill[]): number {
     .filter((f) => f.fill_type === "close")
     .reduce((s, f) => s + f.contracts, 0);
   return (sold - bought) * closedContracts * 100;
+}
+
+// Refetch fills, recompute aggregates, and write them back onto the
+// position row. Shared between bulk-create's per-fill loop and the
+// add/edit/delete fill routes used by the position-card edit panel.
+// The supabase client param uses the project's `RestClient` wrapper —
+// any object with a Supabase-shaped `.from(...)` call works.
+//
+// Returns the recomputed status so callers can fire post-close hooks
+// (the screener-results outcome recorder, for example) only when this
+// recalc actually flipped the position.
+type RecalcClient = {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  from: (table: string) => any;
+};
+export async function recalculatePositionFromFills(
+  positionId: string,
+  sb: RecalcClient,
+): Promise<
+  | { ok: true; status: "open" | "closed"; totalOpened: number; remaining: number }
+  | { ok: false; error: string }
+> {
+  const fetched = await sb
+    .from("fills")
+    .select("fill_type, contracts, premium, fill_date")
+    .eq("position_id", positionId);
+  if (fetched.error) {
+    return { ok: false, error: `refetch fills failed — ${fetched.error.message}` };
+  }
+  const fills = (fetched.data ?? []) as Fill[];
+  const remaining = remainingContracts(fills);
+  const totalOpened = fills
+    .filter((f) => f.fill_type === "open")
+    .reduce((s, f) => s + f.contracts, 0);
+  const sold = avgPremiumSold(fills);
+  const status: "open" | "closed" =
+    remaining === 0 && totalOpened > 0 ? "closed" : "open";
+  const closedDate =
+    status === "closed"
+      ? fills
+          .filter((f) => f.fill_type === "close")
+          .map((f) => f.fill_date)
+          .sort()
+          .pop() ?? null
+      : null;
+  const pnl = realizedPnl(fills);
+  const upd = await sb
+    .from("positions")
+    .update({
+      total_contracts: totalOpened,
+      avg_premium_sold: totalOpened > 0 ? sold : null,
+      status,
+      closed_date: closedDate,
+      realized_pnl: pnl,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", positionId);
+  if (upd.error) {
+    return { ok: false, error: `position update failed — ${upd.error.message}` };
+  }
+  return { ok: true, status, totalOpened, remaining };
 }
 
 // ---------- Recommendation engine ----------

@@ -202,11 +202,12 @@ export async function GET(req: NextRequest) {
   if (positionIds.length > 0) {
     const { data: fillsRows } = await supabase
       .from<Fill & { position_id: string }>("fills")
-      .select("position_id, fill_type, contracts, premium, fill_date")
+      .select("id, position_id, fill_type, contracts, premium, fill_date")
       .in("position_id", positionIds);
     for (const f of (fillsRows ?? []) as Array<Fill & { position_id: string }>) {
       const arr = fillsByPosition.get(f.position_id) ?? [];
       arr.push({
+        id: f.id,
         fill_type: f.fill_type,
         contracts: f.contracts,
         premium: f.premium,
