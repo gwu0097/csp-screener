@@ -248,6 +248,17 @@ function Header({
 }) {
   const savedAt =
     (selected.output as { saved_at?: string }).saved_at ?? selected.runAt;
+  // Foreign-filer metadata. All four fields land on the model output
+  // when the EDGAR pull detects a 20-F / 40-F filer in non-USD;
+  // missing on rows generated before this shipped (US filers don't
+  // need the source line either — kept terse).
+  const meta = selected.output as {
+    reporting_currency?: string | null;
+    fx_to_usd?: number | null;
+    source_form?: string | null;
+  };
+  const isForeign =
+    !!meta.reporting_currency && meta.reporting_currency !== "USD";
   return (
     <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
       <div className="flex flex-wrap items-center gap-2">
@@ -272,6 +283,15 @@ function Header({
         {!isLatest && (
           <span className="rounded border border-amber-500/40 bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-amber-300">
             Read-only history
+          </span>
+        )}
+        {isForeign && (
+          <span
+            className="rounded border border-sky-500/40 bg-sky-500/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-sky-300"
+            title={`Source: SEC EDGAR ${meta.source_form ?? "annual filing"} · Reported in ${meta.reporting_currency} · Converted to USD at ${meta.fx_to_usd ? meta.fx_to_usd.toFixed(4) : "—"}`}
+          >
+            {meta.source_form ?? "annual"} · {meta.reporting_currency}→USD
+            {meta.fx_to_usd ? ` @ ${meta.fx_to_usd.toFixed(4)}` : ""}
           </span>
         )}
       </div>

@@ -1,10 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import YahooFinance from "yahoo-finance2";
 import {
+  convertAnnualToUsd,
+  convertDCFExtrasToUsd,
   extractAnnualMetrics,
   extractDCFExtras,
+  fetchFxToUsd,
   getCIK,
   getCompanyFacts,
+  getReportingInfo,
 } from "@/lib/sec-edgar";
 import {
   getModuleHistory,
@@ -241,8 +245,28 @@ export async function POST(
       cik ? getCompanyFacts(cik) : Promise.resolve(null),
       fetchYahooBag(symbol),
     ]);
-    const annual = extractAnnualMetrics(facts, 5);
-    const dcfExtras = extractDCFExtras(facts, 5);
+    const rawAnnual = extractAnnualMetrics(facts, 5);
+    const rawDcfExtras = extractDCFExtras(facts, 5);
+    const reporting = getReportingInfo(facts);
+    // Foreign private issuers (Spotify EUR/20-F, Novo DKK/20-F, Alibaba
+    // CNY/20-F, etc.) come back in their native currency. Multiply
+    // through a live FX rate so the rest of the model — Yahoo's USD
+    // current price, USD analyst targets, USD comps — stays
+    // dimensionally consistent. fxToUsd defaults to 1 when reporting
+    // is already USD or the FX fetch fails.
+    let fxToUsd = 1;
+    if (reporting.currency && reporting.currency !== "USD") {
+      const rate = await fetchFxToUsd(reporting.currency);
+      if (rate && Number.isFinite(rate) && rate > 0) {
+        fxToUsd = rate;
+      } else {
+        console.warn(
+          `[valuation:${symbol}] FX ${reporting.currency}→USD fetch failed; surfacing native currency`,
+        );
+      }
+    }
+    const annual = convertAnnualToUsd(rawAnnual, fxToUsd);
+    const dcfExtras = convertDCFExtrasToUsd(rawDcfExtras, fxToUsd);
     const historical = buildHistorical(annual);
     const fcfHistory = buildFCFHistory(annual, dcfExtras);
     if (historical.length === 0) {
@@ -399,6 +423,10 @@ export async function POST(
       analyst_target_high: yh.targetHighPrice,
       analyst_target_low: yh.targetLowPrice,
       analyst_count: yh.numberOfAnalystOpinions,
+      reporting_currency: reporting.currency,
+      fx_to_usd: fxToUsd,
+      source_form: reporting.formType,
+      source_taxonomy: reporting.taxonomy,
       tier1: {
         system: tier1System,
         user: tier1User,

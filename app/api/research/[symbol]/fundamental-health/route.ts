@@ -1,9 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import YahooFinance from "yahoo-finance2";
 import {
+  convertAnnualToUsd,
   extractAnnualMetrics,
+  fetchFxToUsd,
   getCIK,
   getCompanyFacts,
+  getReportingInfo,
   type AnnualMetrics,
 } from "@/lib/sec-edgar";
 import {
@@ -300,7 +303,18 @@ export async function POST(
   try {
     const cik = await getCIK(symbol);
     const facts = cik ? await getCompanyFacts(cik) : null;
-    const annual = extractAnnualMetrics(facts, 5);
+    const rawAnnual = extractAnnualMetrics(facts, 5);
+    const reporting = getReportingInfo(facts);
+    // Foreign filers report in their native currency under ifrs-full.
+    // Convert annual figures into USD so YoY ratios + comparison
+    // against Yahoo's USD `current` block stay coherent. fxToUsd=1
+    // when reporting is already USD.
+    let fxToUsd = 1;
+    if (reporting.currency && reporting.currency !== "USD") {
+      const rate = await fetchFxToUsd(reporting.currency);
+      if (rate && Number.isFinite(rate) && rate > 0) fxToUsd = rate;
+    }
+    const annual = convertAnnualToUsd(rawAnnual, fxToUsd);
     const current = await fetchCurrentMetrics(symbol);
     const { score, components, label } = computeHealth(annual, current);
 

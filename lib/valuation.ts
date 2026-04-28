@@ -195,6 +195,16 @@ export type ValuationModelV2 = {
   };
 
   comps: CompsBlock | null;
+
+  // Optional metadata about where the EDGAR-sourced figures came from
+  // and how they were normalized. Populated for foreign private
+  // issuers (20-F / 40-F) reporting in non-USD currencies; absent on
+  // older rows and on US-domestic filers (which always satisfy
+  // currency='USD', taxonomy='us-gaap', formType='10-K' implicitly).
+  reporting_currency?: string | null;
+  fx_to_usd?: number | null;
+  source_form?: string | null;
+  source_taxonomy?: string | null;
 };
 
 export type WeightedDCFOutputs = {
