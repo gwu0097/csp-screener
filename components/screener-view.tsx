@@ -219,6 +219,41 @@ function yieldColor(
   return "text-muted-foreground";
 }
 
+// % Drop to Strike — how far the stock has to fall before breaching
+// the put. (price − strike) / price × 100. Inverse to yield: more
+// drop = safer cushion.
+function pctDrop(
+  price: number | null | undefined,
+  strike: number | null | undefined,
+): number | null {
+  if (
+    price === null || price === undefined || !Number.isFinite(price) || price <= 0 ||
+    strike === null || strike === undefined || !Number.isFinite(strike)
+  ) {
+    return null;
+  }
+  return ((price - strike) / price) * 100;
+}
+function fmtPctDrop(
+  price: number | null | undefined,
+  strike: number | null | undefined,
+): string {
+  const d = pctDrop(price, strike);
+  if (d === null) return "—";
+  return `${d.toFixed(1)}%`;
+}
+function pctDropColor(
+  price: number | null | undefined,
+  strike: number | null | undefined,
+): string {
+  const d = pctDrop(price, strike);
+  if (d === null) return "text-muted-foreground";
+  if (d > 20) return "text-emerald-300";
+  if (d >= 15) return "text-foreground";
+  if (d >= 10) return "text-amber-300";
+  return "text-rose-300";
+}
+
 function gradeOrder(g: string | null | undefined): number {
   if (g === "A") return 0;
   if (g === "B") return 1;
@@ -1800,6 +1835,9 @@ export function ScreenerView({ connected }: Props) {
                     }
                   />
                   <SortableHeader label="Strike" active={sortKey === "strike"} dir={sortDir} onClick={() => onSort("strike")} />
+                  <TableHead title="How far the stock has to fall to breach the strike: (price − strike) / price">
+                    % Drop
+                  </TableHead>
                   <SortableHeader label="Premium" active={sortKey === "premium"} dir={sortDir} onClick={() => onSort("premium")} />
                   <SortableHeader label="Yield%" active={sortKey === "yield"} dir={sortDir} onClick={() => onSort("yield")} />
                   <SortableHeader label="Delta" active={sortKey === "delta"} dir={sortDir} onClick={() => onSort("delta")} />
@@ -1809,7 +1847,7 @@ export function ScreenerView({ connected }: Props) {
               <TableBody>
                 {sortedResults.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={14} className="py-10 text-center text-sm text-muted-foreground">
+                    <TableCell colSpan={15} className="py-10 text-center text-sm text-muted-foreground">
                       No qualifying earnings today or tomorrow after filters.
                     </TableCell>
                   </TableRow>
@@ -1825,7 +1863,7 @@ export function ScreenerView({ connected }: Props) {
                       {showDivider && (
                         <TableRow key={`divider-${idx}`} className="hover:bg-transparent">
                           <TableCell
-                            colSpan={14}
+                            colSpan={15}
                             className="bg-amber-500/10 py-1.5 text-center text-xs italic text-amber-300/90"
                           >
                             <AlertTriangle className="mr-1.5 inline h-3 w-3" />
@@ -1928,6 +1966,9 @@ export function ScreenerView({ connected }: Props) {
                                   }
                                 />
                               </TableCell>
+                              <TableCell className={cn("text-sm font-mono", pctDropColor(displayedPrice, effStrike))}>
+                                {fmtPctDrop(displayedPrice, effStrike)}
+                              </TableCell>
                               <TableCell className="text-sm">
                                 {effPremium !== null && effPremium !== undefined
                                   ? `$${fmtNum(effPremium)}`
@@ -1955,7 +1996,7 @@ export function ScreenerView({ connected }: Props) {
                       </TableRow>
                       {open && (
                         <TableRow key={`${id}-detail`}>
-                          <TableCell colSpan={14} className="bg-muted/30">
+                          <TableCell colSpan={15} className="bg-muted/30">
                             <ExpandedDetail
                               r={r}
                               analyzing={analyzingSymbols.has(r.symbol.toUpperCase())}
@@ -2545,7 +2586,7 @@ function CustomStrikeAnalyzer({
           <div className="mb-1 font-medium">Custom Strike Analysis</div>
           <div className="grid grid-cols-2 gap-x-6 gap-y-0.5 font-mono">
             <Row k="Strike" v={`$${result.strike.toFixed(2)}`} />
-            <Row k="Distance" v={`${result.distancePct.toFixed(1)}% OTM`} />
+            <Row k="% Drop to Strike" v={`${result.distancePct.toFixed(1)}%`} />
             <Row k="Premium" v={`$${result.premium.toFixed(2)}`} />
             <Row k="Delta" v={result.delta.toFixed(3)} />
             <Row
