@@ -188,6 +188,10 @@ const LS_RESULTS = "screener_results";
 const LS_TIMESTAMP = "screener_timestamp";
 const LS_PRICES = "screener_prices";
 
+// Cross-device hydration freshness window. Anything older shows the
+// "stale — Run Analysis to update" banner instead of the green one.
+const FRESH_WINDOW_MS = 24 * 60 * 60 * 1000;
+
 function clearStoredScreen() {
   try {
     if (typeof window === "undefined") return;
@@ -197,6 +201,47 @@ function clearStoredScreen() {
   } catch {
     // ignore — quota / privacy mode
   }
+}
+
+// Writes the latest screener snapshot to localStorage AND fires a
+// background POST to /api/screener/results/save so the result is
+// available cross-device. The Supabase write is best-effort —
+// localStorage is the authoritative store on the originating device,
+// the DB row exists for hydration on every other device.
+function persistScreenSnapshot(args: {
+  candidates: ScreenerResult[];
+  prices: Record<string, number>;
+  screenedAt: string;
+  pass1Count?: number | null;
+  pass2Count?: number | null;
+  vix?: number | null;
+}) {
+  try {
+    if (typeof window !== "undefined") {
+      localStorage.setItem(LS_RESULTS, JSON.stringify(args.candidates));
+      localStorage.setItem(LS_TIMESTAMP, args.screenedAt);
+      localStorage.setItem(LS_PRICES, JSON.stringify(args.prices));
+    }
+  } catch (e) {
+    console.error("[screener] localStorage save failed", e);
+  }
+  // Fire-and-forget: failure here doesn't block the UI; the next
+  // mount on this device will still hydrate from localStorage.
+  void fetch("/api/screener/results/save", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      candidates: args.candidates,
+      screenedAt: args.screenedAt,
+      prices: args.prices,
+      pass1Count: args.pass1Count ?? null,
+      pass2Count: args.pass2Count ?? null,
+      vix: args.vix ?? null,
+    }),
+    cache: "no-store",
+  }).catch((e) => {
+    console.warn("[screener] remote save failed", e);
+  });
 }
 
 // Backfill fields that may be missing if the cached payload predates a schema
@@ -299,35 +344,76 @@ export function ScreenerView({ connected }: Props) {
     window.setTimeout(() => setTrackToast(null), 4000);
   }
 
+  // Two-stage hydration: localStorage first (instant), Supabase
+  // second (cross-device truth). The /latest fetch overwrites
+  // localStorage state when the DB row is newer, so opening the app
+  // on a second device picks up scans run from elsewhere.
   useEffect(() => {
+    // Stage 1 — localStorage. Fast paint on the same device.
     try {
       const raw = localStorage.getItem(LS_RESULTS);
       const ts = localStorage.getItem(LS_TIMESTAMP);
       const pricesRaw = localStorage.getItem(LS_PRICES);
-      console.log("[screener] mount restore - raw length:", raw?.length, "ts:", ts);
       if (raw && ts) {
-        const age = Date.now() - new Date(ts).getTime();
-        if (age < 24 * 60 * 60 * 1000) {
-          const parsed = (JSON.parse(raw) as unknown[])
-            .map((r) => normaliseResult(r as Partial<ScreenerResult>))
-            .filter((r): r is ScreenerResult => r !== null);
+        const parsed = (JSON.parse(raw) as unknown[])
+          .map((r) => normaliseResult(r as Partial<ScreenerResult>))
+          .filter((r): r is ScreenerResult => r !== null);
+        if (parsed.length > 0) {
           setResults(parsed);
           if (pricesRaw) setPrices(JSON.parse(pricesRaw));
           setScreenedAt(new Date(ts));
-          // Flat sort with tracked-first ordering is the default; skip the
-          // old two-group display entirely.
           setGroupMode(null);
-          console.log("[screener] restored", parsed.length, "results");
-        } else {
-          localStorage.removeItem(LS_RESULTS);
-          localStorage.removeItem(LS_TIMESTAMP);
-          localStorage.removeItem(LS_PRICES);
-          console.log("[screener] cleared stale results");
         }
       }
     } catch (e) {
-      console.error("localStorage restore failed", e);
+      console.error("[screener] localStorage restore failed", e);
     }
+
+    // Stage 2 — Supabase /latest. Replaces local state when the DB
+    // row is newer. Stale (>24 h) rows still hydrate so the user sees
+    // the full table; the banner labels them as stale.
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch("/api/screener/results/latest", {
+          cache: "no-store",
+        });
+        if (!res.ok) return;
+        const json = (await res.json()) as {
+          screenedAt: string | null;
+          candidates: Array<Partial<ScreenerResult> & { symbol?: string }>;
+          prices: Record<string, number>;
+        };
+        if (cancelled) return;
+        if (!json.screenedAt || json.candidates.length === 0) return;
+        const remoteTs = new Date(json.screenedAt).getTime();
+        const localTs = (() => {
+          try {
+            const ts = localStorage.getItem(LS_TIMESTAMP);
+            return ts ? new Date(ts).getTime() : 0;
+          } catch {
+            return 0;
+          }
+        })();
+        // Only overwrite if the remote row is at least as recent as
+        // what we already painted; preserves local edits (Track
+        // toggles persist through localStorage; results state stays
+        // in sync with the merged set on this device).
+        if (remoteTs < localTs) return;
+        const parsed = json.candidates
+          .map((r) => normaliseResult(r))
+          .filter((r): r is ScreenerResult => r !== null);
+        setResults(parsed);
+        setPrices(json.prices ?? {});
+        setScreenedAt(new Date(json.screenedAt));
+        setGroupMode(null);
+      } catch (e) {
+        console.warn("[screener] remote /latest hydrate failed", e);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const toggle = (id: string) => setExpanded((s) => ({ ...s, [id]: !s[id] }));
@@ -489,14 +575,18 @@ export function ScreenerView({ connected }: Props) {
       const nextPrices = json.prices ?? {};
       const nextStats = json.stats ?? null;
       const timestampIso = json.screenedAt ?? new Date().toISOString();
-      // Save BEFORE setState
-      try {
-        localStorage.setItem(LS_RESULTS, JSON.stringify(nextResults));
-        localStorage.setItem(LS_TIMESTAMP, timestampIso);
-        localStorage.setItem(LS_PRICES, JSON.stringify(nextPrices));
-      } catch (e) {
-        console.error("localStorage save failed", e);
-      }
+      // Save BEFORE setState — both localStorage (this device) and
+      // Supabase (cross-device hydration on next mount).
+      persistScreenSnapshot({
+        candidates: nextResults,
+        prices: nextPrices,
+        screenedAt: timestampIso,
+        // ScreenStats here counts candidates per filter stage rather
+        // than per analysis pass; map them onto pass1/pass2 columns
+        // so the DB row stays comparable across screener types.
+        pass1Count: nextStats?.afterPriceFilter ?? null,
+        pass2Count: nextStats?.final ?? null,
+      });
       setResults(nextResults);
       setPrices(nextPrices);
       setScreenedAt(new Date(timestampIso));
@@ -537,13 +627,11 @@ export function ScreenerView({ connected }: Props) {
       // Save BEFORE setState. Preserve the existing timestamp so "Last screened"
       // still reflects the most recent Screen run; fall back to now if missing.
       const timestampIso = (screenedAt ?? new Date()).toISOString();
-      try {
-        localStorage.setItem(LS_RESULTS, JSON.stringify(next));
-        localStorage.setItem(LS_TIMESTAMP, timestampIso);
-        localStorage.setItem(LS_PRICES, JSON.stringify(mergedPrices));
-      } catch (e) {
-        console.error("localStorage save failed", e);
-      }
+      persistScreenSnapshot({
+        candidates: next,
+        prices: mergedPrices,
+        screenedAt: timestampIso,
+      });
       setResults(next);
       setPrices(mergedPrices);
       setMessage(`Added ${json.added.length}, removed ${json.removed.length}`);
@@ -647,13 +735,11 @@ export function ScreenerView({ connected }: Props) {
       const byKey = new Map(json.results.map((r) => [`${r.symbol}|${r.earningsDate}`, r]));
       const next = merged2.map((r) => byKey.get(`${r.symbol}|${r.earningsDate}`) ?? r);
       const timestampIso = (screenedAt ?? new Date()).toISOString();
-      try {
-        localStorage.setItem(LS_RESULTS, JSON.stringify(next));
-        localStorage.setItem(LS_TIMESTAMP, timestampIso);
-        localStorage.setItem(LS_PRICES, JSON.stringify(mergedPrices));
-      } catch (e) {
-        console.error("localStorage save failed", e);
-      }
+      persistScreenSnapshot({
+        candidates: next,
+        prices: mergedPrices,
+        screenedAt: timestampIso,
+      });
       setResults(next);
       setGroupMode(null);
       const scored = json.scoredCount ?? json.results.length;
@@ -718,13 +804,12 @@ export function ScreenerView({ connected }: Props) {
           ? enriched
           : r,
       );
-      try {
-        const timestampIso = (screenedAt ?? new Date()).toISOString();
-        localStorage.setItem(LS_RESULTS, JSON.stringify(next));
-        localStorage.setItem(LS_TIMESTAMP, timestampIso);
-      } catch (e) {
-        console.error("localStorage save failed", e);
-      }
+      const timestampIso = (screenedAt ?? new Date()).toISOString();
+      persistScreenSnapshot({
+        candidates: next,
+        prices,
+        screenedAt: timestampIso,
+      });
       setResults(next);
       setMessage(`Analysis refreshed for ${upper}`);
     } catch (e) {
@@ -869,6 +954,10 @@ export function ScreenerView({ connected }: Props) {
               <AlertTriangle className="h-4 w-4" /> {error}
             </div>
           </div>
+        )}
+
+        {results && results.length > 0 && screenedAt && !busy && (
+          <HydrationBanner screenedAt={screenedAt} onRefresh={screenToday} />
         )}
 
         {showStaleNotice && (
@@ -1964,6 +2053,77 @@ function CrushRow({
         </TooltipContent>
       </Tooltip>
       <span className="font-mono text-foreground">{crushGrade}</span>
+    </div>
+  );
+}
+
+// Cross-device hydration banner. Tells the user where the results
+// they're seeing came from — the most recent screener_results row in
+// Supabase. Two states:
+//   <24 h old  → green "Showing results from {time} — Run Analysis to refresh"
+//   >=24 h old → amber "Last scan: {time} (stale) — Run Analysis to update"
+function HydrationBanner({
+  screenedAt,
+  onRefresh,
+}: {
+  screenedAt: Date;
+  onRefresh: () => void;
+}) {
+  const ageMs = Date.now() - screenedAt.getTime();
+  const stale = ageMs >= FRESH_WINDOW_MS;
+  const sameDay = (() => {
+    const today = new Date();
+    return (
+      today.getFullYear() === screenedAt.getFullYear() &&
+      today.getMonth() === screenedAt.getMonth() &&
+      today.getDate() === screenedAt.getDate()
+    );
+  })();
+  const label = sameDay
+    ? screenedAt.toLocaleTimeString([], {
+        hour: "numeric",
+        minute: "2-digit",
+        hour12: true,
+      })
+    : screenedAt.toLocaleString([], {
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+        hour12: true,
+      });
+  const cls = stale
+    ? "border-amber-500/30 bg-amber-500/10 text-amber-200"
+    : "border-emerald-500/30 bg-emerald-500/10 text-emerald-200";
+  return (
+    <div
+      className={`flex flex-wrap items-center justify-between gap-2 rounded-lg border ${cls} px-3 py-2 text-xs`}
+    >
+      <span>
+        {stale ? (
+          <>
+            Last scan:{" "}
+            <span className="font-mono">{label}</span>
+            <span className="ml-1 rounded border border-amber-500/40 bg-amber-500/15 px-1 py-0.5 text-[10px] font-semibold uppercase">
+              stale
+            </span>{" "}
+            — Run Analysis to update.
+          </>
+        ) : (
+          <>
+            Showing results from{" "}
+            <span className="font-mono">{label}</span> — Run Analysis to
+            refresh.
+          </>
+        )}
+      </span>
+      <button
+        type="button"
+        onClick={onRefresh}
+        className="rounded border border-current bg-transparent px-2 py-0.5 text-[11px] font-medium hover:bg-current/10"
+      >
+        Run Analysis
+      </button>
     </div>
   );
 }
