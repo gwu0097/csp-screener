@@ -99,11 +99,13 @@ export function CrushHistoryTable({
   ).length;
 
   async function handleFetchEmHistory() {
+    console.log("[fetch-em] starting for:", todaySymbol);
     setFetchStatus("fetching");
     setFetchError(null);
     setPopulatedCount(0);
     setFetchProgress(null);
     let totalPopulated = 0;
+    let totalSkipMessages: string[] = [];
     let lastRemaining = Number.POSITIVE_INFINITY;
     // Loop until backend reports remainingMissing===0. Bail out if a
     // call makes no progress (avoids infinite loop on persistent skips
@@ -127,12 +129,16 @@ export function CrushHistoryTable({
               messages: string[];
             }
           | { error: string };
+        console.log("[fetch-em] response:", { status: res.status, json });
         if (!res.ok || !("events" in json)) {
+          const msg = "error" in json ? json.error : `HTTP ${res.status}`;
+          console.error("[fetch-em] error:", msg);
           setFetchStatus("error");
-          setFetchError("error" in json ? json.error : `HTTP ${res.status}`);
+          setFetchError(`Failed to fetch EM data — ${msg}`);
           return;
         }
         totalPopulated += json.populated;
+        totalSkipMessages = totalSkipMessages.concat(json.messages ?? []);
         setPopulatedCount(totalPopulated);
         setRefreshed(json.events);
         setFetchProgress(
@@ -141,21 +147,55 @@ export function CrushHistoryTable({
             : null,
         );
         if (json.remainingMissing === 0) {
+          // True success — only branch where the button is replaced.
+          if (totalPopulated === 0) {
+            // Edge case: nothing was actually missing (UI/server drift).
+            // Fall through to error so the button stays available.
+            setFetchStatus("error");
+            setFetchError(
+              "Failed to fetch EM data — server reported nothing to populate. Try again.",
+            );
+            return;
+          }
           setFetchStatus("done");
           return;
         }
         if (json.remainingMissing >= lastRemaining) {
-          // No progress — every remaining row is being skipped
-          // (e.g. outside Polygon's 24-month window). Stop.
+          // No progress — every remaining row is being skipped. Surface
+          // the skip messages so the user knows why and offer a retry.
+          console.warn(
+            "[fetch-em] no progress — surfaceable skip messages:",
+            totalSkipMessages,
+          );
+          if (totalPopulated === 0) {
+            setFetchStatus("error");
+            setFetchError(
+              `Failed to fetch EM data — try again. ${
+                totalSkipMessages.slice(-2).join(" · ") ||
+                "All rows skipped (check Vercel logs for Polygon errors)."
+              }`,
+            );
+            return;
+          }
+          // Some populated, some persistently skipped — partial success.
           setFetchStatus("done");
           return;
         }
         lastRemaining = json.remainingMissing;
       } catch (e) {
+        console.error("[fetch-em] error:", e);
         setFetchStatus("error");
-        setFetchError(e instanceof Error ? e.message : "Network error");
+        setFetchError(
+          `Failed to fetch EM data — ${e instanceof Error ? e.message : "network error"}. Try again.`,
+        );
         return;
       }
+    }
+    // Hit iteration cap without finishing — treat as partial.
+    if (totalPopulated === 0) {
+      setFetchStatus("error");
+      setFetchError("Failed to fetch EM data — too many iterations without progress. Try again.");
+      return;
     }
     setFetchStatus("done");
   }
@@ -198,7 +238,7 @@ export function CrushHistoryTable({
         <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
           Earnings history
         </div>
-        {missingEmCount > 0 && fetchStatus !== "done" && (
+        {missingEmCount > 0 && !(fetchStatus === "done" && populatedCount > 0) && (
           <button
             type="button"
             onClick={handleFetchEmHistory}
@@ -210,6 +250,8 @@ export function CrushHistoryTable({
                 <Loader2 className="h-3 w-3 animate-spin" />
                 Fetching…
               </>
+            ) : fetchStatus === "error" ? (
+              <>↻ Retry</>
             ) : (
               <>📊 Fetch EM history ({missingEmCount})</>
             )}

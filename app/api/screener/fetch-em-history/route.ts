@@ -223,6 +223,10 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid symbol" }, { status: 400 });
   }
 
+  console.log(
+    `[fetch-em] symbol: ${symbol} key exists: ${!!process.env.POLYGON_API_KEY} using fallback: ${!process.env.POLYGON_API_KEY}`,
+  );
+
   const sb = createServerClient();
   // Pull every row for the symbol in the Polygon window — we need
   // the full list both to pick targets and to recompute the crush
@@ -257,10 +261,14 @@ export async function POST(req: NextRequest) {
     try {
       outcome = await processEvent(row);
     } catch (e) {
-      outcome = {
-        kind: "error",
-        reason: e instanceof Error ? e.message : String(e),
-      };
+      const reason = e instanceof Error ? e.message : String(e);
+      console.error(`[fetch-em] ${symbol} ${row.earnings_date} threw:`, e);
+      outcome = { kind: "error", reason };
+    }
+    if (outcome.kind === "error" || outcome.kind === "skip_no_contracts" || outcome.kind === "skip_no_data") {
+      console.log(
+        `[fetch-em] ${symbol} ${row.earnings_date} ${outcome.kind}: ${"reason" in outcome ? outcome.reason : ""}`,
+      );
     }
     if (outcome.kind === "populated") {
       const upd = await sb
