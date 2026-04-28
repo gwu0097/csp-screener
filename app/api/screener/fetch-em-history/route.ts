@@ -54,6 +54,26 @@ function nextFridayOnOrAfter(dateIso: string): string {
   return d.toISOString().slice(0, 10);
 }
 
+function lookbackBusinessDays(dateIso: string, n: number): string {
+  const d = new Date(dateIso + "T12:00:00Z");
+  let remaining = n;
+  while (remaining > 0) {
+    d.setUTCDate(d.getUTCDate() - 1);
+    const dow = d.getUTCDay();
+    if (dow !== 0 && dow !== 6) remaining -= 1;
+  }
+  return d.toISOString().slice(0, 10);
+}
+
+// Pull the latest valid close from a Polygon aggs response. Polygon
+// returns ascending by `t`, so the last entry is the most recent.
+function latestCloseFromAggs(body: Aggs | null): number | null {
+  const list = body?.results;
+  if (!list || list.length === 0) return null;
+  const last = list[list.length - 1];
+  return typeof last.c === "number" ? last.c : null;
+}
+
 function quarterLabel(dateIso: string): string {
   const [y, m] = dateIso.split("-").map(Number);
   if (!y || !m) return "—";
@@ -74,7 +94,7 @@ type EarningsRow = {
 };
 
 type Aggs = {
-  results?: Array<{ c?: number }>;
+  results?: Array<{ c?: number; t?: number }>;
   status?: string;
   message?: string;
 };
@@ -122,8 +142,56 @@ async function poly<T>(
   return r;
 }
 
+// Single-day option close with a 5-business-day range fallback for
+// thinly traded strikes. Polygon's daily aggs omit zero-volume bars
+// entirely, so an ATM strike with no Tue-pre-earnings prints comes
+// back status=200, results=[]. Falling back to a 5-BD range and
+// taking the latest available close keeps the EM% computable; cost
+// is one extra aggs call only when the single-day is empty.
+type LegFetch =
+  | { kind: "ok"; close: number; usedFallback: boolean }
+  | { kind: "too_old" }
+  | { kind: "empty_even_with_fallback" }
+  | { kind: "error"; reason: string };
+
+async function fetchLegClose(
+  ticker: string,
+  priorClose: string,
+): Promise<LegFetch> {
+  const single = await poly<Aggs>(
+    `/v2/aggs/ticker/${encodeURIComponent(ticker)}/range/1/day/${priorClose}/${priorClose}`,
+    { adjusted: "false" },
+  );
+  if (single.status === 403) return { kind: "too_old" };
+  if (single.status !== 200) {
+    return {
+      kind: "error",
+      reason: `bar status=${single.status} ${single.body?.message ?? single.rawSnippet}`,
+    };
+  }
+  if (single.body?.results?.[0]?.c !== undefined) {
+    return { kind: "ok", close: single.body.results[0].c as number, usedFallback: false };
+  }
+  // Single-day empty — retry with a 5-business-day lookback range.
+  const start = lookbackBusinessDays(priorClose, 5);
+  const range = await poly<Aggs>(
+    `/v2/aggs/ticker/${encodeURIComponent(ticker)}/range/1/day/${start}/${priorClose}`,
+    { adjusted: "false" },
+  );
+  if (range.status === 403) return { kind: "too_old" };
+  if (range.status !== 200) {
+    return {
+      kind: "error",
+      reason: `range status=${range.status} ${range.body?.message ?? range.rawSnippet}`,
+    };
+  }
+  const close = latestCloseFromAggs(range.body);
+  if (close === null) return { kind: "empty_even_with_fallback" };
+  return { kind: "ok", close, usedFallback: true };
+}
+
 type ProcessOutcome =
-  | { kind: "populated"; emPct: number; strike: number }
+  | { kind: "populated"; emPct: number; strike: number; usedFallback: boolean }
   | { kind: "skip_too_old" }
   | { kind: "skip_no_contracts"; reason: string }
   | { kind: "skip_no_data"; reason: string }
@@ -242,34 +310,35 @@ async function processEvent(row: EarningsRow): Promise<ProcessOutcome> {
     };
   }
 
-  const callBar = await poly<Aggs>(
-    `/v2/aggs/ticker/${encodeURIComponent(callTicker)}/range/1/day/${priorClose}/${priorClose}`,
-  );
-  if (callBar.status === 403) return { kind: "skip_too_old" };
-  if (callBar.status !== 200 || callBar.body?.results?.[0]?.c === undefined) {
-    return {
-      kind: "skip_no_data",
-      reason: `call bar status=${callBar.status}`,
-    };
+  const callRes = await fetchLegClose(callTicker, priorClose);
+  if (callRes.kind === "too_old") return { kind: "skip_too_old" };
+  if (callRes.kind === "error") {
+    return { kind: "skip_no_data", reason: `call ${callRes.reason}` };
   }
-  const callClose = callBar.body.results[0].c as number;
+  if (callRes.kind === "empty_even_with_fallback") {
+    return { kind: "skip_no_data", reason: `call bar empty even with 5-BD lookback to ${lookbackBusinessDays(priorClose, 5)}` };
+  }
+  const callClose = callRes.close;
 
   await sleep(SLEEP_BETWEEN_AGGS_MS);
 
-  const putBar = await poly<Aggs>(
-    `/v2/aggs/ticker/${encodeURIComponent(putTicker)}/range/1/day/${priorClose}/${priorClose}`,
-  );
-  if (putBar.status === 403) return { kind: "skip_too_old" };
-  if (putBar.status !== 200 || putBar.body?.results?.[0]?.c === undefined) {
-    return {
-      kind: "skip_no_data",
-      reason: `put bar status=${putBar.status}`,
-    };
+  const putRes = await fetchLegClose(putTicker, priorClose);
+  if (putRes.kind === "too_old") return { kind: "skip_too_old" };
+  if (putRes.kind === "error") {
+    return { kind: "skip_no_data", reason: `put ${putRes.reason}` };
   }
-  const putClose = putBar.body.results[0].c as number;
+  if (putRes.kind === "empty_even_with_fallback") {
+    return { kind: "skip_no_data", reason: `put bar empty even with 5-BD lookback to ${lookbackBusinessDays(priorClose, 5)}` };
+  }
+  const putClose = putRes.close;
 
   const straddle = callClose + putClose;
-  return { kind: "populated", emPct: straddle / spot, strike: atm };
+  return {
+    kind: "populated",
+    emPct: straddle / spot,
+    strike: atm,
+    usedFallback: callRes.usedFallback || putRes.usedFallback,
+  };
 }
 
 type Body = { symbol?: unknown };
@@ -348,7 +417,7 @@ export async function POST(req: NextRequest) {
       } else {
         populated += 1;
         messages.push(
-          `${row.earnings_date}: EM=${(outcome.emPct * 100).toFixed(2)}% @ strike $${outcome.strike}`,
+          `${row.earnings_date}: EM=${(outcome.emPct * 100).toFixed(2)}% @ strike $${outcome.strike}${outcome.usedFallback ? " (used 5-BD fallback)" : ""}`,
         );
       }
     } else if (outcome.kind === "skip_too_old") {
