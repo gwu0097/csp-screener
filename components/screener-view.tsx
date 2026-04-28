@@ -135,6 +135,7 @@ type SortKey =
   | "opportunity"
   | "strike"
   | "premium"
+  | "yield"
   | "delta"
   | "spread"
   | "stage2"
@@ -175,6 +176,46 @@ function fmtPrice(n: number | null | undefined) {
 function fmtNum(n: number | null | undefined, digits = 2) {
   if (n === null || n === undefined || !Number.isFinite(n)) return "—";
   return n.toFixed(digits);
+}
+
+// CSP yield = premium / strike, expressed as a percent. The denominator
+// is strike (capital at risk for a cash-secured put) rather than spot,
+// so a $5 premium on a $500 strike reads 1.00%, the same number a
+// trader would compute when sizing the trade.
+function csPYieldPct(
+  premium: number | null | undefined,
+  strike: number | null | undefined,
+): number | null {
+  if (
+    premium === null ||
+    premium === undefined ||
+    !Number.isFinite(premium) ||
+    strike === null ||
+    strike === undefined ||
+    !Number.isFinite(strike) ||
+    strike <= 0
+  ) {
+    return null;
+  }
+  return (premium / strike) * 100;
+}
+function fmtYield(
+  premium: number | null | undefined,
+  strike: number | null | undefined,
+): string {
+  const y = csPYieldPct(premium, strike);
+  if (y === null) return "—";
+  return `${y.toFixed(2)}%`;
+}
+function yieldColor(
+  premium: number | null | undefined,
+  strike: number | null | undefined,
+): string {
+  const y = csPYieldPct(premium, strike);
+  if (y === null) return "text-muted-foreground";
+  if (y > 0.5) return "text-emerald-300";
+  if (y >= 0.2) return "text-foreground";
+  return "text-muted-foreground";
 }
 
 function gradeOrder(g: string | null | undefined): number {
@@ -694,6 +735,19 @@ export function ScreenerView({ connected }: Props) {
           va = a.stageFour?.premium ?? -1;
           vb = b.stageFour?.premium ?? -1;
           break;
+        case "yield": {
+          const yA =
+            a.stageFour?.premium && a.stageFour?.suggestedStrike
+              ? a.stageFour.premium / a.stageFour.suggestedStrike
+              : -1;
+          const yB =
+            b.stageFour?.premium && b.stageFour?.suggestedStrike
+              ? b.stageFour.premium / b.stageFour.suggestedStrike
+              : -1;
+          va = yA;
+          vb = yB;
+          break;
+        }
         case "delta":
           va = a.stageFour?.delta ?? 999;
           vb = b.stageFour?.delta ?? 999;
@@ -1664,6 +1718,7 @@ export function ScreenerView({ connected }: Props) {
                   />
                   <SortableHeader label="Strike" active={sortKey === "strike"} dir={sortDir} onClick={() => onSort("strike")} />
                   <SortableHeader label="Premium" active={sortKey === "premium"} dir={sortDir} onClick={() => onSort("premium")} />
+                  <SortableHeader label="Yield%" active={sortKey === "yield"} dir={sortDir} onClick={() => onSort("yield")} />
                   <SortableHeader label="Delta" active={sortKey === "delta"} dir={sortDir} onClick={() => onSort("delta")} />
                   <SortableHeader label="Spread" active={sortKey === "spread"} dir={sortDir} onClick={() => onSort("spread")} />
                 </TableRow>
@@ -1671,7 +1726,7 @@ export function ScreenerView({ connected }: Props) {
               <TableBody>
                 {sortedResults.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={15} className="py-10 text-center text-sm text-muted-foreground">
+                    <TableCell colSpan={16} className="py-10 text-center text-sm text-muted-foreground">
                       No qualifying earnings today or tomorrow after filters.
                     </TableCell>
                   </TableRow>
@@ -1687,7 +1742,7 @@ export function ScreenerView({ connected }: Props) {
                       {showDivider && (
                         <TableRow key={`divider-${idx}`} className="hover:bg-transparent">
                           <TableCell
-                            colSpan={15}
+                            colSpan={16}
                             className="bg-amber-500/10 py-1.5 text-center text-xs italic text-amber-300/90"
                           >
                             <AlertTriangle className="mr-1.5 inline h-3 w-3" />
@@ -1782,6 +1837,9 @@ export function ScreenerView({ connected }: Props) {
                             ? `$${fmtNum(r.stageFour.premium)}`
                             : "—"}
                         </TableCell>
+                        <TableCell className={cn("text-sm font-mono", yieldColor(r.stageFour?.premium ?? null, r.stageFour?.suggestedStrike ?? null))}>
+                          {fmtYield(r.stageFour?.premium ?? null, r.stageFour?.suggestedStrike ?? null)}
+                        </TableCell>
                         <TableCell className="text-sm">{fmtNum(r.stageFour?.delta ?? null, 3)}</TableCell>
                         <TableCell className="text-sm">
                           {r.stageFour?.bidAskSpreadPct !== null && r.stageFour?.bidAskSpreadPct !== undefined
@@ -1791,7 +1849,7 @@ export function ScreenerView({ connected }: Props) {
                       </TableRow>
                       {open && (
                         <TableRow key={`${id}-detail`}>
-                          <TableCell colSpan={15} className="bg-muted/30">
+                          <TableCell colSpan={16} className="bg-muted/30">
                             <ExpandedDetail
                               r={r}
                               analyzing={analyzingSymbols.has(r.symbol.toUpperCase())}
