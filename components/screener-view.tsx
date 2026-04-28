@@ -1240,14 +1240,49 @@ export function ScreenerView({ connected }: Props) {
   }
 
   async function runAnalysis() {
+    if (!results) return;
+    setMessage(null);
+    await runAnalysisOn(results);
+  }
+
+  // "Analyze Tracked" — same Pass 2/3 flow as Run Analysis but
+  // restricted to candidates the user has checkbox-tracked. Untracked
+  // rows are left exactly as-is in the merged result set, so they
+  // still show Pass 1 data (crush/opportunity grades, suggested
+  // strike, premium) but no three-layer grade.
+  async function analyzeTracked() {
+    if (!results) return;
+    const trackedCandidates = results.filter((r) =>
+      tracked.has(r.symbol.toUpperCase()),
+    );
+    if (trackedCandidates.length === 0) {
+      setMessage(
+        "No tracked candidates — check the boxes on rows you want to analyze.",
+      );
+      return;
+    }
+    setMessage(
+      `Analyzing ${trackedCandidates.length} tracked candidate${trackedCandidates.length === 1 ? "" : "s"}…`,
+    );
+    await runAnalysisOn(trackedCandidates);
+  }
+
+  // Shared analysis flow — runs Pass 2 + the parallel News/Grade
+  // streams on the supplied candidate list. The merge step always
+  // walks the full `results` array so untouched rows pass through
+  // unchanged (this is what lets Analyze Tracked leave non-tracked
+  // candidates with their Pass 1 data intact).
+  async function runAnalysisOn(candidatesToAnalyze: ScreenerResult[]) {
     if (!results || !connected) return;
+    if (candidatesToAnalyze.length === 0) return;
     setStatus("analyzing");
     setError(null);
     setAnalysisError(null);
-    setMessage(null);
     setNewsProgress(null);
     setGradeProgress(null);
-    setAnalyzingSymbols(new Set(results.map((r) => r.symbol.toUpperCase())));
+    setAnalyzingSymbols(
+      new Set(candidatesToAnalyze.map((r) => r.symbol.toUpperCase())),
+    );
 
     // ---- Pass 2 — Schwab options + stages 3/4 ----
     let p2: {
@@ -1259,7 +1294,7 @@ export function ScreenerView({ connected }: Props) {
       const r2 = await fetch("/api/screener/analyze/pass2", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ candidates: results }),
+        body: JSON.stringify({ candidates: candidatesToAnalyze }),
         cache: "no-store",
       });
       if (!r2.ok) {
@@ -1484,6 +1519,44 @@ export function ScreenerView({ connected }: Props) {
               )}
               {status === "screening" ? "Screening…" : "Screen Today"}
             </Button>
+            {(() => {
+              const trackedCandidateCount = (results ?? []).filter((r) =>
+                tracked.has(r.symbol.toUpperCase()),
+              ).length;
+              return (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span>
+                      <Button
+                        variant="secondary"
+                        disabled={
+                          !results ||
+                          busy ||
+                          !connected ||
+                          trackedCandidateCount === 0
+                        }
+                        onClick={analyzeTracked}
+                      >
+                        {status === "analyzing" ? (
+                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        ) : (
+                          <Star className="mr-2 h-4 w-4" />
+                        )}
+                        Analyze Tracked ({trackedCandidateCount})
+                      </Button>
+                    </span>
+                  </TooltipTrigger>
+                  {!connected && (
+                    <TooltipContent>Connect Schwab to analyze</TooltipContent>
+                  )}
+                  {connected && trackedCandidateCount === 0 && (
+                    <TooltipContent>
+                      Check the box on rows you want to analyze
+                    </TooltipContent>
+                  )}
+                </Tooltip>
+              );
+            })()}
             <Button variant="secondary" disabled={!results || busy} onClick={applyWatchlist}>
               {status === "applying" ? (
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
