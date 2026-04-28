@@ -37,10 +37,14 @@ export async function GET() {
     .order("screened_at", { ascending: false })
     .limit(1);
   if (r.error) {
+    console.error(
+      `[screener] /latest FAILED: ${r.error.message} (likely migration 010_screener_results.sql not applied)`,
+    );
     return NextResponse.json({ error: r.error.message }, { status: 500 });
   }
   const row = ((r.data ?? []) as Row[])[0];
   if (!row) {
+    console.log(`[screener] /latest hit empty table — no saved results yet`);
     return NextResponse.json({
       screenedAt: null,
       candidates: [],
@@ -50,6 +54,9 @@ export async function GET() {
       pass2Count: null,
     });
   }
+  console.log(
+    `[screener] loading cached results from: ${row.screened_at} (${Array.isArray(row.candidates) ? (row.candidates as unknown[]).length : 0} candidates)`,
+  );
   return NextResponse.json({
     screenedAt: row.screened_at,
     candidates: Array.isArray(row.candidates) ? row.candidates : [],

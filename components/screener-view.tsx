@@ -226,22 +226,41 @@ function persistScreenSnapshot(args: {
     console.error("[screener] localStorage save failed", e);
   }
   // Fire-and-forget: failure here doesn't block the UI; the next
-  // mount on this device will still hydrate from localStorage.
-  void fetch("/api/screener/results/save", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      candidates: args.candidates,
-      screenedAt: args.screenedAt,
-      prices: args.prices,
-      pass1Count: args.pass1Count ?? null,
-      pass2Count: args.pass2Count ?? null,
-      vix: args.vix ?? null,
-    }),
-    cache: "no-store",
-  }).catch((e) => {
-    console.warn("[screener] remote save failed", e);
-  });
+  // mount on this device will still hydrate from localStorage. But
+  // we DO inspect res.ok — a missing migration / 500 response would
+  // otherwise be silently swallowed by .catch(), which historically
+  // hid the "screener_results table doesn't exist" failure mode.
+  void (async () => {
+    try {
+      const res = await fetch("/api/screener/results/save", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          candidates: args.candidates,
+          screenedAt: args.screenedAt,
+          prices: args.prices,
+          pass1Count: args.pass1Count ?? null,
+          pass2Count: args.pass2Count ?? null,
+          vix: args.vix ?? null,
+        }),
+        cache: "no-store",
+      });
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        console.error(
+          `[screener] /api/screener/results/save returned HTTP ${res.status}. Body: ${body.slice(0, 240)}. ` +
+            `Cross-device hydration will not work until this is fixed — ` +
+            `most common cause: db/migrations/010_screener_results.sql has not been applied to Supabase.`,
+        );
+        return;
+      }
+      console.log(
+        `[screener] saved ${args.candidates.length} candidates to DB at ${args.screenedAt}`,
+      );
+    } catch (e) {
+      console.error("[screener] remote save threw (network):", e);
+    }
+  })();
 }
 
 // Backfill fields that may be missing if the cached payload predates a schema

@@ -61,7 +61,13 @@ export async function POST(req: NextRequest) {
     prices,
   });
   if (ins.error) {
+    console.error(
+      `[screener] save FAILED: ${ins.error.message} (likely migration 010_screener_results.sql not applied)`,
+    );
     return NextResponse.json({ error: ins.error.message }, { status: 500 });
   }
+  console.log(
+    `[screener] saved results to DB: count=${(body.candidates as unknown[]).length} screenedAt=${screenedAt}`,
+  );
   return NextResponse.json({ ok: true, screenedAt });
 }
