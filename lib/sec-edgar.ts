@@ -638,7 +638,16 @@ export function extractQuarterlyMetrics(
     ) {
       return null;
     }
-    return fyEntry.val - q1.val - q2.val - q3.val;
+    const derived = fyEntry.val - q1.val - q2.val - q3.val;
+    // Guard: a negative Q4 derivation almost always means the picker
+    // matched a stale FY entry (e.g. a prior-year comparative tagged
+    // with the current filing's fy). EDGAR is internally consistent on
+    // units — both annual and quarterly come back in raw dollars from
+    // the same picker — so a real unit mismatch isn't the cause.
+    // Surface null rather than a misleading negative figure; the next
+    // re-extract from EDGAR will produce the correct value.
+    if (derived < 0) return null;
+    return derived;
   }
 
   function lookupEnd(year: number, q: 1 | 2 | 3 | 4): string | null {

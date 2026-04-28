@@ -144,10 +144,17 @@ export function SecFilingsTab({
   }
 
   // Quarterly (10-Q) data is reused from the existing fundamental-health
-  // module — no extra API call. Newest first by periodEnd.
+  // module — no extra API call. Newest first by periodEnd. If the
+  // dates look wrong, the saved module pre-dates the endYear keying
+  // patch — Refresh button at the section header re-runs the extractor.
   const quarterly = (healthMod?.output?.quarterly ?? [])
     .slice()
     .sort((a, b) => b.periodEnd.localeCompare(a.periodEnd));
+  // Index for YoY revenue growth lookup — match (fiscalYear − 1, same
+  // fiscalQuarter) to compute (current − prior) / prior.
+  const quarterlyByKey = new Map(
+    quarterly.map((q) => [`${q.fiscalYear}|${q.fiscalQuarter}`, q]),
+  );
 
   return (
     <div className="space-y-4">
@@ -276,6 +283,9 @@ export function SecFilingsTab({
                 <tr className="border-b border-border/50">
                   <th className="px-1.5 py-1 text-left font-medium">Quarter</th>
                   <th className="px-1.5 py-1 text-right font-medium">Revenue</th>
+                  <th className="px-1.5 py-1 text-right font-medium">
+                    Rev growth
+                  </th>
                   <th className="px-1.5 py-1 text-right font-medium">EPS</th>
                   <th className="px-1.5 py-1 text-right font-medium">
                     Period end
@@ -283,22 +293,47 @@ export function SecFilingsTab({
                 </tr>
               </thead>
               <tbody>
-                {quarterly.map((q) => (
-                  <tr key={q.periodEnd} className="border-b border-border/30">
-                    <td className="px-1.5 py-1 font-mono">{q.fiscalLabel}</td>
-                    <td className="px-1.5 py-1 text-right font-mono">
-                      {q.revenue === null
-                        ? "—"
-                        : fmtMillions(q.revenue / 1_000_000)}
-                    </td>
-                    <td className="px-1.5 py-1 text-right font-mono">
-                      {q.eps === null ? "—" : `$${q.eps.toFixed(2)}`}
-                    </td>
-                    <td className="px-1.5 py-1 text-right font-mono text-muted-foreground">
-                      {fmtMonthYear(q.periodEnd)}
-                    </td>
-                  </tr>
-                ))}
+                {quarterly.map((q) => {
+                  const prior = quarterlyByKey.get(
+                    `${q.fiscalYear - 1}|${q.fiscalQuarter}`,
+                  );
+                  const growth =
+                    q.revenue !== null &&
+                    prior?.revenue !== null &&
+                    prior?.revenue !== undefined &&
+                    prior.revenue > 0
+                      ? (q.revenue - prior.revenue) / prior.revenue
+                      : null;
+                  return (
+                    <tr key={q.periodEnd} className="border-b border-border/30">
+                      <td className="px-1.5 py-1 font-mono">{q.fiscalLabel}</td>
+                      <td className="px-1.5 py-1 text-right font-mono">
+                        {q.revenue === null
+                          ? "—"
+                          : fmtMillions(q.revenue / 1_000_000)}
+                      </td>
+                      <td
+                        className={`px-1.5 py-1 text-right font-mono ${
+                          growth === null
+                            ? "text-muted-foreground"
+                            : growth >= 0
+                              ? "text-emerald-300"
+                              : "text-rose-300"
+                        }`}
+                      >
+                        {growth === null
+                          ? "—"
+                          : `${growth >= 0 ? "+" : ""}${(growth * 100).toFixed(1)}%`}
+                      </td>
+                      <td className="px-1.5 py-1 text-right font-mono">
+                        {q.eps === null ? "—" : `$${q.eps.toFixed(2)}`}
+                      </td>
+                      <td className="px-1.5 py-1 text-right font-mono text-muted-foreground">
+                        {fmtMonthYear(q.periodEnd)}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
             <div className="mt-2 text-[10px] text-muted-foreground/80">
