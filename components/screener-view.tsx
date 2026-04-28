@@ -331,6 +331,13 @@ export function ScreenerView({ connected }: Props) {
     count: number;
     graded: boolean;
   } | null>(null);
+  // Hide the HydrationBanner after Load Previous fires — the user
+  // explicitly chose what they're loading, the green message strip
+  // already says "Loaded N from {time}", a banner repeat is just
+  // noise. Reset to false at the start of any fresh action (Screen
+  // Today / Apply Watchlist / Run Analysis) where the banner adds
+  // signal (graded vs ungraded, age, etc.).
+  const [hydrationBannerHidden, setHydrationBannerHidden] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Richer per-pass error so the analyze banner can show a friendly
@@ -487,6 +494,9 @@ export function ScreenerView({ connected }: Props) {
         hour12: true,
       });
       setMessage(`Loaded ${parsed.length} candidates from ${ts}`);
+      // Suppress the HydrationBanner — the message line above already
+      // confirms what was loaded; banner copy would just repeat it.
+      setHydrationBannerHidden(true);
     } catch (e) {
       setError(`Load Previous failed: ${e instanceof Error ? e.message : "network error"}`);
     } finally {
@@ -633,6 +643,7 @@ export function ScreenerView({ connected }: Props) {
     setMessage(null);
     setExpanded({});
     setLastStats(null);
+    setHydrationBannerHidden(false);
     try {
       const res = await fetch("/api/screener/screen", { method: "POST", cache: "no-store" });
       const json = (await res.json().catch(() => ({}))) as {
@@ -685,6 +696,7 @@ export function ScreenerView({ connected }: Props) {
     setStatus("applying");
     setError(null);
     setMessage(null);
+    setHydrationBannerHidden(false);
     try {
       const res = await fetch("/api/screener/apply-watchlist", {
         method: "POST",
@@ -909,6 +921,7 @@ export function ScreenerView({ connected }: Props) {
     setAnalysisError(null);
     setMessage(null);
     setAnalyzeProgress(null);
+    setHydrationBannerHidden(false);
     setAnalyzingSymbols(new Set(results.map((r) => r.symbol.toUpperCase())));
 
     // ---- Pass 2 — Schwab options + stages 3/4 ----
@@ -1221,7 +1234,7 @@ export function ScreenerView({ connected }: Props) {
           </div>
         )}
 
-        {results && results.length > 0 && screenedAt && !busy && (
+        {results && results.length > 0 && screenedAt && !busy && !hydrationBannerHidden && (
           <HydrationBanner
             screenedAt={screenedAt}
             graded={screenIsGraded}
