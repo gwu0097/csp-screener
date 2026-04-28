@@ -405,13 +405,6 @@ export function ScreenerView({ connected }: Props) {
     count: number;
     graded: boolean;
   } | null>(null);
-  // Hide the HydrationBanner after Load Previous fires — the user
-  // explicitly chose what they're loading, the green message strip
-  // already says "Loaded N from {time}", a banner repeat is just
-  // noise. Reset to false at the start of any fresh action (Screen
-  // Today / Apply Watchlist / Run Analysis) where the banner adds
-  // signal (graded vs ungraded, age, etc.).
-  const [hydrationBannerHidden, setHydrationBannerHidden] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Richer per-pass error so the analyze banner can show a friendly
@@ -489,12 +482,17 @@ export function ScreenerView({ connected }: Props) {
     window.setTimeout(() => setTrackToast(null), 4000);
   }
 
-  // Mount probe — checks whether a previous run exists in Supabase
-  // but does NOT populate state. Auto-hydration was overwriting the
-  // user's in-progress session (e.g. they ran Screen Today, opened
-  // a new tab, and the new tab loaded yesterday's row over today's
-  // unsaved edits). Now the table starts empty and the user picks
-  // explicitly via the Load Previous button.
+  // Mount auto-restore. A page refresh shouldn't lose the table
+  // the user just looked at — but a stale row (>24h) shouldn't
+  // hide the empty-state either. Two paths:
+  //   fresh (<24h): populate state silently. No banner, no
+  //                 message — refresh feels like nothing happened.
+  //   stale (>=24h): leave state empty; only record availability
+  //                  so the Load Previous button can offer it
+  //                  explicitly.
+  // Either way, previousAvailable is set so Load Previous remains
+  // available for cross-device refreshes (other tab ran a scan,
+  // this tab wants to pick it up without a full reload).
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -505,7 +503,8 @@ export function ScreenerView({ connected }: Props) {
         if (!res.ok) return;
         const json = (await res.json()) as {
           screenedAt: string | null;
-          candidates: Array<unknown>;
+          candidates: Array<Partial<ScreenerResult> & { symbol?: string }>;
+          prices: Record<string, number>;
           graded?: boolean;
         };
         if (cancelled) return;
@@ -517,8 +516,36 @@ export function ScreenerView({ connected }: Props) {
           count: json.candidates.length,
           graded: json.graded === true,
         });
+        const ageMs = Date.now() - new Date(json.screenedAt).getTime();
+        if (ageMs >= FRESH_WINDOW_MS) {
+          // Stale — don't auto-populate. Empty state stays.
+          return;
+        }
+        const parsed = json.candidates
+          .map((r) => normaliseResult(r))
+          .filter((r): r is ScreenerResult => r !== null);
+        if (parsed.length === 0) return;
+        setResults(parsed);
+        setPrices(json.prices ?? {});
+        setScreenedAt(new Date(json.screenedAt));
+        setScreenIsGraded(json.graded === true);
+        setGroupMode(null);
+        // Sync localStorage so subsequent in-session edits read
+        // from a consistent baseline. No banner, no message — this
+        // is a silent restore.
+        try {
+          localStorage.setItem(LS_RESULTS, JSON.stringify(parsed));
+          localStorage.setItem(LS_TIMESTAMP, json.screenedAt);
+          localStorage.setItem(LS_PRICES, JSON.stringify(json.prices ?? {}));
+          localStorage.setItem(
+            LS_GRADED,
+            json.graded === true ? "true" : "false",
+          );
+        } catch (e) {
+          console.warn("[screener] LS seed after silent restore failed", e);
+        }
       } catch (e) {
-        console.warn("[screener] /latest probe failed", e);
+        console.warn("[screener] /latest mount fetch failed", e);
       }
     })();
     return () => {
@@ -575,9 +602,6 @@ export function ScreenerView({ connected }: Props) {
         hour12: true,
       });
       setMessage(`Loaded ${parsed.length} candidates from ${ts}`);
-      // Suppress the HydrationBanner — the message line above already
-      // confirms what was loaded; banner copy would just repeat it.
-      setHydrationBannerHidden(true);
     } catch (e) {
       setError(`Load Previous failed: ${e instanceof Error ? e.message : "network error"}`);
     } finally {
@@ -728,7 +752,6 @@ export function ScreenerView({ connected }: Props) {
     setMessage(null);
     setExpanded({});
     setLastStats(null);
-    setHydrationBannerHidden(false);
     try {
       const res = await fetch("/api/screener/screen", { method: "POST", cache: "no-store" });
       const json = (await res.json().catch(() => ({}))) as {
@@ -781,7 +804,6 @@ export function ScreenerView({ connected }: Props) {
     setStatus("applying");
     setError(null);
     setMessage(null);
-    setHydrationBannerHidden(false);
     try {
       const res = await fetch("/api/screener/apply-watchlist", {
         method: "POST",
@@ -1147,12 +1169,6 @@ export function ScreenerView({ connected }: Props) {
       setStatus("idle");
       setNewsProgress(null);
       setGradeProgress(null);
-      // Suppress the HydrationBanner — the user just initiated a
-      // full analysis run, the green completion message above the
-      // toolbar already conveys the outcome, and the banner copy
-      // ("Showing graded results from {time}") would be a redundant
-      // restatement. Same suppression Load Previous applies.
-      setHydrationBannerHidden(true);
       setMessage(
         `Analysis complete ✓\n📊 ${ctx.summary.scored} candidates scored\n🎯 ${ctx.summary.tracked} tracked tickers saved\n📸 ${ctx.summary.snapshots} position snapshots taken\n📚 ${ctx.summary.encyclopedia} encyclopedia updates`,
       );
@@ -1177,7 +1193,6 @@ export function ScreenerView({ connected }: Props) {
     setMessage(null);
     setNewsProgress(null);
     setGradeProgress(null);
-    setHydrationBannerHidden(false);
     setAnalyzingSymbols(new Set(results.map((r) => r.symbol.toUpperCase())));
 
     // ---- Pass 2 — Schwab options + stages 3/4 ----
@@ -1508,15 +1523,6 @@ export function ScreenerView({ connected }: Props) {
               <AlertTriangle className="h-4 w-4" /> {error}
             </div>
           </div>
-        )}
-
-        {results && results.length > 0 && screenedAt && !busy && !hydrationBannerHidden && (
-          <HydrationBanner
-            screenedAt={screenedAt}
-            graded={screenIsGraded}
-            onRefresh={screenToday}
-            onAnalyze={runAnalysis}
-          />
         )}
 
         {showStaleNotice && (
@@ -2819,116 +2825,3 @@ function CrushRow({
   );
 }
 
-// Cross-device hydration banner. Tells the user where the results
-// they're seeing came from — the most recent screener_results row in
-// Supabase. Combines two axes:
-//   age: <24h → green / >=24h → amber
-//   graded: true (Run Analysis attached grades) / false (just the
-//           Stage 1 + 2 candidate list)
-//
-// Copy:
-//   fresh & graded   → "Showing graded results from {time} — Run Analysis to refresh"
-//   fresh & ungraded → "Showing ungraded candidates from {time} — Run Analysis to grade"
-//   stale & graded   → "Last scan: {time} (stale) — Run Analysis to update"
-//   stale & ungraded → "Last scan: {time} (stale, ungraded) — Run Analysis to update"
-function HydrationBanner({
-  screenedAt,
-  graded,
-  onRefresh,
-  onAnalyze,
-}: {
-  screenedAt: Date;
-  graded: boolean;
-  onRefresh: () => void;
-  onAnalyze: () => void;
-}) {
-  const ageMs = Date.now() - screenedAt.getTime();
-  const stale = ageMs >= FRESH_WINDOW_MS;
-  const sameDay = (() => {
-    const today = new Date();
-    return (
-      today.getFullYear() === screenedAt.getFullYear() &&
-      today.getMonth() === screenedAt.getMonth() &&
-      today.getDate() === screenedAt.getDate()
-    );
-  })();
-  const label = sameDay
-    ? screenedAt.toLocaleTimeString([], {
-        hour: "numeric",
-        minute: "2-digit",
-        hour12: true,
-      })
-    : screenedAt.toLocaleString([], {
-        month: "short",
-        day: "numeric",
-        hour: "numeric",
-        minute: "2-digit",
-        hour12: true,
-      });
-  // Color: stale → amber, fresh → graded:emerald / ungraded:sky
-  // (sky reads "informational, action available" for the fresh
-  // ungraded case where Run Analysis is the natural next step).
-  const cls = stale
-    ? "border-amber-500/30 bg-amber-500/10 text-amber-200"
-    : graded
-      ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-200"
-      : "border-sky-500/30 bg-sky-500/10 text-sky-200";
-
-  let body: React.ReactNode;
-  if (stale && graded) {
-    body = (
-      <>
-        Last scan:{" "}
-        <span className="font-mono">{label}</span>
-        <span className="ml-1 rounded border border-amber-500/40 bg-amber-500/15 px-1 py-0.5 text-[10px] font-semibold uppercase">
-          stale
-        </span>{" "}
-        — Run Analysis to update.
-      </>
-    );
-  } else if (stale && !graded) {
-    body = (
-      <>
-        Last scan:{" "}
-        <span className="font-mono">{label}</span>
-        <span className="ml-1 rounded border border-amber-500/40 bg-amber-500/15 px-1 py-0.5 text-[10px] font-semibold uppercase">
-          stale, ungraded
-        </span>{" "}
-        — Run Analysis to update.
-      </>
-    );
-  } else if (!stale && graded) {
-    body = (
-      <>
-        Showing graded results from{" "}
-        <span className="font-mono">{label}</span> — Run Analysis to refresh.
-      </>
-    );
-  } else {
-    body = (
-      <>
-        Showing ungraded candidates from{" "}
-        <span className="font-mono">{label}</span> — Run Analysis to grade.
-      </>
-    );
-  }
-
-  // Primary CTA: when ungraded, Run Analysis is the obvious next
-  // step. When stale or graded, "Refresh" (re-run Screen Today) is.
-  const primaryLabel = !graded ? "Run Analysis" : "Refresh";
-  const primaryHandler = !graded ? onAnalyze : onRefresh;
-  return (
-    <div
-      className={`flex flex-wrap items-center justify-between gap-2 rounded-lg border ${cls} px-3 py-2 text-xs`}
-    >
-      <span>{body}</span>
-      <button
-        type="button"
-        onClick={primaryHandler}
-        className="rounded border border-current bg-transparent px-2 py-0.5 text-[11px] font-medium hover:bg-current/10"
-      >
-        {primaryLabel}
-      </button>
-    </div>
-  );
-}
