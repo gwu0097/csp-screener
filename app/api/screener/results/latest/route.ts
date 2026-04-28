@@ -18,6 +18,7 @@ type Row = {
   pass2_count: number | null;
   candidates: unknown;
   prices: unknown;
+  graded: boolean | null;
 };
 
 function toNum(v: unknown): number | null {
@@ -52,10 +53,14 @@ export async function GET() {
       vix: null,
       pass1Count: null,
       pass2Count: null,
+      graded: false,
     });
   }
+  const candidateCount = Array.isArray(row.candidates)
+    ? (row.candidates as unknown[]).length
+    : 0;
   console.log(
-    `[screener] loading cached results from: ${row.screened_at} (${Array.isArray(row.candidates) ? (row.candidates as unknown[]).length : 0} candidates)`,
+    `[screener] loading cached results from: ${row.screened_at} (${candidateCount} candidates, graded=${row.graded ?? false})`,
   );
   return NextResponse.json({
     screenedAt: row.screened_at,
@@ -67,5 +72,6 @@ export async function GET() {
     vix: toNum(row.vix),
     pass1Count: row.pass1_count,
     pass2Count: row.pass2_count,
+    graded: row.graded === true,
   });
 }

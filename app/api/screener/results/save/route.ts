@@ -16,6 +16,11 @@ type Body = {
   vix?: unknown;
   pass1Count?: unknown;
   pass2Count?: unknown;
+  // Whether the candidates carry Stage-3/4 analysis grades. Screen
+  // Today writes graded=false; Run Analysis (and single-symbol
+  // re-analyze) write graded=true. Drives the cross-device
+  // hydration banner copy.
+  graded?: unknown;
 };
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -43,6 +48,7 @@ export async function POST(req: NextRequest) {
   const vix = typeof body.vix === "number" ? body.vix : null;
   const pass1Count = typeof body.pass1Count === "number" ? body.pass1Count : null;
   const pass2Count = typeof body.pass2Count === "number" ? body.pass2Count : null;
+  const graded = body.graded === true;
 
   const sb = createServerClient();
   const del = await sb
@@ -59,6 +65,7 @@ export async function POST(req: NextRequest) {
     pass2_count: pass2Count,
     candidates: body.candidates,
     prices,
+    graded,
   });
   if (ins.error) {
     console.error(
@@ -67,7 +74,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: ins.error.message }, { status: 500 });
   }
   console.log(
-    `[screener] saved results to DB: count=${(body.candidates as unknown[]).length} screenedAt=${screenedAt}`,
+    `[screener] saved results to DB: count=${(body.candidates as unknown[]).length} graded=${graded} screenedAt=${screenedAt}`,
   );
-  return NextResponse.json({ ok: true, screenedAt });
+  return NextResponse.json({ ok: true, screenedAt, graded });
 }

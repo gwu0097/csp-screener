@@ -187,6 +187,7 @@ function gradeOrder(g: string | null | undefined): number {
 const LS_RESULTS = "screener_results";
 const LS_TIMESTAMP = "screener_timestamp";
 const LS_PRICES = "screener_prices";
+const LS_GRADED = "screener_graded";
 
 // Cross-device hydration freshness window. Anything older shows the
 // "stale — Run Analysis to update" banner instead of the green one.
@@ -198,6 +199,7 @@ function clearStoredScreen() {
     window.localStorage.removeItem(LS_RESULTS);
     window.localStorage.removeItem(LS_TIMESTAMP);
     window.localStorage.removeItem(LS_PRICES);
+    window.localStorage.removeItem(LS_GRADED);
   } catch {
     // ignore — quota / privacy mode
   }
@@ -208,10 +210,16 @@ function clearStoredScreen() {
 // available cross-device. The Supabase write is best-effort —
 // localStorage is the authoritative store on the originating device,
 // the DB row exists for hydration on every other device.
+//
+// `graded` distinguishes Screen Today output (Stage 1+2 filters
+// only) from Run Analysis output (Stage 3 + 4 grades attached). The
+// hydration banner uses this to tell the user whether they need to
+// re-run analysis on the cached row.
 function persistScreenSnapshot(args: {
   candidates: ScreenerResult[];
   prices: Record<string, number>;
   screenedAt: string;
+  graded: boolean;
   pass1Count?: number | null;
   pass2Count?: number | null;
   vix?: number | null;
@@ -221,6 +229,7 @@ function persistScreenSnapshot(args: {
       localStorage.setItem(LS_RESULTS, JSON.stringify(args.candidates));
       localStorage.setItem(LS_TIMESTAMP, args.screenedAt);
       localStorage.setItem(LS_PRICES, JSON.stringify(args.prices));
+      localStorage.setItem(LS_GRADED, args.graded ? "true" : "false");
     }
   } catch (e) {
     console.error("[screener] localStorage save failed", e);
@@ -242,6 +251,7 @@ function persistScreenSnapshot(args: {
           pass1Count: args.pass1Count ?? null,
           pass2Count: args.pass2Count ?? null,
           vix: args.vix ?? null,
+          graded: args.graded,
         }),
         cache: "no-store",
       });
@@ -255,7 +265,7 @@ function persistScreenSnapshot(args: {
         return;
       }
       console.log(
-        `[screener] saved ${args.candidates.length} candidates to DB at ${args.screenedAt}`,
+        `[screener] saved ${args.candidates.length} candidates to DB at ${args.screenedAt} (graded=${args.graded})`,
       );
     } catch (e) {
       console.error("[screener] remote save threw (network):", e);
@@ -293,6 +303,12 @@ export function ScreenerView({ connected }: Props) {
   const [results, setResults] = useState<ScreenerResult[] | null>(null);
   const [prices, setPrices] = useState<Record<string, number>>({});
   const [screenedAt, setScreenedAt] = useState<Date | null>(null);
+  // Whether the currently-rendered candidate list carries Stage 3 + 4
+  // analysis grades. Drives the cross-device hydration banner copy.
+  // Flips to true when Run Analysis completes; stays false after a
+  // bare Screen Today or applyWatchlist (which can introduce new
+  // ungraded rows).
+  const [screenIsGraded, setScreenIsGraded] = useState<boolean>(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Richer per-pass error so the analyze banner can show a friendly
@@ -373,6 +389,7 @@ export function ScreenerView({ connected }: Props) {
       const raw = localStorage.getItem(LS_RESULTS);
       const ts = localStorage.getItem(LS_TIMESTAMP);
       const pricesRaw = localStorage.getItem(LS_PRICES);
+      const gradedRaw = localStorage.getItem(LS_GRADED);
       if (raw && ts) {
         const parsed = (JSON.parse(raw) as unknown[])
           .map((r) => normaliseResult(r as Partial<ScreenerResult>))
@@ -381,6 +398,7 @@ export function ScreenerView({ connected }: Props) {
           setResults(parsed);
           if (pricesRaw) setPrices(JSON.parse(pricesRaw));
           setScreenedAt(new Date(ts));
+          setScreenIsGraded(gradedRaw === "true");
           setGroupMode(null);
         }
       }
@@ -402,6 +420,7 @@ export function ScreenerView({ connected }: Props) {
           screenedAt: string | null;
           candidates: Array<Partial<ScreenerResult> & { symbol?: string }>;
           prices: Record<string, number>;
+          graded?: boolean;
         };
         if (cancelled) return;
         if (!json.screenedAt || json.candidates.length === 0) return;
@@ -425,7 +444,16 @@ export function ScreenerView({ connected }: Props) {
         setResults(parsed);
         setPrices(json.prices ?? {});
         setScreenedAt(new Date(json.screenedAt));
+        setScreenIsGraded(json.graded === true);
         setGroupMode(null);
+        // Re-sync localStorage so a subsequent same-device first paint
+        // matches what /latest just told us — avoids a flicker where
+        // the local cache claims one graded state and the DB another.
+        try {
+          localStorage.setItem(LS_GRADED, json.graded === true ? "true" : "false");
+        } catch {
+          /* quota / privacy */
+        }
       } catch (e) {
         console.warn("[screener] remote /latest hydrate failed", e);
       }
@@ -600,12 +628,14 @@ export function ScreenerView({ connected }: Props) {
         candidates: nextResults,
         prices: nextPrices,
         screenedAt: timestampIso,
+        graded: false,
         // ScreenStats here counts candidates per filter stage rather
         // than per analysis pass; map them onto pass1/pass2 columns
         // so the DB row stays comparable across screener types.
         pass1Count: nextStats?.afterPriceFilter ?? null,
         pass2Count: nextStats?.final ?? null,
       });
+      setScreenIsGraded(false);
       setResults(nextResults);
       setPrices(nextPrices);
       setScreenedAt(new Date(timestampIso));
@@ -646,11 +676,17 @@ export function ScreenerView({ connected }: Props) {
       // Save BEFORE setState. Preserve the existing timestamp so "Last screened"
       // still reflects the most recent Screen run; fall back to now if missing.
       const timestampIso = (screenedAt ?? new Date()).toISOString();
+      // ApplyWatchlist may add ungraded rows; flip to ungraded so the
+      // banner prompts a re-analyze. Existing graded rows in `next`
+      // keep their stageThree/stageFour data — we just don't *claim*
+      // the whole snapshot is graded.
       persistScreenSnapshot({
         candidates: next,
         prices: mergedPrices,
         screenedAt: timestampIso,
+        graded: false,
       });
+      setScreenIsGraded(false);
       setResults(next);
       setPrices(mergedPrices);
       setMessage(`Added ${json.added.length}, removed ${json.removed.length}`);
@@ -754,11 +790,14 @@ export function ScreenerView({ connected }: Props) {
       const byKey = new Map(json.results.map((r) => [`${r.symbol}|${r.earningsDate}`, r]));
       const next = merged2.map((r) => byKey.get(`${r.symbol}|${r.earningsDate}`) ?? r);
       const timestampIso = (screenedAt ?? new Date()).toISOString();
+      // Run Analysis (Pass 3) is the moment grades land — flip true.
       persistScreenSnapshot({
         candidates: next,
         prices: mergedPrices,
         screenedAt: timestampIso,
+        graded: true,
       });
+      setScreenIsGraded(true);
       setResults(next);
       setGroupMode(null);
       const scored = json.scoredCount ?? json.results.length;
@@ -824,10 +863,16 @@ export function ScreenerView({ connected }: Props) {
           : r,
       );
       const timestampIso = (screenedAt ?? new Date()).toISOString();
+      // Single-symbol re-analyze refreshes one row's grades. Preserve
+      // the existing screenIsGraded flag — if the bulk Run Analysis
+      // already happened the snapshot is still graded; if we
+      // re-analyze a single row before the bulk run, the snapshot
+      // is still mostly ungraded.
       persistScreenSnapshot({
         candidates: next,
         prices,
         screenedAt: timestampIso,
+        graded: screenIsGraded,
       });
       setResults(next);
       setMessage(`Analysis refreshed for ${upper}`);
@@ -976,7 +1021,12 @@ export function ScreenerView({ connected }: Props) {
         )}
 
         {results && results.length > 0 && screenedAt && !busy && (
-          <HydrationBanner screenedAt={screenedAt} onRefresh={screenToday} />
+          <HydrationBanner
+            screenedAt={screenedAt}
+            graded={screenIsGraded}
+            onRefresh={screenToday}
+            onAnalyze={runAnalysis}
+          />
         )}
 
         {showStaleNotice && (
@@ -2078,15 +2128,26 @@ function CrushRow({
 
 // Cross-device hydration banner. Tells the user where the results
 // they're seeing came from — the most recent screener_results row in
-// Supabase. Two states:
-//   <24 h old  → green "Showing results from {time} — Run Analysis to refresh"
-//   >=24 h old → amber "Last scan: {time} (stale) — Run Analysis to update"
+// Supabase. Combines two axes:
+//   age: <24h → green / >=24h → amber
+//   graded: true (Run Analysis attached grades) / false (just the
+//           Stage 1 + 2 candidate list)
+//
+// Copy:
+//   fresh & graded   → "Showing graded results from {time} — Run Analysis to refresh"
+//   fresh & ungraded → "Showing ungraded candidates from {time} — Run Analysis to grade"
+//   stale & graded   → "Last scan: {time} (stale) — Run Analysis to update"
+//   stale & ungraded → "Last scan: {time} (stale, ungraded) — Run Analysis to update"
 function HydrationBanner({
   screenedAt,
+  graded,
   onRefresh,
+  onAnalyze,
 }: {
   screenedAt: Date;
+  graded: boolean;
   onRefresh: () => void;
+  onAnalyze: () => void;
 }) {
   const ageMs = Date.now() - screenedAt.getTime();
   const stale = ageMs >= FRESH_WINDOW_MS;
@@ -2111,37 +2172,69 @@ function HydrationBanner({
         minute: "2-digit",
         hour12: true,
       });
+  // Color: stale → amber, fresh → graded:emerald / ungraded:sky
+  // (sky reads "informational, action available" for the fresh
+  // ungraded case where Run Analysis is the natural next step).
   const cls = stale
     ? "border-amber-500/30 bg-amber-500/10 text-amber-200"
-    : "border-emerald-500/30 bg-emerald-500/10 text-emerald-200";
+    : graded
+      ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-200"
+      : "border-sky-500/30 bg-sky-500/10 text-sky-200";
+
+  let body: React.ReactNode;
+  if (stale && graded) {
+    body = (
+      <>
+        Last scan:{" "}
+        <span className="font-mono">{label}</span>
+        <span className="ml-1 rounded border border-amber-500/40 bg-amber-500/15 px-1 py-0.5 text-[10px] font-semibold uppercase">
+          stale
+        </span>{" "}
+        — Run Analysis to update.
+      </>
+    );
+  } else if (stale && !graded) {
+    body = (
+      <>
+        Last scan:{" "}
+        <span className="font-mono">{label}</span>
+        <span className="ml-1 rounded border border-amber-500/40 bg-amber-500/15 px-1 py-0.5 text-[10px] font-semibold uppercase">
+          stale, ungraded
+        </span>{" "}
+        — Run Analysis to update.
+      </>
+    );
+  } else if (!stale && graded) {
+    body = (
+      <>
+        Showing graded results from{" "}
+        <span className="font-mono">{label}</span> — Run Analysis to refresh.
+      </>
+    );
+  } else {
+    body = (
+      <>
+        Showing ungraded candidates from{" "}
+        <span className="font-mono">{label}</span> — Run Analysis to grade.
+      </>
+    );
+  }
+
+  // Primary CTA: when ungraded, Run Analysis is the obvious next
+  // step. When stale or graded, "Refresh" (re-run Screen Today) is.
+  const primaryLabel = !graded ? "Run Analysis" : "Refresh";
+  const primaryHandler = !graded ? onAnalyze : onRefresh;
   return (
     <div
       className={`flex flex-wrap items-center justify-between gap-2 rounded-lg border ${cls} px-3 py-2 text-xs`}
     >
-      <span>
-        {stale ? (
-          <>
-            Last scan:{" "}
-            <span className="font-mono">{label}</span>
-            <span className="ml-1 rounded border border-amber-500/40 bg-amber-500/15 px-1 py-0.5 text-[10px] font-semibold uppercase">
-              stale
-            </span>{" "}
-            — Run Analysis to update.
-          </>
-        ) : (
-          <>
-            Showing results from{" "}
-            <span className="font-mono">{label}</span> — Run Analysis to
-            refresh.
-          </>
-        )}
-      </span>
+      <span>{body}</span>
       <button
         type="button"
-        onClick={onRefresh}
+        onClick={primaryHandler}
         className="rounded border border-current bg-transparent px-2 py-0.5 text-[11px] font-medium hover:bg-current/10"
       >
-        Run Analysis
+        {primaryLabel}
       </button>
     </div>
   );
