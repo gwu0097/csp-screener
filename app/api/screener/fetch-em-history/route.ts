@@ -7,11 +7,11 @@ import {
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
-// Polygon's free tier caps aggs at 5/min. Each event makes 2 aggs
-// calls (call leg + put leg) with a 13 s spacer between, so wall
-// clock per event ≈ 27 s. Vercel Hobby caps at 60 s, so we cap the
-// per-invocation event count at 2 and let the client auto-loop the
-// route until remainingMissing hits 0.
+// Polygon's free tier caps aggs at 5/min. Each event now makes 3 aggs
+// calls (unadjusted spot + call leg + put leg) with 13 s spacers, so
+// wall-clock per event ≈ 40 s. Vercel Hobby caps at 60 s, so we cap
+// the per-invocation event count at 1 and let the client auto-loop
+// the route until remainingMissing hits 0.
 export const maxDuration = 60;
 
 const POLY_BASE = "https://api.polygon.io";
@@ -25,7 +25,7 @@ const POLYGON_KEY =
 const POLYGON_DEPTH_CUTOFF = "2024-06-01";
 const SLEEP_BETWEEN_AGGS_MS = 13_000;
 const RATE_LIMIT_BACKOFF_MS = 60_000;
-const EVENTS_PER_CALL = 2;
+const EVENTS_PER_CALL = 1;
 // Primary strike band ±5% (matches bulk-polygon-em.ts default for the
 // HOOD-style reruns) with an ±8% fallback for high-priced names where
 // strikes are wider — e.g. BKNG-class tickers where the ±5% band can
@@ -170,12 +170,32 @@ async function fetchContractsForBand(
 
 async function processEvent(row: EarningsRow): Promise<ProcessOutcome> {
   const { symbol, earnings_date } = row;
-  const spot = row.price_before;
-  if (spot === null || !Number.isFinite(spot) || spot <= 0) {
-    return { kind: "skip_no_data", reason: "price_before missing" };
-  }
   const priorClose = priorBusinessDayIso(earnings_date);
   const expiry = nextFridayOnOrAfter(earnings_date);
+
+  // Fetch the unadjusted close from Polygon as our spot. The DB's
+  // price_before is split-adjusted (Yahoo behavior), but Polygon's
+  // options reference table preserves the unadjusted strikes that
+  // were listed at that time — so we MUST band/score against the
+  // unadjusted historical price or every post-split symbol misses.
+  // adjusted=false makes Polygon return the true closing print.
+  const spotBar = await poly<Aggs>(
+    `/v2/aggs/ticker/${encodeURIComponent(symbol)}/range/1/day/${priorClose}/${priorClose}`,
+    { adjusted: "false" },
+  );
+  if (spotBar.status === 403) return { kind: "skip_too_old" };
+  if (spotBar.status !== 200 || spotBar.body?.results?.[0]?.c === undefined) {
+    return {
+      kind: "skip_no_data",
+      reason: `unadjusted spot bar status=${spotBar.status} ${spotBar.body?.message ?? "(no body)"}`,
+    };
+  }
+  const spot = spotBar.body.results[0].c as number;
+  if (!Number.isFinite(spot) || spot <= 0) {
+    return { kind: "skip_no_data", reason: "spot from polygon non-positive" };
+  }
+
+  await sleep(SLEEP_BETWEEN_AGGS_MS);
 
   // Try the ±5% band first; fall back to ±8% if no listed strikes
   // landed inside (high-priced names with wide strike spacing).
@@ -247,8 +267,6 @@ async function processEvent(row: EarningsRow): Promise<ProcessOutcome> {
     };
   }
   const putClose = putBar.body.results[0].c as number;
-
-  await sleep(SLEEP_BETWEEN_AGGS_MS);
 
   const straddle = callClose + putClose;
   return { kind: "populated", emPct: straddle / spot, strike: atm };
