@@ -668,15 +668,24 @@ export async function runStageThree(
 
 // ---------- Stage 4 ----------
 
-// Opportunity scoring is premium + delta only (20 pts max). Spread was
-// removed — it's an execution-cost concern for day trades and doesn't
-// affect overnight CSP holds. We still track bidAskSpreadPct for
-// informational display in the expanded row, but it does not influence
-// any grade, recommendation, or hard-kill.
+// Opportunity scoring tracks premium + delta for transparency in
+// details.{premiumYieldScore,deltaScore}, but the grade itself is now
+// keyed directly on yield% bands calibrated for weekly earnings CSPs
+// (1-5 DTE). Yield = (premium / strike) × 100 — strike is the capital
+// at risk on a CSP, the same denominator the new Yield% column uses.
+//
+// Old bands (yield ÷ spot, plus weighted score) consistently
+// over-graded large-cap names whose absolute premium looks fat but
+// whose yield-on-capital is thin. The recalibrated bands match
+// realistic weekly-CSP economics:
+//   A: > 0.75%   strong premium for the held capital
+//   B: 0.40–0.75%
+//   C: 0.20–0.40%
+//   F: < 0.20%   not worth tying up margin for the week
 function scorePremiumYield(yieldPct: number): number {
-  if (yieldPct > 0.5) return 12;
-  if (yieldPct >= 0.3) return 8;
-  if (yieldPct >= 0.15) return 3;
+  if (yieldPct > 0.75) return 12;
+  if (yieldPct >= 0.4) return 8;
+  if (yieldPct >= 0.2) return 3;
   return 0;
 }
 
@@ -688,10 +697,12 @@ function scoreDelta(delta: number): number {
   return 0;
 }
 
-function gradeFromOpportunityScore(score: number): StageFourResult["opportunityGrade"] {
-  if (score >= 17) return "A";
-  if (score >= 12) return "B";
-  if (score >= 8) return "C";
+function gradeFromYield(
+  yieldPct: number,
+): StageFourResult["opportunityGrade"] {
+  if (yieldPct > 0.75) return "A";
+  if (yieldPct >= 0.4) return "B";
+  if (yieldPct >= 0.2) return "C";
   return "F";
 }
 
@@ -957,7 +968,12 @@ export async function runStageFour(
 
   const mid = (contract.bid + contract.ask) / 2 || contract.mark || contract.last || 0;
   const premium = mid;
-  const yieldPct = candidate.price > 0 ? (premium / candidate.price) * 100 : 0;
+  // Yield denominator is STRIKE (capital at risk on a cash-secured
+  // put), not spot — matches the Yield% screener column and what a
+  // trader computes when sizing capital. A $5 premium on a $500
+  // strike reads 1.00% from either direction.
+  const strike = contract.strikePrice;
+  const yieldPct = strike > 0 ? (premium / strike) * 100 : 0;
   const spreadPctOfMid = mid > 0 ? ((contract.ask - contract.bid) / mid) * 100 : 100;
   const delta = contract.delta;
 
@@ -965,9 +981,11 @@ export async function runStageFour(
   const deltaScore = scoreDelta(delta);
   const rawScore = premiumYieldScore + deltaScore;
 
-  // Spread is no longer a hard-kill or scoring input. We still surface
-  // bidAskSpreadPct as informational display in the expanded row.
-  const opportunityGrade = gradeFromOpportunityScore(rawScore);
+  // Grade is yield-direct: > 0.75% / 0.40-0.75% / 0.20-0.40% / < 0.20%
+  // → A / B / C / F. Delta no longer influences the letter grade —
+  // a thin-premium A would still be a bad trade — but deltaScore
+  // stays in details for transparency in the expanded row.
+  const opportunityGrade = gradeFromYield(yieldPct);
   const note: string | null = null;
 
   // Compact snapshot of the weekly put chain — the UI uses it to let
