@@ -2510,12 +2510,18 @@ function CustomStrikeAnalyzer({
       {result && (
         <div className="mt-3 rounded border border-border bg-muted/20 p-2">
           <div className="mb-1 font-medium">Custom Strike Analysis</div>
-          <div className="grid grid-cols-2 gap-x-6 gap-y-0.5 font-mono md:grid-cols-3">
+          <div className="grid grid-cols-2 gap-x-6 gap-y-0.5 font-mono">
             <Row k="Strike" v={`$${result.strike.toFixed(2)}`} />
             <Row k="Distance" v={`${result.distancePct.toFixed(1)}% OTM`} />
-            <Row k="Prob of profit" v={`${(result.pop * 100).toFixed(0)}%`} />
             <Row k="Premium" v={`$${result.premium.toFixed(2)}`} />
             <Row k="Delta" v={result.delta.toFixed(3)} />
+            <Row
+              k="Yield%"
+              v={fmtYield(result.premium, result.strike)}
+              valueClassName={yieldColor(result.premium, result.strike)}
+            />
+            <Row k="Prob of profit" v={`${(result.pop * 100).toFixed(0)}%`} />
+            <div />
             <Row k="Breakeven" v={`$${result.breakeven.toFixed(2)}`} />
           </div>
           <div className="mt-2 flex items-center gap-2 border-t border-border pt-2">
@@ -2839,11 +2845,21 @@ function StreamRow({
   );
 }
 
-function Row({ k, v }: { k: string; v: string }) {
+function Row({
+  k,
+  v,
+  valueClassName,
+}: {
+  k: string;
+  v: string;
+  valueClassName?: string;
+}) {
   return (
     <div className="flex justify-between gap-2">
       <span className="text-muted-foreground">{k}</span>
-      <span className="font-mono text-foreground">{v}</span>
+      <span className={`font-mono ${valueClassName ?? "text-foreground"}`}>
+        {v}
+      </span>
     </div>
   );
 }
