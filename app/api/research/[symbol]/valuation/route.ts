@@ -21,6 +21,7 @@ import {
   assertValidTier2,
   buildFCFHistory,
   buildHistorical,
+  classifyStock,
   computeTier1All,
   computeTier2All,
   diffTier1Customized,
@@ -89,6 +90,10 @@ type YahooBag = {
   totalDebt: number | null;
   totalCash: number | null;
   sector: string | null;
+  // TTM YoY growth — drives the growth/value/blend classifier and is
+  // surfaced on the Market Context strip in the UI.
+  revenueGrowthTTM: number | null;
+  earningsGrowthTTM: number | null;
 };
 
 async function fetchYahooBag(symbol: string): Promise<YahooBag> {
@@ -144,6 +149,8 @@ async function fetchYahooBag(symbol: string): Promise<YahooBag> {
     totalDebt: unwrapNumber(fd.totalDebt),
     totalCash: unwrapNumber(fd.totalCash),
     sector: typeof ap.sector === "string" ? (ap.sector as string) : null,
+    revenueGrowthTTM: unwrapNumber(fd.revenueGrowth),
+    earningsGrowthTTM: unwrapNumber(fd.earningsGrowth),
   };
 }
 
@@ -362,11 +369,27 @@ export async function POST(
           Math.min(3, capexRatios.length)
         : 0.04;
 
+    // Classify before recommending so Tier 1's exit-PE bands reflect
+    // the right anchor (growth → forward PE, value → sector, blend →
+    // trailing PE). lastAnnual.netIncome / .eps are post-FX-conversion
+    // so the threshold check sees comparable numbers across filers.
+    const category = classifyStock({
+      forwardPE: yh.forwardPE,
+      revenueGrowthTTM: yh.revenueGrowthTTM,
+      netIncome: lastAnnual?.netIncome ?? null,
+      eps: lastAnnual?.eps ?? null,
+    });
+    console.log(
+      `[valuation:${symbol}] classified as '${category}' (fwdPE=${yh.forwardPE} ttmRevGrowth=${yh.revenueGrowthTTM} lastNI=${lastAnnual?.netIncome} lastEPS=${lastAnnual?.eps})`,
+    );
+
     const tier1System: ScenarioSet = recommendTier1({
       historical,
       forwardPE: yh.forwardPE,
+      trailingPE: yh.trailingPE,
       sector: yh.sector,
       taxRate,
+      category,
     });
     const tier2System: DCFScenarioSet = recommendTier2({
       historical,
@@ -427,6 +450,10 @@ export async function POST(
       fx_to_usd: fxToUsd,
       source_form: reporting.formType,
       source_taxonomy: reporting.taxonomy,
+      category,
+      forward_eps: yh.forwardEps,
+      revenue_growth_ttm: yh.revenueGrowthTTM,
+      earnings_growth_ttm: yh.earningsGrowthTTM,
       tier1: {
         system: tier1System,
         user: tier1User,

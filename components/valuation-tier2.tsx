@@ -732,27 +732,53 @@ function WeightedTargetCard({
   analystLow: number | null;
   analystCount: number | null;
 }) {
+  // Mirror Tier 1: BASE intrinsic value as the headline, weighted as
+  // a secondary line below the per-scenario list.
+  const baseValue = outputs.base.intrinsic_value;
+  const baseReturn = outputs.base.return_pct;
   return (
     <div className="rounded-md border border-emerald-500/30 bg-emerald-500/[0.04] p-3">
       <div className="text-[10px] font-semibold uppercase tracking-wide text-emerald-300/80">
-        Weighted intrinsic value
+        Intrinsic value
       </div>
       <div className="mt-1 text-2xl font-bold text-foreground">
-        {fmtRoundPrice(outputs.weighted_target)}{" "}
+        {fmtRoundPrice(baseValue)}{" "}
         <span
-          className={`text-sm font-medium ${outputs.weighted_return_pct >= 0 ? "text-emerald-300" : "text-rose-300"}`}
+          className={`text-sm font-medium ${baseReturn >= 0 ? "text-emerald-300" : "text-rose-300"}`}
         >
-          ({fmtSignedPct(outputs.weighted_return_pct, 1)} from {fmtPrice(currentPrice)})
+          ({fmtSignedPct(baseReturn, 1)} from {fmtPrice(currentPrice)})
+        </span>
+        <span className="ml-2 rounded border border-emerald-500/40 bg-emerald-500/15 px-1.5 py-0.5 align-middle text-[10px] font-semibold text-emerald-300">
+          BASE
         </span>
       </div>
-      <div className="mt-2 space-y-0.5 font-mono text-[11px] text-muted-foreground">
-        {SCENARIOS.map((s) => (
-          <div key={s}>
-            {SCENARIO_LABEL[s]} {fmtRoundPrice(outputs[s].intrinsic_value)} ×{" "}
-            {fmtPct(userInputs[s].probability, 0)} ={" "}
-            {fmtRoundPrice(outputs[s].intrinsic_value * userInputs[s].probability)}
-          </div>
-        ))}
+      <div className="mt-2 space-y-0.5 font-mono text-[11px]">
+        {SCENARIOS.map((s) => {
+          const isBase = s === "base";
+          return (
+            <div
+              key={s}
+              className={isBase ? "text-foreground" : "text-muted-foreground"}
+            >
+              <span className={isBase ? "font-semibold" : ""}>
+                {SCENARIO_LABEL[s]}
+              </span>{" "}
+              {fmtRoundPrice(outputs[s].intrinsic_value)} ×{" "}
+              {fmtPct(userInputs[s].probability, 0)} ={" "}
+              {fmtRoundPrice(outputs[s].intrinsic_value * userInputs[s].probability)}
+            </div>
+          );
+        })}
+      </div>
+      <div className="mt-2 border-t border-emerald-500/20 pt-1.5 text-[11px] text-muted-foreground">
+        Weighted: {fmtRoundPrice(outputs.weighted_target)}{" "}
+        <span
+          className={
+            outputs.weighted_return_pct >= 0 ? "text-emerald-300/80" : "text-rose-300/80"
+          }
+        >
+          ({fmtSignedPct(outputs.weighted_return_pct, 1)})
+        </span>
       </div>
       {showSystem && (
         <div className="mt-2 text-[11px] text-amber-300/80">

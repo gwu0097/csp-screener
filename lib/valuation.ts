@@ -205,7 +205,50 @@ export type ValuationModelV2 = {
   fx_to_usd?: number | null;
   source_form?: string | null;
   source_taxonomy?: string | null;
+
+  // Stock classification + growth-relevant Yahoo fields. The category
+  // drives the Tier 1 exit-PE recommendation (growth → fwd PE bands,
+  // value → sector PE bands, blend → trailing PE bands) and the
+  // model-recommendation banner the UI shows above the tabs.
+  category?: ValuationCategory | null;
+  forward_eps?: number | null;
+  revenue_growth_ttm?: number | null;
+  earnings_growth_ttm?: number | null;
 };
+
+export type ValuationCategory = "growth" | "value" | "blend" | "pre_profit";
+
+// Classifier — matches the spec the trader walked through with SPOT.
+// Order matters: pre-profit catches negative-EPS / negative-NI cases
+// AFTER the growth gate so a high-flying unprofitable growth name
+// (RBLX, PLTR pre-2023, etc.) lands in 'growth' rather than
+// 'pre_profit'. Inputs are decimal fractions (e.g. 0.20 for 20%).
+export function classifyStock(args: {
+  forwardPE: number | null;
+  revenueGrowthTTM: number | null;
+  netIncome: number | null;
+  eps: number | null;
+}): ValuationCategory {
+  const fp = args.forwardPE;
+  const rg = args.revenueGrowthTTM;
+  const ni = args.netIncome;
+  const eps = args.eps;
+  const isGrowth =
+    (typeof fp === "number" && fp > 30) ||
+    (typeof rg === "number" && rg > 0.2);
+  if (isGrowth) return "growth";
+  const isValue =
+    typeof fp === "number" &&
+    fp < 18 &&
+    typeof rg === "number" &&
+    rg < 0.1;
+  if (isValue) return "value";
+  const isPreProfit =
+    (typeof ni === "number" && ni < 0) ||
+    (typeof eps === "number" && eps < 0);
+  if (isPreProfit) return "pre_profit";
+  return "blend";
+}
 
 export type WeightedDCFOutputs = {
   weighted_target: number;
@@ -416,8 +459,15 @@ function round2(n: number): number {
 export function recommendTier1(args: {
   historical: HistoricalRow[];
   forwardPE: number | null;
+  trailingPE?: number | null;
   sector: string | null;
   taxRate: number;
+  // Stock category — drives the Bear/Base/Bull exit-PE bands so a
+  // growth name doesn't get crushed by sector-average expectations
+  // and a value name doesn't get inflated bull cases. Caller passes
+  // the classifier output from the route; falls back to the sector-
+  // anchored defaults when omitted (the previous behavior).
+  category?: ValuationCategory | null;
 }): ScenarioSet {
   const growths = recentRevGrowths(args.historical);
   const lastYearRevGrowth = growths[0] ?? 0.05;
@@ -427,6 +477,7 @@ export function recommendTier1(args: {
   const currentOpMargin = last?.op_margin ?? 0.15;
 
   const currentPE = args.forwardPE ?? 20;
+  const trailingPE = args.trailingPE ?? currentPE;
   const sectorAvg = sectorPE(args.sector);
 
   const bear_rev = Math.max(lastYearRevGrowth * 0.5, -0.05);
@@ -437,9 +488,36 @@ export function recommendTier1(args: {
   const base_op = currentOpMargin;
   const bull_op = currentOpMargin + 0.03;
 
-  const bear_pe = Math.min(currentPE * 0.7, sectorAvg * 0.8);
-  const base_pe = sectorAvg;
-  const bull_pe = Math.max(currentPE * 1.2, sectorAvg * 1.3);
+  // Exit-PE bands by category. Growth names anchor on forward PE
+  // (the multiple the market is willing to pay for next-year earnings),
+  // value names anchor on sector average (multiple is the regression-
+  // to-mean lever), blend names anchor on trailing PE (no clear
+  // narrative, just normalize toward where the stock has traded).
+  // Pre-profit stocks have no clean PE anchor; fall through to the
+  // forward-PE bands so the model still produces a number, but the
+  // UI banner steers the user toward EV/Revenue.
+  let bear_pe: number;
+  let base_pe: number;
+  let bull_pe: number;
+  if (args.category === "growth" || args.category === "pre_profit") {
+    bear_pe = currentPE * 0.6;
+    base_pe = currentPE * 0.9;
+    bull_pe = currentPE * 1.1;
+  } else if (args.category === "value") {
+    bear_pe = sectorAvg * 0.8;
+    base_pe = sectorAvg * 1.0;
+    bull_pe = sectorAvg * 1.2;
+  } else if (args.category === "blend") {
+    bear_pe = trailingPE * 0.6;
+    base_pe = trailingPE * 0.85;
+    bull_pe = trailingPE * 1.1;
+  } else {
+    // No category provided — preserve the prior behavior so callers
+    // that haven't been updated still get the same numbers.
+    bear_pe = Math.min(currentPE * 0.7, sectorAvg * 0.8);
+    base_pe = sectorAvg;
+    bull_pe = Math.max(currentPE * 1.2, sectorAvg * 1.3);
+  }
 
   const mk = (rev: number, op: number, pe: number, prob: number): ScenarioInputs => ({
     rev_growth_y1: round4(rev),
