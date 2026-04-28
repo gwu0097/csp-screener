@@ -447,6 +447,13 @@ export function ScreenerView({ connected }: Props) {
       .then((j) => setDailyContext(j))
       .catch(() => setDailyContext(null));
 
+    // Adaptive batch sizes are deliberately session-scoped. A run
+    // that ended with size=1 yesterday because Perplexity was slow
+    // shouldn't penalize today's run, and the next page load IS
+    // the next session boundary. Clear them here so a refresh
+    // always starts both streams at their full default size.
+    resetBatchSizes();
+
     // Restore Track checkbox state from localStorage.
     try {
       const raw = localStorage.getItem(LS_TRACKED);
@@ -1140,6 +1147,12 @@ export function ScreenerView({ connected }: Props) {
       setStatus("idle");
       setNewsProgress(null);
       setGradeProgress(null);
+      // Suppress the HydrationBanner — the user just initiated a
+      // full analysis run, the green completion message above the
+      // toolbar already conveys the outcome, and the banner copy
+      // ("Showing graded results from {time}") would be a redundant
+      // restatement. Same suppression Load Previous applies.
+      setHydrationBannerHidden(true);
       setMessage(
         `Analysis complete ✓\n📊 ${ctx.summary.scored} candidates scored\n🎯 ${ctx.summary.tracked} tracked tickers saved\n📸 ${ctx.summary.snapshots} position snapshots taken\n📚 ${ctx.summary.encyclopedia} encyclopedia updates`,
       );
