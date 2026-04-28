@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ChevronRight, ExternalLink, ListChecks, Loader2, Plus, Trash2, X } from "lucide-react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
@@ -1075,18 +1075,32 @@ function EditFillsPanel({
     new Date().toISOString().slice(0, 10),
   );
 
-  const sorted = [...fills].sort((a, b) =>
+  // Optimistic local copy of the fills array. We mutate this immediately
+  // on a successful API call so the panel updates without waiting for
+  // the parent's refetch round-trip. Synced from props only when the
+  // total fill count changes (an add or external refetch landed) —
+  // an in-place qty edit leaves length unchanged, so the optimistic
+  // state isn't clobbered between the local mutation and the parent
+  // refetch returning identical data.
+  const [localFills, setLocalFills] = useState<Fill[]>(fills);
+  const propsFillsLen = fills.length;
+  useEffect(() => {
+    setLocalFills(fills);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [propsFillsLen]);
+
+  const sorted = [...localFills].sort((a, b) =>
     a.fill_date.localeCompare(b.fill_date),
   );
-  const totalOpened = fills
+  const totalOpened = localFills
     .filter((f) => f.fill_type === "open")
     .reduce((s, f) => s + f.contracts, 0);
-  const totalClosed = fills
+  const totalClosed = localFills
     .filter((f) => f.fill_type === "close")
     .reduce((s, f) => s + f.contracts, 0);
   const remaining = totalOpened - totalClosed;
   const avgOpen = (() => {
-    const opens = fills.filter((f) => f.fill_type === "open");
+    const opens = localFills.filter((f) => f.fill_type === "open");
     const totalQ = opens.reduce((s, f) => s + f.contracts, 0);
     if (totalQ === 0) return null;
     return (
@@ -1107,6 +1121,9 @@ function EditFillsPanel({
         setError(j.error ?? `HTTP ${res.status}`);
         return;
       }
+      // Optimistic — drop the row before the parent refetch lands so
+      // the table updates instantly.
+      setLocalFills((prev) => prev.filter((f) => f.id !== fillId));
       onChanged("Fill deleted");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Network error");
@@ -1132,6 +1149,11 @@ function EditFillsPanel({
         setError(j.error ?? `HTTP ${res.status}`);
         return;
       }
+      // Optimistic — patch the row locally so the qty + Total + Avg
+      // numbers update without waiting on /api/positions/open.
+      setLocalFills((prev) =>
+        prev.map((f) => (f.id === fillId ? { ...f, contracts } : f)),
+      );
       onChanged("Fill updated");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Network error");
