@@ -309,6 +309,19 @@ export function ScreenerView({ connected }: Props) {
   // bare Screen Today or applyWatchlist (which can introduce new
   // ungraded rows).
   const [screenIsGraded, setScreenIsGraded] = useState<boolean>(false);
+  // Pass-3 batch state. `pendingPass3Keys` is the set of
+  // `${symbol}|${earningsDate}` keys whose grades haven't been
+  // computed yet — populated when Run Analysis starts and drained
+  // one batch (of 5) at a time. If a batch fails, this set stays
+  // populated and the Resume button replays just the remainder.
+  // `analysisVix` carries Pass 2's VIX into the resume call so the
+  // Stage-3 grade math doesn't have to refetch.
+  const [pendingPass3Keys, setPendingPass3Keys] = useState<Set<string>>(
+    new Set(),
+  );
+  const [analysisVix, setAnalysisVix] = useState<number | null>(null);
+  // Progress copy under the toolbar while batches stream in.
+  const [analyzeProgress, setAnalyzeProgress] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Richer per-pass error so the analyze banner can show a friendly
@@ -697,12 +710,187 @@ export function ScreenerView({ connected }: Props) {
     }
   }
 
+  // Tracked tickers first, then untracked — within each group sort by
+  // Stage 2 score descending so the highest-quality untracked
+  // candidates land in the first batch even when nothing's tracked.
+  // Stage 2 score is the best signal we have at this point;
+  // Stage 3 + 4 grades aren't computed yet.
+  function sortForPass3(
+    candidates: ScreenerResult[],
+    trackedUpper: Set<string>,
+  ): ScreenerResult[] {
+    const tier = (c: ScreenerResult): number =>
+      trackedUpper.has(c.symbol.toUpperCase()) ? 0 : 1;
+    const score = (c: ScreenerResult): number => c.stageTwo?.score ?? -1;
+    return [...candidates].sort((a, b) => {
+      const t = tier(a) - tier(b);
+      if (t !== 0) return t;
+      return score(b) - score(a);
+    });
+  }
+
+  // Drives the batched Pass 3 loop. Called by both the initial Run
+  // Analysis flow (after Pass 2 completes) and the Resume button
+  // (after a prior batch failed). `seedResults` is the working
+  // result list to merge each batch's output into; `targets` is the
+  // subset of candidates that still need grading. timestamp + vix
+  // are stable across the loop so persist + grade math stay
+  // consistent.
+  const PASS3_BATCH_SIZE = 5;
+  async function runPass3Batches(args: {
+    targets: ScreenerResult[];
+    seedResults: ScreenerResult[];
+    timestampIso: string;
+    pricesForPersist: Record<string, number>;
+    vix: number | null;
+  }): Promise<void> {
+    const sorted = sortForPass3(args.targets, tracked);
+    const totalBatches = Math.ceil(sorted.length / PASS3_BATCH_SIZE);
+    let workingResults = args.seedResults;
+    let workingPending = new Set(
+      sorted.map((c) => `${c.symbol}|${c.earningsDate}`),
+    );
+    setPendingPass3Keys(workingPending);
+
+    let totalScored = 0;
+    let totalTrackedUpserted = 0;
+    let totalSnapshots = 0;
+    let totalEncyclopedia = 0;
+
+    for (let i = 0; i < totalBatches; i += 1) {
+      const start = i * PASS3_BATCH_SIZE;
+      const batch = sorted.slice(start, start + PASS3_BATCH_SIZE);
+      const symbolsLine = batch.map((b) => b.symbol).join(", ");
+      setAnalyzeProgress(
+        `Analyzing batch ${i + 1}/${totalBatches} (${symbolsLine})…`,
+      );
+      setAnalyzingSymbols(new Set(batch.map((b) => b.symbol.toUpperCase())));
+
+      try {
+        const r3 = await fetch("/api/screener/analyze/pass3", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            candidates: batch,
+            vix: args.vix,
+            trackedSymbols: Array.from(tracked),
+          }),
+          cache: "no-store",
+        });
+        if (!r3.ok) {
+          const body = (await r3.json().catch(() => ({}))) as {
+            error?: string;
+          };
+          setAnalysisError({
+            pass: "pass3",
+            status: r3.status,
+            rawMessage:
+              body.error ??
+              `Batch ${i + 1}/${totalBatches} failed (HTTP ${r3.status})`,
+            partialAvailable: true,
+          });
+          setStatus("error");
+          setAnalyzingSymbols(new Set());
+          setAnalyzeProgress(null);
+          return;
+        }
+        const json = (await r3.json()) as {
+          results: ScreenerResult[];
+          scoredCount?: number;
+          trackedUpserted?: number;
+          snapshotsWritten?: number;
+          encyclopediaUpdates?: number;
+        };
+        const byKey = new Map(
+          json.results.map((r) => [`${r.symbol}|${r.earningsDate}`, r]),
+        );
+        workingResults = workingResults.map(
+          (r) => byKey.get(`${r.symbol}|${r.earningsDate}`) ?? r,
+        );
+        // Drop processed keys from pending — even ones that came back
+        // partially graded count as "no longer pending" so a Resume
+        // doesn't re-bill Perplexity for the same row.
+        workingPending = new Set(workingPending);
+        for (const c of batch) {
+          workingPending.delete(`${c.symbol}|${c.earningsDate}`);
+        }
+        setPendingPass3Keys(workingPending);
+        setResults([...workingResults]);
+        setGroupMode(null);
+
+        totalScored += json.scoredCount ?? json.results.length;
+        totalTrackedUpserted += json.trackedUpserted ?? 0;
+        totalSnapshots += json.snapshotsWritten ?? 0;
+        totalEncyclopedia += json.encyclopediaUpdates ?? 0;
+
+        // Persist after each batch so a crash mid-loop still leaves
+        // the partial grade set on disk. graded=true only when the
+        // pending set is empty (i.e. the final successful batch).
+        const isFinal = workingPending.size === 0;
+        persistScreenSnapshot({
+          candidates: workingResults,
+          prices: args.pricesForPersist,
+          screenedAt: args.timestampIso,
+          graded: isFinal,
+        });
+        if (isFinal) {
+          setScreenIsGraded(true);
+        }
+      } catch (e) {
+        setAnalysisError({
+          pass: "pass3",
+          status: null,
+          rawMessage: e instanceof Error ? e.message : String(e),
+          partialAvailable: true,
+        });
+        setStatus("error");
+        setAnalyzingSymbols(new Set());
+        setAnalyzeProgress(null);
+        return;
+      }
+    }
+
+    setAnalyzingSymbols(new Set());
+    setAnalyzeProgress(null);
+    setStatus("idle");
+    setMessage(
+      `Analysis complete ✓\n📊 ${totalScored} candidates scored\n🎯 ${totalTrackedUpserted} tracked tickers saved\n📸 ${totalSnapshots} position snapshots taken\n📚 ${totalEncyclopedia} encyclopedia updates`,
+    );
+  }
+
+  // Resume Pass 3 from wherever the previous run stopped. Reads
+  // `pendingPass3Keys` and replays only those candidates against the
+  // batched Pass 3 endpoint — already-graded rows are not re-fetched.
+  async function resumeAnalysis() {
+    if (!results) return;
+    if (pendingPass3Keys.size === 0) return;
+    const remaining = results.filter((r) =>
+      pendingPass3Keys.has(`${r.symbol}|${r.earningsDate}`),
+    );
+    if (remaining.length === 0) {
+      setPendingPass3Keys(new Set());
+      return;
+    }
+    setStatus("analyzing");
+    setAnalysisError(null);
+    setError(null);
+    const timestampIso = (screenedAt ?? new Date()).toISOString();
+    await runPass3Batches({
+      targets: remaining,
+      seedResults: results,
+      timestampIso,
+      pricesForPersist: prices,
+      vix: analysisVix,
+    });
+  }
+
   async function runAnalysis() {
     if (!results || !connected) return;
     setStatus("analyzing");
     setError(null);
     setAnalysisError(null);
     setMessage(null);
+    setAnalyzeProgress(null);
     setAnalyzingSymbols(new Set(results.map((r) => r.symbol.toUpperCase())));
 
     // ---- Pass 2 — Schwab options + stages 3/4 ----
@@ -756,69 +944,21 @@ export function ScreenerView({ connected }: Props) {
     setResults(merged2);
     setPrices(mergedPrices);
 
-    // ---- Pass 3 — Perplexity + grade + post-actions ----
-    try {
-      const r3 = await fetch("/api/screener/analyze/pass3", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          candidates: p2!.results,
-          vix: p2!.vix,
-          trackedSymbols: Array.from(tracked),
-        }),
-        cache: "no-store",
-      });
-      if (!r3.ok) {
-        const body = (await r3.json().catch(() => ({}))) as { error?: string };
-        setAnalysisError({
-          pass: "pass3",
-          status: r3.status,
-          rawMessage: body.error ?? "",
-          partialAvailable: true,
-        });
-        setStatus("error");
-        setAnalyzingSymbols(new Set());
-        return;
-      }
-      const json = (await r3.json()) as {
-        results: ScreenerResult[];
-        scoredCount?: number;
-        trackedUpserted?: number;
-        snapshotsWritten?: number;
-        encyclopediaUpdates?: number;
-      };
-      const byKey = new Map(json.results.map((r) => [`${r.symbol}|${r.earningsDate}`, r]));
-      const next = merged2.map((r) => byKey.get(`${r.symbol}|${r.earningsDate}`) ?? r);
-      const timestampIso = (screenedAt ?? new Date()).toISOString();
-      // Run Analysis (Pass 3) is the moment grades land — flip true.
-      persistScreenSnapshot({
-        candidates: next,
-        prices: mergedPrices,
-        screenedAt: timestampIso,
-        graded: true,
-      });
-      setScreenIsGraded(true);
-      setResults(next);
-      setGroupMode(null);
-      const scored = json.scoredCount ?? json.results.length;
-      const trackedCount = json.trackedUpserted ?? 0;
-      const snapshots = json.snapshotsWritten ?? 0;
-      const encyclopedia = json.encyclopediaUpdates ?? 0;
-      setMessage(
-        `Analysis complete ✓\n📊 ${scored} candidates scored\n🎯 ${trackedCount} tracked tickers saved\n📸 ${snapshots} position snapshots taken\n📚 ${encyclopedia} encyclopedia updates`,
-      );
-      setStatus("idle");
-    } catch (e) {
-      setAnalysisError({
-        pass: "pass3",
-        status: null,
-        rawMessage: e instanceof Error ? e.message : String(e),
-        partialAvailable: true,
-      });
-      setStatus("error");
-    } finally {
-      setAnalyzingSymbols(new Set());
-    }
+    // ---- Pass 3 — Perplexity + grade + post-actions, batched ----
+    // Pass 3 is the slow path: each candidate makes one Perplexity
+    // call (~5–10s). 20 in one shot blew the 60s Vercel ceiling.
+    // Batches of 5 land at ~30s each, leave grades on the table as
+    // they arrive, and let a partial run resume from where it
+    // stopped via the Resume button below.
+    setAnalysisVix(p2!.vix);
+    const timestampIso = (screenedAt ?? new Date()).toISOString();
+    await runPass3Batches({
+      targets: p2!.results,
+      seedResults: merged2,
+      timestampIso,
+      pricesForPersist: mergedPrices,
+      vix: p2!.vix,
+    });
   }
 
   // Per-symbol re-run of pass 2 + pass 3. Useful when the bulk analyze
@@ -1003,14 +1143,38 @@ export function ScreenerView({ connected }: Props) {
         {analysisError && (
           <AnalysisErrorBanner
             err={analysisError}
+            // When a Pass 3 batch failed mid-run we have un-graded
+            // candidates parked in pendingPass3Keys — Resume replays
+            // just those. When everything failed (e.g. Pass 2) or we
+            // explicitly cleared the partial, Retry restarts from
+            // scratch.
+            onResume={
+              analysisError.pass === "pass3" && pendingPass3Keys.size > 0
+                ? () => {
+                    setAnalysisError(null);
+                    void resumeAnalysis();
+                  }
+                : null
+            }
+            pendingCount={pendingPass3Keys.size}
             onRetry={() => {
-              // Pass 3 retries from the existing pass2 results merged
-              // into `results`; pass2 retry replays the whole thing.
               setAnalysisError(null);
-              runAnalysis();
+              void runAnalysis();
             }}
             onDismiss={() => setAnalysisError(null)}
           />
+        )}
+        {analyzeProgress && status === "analyzing" && (
+          <div className="rounded-lg border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-xs text-sky-200">
+            <Loader2 className="mr-1.5 inline h-3 w-3 animate-spin" />
+            {analyzeProgress}
+            {pendingPass3Keys.size > 0 && (
+              <span className="ml-2 text-sky-300/80">
+                · {pendingPass3Keys.size} candidate
+                {pendingPass3Keys.size === 1 ? "" : "s"} pending
+              </span>
+            )}
+          </div>
         )}
         {!analysisError && error && (
           <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-200">
@@ -1961,10 +2125,16 @@ function StageCard({
 function AnalysisErrorBanner({
   err,
   onRetry,
+  onResume,
+  pendingCount,
   onDismiss,
 }: {
   err: AnalysisError;
   onRetry: () => void;
+  // Resume the batched Pass 3 from where it stopped. Null when no
+  // partial state exists (e.g. Pass 2 failed entirely).
+  onResume: (() => void) | null;
+  pendingCount: number;
   onDismiss: () => void;
 }) {
   const { title, detail, action } = describeAnalysisError(err);
@@ -1975,9 +2145,18 @@ function AnalysisErrorBanner({
       </div>
       <div className="mb-2 ml-6 text-rose-200/80">{detail}</div>
       <div className="ml-6 flex flex-wrap items-center gap-2">
+        {onResume && (
+          <Button
+            size="sm"
+            onClick={onResume}
+            className="bg-emerald-500/80 hover:bg-emerald-500"
+          >
+            Resume ({pendingCount} pending)
+          </Button>
+        )}
         {action === "retry" && (
           <Button size="sm" variant="outline" onClick={onRetry}>
-            Retry {err.pass === "pass2" ? "Pass 2" : "Pass 3"}
+            Retry {err.pass === "pass2" ? "Pass 2" : "Pass 3 from start"}
           </Button>
         )}
         {action === "settings" && (
@@ -1988,7 +2167,8 @@ function AnalysisErrorBanner({
         {err.partialAvailable && (
           <span className="text-xs text-rose-200/70">
             ✓ Pass 2 grades already shown in the table — Pass 3 (news /
-            regime / final grade) is missing.
+            regime / final grade) is missing for {pendingCount}{" "}
+            candidate{pendingCount === 1 ? "" : "s"}.
           </span>
         )}
         {!err.partialAvailable && err.pass === "pass2" && (
