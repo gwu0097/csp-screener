@@ -8,6 +8,7 @@ import {
   ChevronRight,
   History,
   Loader2,
+  Pencil,
   RefreshCcw,
   Sparkles,
   Star,
@@ -459,6 +460,17 @@ export function ScreenerView({ connected }: Props) {
   // track for tonight's trades. Persisted in localStorage; passed to the
   // analyze endpoint so tracked_tickers gets upserted on every run.
   const [tracked, setTracked] = useState<Set<string>>(new Set());
+  // Per-row strike overrides applied via inline-edit. Snapshots premium /
+  // delta / spread% from the chosen entry in stageFour.availableStrikes
+  // so subsequent re-renders don't have to rerun the lookup. Cleared
+  // implicitly by Apply Watchlist / Run Analysis (orphan keys are
+  // harmless; the table reads via key lookup).
+  const [strikeOverrides, setStrikeOverrides] = useState<
+    Record<
+      string,
+      { strike: number; premium: number; delta: number; bidAskSpreadPct: number }
+    >
+  >({});
   // Transient toast for Track confirmations. One line above the table.
   const [trackToast, setTrackToast] = useState<string | null>(null);
   // Default sort: finalGrade (A→F). ascending=true means A before F because
@@ -1746,7 +1758,6 @@ export function ScreenerView({ connected }: Props) {
                   <SortableHeader label="Symbol" active={sortKey === "symbol"} dir={sortDir} onClick={() => onSort("symbol")} />
                   <SortableHeader label="Price" active={sortKey === "price"} dir={sortDir} onClick={() => onSort("price")} />
                   <TableHead>Earnings</TableHead>
-                  <SortableHeader label="DTE" active={sortKey === "dte"} dir={sortDir} onClick={() => onSort("dte")} />
                   <SortableHeader
                     label="EM%"
                     active={sortKey === "em"}
@@ -1761,7 +1772,6 @@ export function ScreenerView({ connected }: Props) {
                       </>
                     }
                   />
-                  <SortableHeader label="Q" active={sortKey === "stage2"} dir={sortDir} onClick={() => onSort("stage2")} />
                   <SortableHeader
                     label="Crush"
                     active={sortKey === "crush"}
@@ -1793,13 +1803,13 @@ export function ScreenerView({ connected }: Props) {
                   <SortableHeader label="Premium" active={sortKey === "premium"} dir={sortDir} onClick={() => onSort("premium")} />
                   <SortableHeader label="Yield%" active={sortKey === "yield"} dir={sortDir} onClick={() => onSort("yield")} />
                   <SortableHeader label="Delta" active={sortKey === "delta"} dir={sortDir} onClick={() => onSort("delta")} />
-                  <SortableHeader label="Spread" active={sortKey === "spread"} dir={sortDir} onClick={() => onSort("spread")} />
+                  <TableHead className="w-10 text-center" title="Wide spread (>50% of premium)">⚠️</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {sortedResults.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={16} className="py-10 text-center text-sm text-muted-foreground">
+                    <TableCell colSpan={14} className="py-10 text-center text-sm text-muted-foreground">
                       No qualifying earnings today or tomorrow after filters.
                     </TableCell>
                   </TableRow>
@@ -1815,7 +1825,7 @@ export function ScreenerView({ connected }: Props) {
                       {showDivider && (
                         <TableRow key={`divider-${idx}`} className="hover:bg-transparent">
                           <TableCell
-                            colSpan={16}
+                            colSpan={14}
                             className="bg-amber-500/10 py-1.5 text-center text-xs italic text-amber-300/90"
                           >
                             <AlertTriangle className="mr-1.5 inline h-3 w-3" />
@@ -1877,7 +1887,6 @@ export function ScreenerView({ connected }: Props) {
                         <TableCell className="text-xs">
                           {r.earningsDate} <span className="text-muted-foreground">· {r.earningsTiming}</span>
                         </TableCell>
-                        <TableCell className="text-sm">{r.daysToExpiry}</TableCell>
                         <TableCell className="font-mono text-sm">
                           {(() => {
                             const em = r.stageThree?.details?.expectedMovePct;
@@ -1895,34 +1904,58 @@ export function ScreenerView({ connected }: Props) {
                             return "—";
                           })()}
                         </TableCell>
-                        <TableCell className="font-mono text-sm">
-                          {r.stageTwo ? `${r.stageTwo.score}` : "—"}
-                        </TableCell>
                         <TableCell className={cn("font-mono text-sm", gradeColor(displayCrushGrade(r.stageThree)))}>
                           {analyzingRow ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : displayCrushGrade(r.stageThree)}
                         </TableCell>
                         <TableCell className={cn("font-mono text-sm", gradeColor(r.stageFour?.opportunityGrade))}>
                           {analyzingRow ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : (r.stageFour?.opportunityGrade ?? "—")}
                         </TableCell>
-                        <TableCell className="text-sm">{r.stageFour?.suggestedStrike ? `$${fmtNum(r.stageFour.suggestedStrike)}` : "—"}</TableCell>
-                        <TableCell className="text-sm">
-                          {r.stageFour?.premium !== null && r.stageFour?.premium !== undefined
-                            ? `$${fmtNum(r.stageFour.premium)}`
-                            : "—"}
-                        </TableCell>
-                        <TableCell className={cn("text-sm font-mono", yieldColor(r.stageFour?.premium ?? null, r.stageFour?.suggestedStrike ?? null))}>
-                          {fmtYield(r.stageFour?.premium ?? null, r.stageFour?.suggestedStrike ?? null)}
-                        </TableCell>
-                        <TableCell className="text-sm">{fmtNum(r.stageFour?.delta ?? null, 3)}</TableCell>
-                        <TableCell className="text-sm">
-                          {r.stageFour?.bidAskSpreadPct !== null && r.stageFour?.bidAskSpreadPct !== undefined
-                            ? `${fmtNum(r.stageFour.bidAskSpreadPct, 1)}%`
-                            : "—"}
-                        </TableCell>
+                        {(() => {
+                          const ov = strikeOverrides[id] ?? null;
+                          const effStrike = ov?.strike ?? r.stageFour?.suggestedStrike ?? null;
+                          const effPremium = ov?.premium ?? r.stageFour?.premium ?? null;
+                          const effDelta = ov?.delta ?? r.stageFour?.delta ?? null;
+                          const effSpread = ov?.bidAskSpreadPct ?? r.stageFour?.bidAskSpreadPct ?? null;
+                          return (
+                            <>
+                              <TableCell onClick={(e) => e.stopPropagation()}>
+                                <EditableStrikeCell
+                                  defaultStrike={r.stageFour?.suggestedStrike ?? null}
+                                  override={ov}
+                                  availableStrikes={r.stageFour?.availableStrikes ?? []}
+                                  onApply={(o) =>
+                                    setStrikeOverrides((prev) => ({ ...prev, [id]: o }))
+                                  }
+                                />
+                              </TableCell>
+                              <TableCell className="text-sm">
+                                {effPremium !== null && effPremium !== undefined
+                                  ? `$${fmtNum(effPremium)}`
+                                  : "—"}
+                              </TableCell>
+                              <TableCell className={cn("text-sm font-mono", yieldColor(effPremium, effStrike))}>
+                                {fmtYield(effPremium, effStrike)}
+                              </TableCell>
+                              <TableCell className="text-sm">{fmtNum(effDelta, 3)}</TableCell>
+                              <TableCell className="text-center">
+                                {effSpread !== null && effSpread !== undefined && effSpread > 50 ? (
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <AlertTriangle className="inline h-4 w-4 text-amber-400" />
+                                    </TooltipTrigger>
+                                    <TooltipContent>
+                                      Bid-ask spread {fmtNum(effSpread, 1)}% — wider than 50% of premium
+                                    </TooltipContent>
+                                  </Tooltip>
+                                ) : null}
+                              </TableCell>
+                            </>
+                          );
+                        })()}
                       </TableRow>
                       {open && (
                         <TableRow key={`${id}-detail`}>
-                          <TableCell colSpan={16} className="bg-muted/30">
+                          <TableCell colSpan={14} className="bg-muted/30">
                             <ExpandedDetail
                               r={r}
                               analyzing={analyzingSymbols.has(r.symbol.toUpperCase())}
@@ -2840,6 +2873,98 @@ function StreamRow({
         >
           Resume ({pending})
         </Button>
+      )}
+    </div>
+  );
+}
+
+// Inline-editable strike cell. Click to type a target strike, Enter to
+// apply (snaps to the nearest entry in availableStrikes — no extra API
+// call), Escape/blur to cancel. Override is owned by the parent table
+// so Premium / Yield% / Delta / ⚠️ cells in the same row can read from
+// the same snapshot.
+function EditableStrikeCell({
+  defaultStrike,
+  override,
+  availableStrikes,
+  onApply,
+}: {
+  defaultStrike: number | null;
+  override:
+    | { strike: number; premium: number; delta: number; bidAskSpreadPct: number }
+    | null;
+  availableStrikes: NonNullable<StageFourResult["availableStrikes"]>;
+  onApply: (
+    o: { strike: number; premium: number; delta: number; bidAskSpreadPct: number },
+  ) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [val, setVal] = useState("");
+  const displayStrike = override?.strike ?? defaultStrike;
+  const showHint = override !== null && defaultStrike !== null;
+
+  if (editing) {
+    return (
+      <input
+        autoFocus
+        type="number"
+        step="0.5"
+        value={val}
+        onChange={(e) => setVal(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            const target = Number(val);
+            if (
+              !Number.isFinite(target) ||
+              !availableStrikes ||
+              availableStrikes.length === 0
+            ) {
+              setEditing(false);
+              return;
+            }
+            const nearest = availableStrikes.reduce((best, s) =>
+              Math.abs(s.strike - target) < Math.abs(best.strike - target) ? s : best,
+            );
+            const spreadPct =
+              nearest.mark > 0
+                ? ((nearest.ask - nearest.bid) / nearest.mark) * 100
+                : 0;
+            onApply({
+              strike: nearest.strike,
+              premium: nearest.mark,
+              delta: nearest.delta,
+              bidAskSpreadPct: spreadPct,
+            });
+            setEditing(false);
+          } else if (e.key === "Escape") {
+            setEditing(false);
+          }
+        }}
+        onBlur={() => setEditing(false)}
+        className="w-20 rounded border border-border bg-background px-1.5 py-0.5 text-sm font-mono"
+      />
+    );
+  }
+
+  if (displayStrike === null) {
+    return <span className="text-sm text-muted-foreground">—</span>;
+  }
+
+  return (
+    <div
+      className="group inline-block cursor-text"
+      onClick={() => {
+        setVal(displayStrike.toString());
+        setEditing(true);
+      }}
+      title="Click to edit strike"
+    >
+      <span className="text-sm">${fmtNum(displayStrike)}</span>
+      <Pencil className="ml-1 inline h-3 w-3 opacity-0 transition-opacity group-hover:opacity-50" />
+      {showHint && defaultStrike !== null && (
+        <div className="text-[10px] text-muted-foreground">
+          2× EM: ${fmtNum(defaultStrike)}
+        </div>
       )}
     </div>
   );
