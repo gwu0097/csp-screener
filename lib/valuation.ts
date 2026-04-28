@@ -555,23 +555,101 @@ export type Tier1Ctx = {
   last_revenue: number;
   shares_outstanding: number;
   current_price: number;
+  // EPS-anchor mode (growth-stock branch). When category is 'growth'
+  // AND forward_eps is positive, computeTier1Scenario uses
+  // forward_eps as EPS Y1 directly and compounds by eps_growth_rate
+  // (or the scenario's rev_growth_y* as fallback) instead of the
+  // revenue × margin × (1−tax) chain. The chain is conservative for
+  // turnaround / accelerating-margin names because it ignores the
+  // analyst-forward beat already baked into Yahoo's earningsTrend.
+  // Optional + back-compat — value/blend stocks fall through to the
+  // existing revenue path.
+  category?: ValuationCategory | null;
+  forward_eps?: number | null;
+  eps_growth_rate?: number | null;
 };
+
+// Whether ctx triggers the EPS-anchor path. Exposed so the UI can
+// surface "EPS anchored on analyst forward estimate" copy without
+// duplicating the rule.
+export function shouldUseEpsAnchor(
+  ctx: Pick<Tier1Ctx, "category" | "forward_eps">,
+): boolean {
+  return (
+    ctx.category === "growth" &&
+    typeof ctx.forward_eps === "number" &&
+    Number.isFinite(ctx.forward_eps) &&
+    ctx.forward_eps > 0
+  );
+}
 
 export function computeTier1Scenario(
   inputs: ScenarioInputs,
   ctx: Tier1Ctx,
 ): ScenarioOutputs {
+  const shares = ctx.shares_outstanding;
+  const oneMinusTax = 1 - inputs.tax_rate;
+
+  if (shouldUseEpsAnchor(ctx)) {
+    // Growth path: anchor Y1 on forward EPS (analyst estimate),
+    // compound by eps_growth_rate when present, else fall back to
+    // the scenario's rev_growth_y* numbers per year.
+    const epsG = ctx.eps_growth_rate;
+    const useEpsG =
+      typeof epsG === "number" && Number.isFinite(epsG) && epsG > 0;
+    const g2 = useEpsG ? epsG! : inputs.rev_growth_y2;
+    const g3 = useEpsG ? epsG! : inputs.rev_growth_y3;
+
+    const eps_y1 = ctx.forward_eps as number;
+    const eps_y2 = eps_y1 * (1 + g2);
+    const eps_y3 = eps_y2 * (1 + g3);
+
+    // Back-derive income + revenue so the projection table reads
+    // consistently with EPS. shares × EPS = net income; / (1−tax) =
+    // operating income; / op_margin = revenue. When shares or
+    // op_margin are zero we still return zeros (matches the
+    // existing chain's behavior in degenerate cases).
+    const net_income_y1 = eps_y1 * shares;
+    const net_income_y2 = eps_y2 * shares;
+    const net_income_y3 = eps_y3 * shares;
+    const op_income_y1 = oneMinusTax > 0 ? net_income_y1 / oneMinusTax : 0;
+    const op_income_y2 = oneMinusTax > 0 ? net_income_y2 / oneMinusTax : 0;
+    const op_income_y3 = oneMinusTax > 0 ? net_income_y3 / oneMinusTax : 0;
+    const rev_y1 = inputs.op_margin > 0 ? op_income_y1 / inputs.op_margin : 0;
+    const rev_y2 = inputs.op_margin > 0 ? op_income_y2 / inputs.op_margin : 0;
+    const rev_y3 = inputs.op_margin > 0 ? op_income_y3 / inputs.op_margin : 0;
+
+    const price_target = eps_y3 * inputs.exit_pe;
+    const return_pct =
+      ctx.current_price > 0
+        ? (price_target - ctx.current_price) / ctx.current_price
+        : 0;
+    const implied_mkt_cap = price_target * shares;
+    return {
+      rev_y1,
+      rev_y2,
+      rev_y3,
+      op_income_y3,
+      net_income_y3,
+      eps_y1,
+      eps_y2,
+      eps_y3,
+      price_target,
+      return_pct,
+      implied_mkt_cap,
+    };
+  }
+
+  // Default revenue × margin path (value / blend / pre_profit).
   const rev_y1 = ctx.last_revenue * (1 + inputs.rev_growth_y1);
   const rev_y2 = rev_y1 * (1 + inputs.rev_growth_y2);
   const rev_y3 = rev_y2 * (1 + inputs.rev_growth_y3);
   const op_income_y1 = rev_y1 * inputs.op_margin;
   const op_income_y2 = rev_y2 * inputs.op_margin;
   const op_income_y3 = rev_y3 * inputs.op_margin;
-  const oneMinusTax = 1 - inputs.tax_rate;
   const net_income_y1 = op_income_y1 * oneMinusTax;
   const net_income_y2 = op_income_y2 * oneMinusTax;
   const net_income_y3 = op_income_y3 * oneMinusTax;
-  const shares = ctx.shares_outstanding;
   const eps_y1 = shares > 0 ? net_income_y1 / shares : 0;
   const eps_y2 = shares > 0 ? net_income_y2 / shares : 0;
   const eps_y3 = shares > 0 ? net_income_y3 / shares : 0;

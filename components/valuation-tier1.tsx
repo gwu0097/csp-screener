@@ -154,9 +154,26 @@ export function ValuationTier1({
       last_revenue: model.last_revenue,
       shares_outstanding: model.shares_outstanding,
       current_price: model.current_price,
+      // Mirrors the server-side ctx so the live preview matches the
+      // saved outputs. EPS-anchor mode triggers off these.
+      category: model.category ?? null,
+      forward_eps: model.forward_eps ?? null,
+      eps_growth_rate: model.analyst_eps_growth_lt ?? null,
     }),
-    [model.last_revenue, model.shares_outstanding, model.current_price],
+    [
+      model.last_revenue,
+      model.shares_outstanding,
+      model.current_price,
+      model.category,
+      model.forward_eps,
+      model.analyst_eps_growth_lt,
+    ],
   );
+  const usingEpsAnchor =
+    model.category === "growth" &&
+    typeof model.forward_eps === "number" &&
+    Number.isFinite(model.forward_eps) &&
+    model.forward_eps > 0;
   const liveOutputs = useMemo(
     () => computeTier1All(userInputs, tier1Ctx),
     [userInputs, tier1Ctx],
@@ -199,6 +216,11 @@ export function ValuationTier1({
 
       <div>
         <SectionLabel>Projection</SectionLabel>
+        <EpsAnchorNote
+          usingEpsAnchor={usingEpsAnchor}
+          forwardEps={model.forward_eps ?? null}
+          analystGrowth={model.analyst_eps_growth_lt ?? null}
+        />
         <CellLegend />
         <div className="overflow-x-auto rounded border border-border">
           <table className="min-w-full text-xs">
@@ -329,7 +351,18 @@ function StartingPoint({
           value={fmtPct(model.last_op_margin)}
           source="EDGAR"
         />
-        <KV label="Current EPS" value={fmtPrice(model.last_eps ?? 0)} source="Yahoo" />
+        <KV
+          label="Trailing EPS"
+          value={fmtPrice(model.last_eps ?? 0)}
+          source="Yahoo"
+        />
+        {model.forward_eps !== null && model.forward_eps !== undefined && (
+          <KV
+            label="Forward EPS (Y1)"
+            value={fmtPrice(model.forward_eps)}
+            source="analyst estimate"
+          />
+        )}
         <KV
           label="Current P/E"
           value={currentPE !== null ? `${currentPE.toFixed(1)}x` : "—"}
@@ -360,6 +393,36 @@ function StartingPoint({
           />
         </div>
       </div>
+    </div>
+  );
+}
+
+function EpsAnchorNote({
+  usingEpsAnchor,
+  forwardEps,
+  analystGrowth,
+}: {
+  usingEpsAnchor: boolean;
+  forwardEps: number | null;
+  analystGrowth: number | null;
+}) {
+  if (usingEpsAnchor && forwardEps !== null) {
+    const g =
+      typeof analystGrowth === "number" && analystGrowth > 0
+        ? ` · compounded by analyst LT EPS growth ${(analystGrowth * 100).toFixed(1)}%`
+        : "";
+    return (
+      <div className="mb-2 rounded border border-emerald-500/40 bg-emerald-500/5 px-2 py-1 text-[11px] text-emerald-200">
+        📌 EPS anchored on analyst forward estimate{" "}
+        <span className="font-mono font-semibold">${forwardEps.toFixed(2)}</span>
+        {g} — more accurate for growth stocks than projecting from
+        trailing EPS.
+      </div>
+    );
+  }
+  return (
+    <div className="mb-2 rounded border border-border bg-background/40 px-2 py-1 text-[11px] text-muted-foreground">
+      📌 EPS derived from revenue × margin × (1 − tax) / shares.
     </div>
   );
 }

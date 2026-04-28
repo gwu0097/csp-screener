@@ -429,6 +429,12 @@ export async function POST(
       last_revenue: lastRevenue,
       shares_outstanding: sharesOutstanding,
       current_price: currentPrice,
+      // Growth-stock EPS-anchor inputs. computeTier1Scenario gates
+      // on category === 'growth' + forward_eps > 0; passing the
+      // fields unconditionally is fine (the gate checks).
+      category,
+      forward_eps: yh.forwardEps,
+      eps_growth_rate: yh.analystEpsGrowthLT,
     };
     const tier2Ctx = {
       last_revenue: lastRevenue,
@@ -604,6 +610,12 @@ export async function PATCH(
       last_revenue: next.last_revenue,
       shares_outstanding: next.shares_outstanding,
       current_price: next.current_price,
+      // EPS-anchor fields for growth stocks — read straight from the
+      // saved model so an edited scenario keeps the same projection
+      // shape it had at first generation.
+      category: next.category ?? null,
+      forward_eps: next.forward_eps ?? null,
+      eps_growth_rate: next.analyst_eps_growth_lt ?? null,
     };
     const tier2Ctx = {
       last_revenue: next.last_revenue,
