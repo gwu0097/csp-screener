@@ -6,6 +6,7 @@ import {
   AlertTriangle,
   ChevronDown,
   ChevronRight,
+  History,
   Loader2,
   RefreshCcw,
   Sparkles,
@@ -322,6 +323,14 @@ export function ScreenerView({ connected }: Props) {
   const [analysisVix, setAnalysisVix] = useState<number | null>(null);
   // Progress copy under the toolbar while batches stream in.
   const [analyzeProgress, setAnalyzeProgress] = useState<string | null>(null);
+  // Probed on mount from /api/screener/results/latest (no state
+  // hydration — population happens only when the user clicks Load
+  // Previous). Null = no previous result, or probe still in flight.
+  const [previousAvailable, setPreviousAvailable] = useState<{
+    screenedAt: string;
+    count: number;
+    graded: boolean;
+  } | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Richer per-pass error so the analyze banner can show a friendly
@@ -392,36 +401,13 @@ export function ScreenerView({ connected }: Props) {
     window.setTimeout(() => setTrackToast(null), 4000);
   }
 
-  // Two-stage hydration: localStorage first (instant), Supabase
-  // second (cross-device truth). The /latest fetch overwrites
-  // localStorage state when the DB row is newer, so opening the app
-  // on a second device picks up scans run from elsewhere.
+  // Mount probe — checks whether a previous run exists in Supabase
+  // but does NOT populate state. Auto-hydration was overwriting the
+  // user's in-progress session (e.g. they ran Screen Today, opened
+  // a new tab, and the new tab loaded yesterday's row over today's
+  // unsaved edits). Now the table starts empty and the user picks
+  // explicitly via the Load Previous button.
   useEffect(() => {
-    // Stage 1 — localStorage. Fast paint on the same device.
-    try {
-      const raw = localStorage.getItem(LS_RESULTS);
-      const ts = localStorage.getItem(LS_TIMESTAMP);
-      const pricesRaw = localStorage.getItem(LS_PRICES);
-      const gradedRaw = localStorage.getItem(LS_GRADED);
-      if (raw && ts) {
-        const parsed = (JSON.parse(raw) as unknown[])
-          .map((r) => normaliseResult(r as Partial<ScreenerResult>))
-          .filter((r): r is ScreenerResult => r !== null);
-        if (parsed.length > 0) {
-          setResults(parsed);
-          if (pricesRaw) setPrices(JSON.parse(pricesRaw));
-          setScreenedAt(new Date(ts));
-          setScreenIsGraded(gradedRaw === "true");
-          setGroupMode(null);
-        }
-      }
-    } catch (e) {
-      console.error("[screener] localStorage restore failed", e);
-    }
-
-    // Stage 2 — Supabase /latest. Replaces local state when the DB
-    // row is newer. Stale (>24 h) rows still hydrate so the user sees
-    // the full table; the banner labels them as stale.
     let cancelled = false;
     void (async () => {
       try {
@@ -431,50 +417,82 @@ export function ScreenerView({ connected }: Props) {
         if (!res.ok) return;
         const json = (await res.json()) as {
           screenedAt: string | null;
-          candidates: Array<Partial<ScreenerResult> & { symbol?: string }>;
-          prices: Record<string, number>;
+          candidates: Array<unknown>;
           graded?: boolean;
         };
         if (cancelled) return;
-        if (!json.screenedAt || json.candidates.length === 0) return;
-        const remoteTs = new Date(json.screenedAt).getTime();
-        const localTs = (() => {
-          try {
-            const ts = localStorage.getItem(LS_TIMESTAMP);
-            return ts ? new Date(ts).getTime() : 0;
-          } catch {
-            return 0;
-          }
-        })();
-        // Only overwrite if the remote row is at least as recent as
-        // what we already painted; preserves local edits (Track
-        // toggles persist through localStorage; results state stays
-        // in sync with the merged set on this device).
-        if (remoteTs < localTs) return;
-        const parsed = json.candidates
-          .map((r) => normaliseResult(r))
-          .filter((r): r is ScreenerResult => r !== null);
-        setResults(parsed);
-        setPrices(json.prices ?? {});
-        setScreenedAt(new Date(json.screenedAt));
-        setScreenIsGraded(json.graded === true);
-        setGroupMode(null);
-        // Re-sync localStorage so a subsequent same-device first paint
-        // matches what /latest just told us — avoids a flicker where
-        // the local cache claims one graded state and the DB another.
-        try {
-          localStorage.setItem(LS_GRADED, json.graded === true ? "true" : "false");
-        } catch {
-          /* quota / privacy */
+        if (!json.screenedAt || !Array.isArray(json.candidates) || json.candidates.length === 0) {
+          return;
         }
+        setPreviousAvailable({
+          screenedAt: json.screenedAt,
+          count: json.candidates.length,
+          graded: json.graded === true,
+        });
       } catch (e) {
-        console.warn("[screener] remote /latest hydrate failed", e);
+        console.warn("[screener] /latest probe failed", e);
       }
     })();
     return () => {
       cancelled = true;
     };
   }, []);
+
+  async function loadPrevious() {
+    setError(null);
+    setMessage(null);
+    setStatus("screening");
+    try {
+      const res = await fetch("/api/screener/results/latest", {
+        cache: "no-store",
+      });
+      const json = (await res.json()) as {
+        screenedAt: string | null;
+        candidates: Array<Partial<ScreenerResult> & { symbol?: string }>;
+        prices: Record<string, number>;
+        graded?: boolean;
+        error?: string;
+      };
+      if (!res.ok || json.error) {
+        throw new Error(json.error ?? `HTTP ${res.status}`);
+      }
+      if (!json.screenedAt || json.candidates.length === 0) {
+        setMessage("No previous results saved.");
+        return;
+      }
+      const parsed = json.candidates
+        .map((r) => normaliseResult(r))
+        .filter((r): r is ScreenerResult => r !== null);
+      setResults(parsed);
+      setPrices(json.prices ?? {});
+      setScreenedAt(new Date(json.screenedAt));
+      setScreenIsGraded(json.graded === true);
+      setGroupMode(null);
+      setExpanded({});
+      // Sync localStorage so subsequent in-session edits (track toggles,
+      // single-symbol re-analyze) read from a consistent baseline.
+      try {
+        localStorage.setItem(LS_RESULTS, JSON.stringify(parsed));
+        localStorage.setItem(LS_TIMESTAMP, json.screenedAt);
+        localStorage.setItem(LS_PRICES, JSON.stringify(json.prices ?? {}));
+        localStorage.setItem(LS_GRADED, json.graded === true ? "true" : "false");
+      } catch (e) {
+        console.error("[screener] localStorage seed after Load Previous failed", e);
+      }
+      const ts = new Date(json.screenedAt).toLocaleString([], {
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+        hour12: true,
+      });
+      setMessage(`Loaded ${parsed.length} candidates from ${ts}`);
+    } catch (e) {
+      setError(`Load Previous failed: ${e instanceof Error ? e.message : "network error"}`);
+    } finally {
+      setStatus("idle");
+    }
+  }
 
   const toggle = (id: string) => setExpanded((s) => ({ ...s, [id]: !s[id] }));
 
@@ -1118,6 +1136,25 @@ export function ScreenerView({ connected }: Props) {
               )}
               Apply Watchlist
             </Button>
+            {previousAvailable && (
+              <Button
+                variant="outline"
+                disabled={busy}
+                onClick={loadPrevious}
+                title={`Load saved results from ${new Date(
+                  previousAvailable.screenedAt,
+                ).toLocaleString([], {
+                  month: "short",
+                  day: "numeric",
+                  hour: "numeric",
+                  minute: "2-digit",
+                  hour12: true,
+                })} (${previousAvailable.count} candidates${previousAvailable.graded ? ", graded" : ", ungraded"})`}
+              >
+                <History className="mr-2 h-4 w-4" />
+                Load Previous
+              </Button>
+            )}
             <Tooltip>
               <TooltipTrigger asChild>
                 <span>
