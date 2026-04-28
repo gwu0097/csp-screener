@@ -2570,7 +2570,7 @@ function StreamProgressPanel({
         resume={onResumeNews}
       />
       <StreamRow
-        label="EDGAR"
+        label="Grade"
         progress={grade}
         pending={pendingGrade}
         resume={onResumeGrade}
