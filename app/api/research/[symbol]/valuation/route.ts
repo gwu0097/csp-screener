@@ -3,12 +3,15 @@ import YahooFinance from "yahoo-finance2";
 import {
   convertAnnualToUsd,
   convertDCFExtrasToUsd,
+  convertQuarterlyToUsd,
   extractAnnualMetrics,
   extractDCFExtras,
+  extractQuarterlyMetrics,
   fetchFxToUsd,
   getCIK,
   getCompanyFacts,
   getReportingInfo,
+  ttmRevenueFromQuarters,
 } from "@/lib/sec-edgar";
 import {
   getModuleHistory,
@@ -280,6 +283,7 @@ export async function POST(
     ]);
     const rawAnnual = extractAnnualMetrics(facts, 5);
     const rawDcfExtras = extractDCFExtras(facts, 5);
+    const rawQuarterly = extractQuarterlyMetrics(facts, 6);
     const reporting = getReportingInfo(facts);
     // Foreign private issuers (Spotify EUR/20-F, Novo DKK/20-F, Alibaba
     // CNY/20-F, etc.) come back in their native currency. Multiply
@@ -300,6 +304,7 @@ export async function POST(
     }
     const annual = convertAnnualToUsd(rawAnnual, fxToUsd);
     const dcfExtras = convertDCFExtrasToUsd(rawDcfExtras, fxToUsd);
+    const quarterly = convertQuarterlyToUsd(rawQuarterly, fxToUsd);
     const historical = buildHistorical(annual);
     const fcfHistory = buildFCFHistory(annual, dcfExtras);
     if (historical.length === 0) {
@@ -312,12 +317,18 @@ export async function POST(
     const lastAnnual = [...annual].reverse()[0];
     const lastRow = [...historical].reverse()[0];
 
-    // Prefer Yahoo's TTM revenue (closer to "now") and fall back to the
-    // most-recent annual figure when Yahoo doesn't have it.
+    // Prefer EDGAR-derived TTM (sum of last 4 quarters in USD) — same
+    // taxonomy and same FX rate as the rest of the model. Fall back to
+    // Yahoo's totalRevenueTTM when EDGAR doesn't carry 4 contiguous
+    // quarters with revenue values, then finally to the last annual
+    // figure as a last resort.
+    const edgarTtm = ttmRevenueFromQuarters(quarterly);
     const lastRevenue =
-      yh.totalRevenueTTM && yh.totalRevenueTTM > 0
-        ? yh.totalRevenueTTM
-        : lastRow.revenue ?? 0;
+      edgarTtm && edgarTtm > 0
+        ? edgarTtm
+        : yh.totalRevenueTTM && yh.totalRevenueTTM > 0
+          ? yh.totalRevenueTTM
+          : lastRow.revenue ?? 0;
     if (lastRevenue <= 0) {
       return NextResponse.json(
         { error: "Most recent revenue is missing or non-positive" },

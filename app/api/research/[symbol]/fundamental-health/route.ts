@@ -2,12 +2,16 @@ import { NextRequest, NextResponse } from "next/server";
 import YahooFinance from "yahoo-finance2";
 import {
   convertAnnualToUsd,
+  convertQuarterlyToUsd,
   extractAnnualMetrics,
+  extractQuarterlyMetrics,
   fetchFxToUsd,
   getCIK,
   getCompanyFacts,
   getReportingInfo,
+  ttmRevenueFromQuarters,
   type AnnualMetrics,
+  type QuarterlyMetrics,
 } from "@/lib/sec-edgar";
 import {
   getLatestModule,
@@ -55,6 +59,14 @@ type ScoreComponent = {
 type FundamentalHealth = {
   cik: string | null;
   annual: AnnualMetrics[];
+  // Last 6 quarters from 10-Q filings, plus a derived Q4 (FY − Q1 −
+  // Q2 − Q3) where EDGAR carries a 10-K alongside. Newest first via
+  // `periodEnd`. Empty for foreign filers with no 10-Q data.
+  quarterly: QuarterlyMetrics[];
+  // Sum of the most recent 4 quarters' revenue, in USD. Null when
+  // EDGAR doesn't carry 4 contiguous quarters with revenue values —
+  // valuation falls back to Yahoo TTM / last annual in that case.
+  ttmRevenue: number | null;
   current: CurrentMetrics;
   healthScore: number; // 0-10
   scoreComponents: ScoreComponent[];
@@ -304,23 +316,28 @@ export async function POST(
     const cik = await getCIK(symbol);
     const facts = cik ? await getCompanyFacts(cik) : null;
     const rawAnnual = extractAnnualMetrics(facts, 5);
+    const rawQuarterly = extractQuarterlyMetrics(facts, 6);
     const reporting = getReportingInfo(facts);
     // Foreign filers report in their native currency under ifrs-full.
-    // Convert annual figures into USD so YoY ratios + comparison
-    // against Yahoo's USD `current` block stay coherent. fxToUsd=1
-    // when reporting is already USD.
+    // Convert annual + quarterly figures into USD so YoY ratios +
+    // comparison against Yahoo's USD `current` block stay coherent.
+    // fxToUsd=1 when reporting is already USD.
     let fxToUsd = 1;
     if (reporting.currency && reporting.currency !== "USD") {
       const rate = await fetchFxToUsd(reporting.currency);
       if (rate && Number.isFinite(rate) && rate > 0) fxToUsd = rate;
     }
     const annual = convertAnnualToUsd(rawAnnual, fxToUsd);
+    const quarterly = convertQuarterlyToUsd(rawQuarterly, fxToUsd);
+    const ttmRevenue = ttmRevenueFromQuarters(quarterly);
     const current = await fetchCurrentMetrics(symbol);
     const { score, components, label } = computeHealth(annual, current);
 
     const output: FundamentalHealth = {
       cik,
       annual,
+      quarterly,
+      ttmRevenue,
       current,
       healthScore: score,
       scoreComponents: components,

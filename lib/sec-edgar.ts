@@ -105,6 +105,7 @@ export async function getCIK(symbol: string): Promise<string | null> {
 // facts.<taxonomy>.<concept>.units.<unit>[].
 type FactEntry = {
   end?: string; // YYYY-MM-DD period end
+  start?: string; // YYYY-MM-DD period start (income-statement concepts)
   val?: number;
   form?: string; // '10-K' | '20-F' | '40-F' | '10-Q' | '8-K' | etc.
   filed?: string;
@@ -473,4 +474,239 @@ export function convertDCFExtrasToUsd(
     ar: r.ar !== null ? r.ar * fxRate : null,
     inventory: r.inventory !== null ? r.inventory * fxRate : null,
   }));
+}
+
+// ---------------- Quarterly (10-Q) data ----------------
+//
+// Quarterly extraction is structurally similar to the annual path but
+// keys facts on (fy, fp) instead of just year, accepts 10-Q for
+// Q1/Q2/Q3 and 10-K/20-F/40-F for FY (so Q4 can be derived from
+// FY − Q1 − Q2 − Q3), and filters out cumulative-period entries that
+// some filers post under the same fp tag (e.g. a 6-month entry tagged
+// fp="Q2"). EDGAR puts the period start/end on every income-statement
+// fact, so a span filter (≈ 90 days for quarters, ≈ 365 days for FY)
+// reliably separates the 3-month Q2 value from the 6-month cumulative.
+//
+// Foreign private issuers (20-F filers) generally don't have quarterly
+// XBRL data in companyfacts — they file 6-K interims that aren't
+// structured. Their quarterly[] will come back empty; the UI hides
+// the section in that case.
+
+export type QuarterlyMetrics = {
+  fiscalLabel: string; // "Q1 2026", "Q4 2025"
+  fiscalYear: number;
+  fiscalQuarter: 1 | 2 | 3 | 4;
+  periodEnd: string; // YYYY-MM-DD
+  revenue: number | null;
+  operatingIncome: number | null;
+  netIncome: number | null;
+  // EPS for Q4 is left null even when the FY and Q1-Q3 EPS values are
+  // all present — share-count drift across the year makes naive
+  // subtraction unreliable, and EDGAR doesn't carry a derived Q4 EPS.
+  eps: number | null;
+};
+
+type QuarterlyPick = {
+  byKey: Map<string, FactEntry>;
+  unit: string | null;
+  taxonomy: string | null;
+};
+
+function pickBestQuarterlyEntries(
+  facts: CompanyFacts,
+  concepts: string[],
+  preferredUnits: string[],
+): QuarterlyPick {
+  for (const taxonomy of TAXONOMIES) {
+    const tax = facts.facts?.[taxonomy];
+    if (!tax) continue;
+    for (const concept of concepts) {
+      const c = tax[concept];
+      const unitsRaw = c?.units;
+      if (!unitsRaw) continue;
+      const sortedUnits = sortUnitsByPreference(
+        Object.keys(unitsRaw),
+        preferredUnits,
+      );
+      for (const unit of sortedUnits) {
+        const entries = unitsRaw[unit];
+        if (!entries) continue;
+        const byKey = new Map<string, FactEntry>();
+        for (const e of entries) {
+          if (!e.end || typeof e.val !== "number") continue;
+          if (typeof e.fy !== "number" || !e.fp) continue;
+          const isQuarter =
+            e.form === "10-Q" &&
+            (e.fp === "Q1" || e.fp === "Q2" || e.fp === "Q3");
+          const isAnnual =
+            ACCEPTED_FORMS.has(e.form ?? "") && e.fp === "FY";
+          if (!isQuarter && !isAnnual) continue;
+          // Span filter knocks out cumulative-period rows. Skipped
+          // when start is missing (some EPS facts omit it — accepted
+          // because the fp tag alone is enough for per-share data).
+          if (e.start) {
+            const days =
+              (new Date(e.end).getTime() - new Date(e.start).getTime()) /
+              86_400_000;
+            if (e.fp === "FY") {
+              if (days < 350 || days > 380) continue;
+            } else {
+              if (days < 80 || days > 100) continue;
+            }
+          }
+          const key = `${e.fy}|${e.fp}`;
+          const existing = byKey.get(key);
+          if (!existing || (e.filed ?? "") > (existing.filed ?? "")) {
+            byKey.set(key, e);
+          }
+        }
+        if (byKey.size > 0) {
+          return { byKey, unit, taxonomy };
+        }
+      }
+    }
+  }
+  return { byKey: new Map(), unit: null, taxonomy: null };
+}
+
+export function extractQuarterlyMetrics(
+  facts: CompanyFacts | null,
+  quarters = 6,
+): QuarterlyMetrics[] {
+  if (!facts) return [];
+  const revenue = pickBestQuarterlyEntries(
+    facts,
+    CONCEPT_REVENUE,
+    PREFERRED_MONEY_UNITS,
+  );
+  const opInc = pickBestQuarterlyEntries(
+    facts,
+    CONCEPT_OPERATING_INCOME,
+    PREFERRED_MONEY_UNITS,
+  );
+  const netInc = pickBestQuarterlyEntries(
+    facts,
+    CONCEPT_NET_INCOME,
+    PREFERRED_MONEY_UNITS,
+  );
+  const eps = pickBestQuarterlyEntries(
+    facts,
+    [...CONCEPT_EPS_BASIC, ...CONCEPT_EPS_DILUTED],
+    PREFERRED_SHARE_UNITS,
+  );
+
+  // Collect every fy that any picker saw — we'll consider Q1..Q4 for
+  // each before filtering out empty rows.
+  const fySet = new Set<number>();
+  for (const m of [revenue, opInc, netInc, eps]) {
+    for (const k of Array.from(m.byKey.keys())) {
+      const fy = Number(k.split("|")[0]);
+      if (Number.isFinite(fy)) fySet.add(fy);
+    }
+  }
+
+  function lookupVal(
+    pick: QuarterlyPick,
+    fy: number,
+    q: 1 | 2 | 3 | 4,
+  ): number | null {
+    if (q < 4) {
+      const e = pick.byKey.get(`${fy}|Q${q}`);
+      return typeof e?.val === "number" ? e.val : null;
+    }
+    const fyEntry = pick.byKey.get(`${fy}|FY`);
+    const q1 = pick.byKey.get(`${fy}|Q1`);
+    const q2 = pick.byKey.get(`${fy}|Q2`);
+    const q3 = pick.byKey.get(`${fy}|Q3`);
+    if (
+      typeof fyEntry?.val !== "number" ||
+      typeof q1?.val !== "number" ||
+      typeof q2?.val !== "number" ||
+      typeof q3?.val !== "number"
+    ) {
+      return null;
+    }
+    return fyEntry.val - q1.val - q2.val - q3.val;
+  }
+
+  function lookupEnd(fy: number, q: 1 | 2 | 3 | 4): string | null {
+    if (q < 4) {
+      for (const m of [revenue, opInc, netInc, eps]) {
+        const e = m.byKey.get(`${fy}|Q${q}`);
+        if (e?.end) return e.end;
+      }
+      return null;
+    }
+    for (const m of [revenue, opInc, netInc, eps]) {
+      const e = m.byKey.get(`${fy}|FY`);
+      if (e?.end) return e.end;
+    }
+    return null;
+  }
+
+  const built: QuarterlyMetrics[] = [];
+  for (const fy of Array.from(fySet)) {
+    for (const q of [1, 2, 3, 4] as const) {
+      const end = lookupEnd(fy, q);
+      if (!end) continue;
+      const rev = lookupVal(revenue, fy, q);
+      const op = lookupVal(opInc, fy, q);
+      const ni = lookupVal(netInc, fy, q);
+      // Q4 EPS by subtraction is unreliable — see type comment above.
+      const epsVal =
+        q < 4
+          ? (eps.byKey.get(`${fy}|Q${q}`)?.val ?? null)
+          : null;
+      if (rev === null && op === null && ni === null && epsVal === null) {
+        continue;
+      }
+      built.push({
+        fiscalLabel: `Q${q} ${fy}`,
+        fiscalYear: fy,
+        fiscalQuarter: q,
+        periodEnd: end,
+        revenue: rev,
+        operatingIncome: op,
+        netIncome: ni,
+        eps: epsVal,
+      });
+    }
+  }
+
+  built.sort((a, b) => b.periodEnd.localeCompare(a.periodEnd));
+  return built.slice(0, quarters);
+}
+
+export function convertQuarterlyToUsd(
+  rows: QuarterlyMetrics[],
+  fxRate: number,
+): QuarterlyMetrics[] {
+  if (fxRate === 1) return rows;
+  return rows.map((r) => ({
+    ...r,
+    revenue: r.revenue !== null ? r.revenue * fxRate : null,
+    operatingIncome:
+      r.operatingIncome !== null ? r.operatingIncome * fxRate : null,
+    netIncome: r.netIncome !== null ? r.netIncome * fxRate : null,
+    eps: r.eps !== null ? r.eps * fxRate : null,
+  }));
+}
+
+// TTM revenue from a sorted-newest-first quarterly array. Returns null
+// when fewer than 4 quarters are available OR any of the most recent
+// 4 has a null revenue value.
+export function ttmRevenueFromQuarters(
+  quarterly: QuarterlyMetrics[],
+): number | null {
+  const sorted = [...quarterly].sort((a, b) =>
+    b.periodEnd.localeCompare(a.periodEnd),
+  );
+  const last4 = sorted.slice(0, 4);
+  if (last4.length < 4) return null;
+  let sum = 0;
+  for (const q of last4) {
+    if (q.revenue === null) return null;
+    sum += q.revenue;
+  }
+  return sum;
 }

@@ -76,6 +76,17 @@ type AnnualMetrics = {
   debt: number | null;
 };
 
+type QuarterlyMetrics = {
+  fiscalLabel: string; // "Q1 2026"
+  fiscalYear: number;
+  fiscalQuarter: 1 | 2 | 3 | 4;
+  periodEnd: string;
+  revenue: number | null;
+  operatingIncome: number | null;
+  netIncome: number | null;
+  eps: number | null;
+};
+
 type CurrentMetrics = {
   forwardPE: number | null;
   trailingPE: number | null;
@@ -95,6 +106,10 @@ type ScoreComponent = { label: string; earned: number; max: number; detail: stri
 export type FundamentalHealth = {
   cik: string | null;
   annual: AnnualMetrics[];
+  // Optional so saved modules from before the quarterly column landed
+  // still parse cleanly; UI defaults to [] when missing.
+  quarterly?: QuarterlyMetrics[];
+  ttmRevenue?: number | null;
   current: CurrentMetrics;
   healthScore: number;
   scoreComponents: ScoreComponent[];
@@ -706,6 +721,15 @@ function trendCls(curr: number | null, prev: number | null): string {
 export function FundamentalHealthBody({ data }: { data: FundamentalHealth }) {
   // Sort ascending so the table reads oldest → newest.
   const annual = [...data.annual].sort((a, b) => a.year - b.year);
+  // Quarterly: newest first for the recent-quarters table; same row
+  // shape lets us compute YoY growth by joining each quarter to the
+  // matching fiscal-quarter from a year prior.
+  const quarterly = [...(data.quarterly ?? [])].sort((a, b) =>
+    b.periodEnd.localeCompare(a.periodEnd),
+  );
+  const quarterlyByKey = new Map(
+    quarterly.map((q) => [`${q.fiscalYear}|${q.fiscalQuarter}`, q]),
+  );
   const c = data.current;
   return (
     <div className="space-y-3 text-xs">
@@ -773,6 +797,77 @@ export function FundamentalHealthBody({ data }: { data: FundamentalHealth }) {
           </div>
         )}
       </Section>
+
+      {quarterly.length > 0 && (
+        <Section title="Recent quarters (10-Q)">
+          <div className="overflow-x-auto">
+            <table className="w-full text-[11px]">
+              <thead className="text-muted-foreground">
+                <tr className="border-b border-border/50">
+                  <th className="px-1.5 py-1 text-left font-medium">Quarter</th>
+                  <th className="px-1.5 py-1 text-right font-medium">Revenue</th>
+                  <th className="px-1.5 py-1 text-right font-medium">Rev growth</th>
+                  <th className="px-1.5 py-1 text-right font-medium">Op margin</th>
+                  <th className="px-1.5 py-1 text-right font-medium">EPS</th>
+                </tr>
+              </thead>
+              <tbody>
+                {quarterly.map((q) => {
+                  const prior = quarterlyByKey.get(
+                    `${q.fiscalYear - 1}|${q.fiscalQuarter}`,
+                  );
+                  const growth =
+                    q.revenue !== null &&
+                    prior?.revenue !== null &&
+                    prior?.revenue !== undefined &&
+                    prior.revenue > 0
+                      ? (q.revenue - prior.revenue) / prior.revenue
+                      : null;
+                  const opMargin =
+                    q.operatingIncome !== null &&
+                    q.revenue !== null &&
+                    q.revenue > 0
+                      ? q.operatingIncome / q.revenue
+                      : null;
+                  return (
+                    <tr key={q.periodEnd} className="border-b border-border/30">
+                      <td className="px-1.5 py-1 font-mono">{q.fiscalLabel}</td>
+                      <td className="px-1.5 py-1 text-right font-mono">
+                        {fmtBigDollars(q.revenue)}
+                      </td>
+                      <td
+                        className={`px-1.5 py-1 text-right font-mono ${
+                          growth === null
+                            ? "text-muted-foreground"
+                            : growth >= 0
+                              ? "text-emerald-300"
+                              : "text-rose-300"
+                        }`}
+                      >
+                        {growth === null
+                          ? "—"
+                          : `${growth >= 0 ? "+" : ""}${(growth * 100).toFixed(1)}%`}
+                      </td>
+                      <td className="px-1.5 py-1 text-right font-mono">
+                        {opMargin === null ? "—" : `${(opMargin * 100).toFixed(1)}%`}
+                      </td>
+                      <td className="px-1.5 py-1 text-right font-mono">
+                        {q.eps === null ? "—" : `$${q.eps.toFixed(2)}`}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            {data.ttmRevenue !== null && data.ttmRevenue !== undefined && (
+              <div className="mt-2 text-[10px] text-muted-foreground">
+                TTM revenue (last 4 quarters): {fmtBigDollars(data.ttmRevenue)}
+                {" — used as base revenue in the valuation model."}
+              </div>
+            )}
+          </div>
+        </Section>
+      )}
 
       <Section title="Current metrics (Yahoo)">
         <div className="grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-3">
