@@ -54,7 +54,7 @@ For each options row:
 - symbol: the ticker in the Symbol column (e.g. NOW, GE, TSLA)
 - strike: the number before PUT or CALL in StrikeType column. Strike prices are always 3-4 digits before the decimal for stocks trading above $100. If you see a strike like 47.5 or 47.50 for a stock trading above $100, it is likely 347.5 or 347.50 — re-read the full strike price carefully from the StrikeType column.
 - optionType: 'put' or 'call' from StrikeType column
-- expiry: convert the Exp date to YYYY-MM-DD format
+- expiry: the Exp column uses 'D MMM YY' or 'DD MMM YY' format — the number BEFORE the month is the DAY OF MONTH, the two-digit number AFTER the month is the YEAR (add 2000 to get the four-digit year). Examples: '1 MAY 26' = 2026-05-01 (May 1, 2026, NOT May 26); '26 MAY 26' = 2026-05-26 (May 26, 2026); '24 APR 26' = 2026-04-24. Single-digit days (1, 2, …, 9) appear without a leading zero — do not confuse them with a year suffix. Return the result in YYYY-MM-DD format.
 - premium: the Price column value
 - timePlaced: YYYY-MM-DD from the Time Placed column (first column). Drop the time-of-day portion — date only.
 

@@ -116,6 +116,13 @@ export async function POST(req: NextRequest) {
 
     try {
       // 1. Find or create the position.
+      // Exact match on (symbol, strike, expiry, broker) is the happy
+      // path. For close fills, fall back to a fuzzy match on
+      // (symbol, strike, broker, status='open') and pick the nearest
+      // expiry — the parser may have read the date a day or two off
+      // (e.g. "1 MAY 26" vs "26 MAY 26"), and a brand-new "open"
+      // position from a close fill would create a phantom row with
+      // negative remaining contracts.
       const { data: findData, error: fErr } = await supabase
         .from("positions")
         .select("*")
@@ -128,14 +135,56 @@ export async function POST(req: NextRequest) {
         errors.push(`${input.symbol}: find failed — ${fErr.message}`);
         continue;
       }
-      const existing = (findData ?? []) as PositionRow[];
+      let existing = (findData ?? []) as PositionRow[];
+
+      // Close-fill fuzzy fallback. Same-symbol-and-strike-and-broker
+      // open positions, ranked by |expiry diff|, smallest wins. We
+      // only do this for closes — opens never collapse onto a
+      // mismatched expiry, the trader could be opening a new tenor.
+      if (existing.length === 0 && input.action === "close") {
+        const { data: openCandidatesRaw, error: cErr } = await supabase
+          .from("positions")
+          .select("*")
+          .eq("symbol", symbol)
+          .eq("strike", input.strike)
+          .eq("broker", broker)
+          .eq("status", "open");
+        if (cErr) {
+          errors.push(`${input.symbol}: close-match find failed — ${cErr.message}`);
+          continue;
+        }
+        const candidates = (openCandidatesRaw ?? []) as PositionRow[];
+        if (candidates.length > 0) {
+          const targetMs = new Date(expiry + "T00:00:00Z").getTime();
+          const nearest = candidates.reduce((best, c) => {
+            const cMs = new Date(c.expiry + "T00:00:00Z").getTime();
+            const bMs = new Date(best.expiry + "T00:00:00Z").getTime();
+            return Math.abs(cMs - targetMs) < Math.abs(bMs - targetMs) ? c : best;
+          });
+          if (nearest.expiry !== expiry) {
+            console.warn(
+              `[bulk-create] ${symbol} close fill expiry ${expiry} routed to open position with expiry ${nearest.expiry}`,
+            );
+          }
+          existing = [nearest];
+        }
+      }
 
       let positionId: string;
       if (existing.length > 0) {
         positionId = existing[0].id;
+      } else if (input.action === "close") {
+        // Orphan close fill — no matching open position at all. Don't
+        // mint a phantom row; surface the error and let the user
+        // re-import or manually open the position first.
+        errors.push(
+          `${symbol}: close fill found no matching open position (strike=${input.strike}, broker=${broker}, expiry=${expiry})`,
+        );
+        continue;
       } else {
-        // New position. total_contracts/avg_premium_sold get set to real
-        // values by the recompute step below — we just need valid defaults.
+        // New position from an OPEN fill. total_contracts /
+        // avg_premium_sold get set to real values by the recompute
+        // step below — we just need valid defaults.
         const { data: insertedRaw, error: iErr } = await supabase
           .from("positions")
           .insert({
