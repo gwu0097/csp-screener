@@ -358,7 +358,22 @@ export function ResearchStockView({ symbol }: { symbol: string }) {
           <ValuationTab symbol={symbol} />
         </TabsContent>
         <TabsContent value="tenk">
-          <SecFilingsTab symbol={symbol} healthMod={healthMod} />
+          <SecFilingsTab
+            symbol={symbol}
+            healthMod={healthMod}
+            onRefreshHealth={async () => {
+              const res = await fetch(
+                `/api/research/${encodeURIComponent(symbol)}/fundamental-health`,
+                { method: "POST", cache: "no-store" },
+              );
+              if (res.ok) {
+                const json = (await res.json()) as {
+                  module: ModuleEnvelope<FundamentalHealth>;
+                };
+                setHealthMod(json.module);
+              }
+            }}
+          />
         </TabsContent>
         <TabsContent value="risk">
           <RiskTab symbol={symbol} />

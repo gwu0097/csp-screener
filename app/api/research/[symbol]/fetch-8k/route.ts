@@ -64,6 +64,13 @@ type ExtractedRelease = {
   op_income_millions?: number | null;
   op_margin_pct?: number | null;
   net_margin_pct?: number | null;
+  // Many fintech / SaaS / consumer issuers don't disclose GAAP operating
+  // income on the press release headline — they report Adj EBITDA
+  // instead. Pulling it as a top-level field (rather than burying it in
+  // key_metrics) lets the card surface it deterministically as a fallback
+  // for op_income.
+  adj_ebitda_millions?: number | null;
+  adj_ebitda_growth_pct?: number | null;
   guidance_notes?: string | null;
   key_metrics?: Record<string, unknown> | null;
 };
@@ -82,14 +89,16 @@ Return ONLY a single JSON object, no prose, no markdown fences, with these field
   "revenue_growth_pct": number (year-over-year, percent — e.g. 15 not 0.15),
   "net_income_millions": number (USD millions; negative for a loss),
   "eps_diluted": number (USD/share; negative for a loss),
-  "op_income_millions": number (USD millions; null if not disclosed),
+  "op_income_millions": number (USD millions; null if GAAP operating income isn't disclosed),
   "op_margin_pct": number (percent; null if not disclosed),
   "net_margin_pct": number (percent; null if not disclosed),
+  "adj_ebitda_millions": number (USD millions; adjusted EBITDA / non-GAAP EBITDA if the release reports it; null otherwise),
+  "adj_ebitda_growth_pct": number (year-over-year percent for Adj EBITDA; null if not stated),
   "guidance_notes": one short paragraph summarizing forward guidance the company gave (next quarter, full-year, expense plan, etc.); null if no guidance,
   "key_metrics": {} object holding any other notable company-specific KPIs the release highlighted (e.g. funded customers, ARR, daily active users, net deposits, subscriber count, segment revenue) as { snake_case_name: number } — keep the keys descriptive but short
 }
 
-Use null for fields the press release truly doesn't disclose. Don't invent numbers. If multiple revenue lines appear, use TOTAL net revenues / total revenues for "revenue_millions".
+Use null for fields the press release truly doesn't disclose. Don't invent numbers. If multiple revenue lines appear, use TOTAL net revenues / total revenues for "revenue_millions". Adj EBITDA is the non-GAAP earnings figure that adds back interest, taxes, depreciation, amortization, and other adjustments — only fill it if the release explicitly labels a number "Adjusted EBITDA" (or equivalent like "Adjusted EBITDA (non-GAAP)").
 
 Press release text (may be truncated):
 """
@@ -255,6 +264,19 @@ export async function POST(
   }
   const reportedDate = str(parsed.reported_date) ?? chosen.filingDate;
 
+  // Merge Adj EBITDA into raw_metrics (the schema doesn't carry a typed
+  // column for it, but the UI looks here as a fallback when op_income
+  // is null). Other key_metrics from the model layer on top.
+  const rawMetrics: Record<string, unknown> = {
+    ...(parsed.key_metrics ?? {}),
+  };
+  const adjEbitda = num(parsed.adj_ebitda_millions);
+  if (adjEbitda !== null) rawMetrics.adj_ebitda = adjEbitda;
+  const adjEbitdaGrowth = num(parsed.adj_ebitda_growth_pct);
+  if (adjEbitdaGrowth !== null) {
+    rawMetrics.adj_ebitda_growth_pct = adjEbitdaGrowth;
+  }
+
   const row = {
     symbol,
     quarter,
@@ -269,7 +291,7 @@ export async function POST(
     net_margin_pct: num(parsed.net_margin_pct),
     eps_diluted: num(parsed.eps_diluted),
     guidance_notes: str(parsed.guidance_notes),
-    raw_metrics: parsed.key_metrics ?? null,
+    raw_metrics: Object.keys(rawMetrics).length > 0 ? rawMetrics : null,
     source: "8-K",
   };
 

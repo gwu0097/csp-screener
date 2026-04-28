@@ -73,13 +73,21 @@ function pctColor(n: number | null | undefined): string {
 export function SecFilingsTab({
   symbol,
   healthMod,
+  onRefreshHealth,
 }: {
   symbol: string;
   healthMod: HealthModule;
+  // Optional callback to re-run the fundamental-health POST and update
+  // the parent's healthMod state. Drives the "Refresh" button next to
+  // the Quarterly Reports header — needed when an EDGAR-side fix to
+  // the extractor (e.g. the endYear keying patch) hasn't taken effect
+  // for cached saved modules yet.
+  onRefreshHealth?: () => Promise<void>;
 }) {
   const [releases, setReleases] = useState<EarningsReleaseRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [fetching, setFetching] = useState(false);
+  const [refreshingHealth, setRefreshingHealth] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
 
@@ -209,13 +217,48 @@ export function SecFilingsTab({
 
       {/* ---------- Quarterly Reports (10-Q) ---------- */}
       <section className="rounded-md border border-border bg-background/40 p-3">
-        <div className="mb-2">
-          <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-            Quarterly reports (10-Q)
+        <div className="mb-2 flex items-start justify-between gap-2">
+          <div>
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+              Quarterly reports (10-Q)
+            </div>
+            <div className="text-[11px] text-muted-foreground/80">
+              Pulled from EDGAR companyfacts in the fundamental-health
+              module. If the period-end dates look wrong, click Refresh to
+              re-run the extractor.
+            </div>
           </div>
-          <div className="text-[11px] text-muted-foreground/80">
-            Pulled from EDGAR companyfacts in the fundamental-health module.
-          </div>
+          {onRefreshHealth && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={refreshingHealth}
+              onClick={async () => {
+                setRefreshingHealth(true);
+                setError(null);
+                try {
+                  await onRefreshHealth();
+                } catch (e) {
+                  setError(e instanceof Error ? e.message : "Refresh failed");
+                } finally {
+                  setRefreshingHealth(false);
+                }
+              }}
+            >
+              {refreshingHealth ? (
+                <>
+                  <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                  Refreshing…
+                </>
+              ) : (
+                <>
+                  <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
+                  Refresh
+                </>
+              )}
+            </Button>
+          )}
         </div>
         {!healthMod?.output ? (
           <div className="text-[11px] text-muted-foreground">
@@ -287,10 +330,23 @@ function ReleaseCard({ r }: { r: EarningsReleaseRow }) {
     r.accession_number !== null
       ? `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&filenum=&CIK=${r.symbol}&type=8-K&dateb=&owner=include&count=10`
       : null;
-  const km = r.raw_metrics ?? {};
-  // Show up to 4 raw_metrics entries inline below the headline numbers,
-  // formatted as "label: value" with light-touch coercion.
-  const rawEntries = Object.entries(km).slice(0, 4);
+  const km = (r.raw_metrics ?? {}) as Record<string, unknown>;
+  // Adj EBITDA fallback when GAAP op_income isn't disclosed (common
+  // for fintech / consumer issuers like HOOD that report
+  // "Adjusted EBITDA (non-GAAP)" in the press release headline).
+  const adjEbitda =
+    typeof km.adj_ebitda === "number" ? (km.adj_ebitda as number) : null;
+  const adjEbitdaGrowth =
+    typeof km.adj_ebitda_growth_pct === "number"
+      ? (km.adj_ebitda_growth_pct as number)
+      : null;
+  const useAdjEbitda = r.op_income === null && adjEbitda !== null;
+  // Render raw_metrics inline but skip the keys we already surface in
+  // the headline grid so the secondary line doesn't duplicate.
+  const SUPPRESSED = new Set(["adj_ebitda", "adj_ebitda_growth_pct"]);
+  const rawEntries = Object.entries(km)
+    .filter(([k]) => !SUPPRESSED.has(k))
+    .slice(0, 4);
 
   return (
     <div className="rounded-md border border-border bg-background/60 p-3">
@@ -336,12 +392,27 @@ function ReleaseCard({ r }: { r: EarningsReleaseRow }) {
             r.eps_diluted !== null && r.eps_diluted < 0 ? "text-rose-300" : ""
           }
         />
-        <Stat label="Op income" value={fmtMillions(r.op_income)} />
-        <Stat
-          label="Op margin"
-          value={fmtPct(r.op_margin_pct, false)}
-          valueClass="text-foreground"
-        />
+        {useAdjEbitda ? (
+          <Stat
+            label="Adj EBITDA"
+            value={fmtMillions(adjEbitda)}
+          />
+        ) : (
+          <Stat label="Op income" value={fmtMillions(r.op_income)} />
+        )}
+        {useAdjEbitda ? (
+          <Stat
+            label="EBITDA growth"
+            value={fmtPct(adjEbitdaGrowth)}
+            valueClass={pctColor(adjEbitdaGrowth)}
+          />
+        ) : (
+          <Stat
+            label="Op margin"
+            value={fmtPct(r.op_margin_pct, false)}
+            valueClass="text-foreground"
+          />
+        )}
         <Stat
           label="Net margin"
           value={fmtPct(r.net_margin_pct, false)}
