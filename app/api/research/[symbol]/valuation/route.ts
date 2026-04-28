@@ -94,6 +94,12 @@ type YahooBag = {
   // surfaced on the Market Context strip in the UI.
   revenueGrowthTTM: number | null;
   earningsGrowthTTM: number | null;
+  // Analyst long-term EPS growth estimate (5-year) from Yahoo's
+  // earningsTrend module. The canonical denominator for PEG — TTM
+  // earnings growth on a turnaround name (SPOT +213%) breaks PEG
+  // math; the long-term estimate is what analysts actually project.
+  // Falls back to next-year (+1y) EPS growth if +5y isn't published.
+  analystEpsGrowthLT: number | null;
 };
 
 async function fetchYahooBag(symbol: string): Promise<YahooBag> {
@@ -110,6 +116,7 @@ async function fetchYahooBag(symbol: string): Promise<YahooBag> {
             "summaryDetail",
             "assetProfile",
             "price",
+            "earningsTrend",
           ],
         },
         MODULE_OPTS,
@@ -125,6 +132,24 @@ async function fetchYahooBag(symbol: string): Promise<YahooBag> {
   const sd = ((summary?.summaryDetail ?? {}) as Record<string, unknown>) ?? {};
   const ap = ((summary?.assetProfile ?? {}) as Record<string, unknown>) ?? {};
   const price = ((summary?.price ?? {}) as Record<string, unknown>) ?? {};
+
+  // earningsTrend.trend is an array of analyst-estimate rows by period
+  // (-1q, 0q, +1q, 0y, +1y, +5y). The +5y row carries the long-term
+  // EPS growth estimate that PEG was designed for; +1y is the
+  // shorter-horizon fallback when +5y isn't published.
+  const trend = (summary?.earningsTrend ?? {}) as Record<string, unknown>;
+  const trendList = Array.isArray((trend as { trend?: unknown }).trend)
+    ? ((trend as { trend: unknown[] }).trend as Array<Record<string, unknown>>)
+    : [];
+  function pickGrowthForPeriod(period: string): number | null {
+    const row = trendList.find(
+      (r) => (r as { period?: unknown }).period === period,
+    );
+    if (!row) return null;
+    return unwrapNumber(row.growth);
+  }
+  const analystEpsGrowthLT =
+    pickGrowthForPeriod("+5y") ?? pickGrowthForPeriod("+1y");
 
   const currentPrice =
     unwrapNumber(fd.currentPrice) ??
@@ -151,6 +176,7 @@ async function fetchYahooBag(symbol: string): Promise<YahooBag> {
     sector: typeof ap.sector === "string" ? (ap.sector as string) : null,
     revenueGrowthTTM: unwrapNumber(fd.revenueGrowth),
     earningsGrowthTTM: unwrapNumber(fd.earningsGrowth),
+    analystEpsGrowthLT,
   };
 }
 
@@ -376,11 +402,12 @@ export async function POST(
     const category = classifyStock({
       forwardPE: yh.forwardPE,
       revenueGrowthTTM: yh.revenueGrowthTTM,
+      earningsGrowthTTM: yh.earningsGrowthTTM,
       netIncome: lastAnnual?.netIncome ?? null,
       eps: lastAnnual?.eps ?? null,
     });
     console.log(
-      `[valuation:${symbol}] classified as '${category}' (fwdPE=${yh.forwardPE} ttmRevGrowth=${yh.revenueGrowthTTM} lastNI=${lastAnnual?.netIncome} lastEPS=${lastAnnual?.eps})`,
+      `[valuation:${symbol}] classified as '${category}' (fwdPE=${yh.forwardPE} ttmRevGrowth=${yh.revenueGrowthTTM} ttmEpsGrowth=${yh.earningsGrowthTTM} lastNI=${lastAnnual?.netIncome} lastEPS=${lastAnnual?.eps})`,
     );
 
     const tier1System: ScenarioSet = recommendTier1({
@@ -454,6 +481,7 @@ export async function POST(
       forward_eps: yh.forwardEps,
       revenue_growth_ttm: yh.revenueGrowthTTM,
       earnings_growth_ttm: yh.earningsGrowthTTM,
+      analyst_eps_growth_lt: yh.analystEpsGrowthLT,
       tier1: {
         system: tier1System,
         user: tier1User,

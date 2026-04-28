@@ -760,18 +760,30 @@ function KvLine({
 
 // ---------- PEG Ratio tab ----------
 
-// Estimate the EPS growth rate for a PEG calculation. Order of
-// preference:
-//   1. Yahoo earningsGrowth TTM (the "G" in classic PEG)
-//   2. revenueGrowth TTM as a fallback
-//   3. The base scenario's projected revenue growth from Tier 1
+// PEG growth source. The denominator in `PEG = P/E ÷ growth` is meant
+// to be the SUSTAINABLE forward growth rate — analyst long-term EPS
+// growth is the canonical input. TTM earnings growth distorts wildly
+// on turnarounds (SPOT 2024-25: -$2.73 EPS → +$5.67 EPS = +213% YoY,
+// which would imply PEG ~0.12 and an absurd "fair" P/E of 213×). We
+// also cap any TTM-derived rate at 50% as a final guardrail.
+//
+// Order of preference:
+//   1. analyst_eps_growth_lt (Yahoo earningsTrend +5y, else +1y)
+//   2. revenue_growth_ttm  (more stable than EPS TTM through cycles)
+//   3. earnings_growth_ttm capped at 0.50
+//   4. tier1 base scenario's projected rev_growth_y1
 //
 // All inputs are decimal fractions (0.15 = 15%).
+const TTM_GROWTH_CAP = 0.5;
 function pegGrowthRate(model: ValuationModelV2): number | null {
-  const eg = model.earnings_growth_ttm;
-  if (typeof eg === "number" && Number.isFinite(eg) && eg > 0) return eg;
+  const lt = model.analyst_eps_growth_lt;
+  if (typeof lt === "number" && Number.isFinite(lt) && lt > 0) return lt;
   const rg = model.revenue_growth_ttm;
   if (typeof rg === "number" && Number.isFinite(rg) && rg > 0) return rg;
+  const eg = model.earnings_growth_ttm;
+  if (typeof eg === "number" && Number.isFinite(eg) && eg > 0) {
+    return Math.min(eg, TTM_GROWTH_CAP);
+  }
   const tier1Base = model.tier1?.user?.base?.rev_growth_y1;
   if (typeof tier1Base === "number" && Number.isFinite(tier1Base) && tier1Base > 0)
     return tier1Base;

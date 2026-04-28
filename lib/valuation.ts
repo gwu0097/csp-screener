@@ -214,6 +214,11 @@ export type ValuationModelV2 = {
   forward_eps?: number | null;
   revenue_growth_ttm?: number | null;
   earnings_growth_ttm?: number | null;
+  // Analyst long-term EPS growth (5-year if available, else 1-year)
+  // — the canonical PEG denominator. TTM earnings growth distorts on
+  // turnaround names where the prior period was negative; this field
+  // gives the projected sustainable rate.
+  analyst_eps_growth_lt?: number | null;
 };
 
 export type ValuationCategory = "growth" | "value" | "blend" | "pre_profit";
@@ -223,19 +228,27 @@ export type ValuationCategory = "growth" | "value" | "blend" | "pre_profit";
 // AFTER the growth gate so a high-flying unprofitable growth name
 // (RBLX, PLTR pre-2023, etc.) lands in 'growth' rather than
 // 'pre_profit'. Inputs are decimal fractions (e.g. 0.20 for 20%).
+//
+// Growth gate is intentionally permissive — any of fwdPE > 25, revenue
+// > 15%, or earnings > 20% is enough. SPOT (fwdPE 25.8, rev +6.8%,
+// EPS +213% post-turnaround) misses on revenue growth alone but its
+// earnings ramp clearly pegs it as growth, so the EPS gate catches it.
 export function classifyStock(args: {
   forwardPE: number | null;
   revenueGrowthTTM: number | null;
+  earningsGrowthTTM?: number | null;
   netIncome: number | null;
   eps: number | null;
 }): ValuationCategory {
   const fp = args.forwardPE;
   const rg = args.revenueGrowthTTM;
+  const eg = args.earningsGrowthTTM ?? null;
   const ni = args.netIncome;
   const eps = args.eps;
   const isGrowth =
-    (typeof fp === "number" && fp > 30) ||
-    (typeof rg === "number" && rg > 0.2);
+    (typeof fp === "number" && fp > 25) ||
+    (typeof rg === "number" && rg > 0.15) ||
+    (typeof eg === "number" && eg > 0.2);
   if (isGrowth) return "growth";
   const isValue =
     typeof fp === "number" &&
