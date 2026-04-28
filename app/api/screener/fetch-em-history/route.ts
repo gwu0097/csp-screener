@@ -26,7 +26,13 @@ const POLYGON_DEPTH_CUTOFF = "2024-06-01";
 const SLEEP_BETWEEN_AGGS_MS = 13_000;
 const RATE_LIMIT_BACKOFF_MS = 60_000;
 const EVENTS_PER_CALL = 2;
-const STRIKE_BAND = 0.05;
+// Primary strike band ±5% (matches bulk-polygon-em.ts default for the
+// HOOD-style reruns) with an ±8% fallback for high-priced names where
+// strikes are wider — e.g. BKNG-class tickers where the ±5% band can
+// land between listed strikes when only the third-Friday weekly is
+// listed for that earnings week.
+const STRIKE_BAND_PRIMARY = 0.05;
+const STRIKE_BAND_FALLBACK = 0.08;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -123,17 +129,21 @@ type ProcessOutcome =
   | { kind: "skip_no_data"; reason: string }
   | { kind: "error"; reason: string };
 
-async function processEvent(row: EarningsRow): Promise<ProcessOutcome> {
-  const { symbol, earnings_date } = row;
-  const spot = row.price_before;
-  if (spot === null || !Number.isFinite(spot) || spot <= 0) {
-    return { kind: "skip_no_data", reason: "price_before missing" };
-  }
-  const priorClose = priorBusinessDayIso(earnings_date);
-  const expiry = nextFridayOnOrAfter(earnings_date);
+type ContractsAttempt =
+  | { kind: "ok"; list: NonNullable<Contracts["results"]>; band: number; lo: number; hi: number }
+  | { kind: "too_old" }
+  | { kind: "error"; reason: string }
+  | { kind: "empty"; band: number; lo: number; hi: number };
 
-  const lo = Math.floor(spot * (1 - STRIKE_BAND));
-  const hi = Math.ceil(spot * (1 + STRIKE_BAND));
+async function fetchContractsForBand(
+  symbol: string,
+  expiry: string,
+  priorClose: string,
+  spot: number,
+  band: number,
+): Promise<ContractsAttempt> {
+  const lo = Math.floor(spot * (1 - band));
+  const hi = Math.ceil(spot * (1 + band));
   const contracts = await poly<Contracts>(
     `/v3/reference/options/contracts`,
     {
@@ -146,7 +156,7 @@ async function processEvent(row: EarningsRow): Promise<ProcessOutcome> {
       limit: 50,
     },
   );
-  if (contracts.status === 403) return { kind: "skip_too_old" };
+  if (contracts.status === 403) return { kind: "too_old" };
   if (contracts.status !== 200) {
     return {
       kind: "error",
@@ -154,12 +164,48 @@ async function processEvent(row: EarningsRow): Promise<ProcessOutcome> {
     };
   }
   const list = contracts.body?.results ?? [];
-  if (list.length === 0) {
+  if (list.length === 0) return { kind: "empty", band, lo, hi };
+  return { kind: "ok", list, band, lo, hi };
+}
+
+async function processEvent(row: EarningsRow): Promise<ProcessOutcome> {
+  const { symbol, earnings_date } = row;
+  const spot = row.price_before;
+  if (spot === null || !Number.isFinite(spot) || spot <= 0) {
+    return { kind: "skip_no_data", reason: "price_before missing" };
+  }
+  const priorClose = priorBusinessDayIso(earnings_date);
+  const expiry = nextFridayOnOrAfter(earnings_date);
+
+  // Try the ±5% band first; fall back to ±8% if no listed strikes
+  // landed inside (high-priced names with wide strike spacing).
+  let attempt = await fetchContractsForBand(
+    symbol,
+    expiry,
+    priorClose,
+    spot,
+    STRIKE_BAND_PRIMARY,
+  );
+  if (attempt.kind === "empty") {
+    attempt = await fetchContractsForBand(
+      symbol,
+      expiry,
+      priorClose,
+      spot,
+      STRIKE_BAND_FALLBACK,
+    );
+  }
+  if (attempt.kind === "too_old") return { kind: "skip_too_old" };
+  if (attempt.kind === "error") {
+    return { kind: "error", reason: attempt.reason };
+  }
+  if (attempt.kind === "empty") {
     return {
       kind: "skip_no_contracts",
-      reason: `no contracts in $${lo}-$${hi} band on ${expiry}`,
+      reason: `no contracts in $${attempt.lo}-$${attempt.hi} band (±${(attempt.band * 100).toFixed(0)}%) on ${expiry}`,
     };
   }
+  const list = attempt.list;
   const strikes = list
     .map((c) => c.strike_price)
     .filter((s): s is number => typeof s === "number");
