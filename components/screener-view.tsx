@@ -870,6 +870,22 @@ export function ScreenerView({ connected }: Props) {
     if (fullyDone) setScreenIsGraded(true);
   }
 
+  // Row-level spinner control: a row keeps its spinner until BOTH
+  // streams have finished its key. Derived from the pending sets so
+  // there's a single source of truth for "still analyzing."
+  function recomputeRowSpinners(ctx: StreamCtx) {
+    const stillAnalyzing = new Set<string>();
+    ctx.pendingNews.forEach((key) => {
+      const sym = key.split("|")[0]?.toUpperCase();
+      if (sym) stillAnalyzing.add(sym);
+    });
+    ctx.pendingGrade.forEach((key) => {
+      const sym = key.split("|")[0]?.toUpperCase();
+      if (sym) stillAnalyzing.add(sym);
+    });
+    setAnalyzingSymbols(stillAnalyzing);
+  }
+
   // News stream — calls /api/screener/analyze/pass3a in batches of
   // size getAdaptiveBatchSize('perplexity'). On a non-2xx (typically
   // a 60s timeout) the helper halves its batch size and retries the
@@ -917,6 +933,7 @@ export function ScreenerView({ connected }: Props) {
           ctx.pendingNews.delete(row.key);
         }
         setPendingNewsKeys(new Set(ctx.pendingNews));
+        recomputeRowSpinners(ctx);
         cursor += batch.length;
         i += 1;
         success = true;
@@ -1037,6 +1054,7 @@ export function ScreenerView({ connected }: Props) {
           ctx.pendingGrade.delete(`${c.symbol}|${c.earningsDate}`);
         }
         setPendingGradeKeys(new Set(ctx.pendingGrade));
+        recomputeRowSpinners(ctx);
         setResults([...ctx.workingResults]);
         setGroupMode(null);
         ctx.summary.scored += json.scoredCount ?? json.results.length;
@@ -2520,6 +2538,20 @@ function StreamProgressPanel({
 }) {
   const total = news?.total ?? grade?.total ?? 0;
   const allDone = pendingNews === 0 && pendingGrade === 0;
+  // "Fully graded" = no pending key in either stream. Only counts
+  // stocks that have completed BOTH Perplexity AND Grade — the
+  // per-stream done counts on the rows below stay independent so
+  // the user can see which stream is the bottleneck, but the
+  // headline number reflects the actual gating progress.
+  const fullyGraded = (() => {
+    if (total === 0) return 0;
+    // Rough derivation: total minus the union of pending keys. The
+    // panel doesn't have the underlying sets, so use the per-stream
+    // pending counts as a conservative proxy — a key is in EITHER
+    // pending set if it's not fully graded.
+    const stillPending = Math.max(pendingNews, pendingGrade);
+    return Math.max(0, total - stillPending);
+  })();
   return (
     <div className="rounded-lg border border-sky-500/30 bg-sky-500/5 p-3 text-xs text-sky-100">
       <div className="mb-2 flex items-center justify-between gap-2">
@@ -2531,11 +2563,21 @@ function StreamProgressPanel({
           ) : (
             <AlertTriangle className="h-3.5 w-3.5 text-amber-300" />
           )}
-          {running
-            ? `Analyzing ${total} candidate${total === 1 ? "" : "s"}…`
-            : allDone
-              ? `Analysis complete — ${total}/${total} graded`
-              : `Partial analysis — ${pendingNews + pendingGrade} pending`}
+          {running ? (
+            <>
+              Analyzing {total} candidate{total === 1 ? "" : "s"}
+              <span className="ml-1 text-sky-300/80">
+                · {fullyGraded}/{total} fully graded
+              </span>
+            </>
+          ) : allDone ? (
+            <>Analysis complete — {total}/{total} graded</>
+          ) : (
+            <>
+              Partial analysis — {fullyGraded}/{total} fully graded ·{" "}
+              {pendingNews + pendingGrade} key{pendingNews + pendingGrade === 1 ? "" : "s"} pending
+            </>
+          )}
         </div>
         {!running && (
           <button
