@@ -65,7 +65,6 @@ const INTELLIGENCE_GROUP: NavGroup = {
   label: "Intelligence",
   basePath: "/intelligence",
   subItems: [
-    { href: "/intelligence/performance", label: "Performance" },
     { href: "/intelligence/efficiency", label: "Efficiency" },
     { href: "/intelligence/patterns", label: "Patterns" },
   ],
@@ -225,6 +224,23 @@ export function Sidebar() {
             onToggle={() => toggleGroup(SCREENER_GROUP.key)}
           />
           <SidebarLink item={POSITIONS} pathname={pathname} />
+          {/* Performance is conceptually part of the Positions section
+              — it summarises the equity curve and per-trade ROC built
+              from the positions table. Indented sub-link, visible on
+              mobile drawer + desktop, hidden in the icon-only tablet
+              rail (no room for indented labels). */}
+          <Link
+            href="/intelligence/performance"
+            className={cn(
+              "rounded-md py-1.5 pl-11 pr-3 text-sm",
+              subActive(pathname, "/intelligence/performance")
+                ? "bg-white/5 font-medium text-white"
+                : "text-gray-500 hover:text-gray-200",
+              "block md:hidden lg:block",
+            )}
+          >
+            Performance
+          </Link>
           <CollapsibleGroup
             group={INTELLIGENCE_GROUP}
             pathname={pathname}
