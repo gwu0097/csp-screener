@@ -83,10 +83,83 @@ export function CrushHistoryTable({
   todaySymbol: string;
   todayEarningsDate: string;
 }) {
-  if (!events || events.length === 0) return null;
+  const [refreshed, setRefreshed] = useState<CrushHistoryEvent[] | null>(null);
+  const [fetchStatus, setFetchStatus] = useState<"idle" | "fetching" | "done" | "error">("idle");
+  const [populatedCount, setPopulatedCount] = useState(0);
+  const [fetchProgress, setFetchProgress] = useState<string | null>(null);
+  const [fetchError, setFetchError] = useState<string | null>(null);
+
+  const liveEvents = refreshed ?? events ?? null;
+  if (!liveEvents || liveEvents.length === 0) return null;
 
   // Sort newest first; today's pending row goes at the bottom.
-  const sorted = [...events].sort((a, b) => b.earningsDate.localeCompare(a.earningsDate));
+  const sorted = [...liveEvents].sort((a, b) => b.earningsDate.localeCompare(a.earningsDate));
+  const missingEmCount = sorted.filter(
+    (e) => e.actualMovePct !== null && e.impliedMovePct === null,
+  ).length;
+
+  async function handleFetchEmHistory() {
+    setFetchStatus("fetching");
+    setFetchError(null);
+    setPopulatedCount(0);
+    setFetchProgress(null);
+    let totalPopulated = 0;
+    let lastRemaining = Number.POSITIVE_INFINITY;
+    // Loop until backend reports remainingMissing===0. Bail out if a
+    // call makes no progress (avoids infinite loop on persistent skips
+    // like "outside 24-month window").
+    for (let i = 0; i < 12; i++) {
+      try {
+        const res = await fetch("/api/screener/fetch-em-history", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ symbol: todaySymbol }),
+          cache: "no-store",
+        });
+        const json = (await res.json()) as
+          | {
+              populated: number;
+              skipped: number;
+              remainingMissing: number;
+              processed: number;
+              totalMissingAtStart: number;
+              events: CrushHistoryEvent[];
+              messages: string[];
+            }
+          | { error: string };
+        if (!res.ok || !("events" in json)) {
+          setFetchStatus("error");
+          setFetchError("error" in json ? json.error : `HTTP ${res.status}`);
+          return;
+        }
+        totalPopulated += json.populated;
+        setPopulatedCount(totalPopulated);
+        setRefreshed(json.events);
+        setFetchProgress(
+          json.remainingMissing > 0
+            ? `Populated ${totalPopulated} · ${json.remainingMissing} remaining…`
+            : null,
+        );
+        if (json.remainingMissing === 0) {
+          setFetchStatus("done");
+          return;
+        }
+        if (json.remainingMissing >= lastRemaining) {
+          // No progress — every remaining row is being skipped
+          // (e.g. outside Polygon's 24-month window). Stop.
+          setFetchStatus("done");
+          return;
+        }
+        lastRemaining = json.remainingMissing;
+      } catch (e) {
+        setFetchStatus("error");
+        setFetchError(e instanceof Error ? e.message : "Network error");
+        return;
+      }
+    }
+    setFetchStatus("done");
+  }
+
   const similar: CrushHistoryEvent[] = [];
   if (todayEmPct !== null) {
     for (const e of sorted) {
@@ -121,9 +194,42 @@ export function CrushHistoryTable({
 
   return (
     <div className="rounded-md border border-border bg-background/40 p-3 text-xs">
-      <div className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-        Earnings history
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+          Earnings history
+        </div>
+        {missingEmCount > 0 && fetchStatus !== "done" && (
+          <button
+            type="button"
+            onClick={handleFetchEmHistory}
+            disabled={fetchStatus === "fetching"}
+            className="inline-flex items-center gap-1 rounded border border-border bg-background/60 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-foreground/90 hover:bg-background disabled:opacity-60"
+          >
+            {fetchStatus === "fetching" ? (
+              <>
+                <Loader2 className="h-3 w-3 animate-spin" />
+                Fetching…
+              </>
+            ) : (
+              <>📊 Fetch EM history ({missingEmCount})</>
+            )}
+          </button>
+        )}
+        {fetchStatus === "done" && populatedCount > 0 && (
+          <span className="text-[10px] font-semibold uppercase tracking-wide text-emerald-300">
+            ✓ Populated {populatedCount} {populatedCount === 1 ? "quarter" : "quarters"}
+          </span>
+        )}
       </div>
+      {fetchStatus === "fetching" && fetchProgress && (
+        <div className="mb-2 text-[10px] text-muted-foreground">{fetchProgress}</div>
+      )}
+      {fetchStatus === "error" && fetchError && (
+        <div className="mb-2 flex items-start gap-1 rounded border border-rose-500/40 bg-rose-500/10 p-1.5 text-[10px] text-rose-200">
+          <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+          <span>{fetchError}</span>
+        </div>
+      )}
       <div className="overflow-x-auto rounded border border-border">
         <table className="min-w-full text-[11px]">
           <thead className="bg-background/60">
