@@ -29,15 +29,19 @@ function validSymbol(s: string): boolean {
 }
 
 // Heuristic: an earnings release is the 99.1 exhibit and almost always
-// contains the substring "exhibit991" or "ex991" or "ex99-1" / "ex99_1"
-// in the filename. Fall back to "press" / "earnings" / "results" when
-// the filer uses an idiosyncratic naming scheme.
+// contains some variant of "ex99-1" / "ex991" / "exhibit991" in the
+// filename. Some filers concatenate the word straight after the ticker
+// (HOOD's exhibit is `q12026robinhoodexhibit991.htm`) so we don't
+// require a word boundary before "ex"/"exhibit". Falls back to
+// "press" / "earnings" / "results" for filers using a less standard
+// naming scheme.
 function pickEarningsExhibit(
   files: Array<{ url: string; name: string }>,
 ): { url: string; name: string } | null {
   const lower = files.map((f) => ({ ...f, n: f.name.toLowerCase() }));
   const byPriority = [
-    /(?:^|[^a-z0-9])(?:ex|exhibit)[-_]?99[-_]?1(?:[^a-z0-9]|$)/,
+    // ex991, ex99-1, ex99_1, ex99.1, exhibit991, exhibit99-1, etc.
+    /ex(?:hibit)?[-_.]?99[-_.]?1/,
     /press.*release/,
     /earnings/,
     /results/,
@@ -143,6 +147,7 @@ export async function POST(
   // 1. CIK + recent 8-K list (data.sec.gov is the stable path; the
   //    full-text efts.sec.gov endpoint returns 500 unauthenticated).
   const cik = await getCIK(symbol);
+  console.log(`[fetch-8k] ${symbol}: CIK=${cik ?? "(none)"}`);
   if (!cik) {
     return NextResponse.json(
       { error: "No EDGAR CIK for this symbol" },
@@ -155,6 +160,14 @@ export async function POST(
     const t = new Date(f.filingDate + "T12:00:00Z").getTime();
     return Number.isFinite(t) && t >= cutoff;
   });
+  console.log(
+    `[fetch-8k] ${symbol}: 8-Ks in last 90 days = ${within90.length} of ${recent.length} total. Most recent: ${
+      within90
+        .slice(0, 5)
+        .map((f) => `${f.filingDate} (${f.accessionNumber})`)
+        .join(", ") || "(none)"
+    }`,
+  );
   if (within90.length === 0) {
     return NextResponse.json(
       { error: "No 8-K filed in the last 90 days" },
@@ -170,6 +183,14 @@ export async function POST(
   for (const f of within90) {
     const files = await listFilingFiles(cik, f.accessionNumber);
     const hit = pickEarningsExhibit(files);
+    console.log(
+      `[fetch-8k] ${symbol}: ${f.filingDate} ${f.accessionNumber} — ${files.length} files [${files
+        .map((x) => x.name)
+        .slice(0, 6)
+        .join(", ")}${files.length > 6 ? ", …" : ""}] → ${
+        hit ? `MATCH ${hit.name}` : "no exhibit match"
+      }`,
+    );
     if (hit) {
       chosen = f;
       exhibit = hit;
@@ -178,10 +199,17 @@ export async function POST(
   }
   if (!chosen || !exhibit) {
     return NextResponse.json(
-      { error: "Could not find an earnings press-release exhibit in any recent 8-K" },
+      {
+        error:
+          "Could not find an earnings press-release exhibit in any recent 8-K",
+        scanned: within90.length,
+      },
       { status: 404 },
     );
   }
+  console.log(
+    `[fetch-8k] ${symbol}: chose ${chosen.accessionNumber} exhibit=${exhibit.name}`,
+  );
 
   // 3. Fetch the exhibit text and ask Perplexity to extract.
   const pressText = await fetchFilingTextPlain(exhibit.url, 60_000);

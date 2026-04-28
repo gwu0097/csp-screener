@@ -554,7 +554,19 @@ function pickBestQuarterlyEntries(
               if (days < 80 || days > 100) continue;
             }
           }
-          const key = `${e.fy}|${e.fp}`;
+          // EDGAR companyfacts attaches the FILING's fiscal year to BOTH
+          // the current period AND the prior-year comparative figures
+          // disclosed in that filing — so HOOD's Q3 2025 10-Q produces
+          // (fy=2025, fp=Q3, end=2025-09-30) AND (fy=2025, fp=Q3,
+          // end=2024-09-30). Keying by `${fy}|${fp}` collides those, and
+          // the latest-filed wins logic lets the prior-year row stomp the
+          // current one. Key by the calendar year of `end` instead so
+          // each unique period gets its own slot. fp is still used to
+          // separate quarters from the FY annual entries that drive Q4
+          // derivation.
+          const endYear = Number(e.end.slice(0, 4));
+          if (!Number.isFinite(endYear)) continue;
+          const key = `${endYear}|${e.fp}`;
           const existing = byKey.get(key);
           if (!existing || (e.filed ?? "") > (existing.filed ?? "")) {
             byKey.set(key, e);
@@ -595,29 +607,29 @@ export function extractQuarterlyMetrics(
     PREFERRED_SHARE_UNITS,
   );
 
-  // Collect every fy that any picker saw — we'll consider Q1..Q4 for
-  // each before filtering out empty rows.
-  const fySet = new Set<number>();
+  // Collect every calendar end-year any picker saw. Keys are now
+  // `${endYear}|${fp}` so split[0] is the calendar year of the period.
+  const yearSet = new Set<number>();
   for (const m of [revenue, opInc, netInc, eps]) {
     for (const k of Array.from(m.byKey.keys())) {
-      const fy = Number(k.split("|")[0]);
-      if (Number.isFinite(fy)) fySet.add(fy);
+      const y = Number(k.split("|")[0]);
+      if (Number.isFinite(y)) yearSet.add(y);
     }
   }
 
   function lookupVal(
     pick: QuarterlyPick,
-    fy: number,
+    year: number,
     q: 1 | 2 | 3 | 4,
   ): number | null {
     if (q < 4) {
-      const e = pick.byKey.get(`${fy}|Q${q}`);
+      const e = pick.byKey.get(`${year}|Q${q}`);
       return typeof e?.val === "number" ? e.val : null;
     }
-    const fyEntry = pick.byKey.get(`${fy}|FY`);
-    const q1 = pick.byKey.get(`${fy}|Q1`);
-    const q2 = pick.byKey.get(`${fy}|Q2`);
-    const q3 = pick.byKey.get(`${fy}|Q3`);
+    const fyEntry = pick.byKey.get(`${year}|FY`);
+    const q1 = pick.byKey.get(`${year}|Q1`);
+    const q2 = pick.byKey.get(`${year}|Q2`);
+    const q3 = pick.byKey.get(`${year}|Q3`);
     if (
       typeof fyEntry?.val !== "number" ||
       typeof q1?.val !== "number" ||
@@ -629,40 +641,40 @@ export function extractQuarterlyMetrics(
     return fyEntry.val - q1.val - q2.val - q3.val;
   }
 
-  function lookupEnd(fy: number, q: 1 | 2 | 3 | 4): string | null {
+  function lookupEnd(year: number, q: 1 | 2 | 3 | 4): string | null {
     if (q < 4) {
       for (const m of [revenue, opInc, netInc, eps]) {
-        const e = m.byKey.get(`${fy}|Q${q}`);
+        const e = m.byKey.get(`${year}|Q${q}`);
         if (e?.end) return e.end;
       }
       return null;
     }
     for (const m of [revenue, opInc, netInc, eps]) {
-      const e = m.byKey.get(`${fy}|FY`);
+      const e = m.byKey.get(`${year}|FY`);
       if (e?.end) return e.end;
     }
     return null;
   }
 
   const built: QuarterlyMetrics[] = [];
-  for (const fy of Array.from(fySet)) {
+  for (const year of Array.from(yearSet)) {
     for (const q of [1, 2, 3, 4] as const) {
-      const end = lookupEnd(fy, q);
+      const end = lookupEnd(year, q);
       if (!end) continue;
-      const rev = lookupVal(revenue, fy, q);
-      const op = lookupVal(opInc, fy, q);
-      const ni = lookupVal(netInc, fy, q);
+      const rev = lookupVal(revenue, year, q);
+      const op = lookupVal(opInc, year, q);
+      const ni = lookupVal(netInc, year, q);
       // Q4 EPS by subtraction is unreliable — see type comment above.
       const epsVal =
         q < 4
-          ? (eps.byKey.get(`${fy}|Q${q}`)?.val ?? null)
+          ? (eps.byKey.get(`${year}|Q${q}`)?.val ?? null)
           : null;
       if (rev === null && op === null && ni === null && epsVal === null) {
         continue;
       }
       built.push({
-        fiscalLabel: `Q${q} ${fy}`,
-        fiscalYear: fy,
+        fiscalLabel: `Q${q} ${year}`,
+        fiscalYear: year,
         fiscalQuarter: q,
         periodEnd: end,
         revenue: rev,
