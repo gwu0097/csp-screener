@@ -865,6 +865,95 @@ export async function fetchFilingTextPlain(
   return stripped.length > maxChars ? stripped.slice(0, maxChars) : stripped;
 }
 
+// Build the full archive URL for a filing's primary document (the
+// `.htm` whose XBRL backs the structured data). Useful for fetching
+// the full 10-Q / 10-K text for downstream extraction.
+export function primaryDocumentUrl(
+  cik: string,
+  accessionNumber: string,
+  primaryDocument: string,
+): string {
+  return `${filingArchiveDirUrl(cik, accessionNumber)}/${primaryDocument}`;
+}
+
+// Find the most-recent filing of a given form. For 10-Q lookups we
+// also accept a `matchPeriodEnd` so the caller can target a specific
+// quarter; falls back to the newest filing when no match is found.
+export async function findFilingByForm(
+  cik: string,
+  forms: string[],
+  matchPeriodEnd?: string | null,
+): Promise<SecFiling | null> {
+  const filings = await getRecentFilings(cik, forms, 25);
+  if (filings.length === 0) return null;
+  if (matchPeriodEnd) {
+    const exact = filings.find((f) => f.reportDate === matchPeriodEnd);
+    if (exact) return exact;
+  }
+  // Filings are returned in submission order (newest first) by EDGAR.
+  return filings[0];
+}
+
+// Strip a chunk of HTML to plain whitespace-normalized text. Used by
+// section extractors that already have the raw HTML in memory.
+export function htmlToText(raw: string): string {
+  return raw
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&#8220;|&#8221;|&ldquo;|&rdquo;/g, '"')
+    .replace(/&#8216;|&#8217;|&lsquo;|&rsquo;/g, "'")
+    .replace(/&#8211;|&#8212;|&ndash;|&mdash;/g, "-")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// Fetch the full text of a filing document (10-Q / 10-K HTML), strip
+// to plain text, and return without the cap that fetchFilingTextPlain
+// applies. Use for downstream regex section extraction where the cap
+// would slice mid-section.
+export async function fetchFilingTextFull(
+  url: string,
+  cap = 2_000_000,
+): Promise<string | null> {
+  let res: Response;
+  try {
+    res = await fetch(url, { headers: DEFAULT_HEADERS, cache: "no-store" });
+  } catch {
+    return null;
+  }
+  if (!res.ok) return null;
+  const raw = await res.text();
+  const stripped = htmlToText(raw);
+  return stripped.length > cap ? stripped.slice(0, cap) : stripped;
+}
+
+// Generic section extractor: locate `headerRegex` in plain text and
+// return everything from the match up to the first hit of
+// `endRegex`, or the rest of the text if no end is found. The header
+// match itself is included so callers can confirm what was extracted.
+//
+// Skips the first 50 chars after the header before searching for the
+// end marker — handles cases where the end-marker pattern overlaps
+// a TOC entry that immediately follows the section header.
+export function extractTextSection(
+  text: string,
+  headerRegex: RegExp,
+  endRegex: RegExp,
+): string | null {
+  const start = text.search(headerRegex);
+  if (start < 0) return null;
+  const tail = text.slice(start);
+  const probe = tail.slice(50);
+  const endRel = probe.search(endRegex);
+  if (endRel < 0) return tail;
+  return tail.slice(0, 50 + endRel);
+}
+
 // TTM revenue from a sorted-newest-first quarterly array. Returns null
 // when fewer than 4 quarters are available OR any of the most recent
 // 4 has a null revenue value.

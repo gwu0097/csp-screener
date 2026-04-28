@@ -7,7 +7,14 @@
 // deep-read distillation.
 
 import { useCallback, useEffect, useState } from "react";
-import { ExternalLink, Loader2, RefreshCw } from "lucide-react";
+import {
+  Check,
+  ClipboardCopy,
+  ExternalLink,
+  Loader2,
+  NotebookPen,
+  RefreshCw,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { EarningsReleaseRow } from "@/app/api/research/[symbol]/earnings-releases/route";
 
@@ -290,6 +297,7 @@ export function SecFilingsTab({
                   <th className="px-1.5 py-1 text-right font-medium">
                     Period end
                   </th>
+                  <th className="px-1.5 py-1 text-right font-medium">Export</th>
                 </tr>
               </thead>
               <tbody>
@@ -331,6 +339,15 @@ export function SecFilingsTab({
                       <td className="px-1.5 py-1 text-right font-mono text-muted-foreground">
                         {fmtMonthYear(q.periodEnd)}
                       </td>
+                      <td className="px-1.5 py-1 text-right">
+                        <ExportFilingButton
+                          symbol={symbol}
+                          type="10-Q"
+                          quarter={q.fiscalLabel}
+                          periodEnd={q.periodEnd}
+                          compact
+                        />
+                      </td>
                     </tr>
                   );
                 })}
@@ -346,15 +363,20 @@ export function SecFilingsTab({
 
       {/* ---------- Annual Report (10-K) ---------- */}
       <section className="rounded-md border border-border bg-background/40 p-3">
-        <div className="mb-2">
-          <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-            Annual report (10-K)
+        <div className="mb-2 flex items-start justify-between gap-2">
+          <div>
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+              Annual report (10-K)
+            </div>
+            <div className="text-[11px] text-muted-foreground/80">
+              Export pulls Business Overview / MD&amp;A / Risk Factors from
+              the latest 10-K and runs each through Gemini Flash for a
+              ~300-word summary tuned for CSP traders.
+            </div>
           </div>
+          <ExportFilingButton symbol={symbol} type="10-K" />
         </div>
-        <div className="text-[11px] text-muted-foreground">
-          Deep read coming soon — risk factors, MD&amp;A highlights, and
-          segment financials from the latest annual filing.
-        </div>
+        <JournalNoteSection symbol={symbol} filingType="10-K" />
       </section>
     </div>
   );
@@ -393,17 +415,26 @@ function ReleaseCard({ r }: { r: EarningsReleaseRow }) {
             {fmtDate(r.period_end)}
           </span>
         </div>
-        {archiveHref && (
-          <a
-            href={archiveHref}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground"
-          >
-            <ExternalLink className="h-3 w-3" />
-            EDGAR
-          </a>
-        )}
+        <div className="flex items-center gap-3">
+          <ExportFilingButton
+            symbol={r.symbol}
+            type="8-K"
+            accessionNumber={r.accession_number}
+            quarter={r.quarter}
+            periodEnd={r.period_end}
+          />
+          {archiveHref && (
+            <a
+              href={archiveHref}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground"
+            >
+              <ExternalLink className="h-3 w-3" />
+              EDGAR
+            </a>
+          )}
+        </div>
       </div>
 
       <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 font-mono text-[11px] sm:grid-cols-4">
@@ -485,6 +516,13 @@ function ReleaseCard({ r }: { r: EarningsReleaseRow }) {
           </div>
         </div>
       )}
+
+      <JournalNoteSection
+        symbol={r.symbol}
+        quarter={r.quarter}
+        filingType="8-K"
+        periodEnd={r.period_end}
+      />
     </div>
   );
 }
@@ -502,6 +540,300 @@ function Stat({
     <div className="flex justify-between gap-2">
       <span className="text-muted-foreground">{label}</span>
       <span className={valueClass ?? "text-foreground"}>{value}</span>
+    </div>
+  );
+}
+
+// ---------- Export for Review button ----------
+//
+// POSTs /api/research/{symbol}/export-filing, copies the markdown to
+// the clipboard, and shows a 2-second "Copied" confirmation. 10-K
+// exports take ~10-30s because Gemini summarizes 3 sections in
+// parallel — disable the button and surface a spinner so the user
+// doesn't think it hung.
+function ExportFilingButton({
+  symbol,
+  type,
+  accessionNumber,
+  quarter,
+  periodEnd,
+  compact = false,
+}: {
+  symbol: string;
+  type: "8-K" | "10-Q" | "10-K";
+  accessionNumber?: string | null;
+  quarter?: string | null;
+  periodEnd?: string | null;
+  compact?: boolean;
+}) {
+  const [status, setStatus] = useState<
+    "idle" | "preparing" | "copied" | "error"
+  >("idle");
+  const [error, setError] = useState<string | null>(null);
+
+  async function run() {
+    setStatus("preparing");
+    setError(null);
+    try {
+      const res = await fetch(
+        `/api/research/${encodeURIComponent(symbol)}/export-filing`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            type,
+            accessionNumber: accessionNumber ?? undefined,
+            quarter: quarter ?? undefined,
+            periodEnd: periodEnd ?? undefined,
+          }),
+          cache: "no-store",
+        },
+      );
+      const json = (await res.json()) as
+        | { markdown: string }
+        | { error: string };
+      if (!res.ok || !("markdown" in json)) {
+        setStatus("error");
+        setError("error" in json ? json.error : `HTTP ${res.status}`);
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(json.markdown);
+      } catch {
+        setStatus("error");
+        setError("Clipboard write blocked by browser. Try again with focus on the page.");
+        return;
+      }
+      setStatus("copied");
+      setTimeout(() => setStatus("idle"), 2500);
+    } catch (e) {
+      setStatus("error");
+      setError(e instanceof Error ? e.message : "Network error");
+    }
+  }
+
+  const label =
+    status === "preparing"
+      ? "Preparing export…"
+      : status === "copied"
+        ? "Copied to clipboard"
+        : "Export for Review";
+
+  if (compact) {
+    return (
+      <button
+        type="button"
+        onClick={run}
+        disabled={status === "preparing"}
+        className={`inline-flex items-center gap-1 rounded border border-border px-1.5 py-0.5 text-[10px] ${
+          status === "copied"
+            ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300"
+            : "text-muted-foreground hover:bg-background/60 hover:text-foreground"
+        } disabled:opacity-60`}
+        title={error ?? "Copy a markdown export of this filing for Claude review"}
+      >
+        {status === "preparing" ? (
+          <Loader2 className="h-3 w-3 animate-spin" />
+        ) : status === "copied" ? (
+          <Check className="h-3 w-3" />
+        ) : (
+          <ClipboardCopy className="h-3 w-3" />
+        )}
+        Export
+      </button>
+    );
+  }
+
+  return (
+    <div className="flex flex-col items-end gap-0.5">
+      <Button
+        type="button"
+        variant={status === "copied" ? "secondary" : "outline"}
+        size="sm"
+        onClick={run}
+        disabled={status === "preparing"}
+        className={
+          status === "copied"
+            ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/20"
+            : ""
+        }
+      >
+        {status === "preparing" ? (
+          <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+        ) : status === "copied" ? (
+          <Check className="mr-1.5 h-3.5 w-3.5" />
+        ) : (
+          <ClipboardCopy className="mr-1.5 h-3.5 w-3.5" />
+        )}
+        {label}
+      </Button>
+      {status === "copied" && (
+        <span className="text-[10px] text-emerald-300/80">
+          paste into Claude chat
+        </span>
+      )}
+      {status === "error" && error && (
+        <span className="max-w-xs text-right text-[10px] text-rose-300/90">
+          {error}
+        </span>
+      )}
+    </div>
+  );
+}
+
+// ---------- Journal Note section ----------
+//
+// "Add Journal Note" toggle that reveals an inline textarea + Save
+// button. POSTs /api/research/{symbol}/filing-notes; the saved note
+// becomes part of the system-context block on subsequent Export for
+// Review calls (so prior reviews carry forward).
+function JournalNoteSection({
+  symbol,
+  quarter,
+  filingType,
+  periodEnd,
+}: {
+  symbol: string;
+  quarter?: string | null;
+  filingType?: string | null;
+  periodEnd?: string | null;
+}) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState("");
+  const [relevance, setRelevance] = useState<
+    "" | "bullish" | "bearish" | "neutral"
+  >("");
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function save() {
+    if (text.trim().length === 0) {
+      setError("Note can't be empty");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await fetch(
+        `/api/research/${encodeURIComponent(symbol)}/filing-notes`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            notes: text,
+            quarter: quarter ?? undefined,
+            filing_type: filingType ?? undefined,
+            period_end: periodEnd ?? undefined,
+            trade_relevance: relevance || undefined,
+          }),
+          cache: "no-store",
+        },
+      );
+      const json = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!res.ok) {
+        setError(json.error ?? `HTTP ${res.status}`);
+        return;
+      }
+      setSaved(true);
+      setText("");
+      setRelevance("");
+      setTimeout(() => {
+        setSaved(false);
+        setOpen(false);
+      }, 1500);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Network error");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        onClick={() => {
+          setOpen(true);
+          setError(null);
+        }}
+        className="mt-3 inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+      >
+        <NotebookPen className="h-3 w-3" />
+        Add journal note
+      </button>
+    );
+  }
+
+  return (
+    <div className="mt-3 rounded border border-border bg-background/60 p-2">
+      <div className="mb-1 flex items-center justify-between text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+        <span>
+          Journal note{filingType ? ` · ${filingType}` : ""}
+          {quarter ? ` · ${quarter}` : ""}
+        </span>
+        {saved && (
+          <span className="font-normal normal-case text-emerald-300">
+            Saved ✓
+          </span>
+        )}
+      </div>
+      <textarea
+        autoFocus
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        placeholder="Paste takeaways from your Claude review here…"
+        rows={4}
+        className="w-full rounded border border-border bg-background px-2 py-1 text-[11px]"
+      />
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <select
+          value={relevance}
+          onChange={(e) =>
+            setRelevance(e.target.value as typeof relevance)
+          }
+          className="rounded border border-border bg-background px-1.5 py-0.5 text-[10px]"
+        >
+          <option value="">— relevance —</option>
+          <option value="bullish">bullish</option>
+          <option value="bearish">bearish</option>
+          <option value="neutral">neutral</option>
+        </select>
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
+          onClick={() => void save()}
+          disabled={saving || saved}
+        >
+          {saving ? (
+            <>
+              <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+              Saving…
+            </>
+          ) : saved ? (
+            <>
+              <Check className="mr-1.5 h-3.5 w-3.5" />
+              Saved
+            </>
+          ) : (
+            "Save note"
+          )}
+        </Button>
+        <button
+          type="button"
+          onClick={() => {
+            setOpen(false);
+            setError(null);
+          }}
+          className="text-[11px] text-muted-foreground hover:text-foreground"
+        >
+          Cancel
+        </button>
+        {error && (
+          <span className="text-[10px] text-rose-300">{error}</span>
+        )}
+      </div>
     </div>
   );
 }
