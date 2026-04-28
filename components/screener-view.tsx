@@ -32,6 +32,7 @@ import {
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import type { ScreenerResult, StageFourResult } from "@/lib/screener";
+import type { PerplexityNewsResult } from "@/lib/perplexity";
 import type { MarketContext } from "@/lib/market";
 import { CrushHistoryTable } from "@/components/crush-history-table";
 import { OptionsFlowSection } from "@/components/options-flow-section";
@@ -190,6 +191,59 @@ const LS_TIMESTAMP = "screener_timestamp";
 const LS_PRICES = "screener_prices";
 const LS_GRADED = "screener_graded";
 
+// Adaptive batch sizing — each stream has its own LS key. On a
+// successful run the size persists; on a failure (typically a 60s
+// timeout) the client halves it and retries the same batch with the
+// smaller size. resetBatchSizes() is called on Screen Today so a
+// fresh trading day starts with the defaults.
+type StreamKey = "perplexity" | "edgar";
+const LS_BATCH_SIZE: Record<StreamKey, string> = {
+  perplexity: "screener_batch_perplexity",
+  edgar: "screener_batch_edgar",
+};
+const DEFAULT_BATCH_SIZES: Record<StreamKey, number> = {
+  perplexity: 10,
+  edgar: 5,
+};
+
+function getAdaptiveBatchSize(key: StreamKey): number {
+  if (typeof window === "undefined") return DEFAULT_BATCH_SIZES[key];
+  try {
+    const raw = localStorage.getItem(LS_BATCH_SIZE[key]);
+    if (raw === null) return DEFAULT_BATCH_SIZES[key];
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n < 1) return DEFAULT_BATCH_SIZES[key];
+    return Math.floor(n);
+  } catch {
+    return DEFAULT_BATCH_SIZES[key];
+  }
+}
+function setAdaptiveBatchSize(key: StreamKey, n: number) {
+  try {
+    if (typeof window !== "undefined") {
+      localStorage.setItem(LS_BATCH_SIZE[key], String(n));
+    }
+  } catch {
+    /* quota / privacy */
+  }
+}
+function reduceAdaptiveBatchSize(key: StreamKey): number {
+  const current = getAdaptiveBatchSize(key);
+  const next = Math.max(1, Math.floor(current / 2));
+  setAdaptiveBatchSize(key, next);
+  return next;
+}
+function resetBatchSizes() {
+  try {
+    if (typeof window !== "undefined") {
+      localStorage.removeItem(LS_BATCH_SIZE.perplexity);
+      localStorage.removeItem(LS_BATCH_SIZE.edgar);
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
 // Cross-device hydration freshness window. Anything older shows the
 // "stale — Run Analysis to update" banner instead of the green one.
 const FRESH_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -310,19 +364,39 @@ export function ScreenerView({ connected }: Props) {
   // bare Screen Today or applyWatchlist (which can introduce new
   // ungraded rows).
   const [screenIsGraded, setScreenIsGraded] = useState<boolean>(false);
-  // Pass-3 batch state. `pendingPass3Keys` is the set of
-  // `${symbol}|${earningsDate}` keys whose grades haven't been
-  // computed yet — populated when Run Analysis starts and drained
-  // one batch (of 5) at a time. If a batch fails, this set stays
-  // populated and the Resume button replays just the remainder.
-  // `analysisVix` carries Pass 2's VIX into the resume call so the
-  // Stage-3 grade math doesn't have to refetch.
-  const [pendingPass3Keys, setPendingPass3Keys] = useState<Set<string>>(
+  // Two-stream Pass 3 state. After Pass 2 lands, the client kicks
+  // off an independent News stream (Perplexity, /api/screener/
+  // analyze/pass3a) and a Grade stream (personal history + three-
+  // layer grade + post-actions, /api/screener/analyze/pass3b). Each
+  // stream batches the candidate list, halves its batch size on
+  // timeout, and drains its own pending-key set so the resume
+  // buttons can replay just the leftovers.
+  //
+  // A stock's final grade lights up only after BOTH streams have
+  // returned data for that stock — pass3b uses pass3a's news as
+  // the regime-factors input.
+  const [pendingNewsKeys, setPendingNewsKeys] = useState<Set<string>>(
     new Set(),
   );
+  const [pendingGradeKeys, setPendingGradeKeys] = useState<Set<string>>(
+    new Set(),
+  );
+  // Per-stream UI progress. Updated at every batch boundary so the
+  // panel can render bars + current-batch symbols.
+  type StreamProgress = {
+    done: number;
+    total: number;
+    batchSize: number;
+    batchIndex: number;
+    batchTotal: number;
+    sample: string[];
+    reduced: boolean;
+  };
+  const [newsProgress, setNewsProgress] = useState<StreamProgress | null>(null);
+  const [gradeProgress, setGradeProgress] = useState<StreamProgress | null>(
+    null,
+  );
   const [analysisVix, setAnalysisVix] = useState<number | null>(null);
-  // Progress copy under the toolbar while batches stream in.
-  const [analyzeProgress, setAnalyzeProgress] = useState<string | null>(null);
   // Probed on mount from /api/screener/results/latest (no state
   // hydration — population happens only when the user clicks Load
   // Previous). Null = no previous result, or probe still in flight.
@@ -629,6 +703,10 @@ export function ScreenerView({ connected }: Props) {
   async function screenToday() {
     // Clear any stale cached screen FIRST — a new run always replaces old data.
     clearStoredScreen();
+    // A fresh trading day starts the adaptive batch sizes back at the
+    // defaults — yesterday's reduced sizes (after a slow Perplexity
+    // afternoon) shouldn't penalize today's run.
+    resetBatchSizes();
     // A new screen = a new trading day. Tracked tickers from the previous
     // day's analysis shouldn't carry over (they apply to yesterday's
     // expiry chain).
@@ -759,72 +837,190 @@ export function ScreenerView({ connected }: Props) {
     });
   }
 
-  // Drives the batched Pass 3 loop. Called by both the initial Run
-  // Analysis flow (after Pass 2 completes) and the Resume button
-  // (after a prior batch failed). `seedResults` is the working
-  // result list to merge each batch's output into; `targets` is the
-  // subset of candidates that still need grading. timestamp + vix
-  // are stable across the loop so persist + grade math stay
-  // consistent.
-  const PASS3_BATCH_SIZE = 5;
-  async function runPass3Batches(args: {
-    targets: ScreenerResult[];
-    seedResults: ScreenerResult[];
+  // Shared batch context used by both streams. Mutated as batches
+  // complete so the persist + state-update path always sees the
+  // latest grade snapshot, regardless of which stream produced it.
+  type StreamCtx = {
+    workingResults: ScreenerResult[];
+    newsByKey: Record<string, PerplexityNewsResult>;
+    pendingNews: Set<string>;
+    pendingGrade: Set<string>;
     timestampIso: string;
     pricesForPersist: Record<string, number>;
     vix: number | null;
-  }): Promise<void> {
-    const sorted = sortForPass3(args.targets, tracked);
-    const totalBatches = Math.ceil(sorted.length / PASS3_BATCH_SIZE);
-    let workingResults = args.seedResults;
-    let workingPending = new Set(
-      sorted.map((c) => `${c.symbol}|${c.earningsDate}`),
+    summary: {
+      scored: number;
+      tracked: number;
+      snapshots: number;
+      encyclopedia: number;
+    };
+  };
+
+  // Persist after every batch from either stream. graded=true only
+  // when both pending sets are empty (i.e. every candidate has both
+  // news and a recomputed grade).
+  function persistAfterBatch(ctx: StreamCtx) {
+    const fullyDone = ctx.pendingNews.size === 0 && ctx.pendingGrade.size === 0;
+    persistScreenSnapshot({
+      candidates: ctx.workingResults,
+      prices: ctx.pricesForPersist,
+      screenedAt: ctx.timestampIso,
+      graded: fullyDone,
+    });
+    if (fullyDone) setScreenIsGraded(true);
+  }
+
+  // News stream — calls /api/screener/analyze/pass3a in batches of
+  // size getAdaptiveBatchSize('perplexity'). On a non-2xx (typically
+  // a 60s timeout) the helper halves its batch size and retries the
+  // SAME batch once. On a second failure it gives up on that batch
+  // and continues — those candidates stay in pendingNews and the
+  // Resume button replays just them.
+  async function runNewsStream(
+    targets: ScreenerResult[],
+    ctx: StreamCtx,
+  ): Promise<void> {
+    let batchSize = getAdaptiveBatchSize("perplexity");
+    let reduced = false;
+    let i = 0;
+    let cursor = 0;
+    while (cursor < targets.length) {
+      const batch = targets.slice(cursor, cursor + batchSize);
+      const totalEstimated = Math.ceil(targets.length / batchSize);
+      setNewsProgress({
+        done: cursor,
+        total: targets.length,
+        batchSize,
+        batchIndex: i + 1,
+        batchTotal: Math.max(totalEstimated, i + 1),
+        sample: batch.slice(0, 3).map((b) => b.symbol),
+        reduced,
+      });
+
+      let success = false;
+      try {
+        const r = await fetch("/api/screener/analyze/pass3a", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ candidates: batch }),
+          cache: "no-store",
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const json = (await r.json()) as {
+          results: Array<{
+            key: string;
+            news: PerplexityNewsResult;
+          }>;
+        };
+        for (const row of json.results) {
+          ctx.newsByKey[row.key] = row.news;
+          ctx.pendingNews.delete(row.key);
+        }
+        setPendingNewsKeys(new Set(ctx.pendingNews));
+        cursor += batch.length;
+        i += 1;
+        success = true;
+        persistAfterBatch(ctx);
+      } catch (e) {
+        // Halve and retry once. If we're already at 1, give up on
+        // this batch — the candidates stay in pendingNews and the
+        // Resume button picks them up.
+        if (batchSize > 1) {
+          batchSize = reduceAdaptiveBatchSize("perplexity");
+          reduced = true;
+          console.warn(
+            `[screener] news stream batch failed (${e instanceof Error ? e.message : e}) — reducing batch size to ${batchSize} and retrying`,
+          );
+          continue;
+        }
+        console.warn(
+          `[screener] news stream batch at size 1 still failing — moving on, ${batch.length} candidate(s) left pending`,
+        );
+        cursor += batch.length;
+        i += 1;
+      }
+      if (!success) {
+        // size-1 give-up path landed above; loop to next batch
+      }
+    }
+    setNewsProgress((prev) =>
+      prev
+        ? { ...prev, done: targets.length, sample: [], batchIndex: prev.batchTotal }
+        : prev,
     );
-    setPendingPass3Keys(workingPending);
+  }
 
-    let totalScored = 0;
-    let totalTrackedUpserted = 0;
-    let totalSnapshots = 0;
-    let totalEncyclopedia = 0;
+  // Grade stream — pulls candidates whose news has already landed (or
+  // accepts a neutral fallback) and calls /api/screener/analyze/pass3b
+  // in batches of size getAdaptiveBatchSize('edgar'). Polls the news
+  // map at each batch boundary so it overlaps the news stream rather
+  // than serializing behind it.
+  async function runGradeStream(
+    targets: ScreenerResult[],
+    ctx: StreamCtx,
+    finalBatchToken: { key: string },
+  ): Promise<void> {
+    let batchSize = getAdaptiveBatchSize("edgar");
+    let reduced = false;
+    let i = 0;
+    let cursor = 0;
+    while (cursor < targets.length) {
+      // Wait until at least one candidate in this slice has news ready
+      // — keeps the grade stream pipelined behind news without
+      // blocking on every individual candidate. Hard cap of 30s
+      // poll wait so a stuck news call doesn't hang grading forever.
+      const slice = targets.slice(cursor, cursor + batchSize);
+      const startedWaiting = Date.now();
+      while (
+        slice.every(
+          (c) => !ctx.newsByKey[`${c.symbol}|${c.earningsDate}`],
+        ) &&
+        ctx.pendingNews.size > 0 &&
+        Date.now() - startedWaiting < 30000
+      ) {
+        await new Promise((res) => setTimeout(res, 200));
+      }
 
-    for (let i = 0; i < totalBatches; i += 1) {
-      const start = i * PASS3_BATCH_SIZE;
-      const batch = sorted.slice(start, start + PASS3_BATCH_SIZE);
-      const symbolsLine = batch.map((b) => b.symbol).join(", ");
-      setAnalyzeProgress(
-        `Analyzing batch ${i + 1}/${totalBatches} (${symbolsLine})…`,
-      );
-      setAnalyzingSymbols(new Set(batch.map((b) => b.symbol.toUpperCase())));
+      const totalEstimated = Math.ceil(targets.length / batchSize);
+      setGradeProgress({
+        done: cursor,
+        total: targets.length,
+        batchSize,
+        batchIndex: i + 1,
+        batchTotal: Math.max(totalEstimated, i + 1),
+        sample: slice.slice(0, 3).map((b) => b.symbol),
+        reduced,
+      });
+
+      // Fire-and-forget post-actions only on the FINAL grade batch
+      // (when this batch will exhaust the pending set). Per-batch
+      // post-actions would re-write tracked / snapshots needlessly.
+      const willBeFinal =
+        cursor + slice.length >= targets.length && ctx.pendingNews.size === 0;
+      finalBatchToken.key = willBeFinal ? "final" : "intermediate";
 
       try {
-        const r3 = await fetch("/api/screener/analyze/pass3", {
+        const r = await fetch("/api/screener/analyze/pass3b", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            candidates: batch,
-            vix: args.vix,
+            candidates: slice,
+            newsByKey: Object.fromEntries(
+              slice
+                .map((c) => [
+                  `${c.symbol}|${c.earningsDate}`,
+                  ctx.newsByKey[`${c.symbol}|${c.earningsDate}`],
+                ])
+                .filter(([, v]) => !!v),
+            ),
+            vix: ctx.vix,
             trackedSymbols: Array.from(tracked),
+            runPostActions: willBeFinal,
           }),
           cache: "no-store",
         });
-        if (!r3.ok) {
-          const body = (await r3.json().catch(() => ({}))) as {
-            error?: string;
-          };
-          setAnalysisError({
-            pass: "pass3",
-            status: r3.status,
-            rawMessage:
-              body.error ??
-              `Batch ${i + 1}/${totalBatches} failed (HTTP ${r3.status})`,
-            partialAvailable: true,
-          });
-          setStatus("error");
-          setAnalyzingSymbols(new Set());
-          setAnalyzeProgress(null);
-          return;
-        }
-        const json = (await r3.json()) as {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const json = (await r.json()) as {
           results: ScreenerResult[];
           scoredCount?: number;
           trackedUpserted?: number;
@@ -832,86 +1028,114 @@ export function ScreenerView({ connected }: Props) {
           encyclopediaUpdates?: number;
         };
         const byKey = new Map(
-          json.results.map((r) => [`${r.symbol}|${r.earningsDate}`, r]),
+          json.results.map((rr) => [`${rr.symbol}|${rr.earningsDate}`, rr]),
         );
-        workingResults = workingResults.map(
-          (r) => byKey.get(`${r.symbol}|${r.earningsDate}`) ?? r,
+        ctx.workingResults = ctx.workingResults.map(
+          (rr) => byKey.get(`${rr.symbol}|${rr.earningsDate}`) ?? rr,
         );
-        // Drop processed keys from pending — even ones that came back
-        // partially graded count as "no longer pending" so a Resume
-        // doesn't re-bill Perplexity for the same row.
-        workingPending = new Set(workingPending);
-        for (const c of batch) {
-          workingPending.delete(`${c.symbol}|${c.earningsDate}`);
+        for (const c of slice) {
+          ctx.pendingGrade.delete(`${c.symbol}|${c.earningsDate}`);
         }
-        setPendingPass3Keys(workingPending);
-        setResults([...workingResults]);
+        setPendingGradeKeys(new Set(ctx.pendingGrade));
+        setResults([...ctx.workingResults]);
         setGroupMode(null);
-
-        totalScored += json.scoredCount ?? json.results.length;
-        totalTrackedUpserted += json.trackedUpserted ?? 0;
-        totalSnapshots += json.snapshotsWritten ?? 0;
-        totalEncyclopedia += json.encyclopediaUpdates ?? 0;
-
-        // Persist after each batch so a crash mid-loop still leaves
-        // the partial grade set on disk. graded=true only when the
-        // pending set is empty (i.e. the final successful batch).
-        const isFinal = workingPending.size === 0;
-        persistScreenSnapshot({
-          candidates: workingResults,
-          prices: args.pricesForPersist,
-          screenedAt: args.timestampIso,
-          graded: isFinal,
-        });
-        if (isFinal) {
-          setScreenIsGraded(true);
-        }
+        ctx.summary.scored += json.scoredCount ?? json.results.length;
+        ctx.summary.tracked += json.trackedUpserted ?? 0;
+        ctx.summary.snapshots += json.snapshotsWritten ?? 0;
+        ctx.summary.encyclopedia += json.encyclopediaUpdates ?? 0;
+        cursor += slice.length;
+        i += 1;
+        persistAfterBatch(ctx);
       } catch (e) {
-        setAnalysisError({
-          pass: "pass3",
-          status: null,
-          rawMessage: e instanceof Error ? e.message : String(e),
-          partialAvailable: true,
-        });
-        setStatus("error");
-        setAnalyzingSymbols(new Set());
-        setAnalyzeProgress(null);
-        return;
+        if (batchSize > 1) {
+          batchSize = reduceAdaptiveBatchSize("edgar");
+          reduced = true;
+          console.warn(
+            `[screener] grade stream batch failed (${e instanceof Error ? e.message : e}) — reducing batch size to ${batchSize} and retrying`,
+          );
+          continue;
+        }
+        console.warn(
+          `[screener] grade stream batch at size 1 still failing — moving on`,
+        );
+        cursor += slice.length;
+        i += 1;
       }
     }
-
-    setAnalyzingSymbols(new Set());
-    setAnalyzeProgress(null);
-    setStatus("idle");
-    setMessage(
-      `Analysis complete ✓\n📊 ${totalScored} candidates scored\n🎯 ${totalTrackedUpserted} tracked tickers saved\n📸 ${totalSnapshots} position snapshots taken\n📚 ${totalEncyclopedia} encyclopedia updates`,
+    setGradeProgress((prev) =>
+      prev
+        ? { ...prev, done: targets.length, sample: [], batchIndex: prev.batchTotal }
+        : prev,
     );
   }
 
-  // Resume Pass 3 from wherever the previous run stopped. Reads
-  // `pendingPass3Keys` and replays only those candidates against the
-  // batched Pass 3 endpoint — already-graded rows are not re-fetched.
-  async function resumeAnalysis() {
-    if (!results) return;
-    if (pendingPass3Keys.size === 0) return;
-    const remaining = results.filter((r) =>
-      pendingPass3Keys.has(`${r.symbol}|${r.earningsDate}`),
-    );
-    if (remaining.length === 0) {
-      setPendingPass3Keys(new Set());
-      return;
-    }
+  // Resume — replays only candidates that didn't make it through one
+  // or both streams. The two streams run independently so each has
+  // its own resume button.
+  async function resumeNewsStream() {
+    if (!results || pendingNewsKeys.size === 0) return;
     setStatus("analyzing");
     setAnalysisError(null);
     setError(null);
-    const timestampIso = (screenedAt ?? new Date()).toISOString();
-    await runPass3Batches({
-      targets: remaining,
-      seedResults: results,
-      timestampIso,
+    const remaining = results.filter((r) =>
+      pendingNewsKeys.has(`${r.symbol}|${r.earningsDate}`),
+    );
+    const ctx = buildStreamCtx({ resumeFrom: results });
+    await runNewsStream(remaining, ctx);
+    finishStreamsIfDone(ctx);
+  }
+  async function resumeGradeStream() {
+    if (!results || pendingGradeKeys.size === 0) return;
+    setStatus("analyzing");
+    setAnalysisError(null);
+    setError(null);
+    const remaining = results.filter((r) =>
+      pendingGradeKeys.has(`${r.symbol}|${r.earningsDate}`),
+    );
+    const ctx = buildStreamCtx({ resumeFrom: results });
+    const token = { key: "intermediate" };
+    await runGradeStream(remaining, ctx, token);
+    finishStreamsIfDone(ctx);
+  }
+
+  // Helper: build a fresh StreamCtx using the current page state.
+  // resumeFrom seeds workingResults with what the table currently
+  // shows (so a Resume run merges into the existing graded rows
+  // instead of reverting to Pass 2 output).
+  function buildStreamCtx(opts: {
+    resumeFrom: ScreenerResult[];
+  }): StreamCtx {
+    return {
+      workingResults: [...opts.resumeFrom],
+      newsByKey: {},
+      pendingNews: new Set(pendingNewsKeys),
+      pendingGrade: new Set(pendingGradeKeys),
+      timestampIso: (screenedAt ?? new Date()).toISOString(),
       pricesForPersist: prices,
       vix: analysisVix,
-    });
+      summary: { scored: 0, tracked: 0, snapshots: 0, encyclopedia: 0 },
+    };
+  }
+
+  function finishStreamsIfDone(ctx: StreamCtx) {
+    if (ctx.pendingNews.size === 0 && ctx.pendingGrade.size === 0) {
+      setStatus("idle");
+      setNewsProgress(null);
+      setGradeProgress(null);
+      setMessage(
+        `Analysis complete ✓\n📊 ${ctx.summary.scored} candidates scored\n🎯 ${ctx.summary.tracked} tracked tickers saved\n📸 ${ctx.summary.snapshots} position snapshots taken\n📚 ${ctx.summary.encyclopedia} encyclopedia updates`,
+      );
+    } else {
+      // Partial — leave progress panel up so the resume buttons stay
+      // visible. status drops back to idle so other actions work.
+      setStatus("idle");
+      const partials: string[] = [];
+      if (ctx.pendingNews.size > 0)
+        partials.push(`${ctx.pendingNews.size} pending news`);
+      if (ctx.pendingGrade.size > 0)
+        partials.push(`${ctx.pendingGrade.size} pending grade`);
+      setMessage(`Partial analysis (${partials.join(", ")}) — Resume to retry`);
+    }
   }
 
   async function runAnalysis() {
@@ -920,7 +1144,8 @@ export function ScreenerView({ connected }: Props) {
     setError(null);
     setAnalysisError(null);
     setMessage(null);
-    setAnalyzeProgress(null);
+    setNewsProgress(null);
+    setGradeProgress(null);
     setHydrationBannerHidden(false);
     setAnalyzingSymbols(new Set(results.map((r) => r.symbol.toUpperCase())));
 
@@ -975,21 +1200,39 @@ export function ScreenerView({ connected }: Props) {
     setResults(merged2);
     setPrices(mergedPrices);
 
-    // ---- Pass 3 — Perplexity + grade + post-actions, batched ----
-    // Pass 3 is the slow path: each candidate makes one Perplexity
-    // call (~5–10s). 20 in one shot blew the 60s Vercel ceiling.
-    // Batches of 5 land at ~30s each, leave grades on the table as
-    // they arrive, and let a partial run resume from where it
-    // stopped via the Resume button below.
+    // ---- Pass 3 — News + Grade as two parallel streams ----
+    // News (pass3a) is Perplexity-bound; Grade (pass3b) is personal-
+    // history + grade compute + (final-batch) post-actions. Streams
+    // are launched in parallel; Grade pipelines behind News at each
+    // batch boundary so both make forward progress simultaneously.
     setAnalysisVix(p2!.vix);
     const timestampIso = (screenedAt ?? new Date()).toISOString();
-    await runPass3Batches({
-      targets: p2!.results,
-      seedResults: merged2,
+    const sorted = sortForPass3(p2!.results, tracked);
+    const allKeys = new Set(
+      sorted.map((c) => `${c.symbol}|${c.earningsDate}`),
+    );
+    setPendingNewsKeys(new Set(allKeys));
+    setPendingGradeKeys(new Set(allKeys));
+
+    const ctx: StreamCtx = {
+      workingResults: merged2,
+      newsByKey: {},
+      pendingNews: new Set(allKeys),
+      pendingGrade: new Set(allKeys),
       timestampIso,
       pricesForPersist: mergedPrices,
       vix: p2!.vix,
-    });
+      summary: { scored: 0, tracked: 0, snapshots: 0, encyclopedia: 0 },
+    };
+
+    const finalBatchToken = { key: "intermediate" };
+    await Promise.allSettled([
+      runNewsStream(sorted, ctx),
+      runGradeStream(sorted, ctx, finalBatchToken),
+    ]);
+
+    setAnalyzingSymbols(new Set());
+    finishStreamsIfDone(ctx);
   }
 
   // Per-symbol re-run of pass 2 + pass 3. Useful when the bulk analyze
@@ -1193,20 +1436,11 @@ export function ScreenerView({ connected }: Props) {
         {analysisError && (
           <AnalysisErrorBanner
             err={analysisError}
-            // When a Pass 3 batch failed mid-run we have un-graded
-            // candidates parked in pendingPass3Keys — Resume replays
-            // just those. When everything failed (e.g. Pass 2) or we
-            // explicitly cleared the partial, Retry restarts from
-            // scratch.
-            onResume={
-              analysisError.pass === "pass3" && pendingPass3Keys.size > 0
-                ? () => {
-                    setAnalysisError(null);
-                    void resumeAnalysis();
-                  }
-                : null
-            }
-            pendingCount={pendingPass3Keys.size}
+            // Resume in the dual-stream world is per-stream, surfaced
+            // inside StreamProgressPanel below. Banner only offers
+            // Retry (full restart) or Dismiss.
+            onResume={null}
+            pendingCount={pendingNewsKeys.size + pendingGradeKeys.size}
             onRetry={() => {
               setAnalysisError(null);
               void runAnalysis();
@@ -1214,17 +1448,28 @@ export function ScreenerView({ connected }: Props) {
             onDismiss={() => setAnalysisError(null)}
           />
         )}
-        {analyzeProgress && status === "analyzing" && (
-          <div className="rounded-lg border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-xs text-sky-200">
-            <Loader2 className="mr-1.5 inline h-3 w-3 animate-spin" />
-            {analyzeProgress}
-            {pendingPass3Keys.size > 0 && (
-              <span className="ml-2 text-sky-300/80">
-                · {pendingPass3Keys.size} candidate
-                {pendingPass3Keys.size === 1 ? "" : "s"} pending
-              </span>
-            )}
-          </div>
+        {(newsProgress || gradeProgress) && (
+          <StreamProgressPanel
+            news={newsProgress}
+            grade={gradeProgress}
+            running={status === "analyzing"}
+            pendingNews={pendingNewsKeys.size}
+            pendingGrade={pendingGradeKeys.size}
+            onResumeNews={
+              status !== "analyzing" && pendingNewsKeys.size > 0
+                ? () => void resumeNewsStream()
+                : null
+            }
+            onResumeGrade={
+              status !== "analyzing" && pendingGradeKeys.size > 0
+                ? () => void resumeGradeStream()
+                : null
+            }
+            onDismiss={() => {
+              setNewsProgress(null);
+              setGradeProgress(null);
+            }}
+          />
         )}
         {!analysisError && error && (
           <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-200">
@@ -2235,6 +2480,169 @@ function AnalysisErrorBanner({
           Dismiss
         </button>
       </div>
+    </div>
+  );
+}
+
+// Live progress panel for the two Pass-3 streams. Shows per-stream
+// progress bars, current-batch sample symbols, batch index/total,
+// the currently-applied batch size (with a "reduced" badge when the
+// adaptive sizer halved on a timeout), and per-stream Resume buttons
+// once the run finishes with leftovers.
+type StreamProgressView = {
+  done: number;
+  total: number;
+  batchSize: number;
+  batchIndex: number;
+  batchTotal: number;
+  sample: string[];
+  reduced: boolean;
+};
+
+function StreamProgressPanel({
+  news,
+  grade,
+  running,
+  pendingNews,
+  pendingGrade,
+  onResumeNews,
+  onResumeGrade,
+  onDismiss,
+}: {
+  news: StreamProgressView | null;
+  grade: StreamProgressView | null;
+  running: boolean;
+  pendingNews: number;
+  pendingGrade: number;
+  onResumeNews: (() => void) | null;
+  onResumeGrade: (() => void) | null;
+  onDismiss: () => void;
+}) {
+  const total = news?.total ?? grade?.total ?? 0;
+  const allDone = pendingNews === 0 && pendingGrade === 0;
+  return (
+    <div className="rounded-lg border border-sky-500/30 bg-sky-500/5 p-3 text-xs text-sky-100">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 font-medium">
+          {running ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : allDone ? (
+            <span className="text-emerald-300">✅</span>
+          ) : (
+            <AlertTriangle className="h-3.5 w-3.5 text-amber-300" />
+          )}
+          {running
+            ? `Analyzing ${total} candidate${total === 1 ? "" : "s"}…`
+            : allDone
+              ? `Analysis complete — ${total}/${total} graded`
+              : `Partial analysis — ${pendingNews + pendingGrade} pending`}
+        </div>
+        {!running && (
+          <button
+            type="button"
+            onClick={onDismiss}
+            className="text-[11px] text-sky-200/60 hover:text-sky-200"
+          >
+            Dismiss
+          </button>
+        )}
+      </div>
+      <StreamRow
+        label="Schwab"
+        progress={{
+          done: total,
+          total,
+          batchSize: total,
+          batchIndex: 1,
+          batchTotal: 1,
+          sample: [],
+          reduced: false,
+        }}
+        // Pass 2 always completes before this panel renders.
+        forceComplete
+        pending={0}
+        resume={null}
+      />
+      <StreamRow
+        label="Perplexity"
+        progress={news}
+        pending={pendingNews}
+        resume={onResumeNews}
+      />
+      <StreamRow
+        label="EDGAR"
+        progress={grade}
+        pending={pendingGrade}
+        resume={onResumeGrade}
+      />
+      <div className="mt-2 text-[11px] text-sky-200/70">
+        Grades appear as each stock completes both streams.
+      </div>
+    </div>
+  );
+}
+
+function StreamRow({
+  label,
+  progress,
+  pending,
+  resume,
+  forceComplete,
+}: {
+  label: string;
+  progress: StreamProgressView | null;
+  pending: number;
+  resume: (() => void) | null;
+  forceComplete?: boolean;
+}) {
+  const total = progress?.total ?? 0;
+  const done = forceComplete ? total : progress?.done ?? 0;
+  const pct = total > 0 ? Math.min(1, done / total) : 0;
+  const blocks = 12;
+  const filled = Math.round(pct * blocks);
+  const bar = "█".repeat(filled) + "░".repeat(Math.max(0, blocks - filled));
+  const sample = progress?.sample ?? [];
+  return (
+    <div className="my-1 flex flex-wrap items-baseline gap-2">
+      <span className="w-20 shrink-0 text-[11px] uppercase tracking-wide text-sky-200/80">
+        {label}
+      </span>
+      <span className="font-mono text-[11px] tracking-tighter text-sky-300">
+        {bar}
+      </span>
+      <span className="font-mono text-[11px] text-sky-100">
+        {done}/{total}
+      </span>
+      {forceComplete || (total > 0 && done === total) ? (
+        <span className="text-emerald-300">✅</span>
+      ) : null}
+      {progress && progress.batchTotal > 1 && done < total && (
+        <span className="text-[10px] text-sky-200/70">
+          batch {progress.batchIndex}/{progress.batchTotal} · size{" "}
+          {progress.batchSize}
+          {sample.length > 0 && (
+            <>
+              {" "}
+              · {sample.join(", ")}
+              {progress.batchSize > sample.length ? "…" : ""}
+            </>
+          )}
+        </span>
+      )}
+      {progress?.reduced && (
+        <span className="rounded border border-amber-500/40 bg-amber-500/10 px-1 py-0.5 text-[9px] font-semibold uppercase text-amber-300">
+          ⚠ reduced to size {progress.batchSize}
+        </span>
+      )}
+      {resume && (
+        <Button
+          size="sm"
+          onClick={resume}
+          className="ml-auto bg-emerald-500/80 hover:bg-emerald-500"
+        >
+          Resume ({pending})
+        </Button>
+      )}
     </div>
   );
 }
