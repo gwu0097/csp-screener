@@ -16,6 +16,12 @@ import {
   RefreshCw,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ErrorBanner } from "@/components/error-banner";
+import {
+  interpretError,
+  interpretFetchError,
+  type InterpretedError,
+} from "@/lib/errors";
 import type { EarningsReleaseRow } from "@/app/api/research/[symbol]/earnings-releases/route";
 
 type QuarterlyMetrics = {
@@ -95,7 +101,9 @@ export function SecFilingsTab({
   const [loading, setLoading] = useState(true);
   const [fetching, setFetching] = useState(false);
   const [refreshingHealth, setRefreshingHealth] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<
+    { err: InterpretedError; retry?: () => void | Promise<void> } | null
+  >(null);
   const [message, setMessage] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -110,12 +118,16 @@ export function SecFilingsTab({
         | { releases: EarningsReleaseRow[] }
         | { error: string };
       if (!res.ok || !("releases" in json)) {
-        setError("error" in json ? json.error : `HTTP ${res.status}`);
+        const interpreted = await interpretFetchError(
+          new Response(JSON.stringify(json), { status: res.status }),
+          "Earnings releases",
+        );
+        setError({ err: interpreted });
         return;
       }
       setReleases(json.releases);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Network error");
+      setError({ err: interpretError(e, "Earnings releases") });
     } finally {
       setLoading(false);
     }
@@ -138,13 +150,20 @@ export function SecFilingsTab({
         | { ok: true; quarter: string; filingDate: string }
         | { error: string };
       if (!res.ok || !("ok" in json)) {
-        setError("error" in json ? json.error : `HTTP ${res.status}`);
+        const interpreted = await interpretFetchError(
+          new Response(JSON.stringify(json), { status: res.status }),
+          "Fetch latest 8-K",
+        );
+        setError({ err: interpreted, retry: () => fetchLatest() });
         return;
       }
       setMessage(`Loaded ${json.quarter} from 8-K filed ${fmtDate(json.filingDate)}`);
       await load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Network error");
+      setError({
+        err: interpretError(e, "Fetch latest 8-K"),
+        retry: () => fetchLatest(),
+      });
     } finally {
       setFetching(false);
     }
@@ -204,8 +223,20 @@ export function SecFilingsTab({
           </div>
         )}
         {error && (
-          <div className="mb-2 rounded border border-rose-500/40 bg-rose-500/10 p-1.5 text-[11px] text-rose-200">
-            {error}
+          <div className="mb-2">
+            <ErrorBanner
+              error={error.err}
+              onRetry={
+                error.retry
+                  ? () => {
+                      const fn = error.retry;
+                      setError(null);
+                      void fn?.();
+                    }
+                  : undefined
+              }
+              onDismiss={() => setError(null)}
+            />
           </div>
         )}
 
@@ -254,7 +285,9 @@ export function SecFilingsTab({
                 try {
                   await onRefreshHealth();
                 } catch (e) {
-                  setError(e instanceof Error ? e.message : "Refresh failed");
+                  setError({
+                    err: interpretError(e, "Refresh fundamentals"),
+                  });
                 } finally {
                   setRefreshingHealth(false);
                 }
@@ -593,8 +626,12 @@ function ExportFilingButton({
         | { markdown: string }
         | { error: string };
       if (!res.ok || !("markdown" in json)) {
+        const interpreted = await interpretFetchError(
+          new Response(JSON.stringify(json), { status: res.status }),
+          `Export ${type}`,
+        );
         setStatus("error");
-        setError("error" in json ? json.error : `HTTP ${res.status}`);
+        setError(`${interpreted.title}. ${interpreted.action}`);
         return;
       }
       try {
@@ -608,7 +645,8 @@ function ExportFilingButton({
       setTimeout(() => setStatus("idle"), 2500);
     } catch (e) {
       setStatus("error");
-      setError(e instanceof Error ? e.message : "Network error");
+      const interpreted = interpretError(e, `Export ${type}`);
+      setError(`${interpreted.title}. ${interpreted.action}`);
     }
   }
 
@@ -732,7 +770,11 @@ function JournalNoteSection({
       );
       const json = (await res.json().catch(() => ({}))) as { error?: string };
       if (!res.ok) {
-        setError(json.error ?? `HTTP ${res.status}`);
+        const interpreted = await interpretFetchError(
+          new Response(JSON.stringify(json), { status: res.status }),
+          "Save journal note",
+        );
+        setError(`${interpreted.title}. ${interpreted.action}`);
         return;
       }
       setSaved(true);
@@ -743,7 +785,8 @@ function JournalNoteSection({
         setOpen(false);
       }, 1500);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Network error");
+      const interpreted = interpretError(e, "Save journal note");
+      setError(`${interpreted.title}. ${interpreted.action}`);
     } finally {
       setSaving(false);
     }

@@ -37,6 +37,12 @@ import type { PerplexityNewsResult } from "@/lib/perplexity";
 import type { MarketContext } from "@/lib/market";
 import { CrushHistoryTable } from "@/components/crush-history-table";
 import { OptionsFlowSection } from "@/components/options-flow-section";
+import { ErrorBanner } from "@/components/error-banner";
+import {
+  interpretError,
+  interpretFetchError,
+  type InterpretedError,
+} from "@/lib/errors";
 
 // localStorage key for the Track checkbox state (screener_tracked is an
 // array of UPPERCASE symbols). Cleared whenever Screen Today runs.
@@ -483,7 +489,9 @@ export function ScreenerView({ connected }: Props) {
     graded: boolean;
   } | null>(null);
   const [message, setMessage] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<
+    { err: InterpretedError; retry?: () => void | Promise<void> } | null
+  >(null);
   // Richer per-pass error so the analyze banner can show a friendly
   // explanation + targeted retry button. Plain `error` keeps holding
   // strings for screen / apply-watchlist failures.
@@ -691,7 +699,10 @@ export function ScreenerView({ connected }: Props) {
       });
       setMessage(`Loaded ${parsed.length} candidates from ${ts}`);
     } catch (e) {
-      setError(`Load Previous failed: ${e instanceof Error ? e.message : "network error"}`);
+      setError({
+        err: interpretError(e, "Load Previous"),
+        retry: () => loadPrevious(),
+      });
     } finally {
       setStatus("idle");
     }
@@ -863,8 +874,11 @@ export function ScreenerView({ connected }: Props) {
         error?: string;
       };
       if (!res.ok || json.error) {
-        const msg = json.error ?? `HTTP ${res.status}`;
-        setError(`Screen failed: ${msg}`);
+        const interpreted = await interpretFetchError(
+          new Response(JSON.stringify(json), { status: res.status }),
+          "Screen Today",
+        );
+        setError({ err: interpreted, retry: () => screenToday() });
         setStatus("error");
         if (json.stats) setLastStats(json.stats);
         return;
@@ -895,7 +909,10 @@ export function ScreenerView({ connected }: Props) {
       setStatus("idle");
       setMessage(`Screened ${nextResults.length} candidates`);
     } catch (e) {
-      setError(`Screen failed: ${e instanceof Error ? e.message : "network error"}`);
+      setError({
+        err: interpretError(e, "Screen Today"),
+        retry: () => screenToday(),
+      });
       setStatus("error");
     }
   }
@@ -943,7 +960,10 @@ export function ScreenerView({ connected }: Props) {
       setMessage(`Added ${json.added.length}, removed ${json.removed.length}`);
       setStatus("idle");
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Apply watchlist failed");
+      setError({
+        err: interpretError(e, "Apply Watchlist"),
+        retry: () => applyWatchlist(),
+      });
       setStatus("error");
     }
   }
@@ -1692,11 +1712,19 @@ export function ScreenerView({ connected }: Props) {
           />
         )}
         {!analysisError && error && (
-          <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-200">
-            <div className="mb-1 flex items-center gap-2 font-medium">
-              <AlertTriangle className="h-4 w-4" /> {error}
-            </div>
-          </div>
+          <ErrorBanner
+            error={error.err}
+            onRetry={
+              error.retry
+                ? () => {
+                    const fn = error.retry;
+                    setError(null);
+                    void fn?.();
+                  }
+                : undefined
+            }
+            onDismiss={() => setError(null)}
+          />
         )}
 
         {showStaleNotice && (
