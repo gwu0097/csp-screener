@@ -22,7 +22,6 @@ type SortKey =
   | "pop"
   | "otm"
   | "iv"
-  | "theta"
   | "grade"
   | "status";
 type SortDir = "asc" | "desc";
@@ -38,7 +37,6 @@ const DEFAULT_SORT_DIR: Record<SortKey, SortDir> = {
   pop: "desc",
   otm: "desc",
   iv: "desc",
-  theta: "desc",
   grade: "asc",
   status: "asc",
 };
@@ -104,12 +102,6 @@ function sortPositions<T extends OpenPositionClientView | ClosedPositionClientVi
         return cmp(
           "currentIv" in a ? a.currentIv ?? null : null,
           "currentIv" in b ? b.currentIv ?? null : null,
-          dir,
-        );
-      case "theta":
-        return cmp(
-          "currentTheta" in a ? a.currentTheta ?? null : null,
-          "currentTheta" in b ? b.currentTheta ?? null : null,
           dir,
         );
       case "grade":
@@ -180,36 +172,30 @@ function PositionsTableHeader({
     <div
       className={cn(
         COLLAPSED_ROW_GRID,
-        "hidden py-1 text-[10px] font-semibold uppercase text-muted-foreground sm:grid",
+        "hidden py-1.5 text-[11px] font-semibold uppercase text-muted-foreground sm:grid",
       )}
     >
       {/* 1 dot */}
       <div />
-      {/* 2 — Symbol cell stays for grid alignment but isn't sortable
-              (rows under a ticker sub-header don't repeat the symbol). */}
-      <div />
-      {/* 3 Strike */}
-      <SortHeader k="strike" label="Strike" align="left" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
-      {/* 4 Expiry — hidden mobile */}
-      <SortHeader k="expiry" label="Expiry" align="left" sortKey={sortKey} sortDir={sortDir} onSort={onSort} className="hidden sm:flex" />
-      {/* 5 Qty */}
+      {/* 2 Strike */}
+      <SortHeader k="strike" label="Strike" align="right" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+      {/* 3 Expiry — hidden mobile */}
+      <SortHeader k="expiry" label="Expiry" align="right" sortKey={sortKey} sortDir={sortDir} onSort={onSort} className="hidden sm:flex" />
+      {/* 4 Qty */}
       <SortHeader k="qty" label="Qty" align="right" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
-      {/* 6 Stock — also blanked under ticker sub-header. Kept for grid alignment. */}
-      <div />
-      {/* 7 P&L */}
+      {/* 5 P&L */}
       <SortHeader k="pnl" label="P&L" align="right" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
-      {/* 8 POP */}
+      {/* 6 POP */}
       <SortHeader k="pop" label="POP" align="right" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
-      {/* 9 % OTM — hidden mobile */}
+      {/* 7 % OTM — hidden mobile */}
       <SortHeader k="otm" label="% OTM" align="right" sortKey={sortKey} sortDir={sortDir} onSort={onSort} className="hidden sm:flex" />
-      {/* 10 IV — hidden mobile */}
+      {/* 8 IV — hidden mobile */}
       <SortHeader k="iv" label="IV" align="right" sortKey={sortKey} sortDir={sortDir} onSort={onSort} className="hidden sm:flex" />
-      {/* 11 θ — hidden mobile */}
-      <SortHeader k="theta" label="θ" align="right" sortKey={sortKey} sortDir={sortDir} onSort={onSort} className="hidden sm:flex" />
-      {/* 12 Grade */}
-      <SortHeader k="grade" label="Grade" align="left" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
-      {/* 13 Status */}
-      <SortHeader k="status" label="Status" align="right" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+      {/* 9 Grade — center-aligned (badge cell, not numeric). Carries inline
+              theta in the row body so a separate column isn't needed. */}
+      <SortHeader k="grade" label="Grade" align="center" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+      {/* 10 Status — center-aligned */}
+      <SortHeader k="status" label="Status" align="center" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
     </div>
   );
 }
@@ -266,7 +252,7 @@ function SortHeader({
 }: {
   k: SortKey;
   label: string;
-  align: "left" | "right";
+  align: "left" | "right" | "center";
   sortKey: SortKey;
   sortDir: SortDir;
   onSort: (k: SortKey) => void;
@@ -278,8 +264,12 @@ function SortHeader({
       type="button"
       onClick={() => onSort(k)}
       className={cn(
-        "flex items-center gap-0.5 text-[10px] font-semibold uppercase tracking-wide transition-colors",
-        align === "right" ? "justify-end" : "justify-start",
+        "flex items-center gap-0.5 text-[11px] font-semibold uppercase tracking-wide transition-colors",
+        align === "right"
+          ? "justify-end"
+          : align === "center"
+            ? "justify-center"
+            : "justify-start",
         active ? "text-foreground" : "text-muted-foreground hover:text-foreground",
         className,
       )}
@@ -1023,8 +1013,6 @@ export function PositionsView() {
                       key={p.id}
                       kind="open"
                       position={p}
-                      hideSymbol
-                      hideStock
                       onCloseSubmitted={onImportSuccess}
                       onPositionRemoved={(id) => {
                         // Optimistic remove — drop the row from local state so
@@ -1118,13 +1106,7 @@ export function PositionsView() {
                               combinedPnl={tg.combinedPnl}
                             />
                             {sortPositions(tg.items, sortKey, sortDir).map((p) => (
-                              <PositionCard
-                                key={p.id}
-                                kind="closed"
-                                position={p}
-                                hideSymbol
-                                hideStock
-                              />
+                              <PositionCard key={p.id} kind="closed" position={p} />
                             ))}
                           </div>
                         ))}

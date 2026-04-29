@@ -129,49 +129,42 @@ type Props =
       // disappears instantly without a full /api/positions/open
       // round-trip. Optional so closed-list usage can ignore it.
       onPositionRemoved?: (id: string) => void;
-      // When grouped under a per-ticker sub-header, blank the Symbol
-      // and Stock cells in the collapsed row — both already appear
-      // in the sub-header so repeating them is noise.
-      hideSymbol?: boolean;
-      hideStock?: boolean;
     }
   | {
       kind: "closed";
       position: ClosedPositionClientView;
-      hideSymbol?: boolean;
-      hideStock?: boolean;
     };
 
 // Grid template shared between the collapsed row and the column-header
 // row in positions-view. Keeping both on the same template guarantees
 // header labels sit directly above their data. If you add/remove a
-// column here, update PositionsTableHeader + the data-row cells too.
+// column here, update PositionsTableHeader to match.
 //
-// Every column except the dot is fractional (fr) with a min floor via
-// minmax() — resize the browser and columns scale proportionally
-// instead of leaving a fixed-width row in the middle of a wider page.
+// Each data column is `minmax(<min-px>, <weight>fr)` so columns hold a
+// readable minimum width even on narrow viewports, and the leftover
+// space distributes proportionally to the weights. Weights match the
+// percentage allocations in the design spec (sum to ~67%, rest is
+// spacing/dot).
 //
-// Desktop (sm+, 13 cols, left → right):
-//   1.  24px               post-earnings dot indicator (only fixed col)
-//   2.  minmax(40px, 1fr)     SYMBOL
-//   3.  minmax(60px, 1.2fr)   STRIKE
-//   4.  minmax(50px, 1fr)     EXPIRY         — hidden on mobile
-//   5.  minmax(30px, 0.6fr)   QTY
-//   6.  minmax(60px, 1.2fr)   STOCK
-//   7.  minmax(60px, 1.2fr)   P&L
-//   8.  minmax(40px, 0.8fr)   POP
-//   9.  minmax(60px, 1fr)     % OTM          — hidden on mobile
-//  10.  minmax(40px, 0.8fr)   IV             — hidden on mobile
-//  11.  minmax(40px, 0.8fr)   θ (theta)      — hidden on mobile
-//  12.  minmax(30px, 0.6fr)   GRADE
-//  13.  minmax(80px, 1.5fr)   STATUS
+// Desktop (sm+, 10 cols, left → right):
+//   1. 24px               post-earnings dot
+//   2. minmax(80px,  8fr) STRIKE   right
+//   3. minmax(70px,  7fr) EXPIRY   right
+//   4. minmax(50px,  5fr) QTY      right
+//   5. minmax(80px,  9fr) P&L      right
+//   6. minmax(60px,  6fr) POP      right
+//   7. minmax(70px,  7fr) % OTM    right
+//   8. minmax(60px,  6fr) IV       right
+//   9. minmax(70px,  7fr) GRADE    center  (also carries inline theta)
+//  10. minmax(130px,12fr) STATUS   center
 //
-// Mobile (< sm, 9 cols): drops EXPIRY / % OTM / IV / θ. Those four
-// cells use `hidden sm:block` so they're pulled out of the grid flow
-// on mobile, leaving only the 9 visible cells which fit the mobile
-// template precisely.
+// Mobile (< sm, 7 cols): drops EXPIRY / % OTM / IV. Those cells use
+// `hidden sm:block` so they're pulled out of the grid flow on mobile,
+// leaving only the 7 visible cells which match the mobile template.
 export const COLLAPSED_ROW_GRID =
-  "grid w-full grid-cols-[24px_1fr_1.2fr_0.6fr_1.2fr_1.2fr_0.8fr_0.6fr_1.5fr] items-center gap-2 px-3 text-sm sm:grid-cols-[24px_minmax(40px,1fr)_minmax(60px,1.2fr)_minmax(50px,1fr)_minmax(30px,0.6fr)_minmax(60px,1.2fr)_minmax(60px,1.2fr)_minmax(40px,0.8fr)_minmax(60px,1fr)_minmax(40px,0.8fr)_minmax(40px,0.8fr)_minmax(30px,0.6fr)_minmax(80px,1.5fr)]";
+  "grid w-full items-center gap-2 px-3 text-sm " +
+  "grid-cols-[24px_minmax(80px,8fr)_minmax(50px,5fr)_minmax(80px,9fr)_minmax(60px,6fr)_minmax(70px,7fr)_minmax(130px,12fr)] " +
+  "sm:grid-cols-[24px_minmax(80px,8fr)_minmax(70px,7fr)_minmax(50px,5fr)_minmax(80px,9fr)_minmax(60px,6fr)_minmax(70px,7fr)_minmax(60px,6fr)_minmax(70px,7fr)_minmax(130px,12fr)]";
 
 // ---------- small helpers ----------
 
@@ -378,8 +371,9 @@ export function PositionCard(props: Props) {
         ? "text-emerald-300"
         : "text-rose-300";
   // Live-only fields; closed rows render as "—" since these are
-  // meaningful at a moment-in-time only.
-  const stockPrice = open ? open.currentStockPrice : null;
+  // meaningful at a moment-in-time only. Stock price moved into the
+  // ticker sub-header in positions-view, so the row no longer renders
+  // it directly.
   const distancePct = open ? open.distanceToStrikePct : null;
   const iv = open ? open.currentIv : null;
   const theta = open ? open.currentTheta : null;
@@ -401,40 +395,32 @@ export function PositionCard(props: Props) {
         <div className="flex h-4 w-4 items-center justify-center">
           {p.postEarningsRec ? <RecDot rec={p.postEarningsRec} /> : null}
         </div>
-        {/* 2. Symbol */}
-        <div className="truncate text-left font-semibold">
-          {props.hideSymbol ? null : p.symbol}
-        </div>
-        {/* 3. Strike */}
-        <div className="truncate text-left font-mono text-xs text-foreground/90">
+        {/* 2. Strike */}
+        <div className="truncate text-right font-mono text-sm text-foreground/90">
           ${p.strike}
           <span className="text-muted-foreground">{p.optionType === "put" ? "P" : "C"}</span>
         </div>
-        {/* 4. Expiry — hidden on mobile */}
-        <div className="hidden truncate text-left font-mono text-xs text-muted-foreground sm:block">
+        {/* 3. Expiry — hidden on mobile */}
+        <div className="hidden truncate text-right font-mono text-sm text-muted-foreground sm:block">
           {shortExpiry(p.expiry)}
         </div>
-        {/* 5. Qty */}
-        <div className="text-right font-mono text-xs text-foreground/80">
+        {/* 4. Qty */}
+        <div className="text-right font-mono text-sm text-foreground/80">
           ×{p.remainingContracts}
         </div>
-        {/* 6. Stock */}
-        <div className="text-right font-mono text-xs text-muted-foreground">
-          {props.hideStock ? null : stockPrice !== null ? `$${stockPrice.toFixed(2)}` : "—"}
-        </div>
-        {/* 7. P&L — bold so it reads first when scanning the row */}
-        <div className={cn("text-right font-mono text-xs font-semibold", pnlColor)}>
+        {/* 5. P&L — bold so it reads first when scanning the row */}
+        <div className={cn("text-right font-mono text-sm font-semibold", pnlColor)}>
           {fmtDollarsSigned(pnlDollars)}
         </div>
-        {/* 8. POP% */}
-        <div className={cn("text-right font-mono text-xs", popColor(pop))}>
+        {/* 6. POP% */}
+        <div className={cn("text-right font-mono text-sm", popColor(pop))}>
           {pop !== null ? `${Math.round(pop * 100)}%` : "—"}
         </div>
-        {/* 9. % OTM — hidden on mobile. Danger zone (<5% breathing room or
+        {/* 7. % OTM — hidden on mobile. Danger zone (<5% breathing room or
               already ITM) flips amber/red regardless of sign. */}
         <div
           className={cn(
-            "hidden text-right font-mono text-xs sm:block",
+            "hidden text-right font-mono text-sm sm:block",
             distancePct === null
               ? "text-muted-foreground"
               : distancePct < 0
@@ -446,40 +432,45 @@ export function PositionCard(props: Props) {
         >
           {distancePct !== null ? `${distancePct.toFixed(1)}%` : "—"}
         </div>
-        {/* 10. IV — hidden on mobile */}
-        <div className="hidden text-right font-mono text-xs text-muted-foreground sm:block">
+        {/* 8. IV — hidden on mobile */}
+        <div className="hidden text-right font-mono text-sm text-muted-foreground sm:block">
           {iv !== null ? `${(iv * 100).toFixed(0)}%` : "—"}
         </div>
-        {/* 11. θ (theta) — hidden on mobile */}
-        <div className="hidden text-right font-mono text-xs text-muted-foreground sm:block">
-          {theta !== null ? theta.toFixed(2) : "—"}
-        </div>
-        {/* 12. Grade */}
-        <div className="text-left">
+        {/* 9. Grade — center-aligned. Theta sits inline next to the badge
+              (desktop only) so we don't waste a whole grid column on a
+              live-only field. min-width on the grade cell guarantees both
+              fit without wrapping. */}
+        <div className="flex items-center justify-center gap-1.5">
           {p.entryFinalGrade ? (
             <span
               className={cn(
-                "inline-block rounded border px-1.5 py-0.5 text-[10px] font-semibold",
+                "inline-block rounded border px-1.5 py-0.5 text-xs font-semibold",
                 gradeColor(p.entryFinalGrade),
               )}
             >
               {p.entryFinalGrade}
             </span>
           ) : (
-            <span className="text-xs text-muted-foreground">—</span>
+            <span className="text-sm text-muted-foreground">—</span>
+          )}
+          {theta !== null && (
+            <span className="hidden font-mono text-[11px] text-muted-foreground sm:inline">
+              θ {theta.toFixed(2)}
+            </span>
           )}
         </div>
-        {/* 13. Status — badge + hover chevron share the cell via flex.
-              Chevron: always visible on mobile (no hover on touch),
-              opacity-0 on desktop until the row is hovered. */}
-        <div className="flex items-center justify-end gap-1.5">
+        {/* 10. Status — badge centered. Trash + chevron affordances absolute-
+              positioned on the right edge so they don't push the badge
+              off-center. Mobile shows the chevron inline since there's no
+              hover state on touch. */}
+        <div className="relative flex items-center justify-center">
           {status.tooltip ? (
             <TooltipProvider delayDuration={150}>
               <Tooltip>
                 <TooltipTrigger asChild>
                   <span
                     className={cn(
-                      "rounded border px-2 py-0.5 text-[10px] font-semibold whitespace-nowrap",
+                      "rounded border px-2 py-0.5 text-[11px] font-semibold whitespace-nowrap",
                       status.className,
                     )}
                   >
@@ -494,42 +485,44 @@ export function PositionCard(props: Props) {
           ) : (
             <span
               className={cn(
-                "rounded border px-2 py-0.5 text-[10px] font-semibold whitespace-nowrap",
+                "rounded border px-2 py-0.5 text-[11px] font-semibold whitespace-nowrap",
                 status.className,
               )}
             >
               {status.label}
             </span>
           )}
-          {props.kind === "open" && (
-            <span
-              role="button"
-              tabIndex={0}
-              aria-label="Remove position"
-              title="Remove position"
-              onClick={onRemoveClick}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  onRemoveClick(e);
-                }
-              }}
-              className={cn(
-                "inline-flex items-center justify-center rounded p-0.5 text-muted-foreground transition-[opacity,colors] duration-150",
-                "hover:bg-rose-500/15 hover:text-rose-300",
-                "opacity-100 sm:opacity-0 sm:group-hover:opacity-100",
-              )}
-            >
-              <Trash2 className="h-3 w-3" />
-            </span>
-          )}
-          <ChevronRight
-            className={cn(
-              "h-3 w-3 text-muted-foreground transition-[opacity,transform] duration-150",
-              "opacity-100 sm:opacity-0 sm:group-hover:opacity-100",
-              expanded && "rotate-90",
+          <div className="absolute right-0 flex items-center gap-0.5">
+            {props.kind === "open" && (
+              <span
+                role="button"
+                tabIndex={0}
+                aria-label="Remove position"
+                title="Remove position"
+                onClick={onRemoveClick}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    onRemoveClick(e);
+                  }
+                }}
+                className={cn(
+                  "inline-flex items-center justify-center rounded p-0.5 text-muted-foreground transition-[opacity,colors] duration-150",
+                  "hover:bg-rose-500/15 hover:text-rose-300",
+                  "opacity-0 sm:group-hover:opacity-100",
+                )}
+              >
+                <Trash2 className="h-3 w-3" />
+              </span>
             )}
-          />
+            <ChevronRight
+              className={cn(
+                "h-3 w-3 text-muted-foreground transition-[opacity,transform] duration-150",
+                "opacity-100 sm:opacity-0 sm:group-hover:opacity-100",
+                expanded && "rotate-90",
+              )}
+            />
+          </div>
         </div>
       </button>
 
