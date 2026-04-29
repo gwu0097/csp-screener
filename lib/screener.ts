@@ -345,7 +345,7 @@ async function fetchMarketCapBillions(symbol: string): Promise<number | null> {
 export async function runStageTwo(
   candidate: EarningsCandidate,
   industryClass: IndustryClass,
-  options: { industryPenalty?: number } = {},
+  options: { industryPenalty?: number; isWhitelisted?: boolean } = {},
 ): Promise<StageTwoResult> {
   const [mcapB, analyst] = await Promise.all([
     fetchMarketCapBillions(candidate.symbol),
@@ -358,12 +358,22 @@ export async function runStageTwo(
   const overhangPenalty = ACTIVE_OVERHANG.has(normalizeSymbol(candidate.symbol)) ? -3 : 0;
   const industryPenalty = options.industryPenalty ?? 0;
   const score = preOverhang + overhangPenalty + industryPenalty;
-  const pass = preOverhang >= 6;
+  const meetsFloor = preOverhang >= 6;
+  // Whitelisted symbols bypass the quality floor entirely — the user
+  // has already vouched for the name, so a low simplicity / mid-cap
+  // tier shouldn't downstream-block analysis. Score still computed so
+  // the Stage 2 detail card stays informative.
+  const pass = options.isWhitelisted ? true : meetsFloor;
+  const reason = options.isWhitelisted
+    ? `Whitelisted — quality floor bypassed (raw ${preOverhang}/9)`
+    : meetsFloor
+      ? "Quality floor met"
+      : `Quality ${preOverhang}/9 below 6 floor`;
   return {
     score,
     maxScore: 9,
     pass,
-    reason: pass ? "Quality floor met" : `Quality ${preOverhang}/9 below 6 floor`,
+    reason,
     details: {
       businessSimplicity,
       marketCapTier,
@@ -1172,7 +1182,10 @@ export async function evaluateStagesOneTwo(
       : -2;
 
   const stageOne = await runStageOne(candidate, context.chain, context.industryClass);
-  const stageTwo = await runStageTwo(candidate, context.industryClass, { industryPenalty });
+  const stageTwo = await runStageTwo(candidate, context.industryClass, {
+    industryPenalty,
+    isWhitelisted: context.isWhitelisted,
+  });
 
   const baseResult: Omit<ScreenerResult, "recommendation" | "stoppedAt" | "stageThree" | "stageFour" | "threeLayer"> = {
     symbol: candidate.symbol,

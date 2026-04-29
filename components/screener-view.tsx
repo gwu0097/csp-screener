@@ -1648,7 +1648,7 @@ export function ScreenerView({ connected }: Props) {
   // when the user wants to refresh a single candidate without re-running
   // the whole table. Hits /api/screener/analyze-single, then merges the
   // single enriched candidate back into `results` and persists to LS.
-  async function runAnalysisSingle(symbol: string) {
+  async function runAnalysisSingle(symbol: string, opts: { force?: boolean } = {}) {
     if (!results || !connected) return;
     const upper = symbol.toUpperCase();
     const candidate = results.find((r) => r.symbol.toUpperCase() === upper);
@@ -1664,7 +1664,7 @@ export function ScreenerView({ connected }: Props) {
       const res = await fetch("/api/screener/analyze-single", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ candidate }),
+        body: JSON.stringify({ candidate, force: opts.force === true }),
         cache: "no-store",
       });
       if (!res.ok) {
@@ -2471,23 +2471,33 @@ function ExpandedDetail({
 }: {
   r: ScreenerResult;
   analyzing: boolean;
-  onAnalyze: ((symbol: string) => Promise<void>) | null;
+  onAnalyze: ((symbol: string, opts?: { force?: boolean }) => Promise<void>) | null;
 }) {
   const tl = r.threeLayer;
   if (!tl) {
     // Before Run Analysis has populated threeLayer, fall back to the
     // Stage-1/2 detail cards — Stage 1 + Stage 2 still run during Screen
     // Today so the user has SOMETHING to look at pre-analysis.
+    // Whitelisted symbols always pass Stage 2 (handled in runStageTwo)
+    // so the "force" path only triggers for non-whitelist below-floor
+    // names — the manual override the user explicitly opted into.
+    const stage2Failed =
+      r.stageTwo !== null && r.stageTwo.pass === false && !r.isWhitelisted;
     return (
       <div className="space-y-3 p-3">
         {onAnalyze && (
           <div className="flex items-center justify-between rounded border border-amber-500/30 bg-amber-500/5 px-3 py-2">
             <div className="text-xs text-amber-200">
               Three-layer grade not yet computed for {r.symbol}.
+              {stage2Failed && (
+                <div className="mt-0.5 text-[11px] text-amber-300/90">
+                  ⚠️ Stage 2 quality filter bypassed — analyzing anyway
+                </div>
+              )}
             </div>
             <Button
               size="sm"
-              onClick={() => onAnalyze(r.symbol)}
+              onClick={() => onAnalyze(r.symbol, { force: stage2Failed })}
               disabled={analyzing}
             >
               {analyzing ? (
@@ -2498,7 +2508,7 @@ function ExpandedDetail({
               ) : (
                 <>
                   <Sparkles className="mr-1 h-3.5 w-3.5" />
-                  Analyze {r.symbol}
+                  {stage2Failed ? `Force Analyze ${r.symbol}` : `Analyze ${r.symbol}`}
                 </>
               )}
             </Button>

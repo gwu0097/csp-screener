@@ -21,6 +21,12 @@ export const maxDuration = 60;
 
 type Body = {
   candidate?: unknown;
+  // When true, the user has opted into analyzing a symbol that the
+  // Stage 2 quality floor would normally fail. The route-level
+  // pipeline doesn't currently gate on Stage 2 (see lib/screener.ts
+  // recommendation logic — purely Stage 3+4 driven), so `force` is a
+  // breadcrumb for future gating + a clearer log line today.
+  force?: unknown;
 };
 
 function isCandidate(v: unknown): v is ScreenerResult {
@@ -56,6 +62,10 @@ export async function POST(req: NextRequest) {
   }
   const base = body.candidate;
   const upper = base.symbol.toUpperCase();
+  const force = body.force === true;
+  if (force) {
+    console.log(`[analyze-single] ${upper} force=true — Stage 2 quality floor explicitly bypassed`);
+  }
 
   const [priceMap, market] = await Promise.all([
     getBatchPrices([upper]),

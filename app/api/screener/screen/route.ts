@@ -184,10 +184,16 @@ export async function POST() {
     const results: ScreenerResult[] = [];
     for (const row of afterChain) {
       const upper = row.symbol.toUpperCase();
-      const cls = await getIndustryClassification(upper, {
+      const isWhitelisted = whitelist.has(upper);
+      // Whitelisted symbols are allowed the slower Yahoo fallback —
+      // the user explicitly cares about these names, so spending
+      // ~1-2s on a sector lookup beats showing "unknown" forever.
+      let cls = await getIndustryClassification(upper, {
         yahooAllowed: false,
       });
-      const isWhitelisted = whitelist.has(upper);
+      if (isWhitelisted && cls.source === "unknown") {
+        cls = await getIndustryClassification(upper, { yahooAllowed: true });
+      }
       const industryStatus: "pass" | "fail" | "unknown" = isWhitelisted
         ? "pass"
         : cls.source === "unknown"
