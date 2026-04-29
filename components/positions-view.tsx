@@ -624,6 +624,19 @@ export function PositionsView() {
     (sum, p) => sum + (p.pnlDollars ?? 0),
     0,
   );
+  // Max profit = total premium collected if every open position
+  // expires worthless. Per position: avgPremiumSold × remainingContracts
+  // × 100. Manually-added positions without fills carry avgPremiumSold=
+  // null — exclude those from the sum and surface the count so the user
+  // knows the headline number is missing some positions.
+  const maxProfitContributors = positions.filter(
+    (p) => p.avgPremiumSold !== null && Number.isFinite(p.avgPremiumSold),
+  );
+  const maxProfit = maxProfitContributors.reduce(
+    (sum, p) => sum + (p.avgPremiumSold as number) * p.remainingContracts * 100,
+    0,
+  );
+  const maxProfitMissing = positions.length - maxProfitContributors.length;
 
   return (
     <div className="space-y-4">
@@ -638,12 +651,31 @@ export function PositionsView() {
               <span className="text-muted-foreground"> ({totalOpenContracts} contracts)</span>
             )}
           </span>
-          {data?.live && (
+          {positions.length > 0 && (
+            <span className="text-muted-foreground">
+              Max Profit:{" "}
+              <span className="text-emerald-300">
+                {maxProfitContributors.length > 0
+                  ? fmtDollarsSigned(maxProfit)
+                  : "—"}
+              </span>
+              {maxProfitMissing > 0 && (
+                <span className="ml-1 text-[10px] text-muted-foreground/70">
+                  ({maxProfitMissing} excluded — no entry data)
+                </span>
+              )}
+            </span>
+          )}
+          {positions.length > 0 && (
             <span className="text-muted-foreground">
               Unrealized:{" "}
-              <span className={unrealized >= 0 ? "text-emerald-300" : "text-rose-300"}>
-                {fmtDollarsSigned(unrealized)}
-              </span>
+              {data?.live ? (
+                <span className={unrealized >= 0 ? "text-emerald-300" : "text-rose-300"}>
+                  {fmtDollarsSigned(unrealized)}
+                </span>
+              ) : (
+                <span className="text-muted-foreground/70">—</span>
+              )}
             </span>
           )}
           {market && (
