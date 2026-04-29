@@ -89,14 +89,10 @@ export function CrushHistoryTable({
   const [fetchProgress, setFetchProgress] = useState<string | null>(null);
   const [fetchError, setFetchError] = useState<string | null>(null);
 
-  const liveEvents = refreshed ?? events ?? null;
-  if (!liveEvents || liveEvents.length === 0) return null;
+  const liveEvents = refreshed ?? events ?? [];
 
   // Sort newest first; today's pending row goes at the bottom.
   const sorted = [...liveEvents].sort((a, b) => b.earningsDate.localeCompare(a.earningsDate));
-  const missingEmCount = sorted.filter(
-    (e) => e.actualMovePct !== null && e.impliedMovePct === null,
-  ).length;
 
   async function handleFetchEmHistory() {
     console.log("[fetch-em] starting for:", todaySymbol);
@@ -238,7 +234,7 @@ export function CrushHistoryTable({
         <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
           Earnings history
         </div>
-        {missingEmCount > 0 && !(fetchStatus === "done" && populatedCount > 0) && (
+        {!(fetchStatus === "done" && populatedCount > 0) && (
           <button
             type="button"
             onClick={handleFetchEmHistory}
@@ -253,7 +249,10 @@ export function CrushHistoryTable({
             ) : fetchStatus === "error" ? (
               <>↻ Retry</>
             ) : (
-              <>📊 Fetch EM history ({missingEmCount})</>
+              <>
+                📊 Fetch EM history
+                {sorted.length > 0 ? ` (${sorted.length})` : ""}
+              </>
             )}
           </button>
         )}
