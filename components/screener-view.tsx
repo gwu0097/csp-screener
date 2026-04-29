@@ -38,6 +38,7 @@ import type { MarketContext } from "@/lib/market";
 import { CrushHistoryTable } from "@/components/crush-history-table";
 import { OptionsFlowSection } from "@/components/options-flow-section";
 import { ErrorBanner } from "@/components/error-banner";
+import { SchwabTokenBanner } from "@/components/schwab-token-banner";
 import {
   interpretError,
   interpretFetchError,
@@ -1715,6 +1716,7 @@ export function ScreenerView({ connected }: Props) {
   return (
     <TooltipProvider>
       <div className="space-y-4">
+        <SchwabTokenBanner />
         {dailyContext && (
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
             <span>
