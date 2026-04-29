@@ -507,7 +507,7 @@ async function getPastEarningsDates(symbol: string): Promise<Date[]> {
 // /calendar/earnings is forward-only on the free tier, so we don't use it.
 type Announcement = { tsMs: number; iso: string };
 
-async function getYahooPastAnnouncements(symbol: string): Promise<Announcement[]> {
+export async function getYahooPastAnnouncements(symbol: string): Promise<Announcement[]> {
   const summary = await quoteSummary(symbol, ["earnings"]);
   const quarterly = summary?.earnings?.earningsChart?.quarterly ?? [];
   const announcements = quarterly

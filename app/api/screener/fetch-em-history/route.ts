@@ -4,6 +4,14 @@ import {
   gradeFromRatio,
   type CrushHistoryEvent,
 } from "@/lib/earnings-history-table";
+import {
+  getFinnhubEarningsPeriods,
+} from "@/lib/earnings";
+import {
+  fetchYahooPriceAction,
+  updateEncyclopedia,
+} from "@/lib/encyclopedia";
+import { getYahooPastAnnouncements } from "@/lib/yahoo";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -341,6 +349,87 @@ async function processEvent(row: EarningsRow): Promise<ProcessOutcome> {
   };
 }
 
+// Seeds historical earnings_history rows when the table has no
+// actual_move_pct events for the symbol. Tries Finnhub /stock/earnings
+// first (which gives fiscal quarter-end periods that updateEncyclopedia
+// then maps to real announcement dates via Yahoo), then falls back to
+// Yahoo's earningsChart.quarterly[].reportedDate when Finnhub returns
+// nothing. Either path computes actual move % from Yahoo price bars.
+type SeedReport = {
+  finnhubPeriods: number;
+  yahooDates: number;
+  rowsAdded: number;
+  source: "finnhub" | "yahoo" | "none";
+  detail: string;
+};
+
+async function seedHistoricalRows(symbol: string): Promise<SeedReport> {
+  const sb = createServerClient();
+  const finnhubPeriods = await getFinnhubEarningsPeriods(symbol);
+  if (finnhubPeriods.length > 0) {
+    try {
+      const summary = await updateEncyclopedia(symbol);
+      return {
+        finnhubPeriods: finnhubPeriods.length,
+        yahooDates: 0,
+        rowsAdded: summary.newRecords + summary.updatedRecords,
+        source: "finnhub",
+        detail: `finnhub returned ${finnhubPeriods.length} periods; encyclopedia ingest added ${summary.newRecords} new + ${summary.updatedRecords} updated`,
+      };
+    } catch (e) {
+      console.warn(
+        `[fetch-em] seed via Finnhub/encyclopedia failed for ${symbol}: ${e instanceof Error ? e.message : e}`,
+      );
+    }
+  }
+
+  // Yahoo fallback: pull announcement dates directly, then compute
+  // actual move % from Yahoo bars and upsert into earnings_history.
+  const yahooAnnouncements = await getYahooPastAnnouncements(symbol);
+  if (yahooAnnouncements.length === 0) {
+    return {
+      finnhubPeriods: finnhubPeriods.length,
+      yahooDates: 0,
+      rowsAdded: 0,
+      source: "none",
+      detail: `finnhub=${finnhubPeriods.length} periods; yahoo=0 announcements — nothing to seed`,
+    };
+  }
+
+  let added = 0;
+  for (const ann of yahooAnnouncements) {
+    const price = await fetchYahooPriceAction(symbol, ann.iso);
+    const payload: Record<string, unknown> = {
+      symbol,
+      earnings_date: ann.iso,
+      price_before: price.price_before,
+      price_after: price.price_after,
+      price_at_expiry: price.price_at_expiry,
+      actual_move_pct: price.actual_move_pct,
+      data_source: "yahoo",
+      is_complete:
+        price.price_before !== null && price.price_after !== null,
+    };
+    const up = await sb
+      .from("earnings_history")
+      .upsert(payload, { onConflict: "symbol,earnings_date" });
+    if (up.error) {
+      console.warn(
+        `[fetch-em] yahoo seed upsert failed for ${symbol}@${ann.iso}: ${up.error.message}`,
+      );
+      continue;
+    }
+    added += 1;
+  }
+  return {
+    finnhubPeriods: finnhubPeriods.length,
+    yahooDates: yahooAnnouncements.length,
+    rowsAdded: added,
+    source: "yahoo",
+    detail: `finnhub=${finnhubPeriods.length} periods; yahoo=${yahooAnnouncements.length} announcements; upserted ${added} rows`,
+  };
+}
+
 type Body = { symbol?: unknown };
 
 export async function POST(req: NextRequest) {
@@ -364,7 +453,7 @@ export async function POST(req: NextRequest) {
   // Pull every row for the symbol in the Polygon window — we need
   // the full list both to pick targets and to recompute the crush
   // events the UI consumes.
-  const r = await sb
+  const initialRead = await sb
     .from("earnings_history")
     .select(
       "symbol,earnings_date,actual_move_pct,implied_move_pct,implied_move_source,move_ratio,price_before",
@@ -372,10 +461,42 @@ export async function POST(req: NextRequest) {
     .eq("symbol", symbol)
     .gte("earnings_date", POLYGON_DEPTH_CUTOFF)
     .order("earnings_date", { ascending: false });
-  if (r.error) {
-    return NextResponse.json({ error: r.error.message }, { status: 500 });
+  if (initialRead.error) {
+    return NextResponse.json({ error: initialRead.error.message }, { status: 500 });
   }
-  const rows = (r.data ?? []) as EarningsRow[];
+  let rows = (initialRead.data ?? []) as EarningsRow[];
+
+  // Seed step. If we have fewer than 3 historical rows with an actual
+  // move, the polygon EM-populate step has nothing to chew on. Seed
+  // historical events from Finnhub (preferred) or Yahoo (fallback)
+  // before computing targets so the button can recover from a cold
+  // earnings_history table.
+  const historicalCount = rows.filter(
+    (row) => row.actual_move_pct !== null,
+  ).length;
+  let seedReport: SeedReport | null = null;
+  let seededThisCall = false;
+  if (historicalCount < 3) {
+    seedReport = await seedHistoricalRows(symbol);
+    console.log(
+      `[fetch-em] seed ${symbol}: ${seedReport.detail}`,
+    );
+    if (seedReport.rowsAdded > 0) {
+      seededThisCall = true;
+      const reread = await sb
+        .from("earnings_history")
+        .select(
+          "symbol,earnings_date,actual_move_pct,implied_move_pct,implied_move_source,move_ratio,price_before",
+        )
+        .eq("symbol", symbol)
+        .gte("earnings_date", POLYGON_DEPTH_CUTOFF)
+        .order("earnings_date", { ascending: false });
+      if (!reread.error) {
+        rows = (reread.data ?? []) as EarningsRow[];
+      }
+    }
+  }
+
   const targets = rows.filter(
     (row) =>
       row.actual_move_pct !== null && row.implied_move_pct === null,
@@ -383,11 +504,17 @@ export async function POST(req: NextRequest) {
 
   // No more than EVENTS_PER_CALL processed per invocation — keeps
   // total wall-clock under the 60 s ceiling. The client loops the
-  // route until remainingMissing === 0.
-  const slice = targets.slice(0, EVENTS_PER_CALL);
-  let populated = 0;
+  // route until remainingMissing === 0. When we just seeded fresh
+  // historical rows we skip polygon this iteration to leave headroom
+  // under the 60 s cap; the client's loop will pick up the new
+  // targets on the next call.
+  const slice = seededThisCall ? [] : targets.slice(0, EVENTS_PER_CALL);
+  let populated = seededThisCall ? (seedReport?.rowsAdded ?? 0) : 0;
   let skipped = 0;
   const messages: string[] = [];
+  if (seedReport) {
+    messages.push(`seed (${seedReport.source}): ${seedReport.detail}`);
+  }
 
   for (const row of slice) {
     let outcome: ProcessOutcome;
