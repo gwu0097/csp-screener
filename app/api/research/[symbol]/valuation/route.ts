@@ -638,6 +638,7 @@ export async function PATCH(
       tier2?: unknown;
       shares_outstanding?: unknown;
       tax_rate?: unknown;
+      forward_eps?: unknown;
     };
     const id = typeof body.id === "string" ? body.id : null;
     if (!id) {
@@ -690,6 +691,14 @@ export async function PATCH(
       body.tax_rate < 1
     ) {
       next.tax_rate = body.tax_rate;
+    }
+    // Forward EPS is editable from the Starting Point grid — flows
+    // straight into tier1Ctx.forward_eps below so the EPS-anchor
+    // scenarios recompute immediately. Negative values are accepted
+    // (loss-making companies); 0 zeroes out the EPS-anchor projection
+    // which is fine because computeTier1Scenario gates on > 0.
+    if (typeof body.forward_eps === "number" && Number.isFinite(body.forward_eps)) {
+      next.forward_eps = body.forward_eps;
     }
 
     if (body.tier1 !== undefined) {

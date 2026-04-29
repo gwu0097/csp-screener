@@ -350,6 +350,9 @@ function V2View({
   const [tier2User, setTier2User] = useState<DCFScenarioSet>(model.tier2.user);
   const [shares, setShares] = useState<number>(model.shares_outstanding);
   const [taxRate, setTaxRate] = useState<number>(model.tax_rate);
+  const [forwardEps, setForwardEps] = useState<number | null>(
+    model.forward_eps ?? null,
+  );
   const [savedState, setSavedState] = useState<"idle" | "saving" | "saved">("idle");
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -359,6 +362,7 @@ function V2View({
     tier2?: DCFScenarioSet;
     shares_outstanding?: number;
     tax_rate?: number;
+    forward_eps?: number;
   }>({});
 
   // Re-seed when user picks a different version. We mark seedingRef so
@@ -369,18 +373,31 @@ function V2View({
     setTier2User(model.tier2.user);
     setShares(model.shares_outstanding);
     setTaxRate(model.tax_rate);
+    setForwardEps(model.forward_eps ?? null);
     dirtyRef.current = {};
     setSavedState("idle");
     queueMicrotask(() => {
       seedingRef.current = false;
     });
-  }, [version.id, model.tier1.user, model.tier2.user, model.shares_outstanding, model.tax_rate]);
+  }, [
+    version.id,
+    model.tier1.user,
+    model.tier2.user,
+    model.shares_outstanding,
+    model.tax_rate,
+    model.forward_eps,
+  ]);
 
-  // The display model has live values for shares + tax rate so children
-  // see edits before they're saved.
+  // The display model has live values for shares / tax rate / forward
+  // EPS so children see edits before they're saved.
   const displayModel: ValuationModelV2 = useMemo(
-    () => ({ ...model, shares_outstanding: shares, tax_rate: taxRate }),
-    [model, shares, taxRate],
+    () => ({
+      ...model,
+      shares_outstanding: shares,
+      tax_rate: taxRate,
+      forward_eps: forwardEps,
+    }),
+    [model, shares, taxRate, forwardEps],
   );
 
   function setTier1Field(s: ScenarioKey, f: Tier1Field, v: number) {
@@ -416,6 +433,11 @@ function V2View({
     if (!isLatest) return;
     setTaxRate(rate);
     dirtyRef.current.tax_rate = rate;
+  }
+  function setForwardEpsGlobal(eps: number) {
+    if (!isLatest) return;
+    setForwardEps(eps);
+    dirtyRef.current.forward_eps = eps;
   }
 
   // Debounced PATCH. Whatever's dirty gets sent; the route recomputes
@@ -503,6 +525,7 @@ function V2View({
           onChangeField={setTier1Field}
           onChangeShares={setSharesGlobal}
           onChangeTaxRate={setTaxRateGlobal}
+          onChangeForwardEps={setForwardEpsGlobal}
         />
       ) : activeTab === "tier2" ? (
         <ValuationTier2

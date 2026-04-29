@@ -141,6 +141,7 @@ export function ValuationTier1({
   onChangeField,
   onChangeShares,
   onChangeTaxRate,
+  onChangeForwardEps,
 }: {
   model: ValuationModelV2;
   userInputs: ScenarioSet;
@@ -148,6 +149,7 @@ export function ValuationTier1({
   onChangeField: (s: ScenarioKey, f: Field, v: number) => void;
   onChangeShares: (raw: number) => void;
   onChangeTaxRate: (rate: number) => void;
+  onChangeForwardEps: (eps: number) => void;
 }) {
   const tier1Ctx = useMemo(
     () => ({
@@ -212,6 +214,7 @@ export function ValuationTier1({
         editable={editable}
         onChangeShares={onChangeShares}
         onChangeTaxRate={onChangeTaxRate}
+        onChangeForwardEps={onChangeForwardEps}
       />
 
       <div>
@@ -327,11 +330,13 @@ function StartingPoint({
   editable,
   onChangeShares,
   onChangeTaxRate,
+  onChangeForwardEps,
 }: {
   model: ValuationModelV2;
   editable: boolean;
   onChangeShares: (v: number) => void;
   onChangeTaxRate: (v: number) => void;
+  onChangeForwardEps: (v: number) => void;
 }) {
   const currentPE =
     model.last_eps && model.last_eps > 0
@@ -364,13 +369,15 @@ function StartingPoint({
               : "Yahoo"
           }
         />
-        {model.forward_eps !== null && model.forward_eps !== undefined && (
-          <KV
-            label="Forward EPS (Y1)"
-            value={fmtPrice(model.forward_eps)}
-            source="analyst estimate"
+        {(model.forward_eps !== null && model.forward_eps !== undefined) ||
+        (model.forward_eps_derived?.analystEps ??
+          model.forward_eps_derived?.derivedEps) ? (
+          <ForwardEpsField
+            model={model}
+            editable={editable}
+            onChange={onChangeForwardEps}
           />
-        )}
+        ) : null}
         <KV
           label="Current P/E"
           value={currentPE !== null ? `${currentPE.toFixed(1)}x` : "—"}
@@ -442,15 +449,89 @@ function StartingPoint({
   );
 }
 
-// ---------- Independent forward EPS panel ----------
+// ---------- Forward EPS editable field ----------
 //
-// Surfaces both the analyst consensus (model.forward_eps) and the
-// system-derived estimate (model.forward_eps_derived) side-by-side
-// with a per-quarter breakdown. Tier 1 outputs are still computed
-// from analyst EPS for now — a follow-up will add a toggle that
-// triggers a server-side recompute with the derived value. The
-// divergence banner cues the user when the analyst figure is likely
-// stale post-earnings.
+// Inline editor for model.forward_eps. Drives Tier 1 price targets
+// directly via the parent's auto-save PATCH (no separate "active
+// toggle" — the field IS the active value). Two quick-fill buttons
+// snap the value to analyst consensus or the system-derived estimate
+// when forward_eps_derived is available; a tag pill labels the current
+// value as Analyst / Derived / Custom based on which value the field
+// currently matches.
+function ForwardEpsField({
+  model,
+  editable,
+  onChange,
+}: {
+  model: ValuationModelV2;
+  editable: boolean;
+  onChange: (v: number) => void;
+}) {
+  const fwd = model.forward_eps_derived;
+  const analyst = fwd?.analystEps ?? null;
+  const derived = fwd?.derivedEps ?? null;
+  const current = model.forward_eps ?? 0;
+  const close = (a: number | null, b: number) =>
+    a !== null && Math.abs(a - b) < 0.005;
+  const tag = close(analyst, current)
+    ? "Analyst"
+    : close(derived, current)
+      ? "Derived"
+      : "Custom";
+  const tagCls =
+    tag === "Analyst"
+      ? "text-muted-foreground"
+      : tag === "Derived"
+        ? "text-sky-300"
+        : "text-amber-300";
+  return (
+    <div className="col-span-2 flex flex-wrap items-center gap-2 border-t border-border/30 pt-1 sm:col-span-3">
+      <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+        Forward EPS (Y1)
+      </span>
+      <span className={`text-[9px] font-semibold uppercase tracking-wide ${tagCls}`}>
+        {tag}
+      </span>
+      <EditableCell
+        value={current}
+        systemValue={analyst ?? current}
+        kind="raw"
+        editable={editable}
+        onCommit={onChange}
+      />
+      {analyst !== null && (
+        <button
+          type="button"
+          disabled={!editable}
+          onClick={() => onChange(analyst)}
+          className="rounded border border-border bg-background/60 px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-background hover:text-foreground disabled:opacity-50"
+          title="Use analyst consensus"
+        >
+          Analyst ${analyst.toFixed(2)}
+        </button>
+      )}
+      {derived !== null && (
+        <button
+          type="button"
+          disabled={!editable}
+          onClick={() => onChange(derived)}
+          className="rounded border border-sky-500/40 bg-sky-500/10 px-1.5 py-0.5 text-[10px] text-sky-200 hover:bg-sky-500/20 disabled:opacity-50"
+          title="Use system-derived estimate"
+        >
+          Derived ${derived.toFixed(2)}
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ---------- Independent forward EPS info panel ----------
+//
+// Display-only — surfaces both numbers + per-quarter breakdown for
+// reference. The actual price-driving value is on the editable field
+// above (ForwardEpsField), which stays in sync with model.forward_eps
+// via the parent's PATCH flow. The divergence banner stays — it's
+// useful to flag when analyst hasn't refreshed post-earnings.
 function ForwardEpsPanel({ model }: { model: ValuationModelV2 }) {
   const [expanded, setExpanded] = useState(false);
   const fwd = model.forward_eps_derived;
@@ -548,11 +629,6 @@ function ForwardEpsPanel({ model }: { model: ValuationModelV2 }) {
           </div>
         </div>
       )}
-      <div className="mt-1 text-[9px] text-muted-foreground">
-        Tier 1 price targets currently use analyst consensus. Toggle
-        to derived (coming soon) — for now, edit forward EPS in the
-        scenario columns below if you want to use the derived value.
-      </div>
     </div>
   );
 }
