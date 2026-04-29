@@ -534,6 +534,11 @@ export function ScreenerView({ connected }: Props) {
   const [dailyContext, setDailyContext] = useState<
     { market: MarketContext; openPositions: number } | null
   >(null);
+  // Refresh-token expiry status. Drives the header badge color/text.
+  const [tokenStatus, setTokenStatus] = useState<{
+    status: "missing" | "expired" | "warning" | "soft_warn" | "ok";
+    expiresInDays: number | null;
+  } | null>(null);
 
   useEffect(() => {
     // Fire-and-forget daily context fetch. Runs alongside the cache restore.
@@ -541,6 +546,20 @@ export function ScreenerView({ connected }: Props) {
       .then((r) => r.json())
       .then((j) => setDailyContext(j))
       .catch(() => setDailyContext(null));
+
+    if (connected) {
+      fetch("/api/schwab/token-status", { cache: "no-store" })
+        .then((r) => r.json())
+        .then((j) =>
+          setTokenStatus({
+            status: j.status,
+            expiresInDays: j.expiresInDays ?? null,
+          }),
+        )
+        .catch(() => {
+          /* informational — silent on failure */
+        });
+    }
 
     // Adaptive batch sizes are deliberately session-scoped. A run
     // that ended with size=1 yesterday because Perplexity was slow
@@ -1744,9 +1763,55 @@ export function ScreenerView({ connected }: Props) {
         )}
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-3 text-sm">
-            <Badge variant={connected ? "default" : "destructive"}>
-              Schwab: {connected ? "connected" : "disconnected"}
-            </Badge>
+            {(() => {
+              // Tier the badge by refresh-token age. Click-through to
+              // /api/auth/schwab is the same surface as the
+              // SchwabTokenBanner reconnect button.
+              let cls =
+                "border-transparent bg-emerald-500/90 text-white hover:bg-emerald-500";
+              let text = "connected";
+              let reconnect = false;
+              if (!connected) {
+                cls =
+                  "border-transparent bg-rose-500/90 text-white hover:bg-rose-500";
+                text = "disconnected";
+                reconnect = true;
+              } else if (tokenStatus) {
+                if (tokenStatus.status === "expired") {
+                  cls =
+                    "border-transparent bg-rose-500/90 text-white hover:bg-rose-500";
+                  text = "expired";
+                  reconnect = true;
+                } else if (tokenStatus.status === "warning") {
+                  cls =
+                    "border-transparent bg-orange-500/90 text-white hover:bg-orange-500";
+                  text =
+                    tokenStatus.expiresInDays !== null &&
+                    tokenStatus.expiresInDays < 1
+                      ? "expires today"
+                      : "expires soon";
+                  reconnect = true;
+                } else if (tokenStatus.status === "soft_warn") {
+                  cls =
+                    "border-transparent bg-amber-400/90 text-black hover:bg-amber-400";
+                  text = "expires soon";
+                  reconnect = true;
+                }
+              }
+              const badge = (
+                <Badge className={cls}>Schwab: {text}</Badge>
+              );
+              if (!reconnect) return badge;
+              return (
+                <a
+                  href="/api/auth/schwab"
+                  title="Reconnect Schwab"
+                  className="cursor-pointer"
+                >
+                  {badge}
+                </a>
+              );
+            })()}
             {screenedAt && (
               <span className="text-xs text-muted-foreground">
                 Last screened:{" "}
