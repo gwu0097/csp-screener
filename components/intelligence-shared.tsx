@@ -50,7 +50,7 @@ export type PresetKey =
   | "ytd"
   | "all";
 
-export type BrokerFilter = "all" | "schwab" | "robinhood";
+export type BrokerFilter = "all" | "schwab" | "schwab2" | "robinhood";
 
 export type Granularity = "day" | "week" | "month";
 
@@ -138,6 +138,7 @@ export const PRESET_OPTIONS: Array<{ value: PresetKey; label: string }> = [
 export const BROKER_OPTIONS: Array<{ value: BrokerFilter; label: string }> = [
   { value: "all", label: "All" },
   { value: "schwab", label: "Schwab" },
+  { value: "schwab2", label: "Schwab 2" },
   { value: "robinhood", label: "Robinhood" },
 ];
 

@@ -36,13 +36,20 @@ type Props = {
   onSuccess: (msg: string) => void;
 };
 
-const BROKERS = ["schwab", "robinhood"] as const;
+const BROKERS = ["schwab", "schwab2", "robinhood"] as const;
+const BROKER_LABELS: Record<(typeof BROKERS)[number], string> = {
+  schwab: "Schwab",
+  schwab2: "Schwab 2",
+  robinhood: "Robinhood",
+};
 
 // Short per-broker help — rendered beneath the upload dropzone so users
 // know what the parser expects for the selected broker.
 const BROKER_INSTRUCTIONS: Record<(typeof BROKERS)[number], string> = {
   schwab:
     "Screenshot your ThinkorSwim / Schwab Order History table. Parser pulls every FILLED row.",
+  schwab2:
+    "Same parser as Schwab — uses ThinkorSwim / Schwab Order History layout. Imports tag the secondary Schwab account.",
   robinhood:
     "Screenshot your Robinhood position detail cards. Scroll to capture multiple open positions in one image — each card becomes its own fill.",
 };
@@ -218,7 +225,7 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
           >
             {BROKERS.map((b) => (
               <option key={b} value={b}>
-                {b[0].toUpperCase() + b.slice(1)}
+                {BROKER_LABELS[b]}
               </option>
             ))}
           </select>

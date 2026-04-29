@@ -386,9 +386,10 @@ function fmtTimeShort(iso: string): string {
 // Section label + ordering for the broker groups. Anything not in
 // this list (or missing a broker) falls into the "Other" bucket and
 // renders last.
-const BROKER_ORDER = ["schwab", "robinhood"] as const;
+const BROKER_ORDER = ["schwab", "schwab2", "robinhood"] as const;
 const BROKER_LABEL: Record<string, string> = {
   schwab: "Schwab",
+  schwab2: "Schwab 2",
   robinhood: "Robinhood",
   other: "Other",
 };
@@ -400,7 +401,11 @@ function groupByBroker<T extends { broker?: string | null; remainingContracts?: 
   for (const it of items) {
     const b = (it.broker ?? "").toLowerCase();
     const key =
-      b === "schwab" || b === "robinhood" ? b : b.length > 0 ? b : "other";
+      b === "schwab" || b === "schwab2" || b === "robinhood"
+        ? b
+        : b.length > 0
+          ? b
+          : "other";
     const arr = groups.get(key) ?? [];
     arr.push(it);
     groups.set(key, arr);

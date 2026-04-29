@@ -24,7 +24,14 @@ type Props = {
   };
 };
 
-const BROKERS = ["schwab", "robinhood", "fidelity", "other"] as const;
+const BROKERS = ["schwab", "schwab2", "robinhood", "fidelity", "other"] as const;
+const BROKER_LABELS: Record<(typeof BROKERS)[number], string> = {
+  schwab: "Schwab",
+  schwab2: "Schwab 2",
+  robinhood: "Robinhood",
+  fidelity: "Fidelity",
+  other: "Other",
+};
 
 export function ImportManualModal({ open, onOpenChange, onSuccess, prefill }: Props) {
   const [symbol, setSymbol] = useState(prefill?.symbol ?? "");
@@ -155,7 +162,7 @@ export function ImportManualModal({ open, onOpenChange, onSuccess, prefill }: Pr
             >
               {BROKERS.map((b) => (
                 <option key={b} value={b}>
-                  {b[0].toUpperCase() + b.slice(1)}
+                  {BROKER_LABELS[b]}
                 </option>
               ))}
             </select>

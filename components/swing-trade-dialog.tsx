@@ -45,7 +45,7 @@ export function SwingTradeDialog({
   const todayIso = new Date().toISOString().slice(0, 10);
 
   const [symbol, setSymbol] = useState("");
-  const [broker, setBroker] = useState<"schwab" | "robinhood" | "other">("schwab");
+  const [broker, setBroker] = useState<"schwab" | "schwab2" | "robinhood" | "other">("schwab");
   const [shares, setShares] = useState("");
   const [entryPrice, setEntryPrice] = useState("");
   const [entryDate, setEntryDate] = useState(todayIso);
@@ -141,11 +141,12 @@ export function SwingTradeDialog({
               <select
                 value={broker}
                 onChange={(e) =>
-                  setBroker(e.target.value as "schwab" | "robinhood" | "other")
+                  setBroker(e.target.value as "schwab" | "schwab2" | "robinhood" | "other")
                 }
                 className="rounded border border-border bg-background px-2 py-1.5 text-sm"
               >
                 <option value="schwab">Schwab</option>
+                <option value="schwab2">Schwab 2</option>
                 <option value="robinhood">Robinhood</option>
                 <option value="other">Other</option>
               </select>

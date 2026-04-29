@@ -285,8 +285,11 @@ function coerceTrade(raw: unknown, fallbackBroker: string): ParsedTrade | null {
   // Robinhood emits negative contracts for shorts; take the abs value
   // defensively even if the prompt already stripped the sign.
   const contracts = Math.abs(Number(r.contracts));
-  const broker =
-    typeof r.broker === "string" && r.broker.trim() ? r.broker.toLowerCase() : fallbackBroker;
+  // The user-picked broker in the dropdown is authoritative — the model
+  // may emit `broker: "schwab"` for the Schwab prompt and clobber a
+  // `schwab2` (or future multi-account) selection. Trusting the request
+  // wins keeps each Schwab account routed to its own grouping.
+  const broker = fallbackBroker.toLowerCase();
   // For Robinhood, round the calculated strike to nearest $0.50 even if
   // the model returned an unrounded raw value (e.g. 53.83 + 0.17 = 54.00
   // always, but bigger tickers can land on 0.47 etc.).
@@ -326,10 +329,8 @@ function coerceStockTrade(raw: unknown, fallbackBroker: string): ParsedStockTrad
   const action = rawAction === "buy" || rawAction === "sell" ? rawAction : null;
   const shares = Math.abs(Number(r.shares));
   const price = Number(r.price);
-  const broker =
-    typeof r.broker === "string" && r.broker.trim()
-      ? r.broker.toLowerCase()
-      : fallbackBroker;
+  // User-picked broker wins — see coerceTrade comment.
+  const broker = fallbackBroker.toLowerCase();
   const date = typeof r.date === "string" ? normalizeExpiry(r.date) : "";
   if (!symbol || !action) return null;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
