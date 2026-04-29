@@ -6,7 +6,6 @@ import { getWatchlistSymbols } from "@/lib/watchlist";
 import { getIndustryClassification } from "@/lib/classification";
 import {
   buildCandidateFromEarnings,
-  chainHasWeeklyExpiry,
   evaluateStagesOneTwo,
   isLikelyCommonEquity,
   MIN_STOCK_PRICE,
@@ -144,106 +143,31 @@ export async function POST() {
         `(dropped=${stats.droppedByPrice.length}; examples=${stats.droppedByPrice.slice(0, 6).join(",")})`,
     );
 
-    // Step 5: chain check (only when Schwab connected — skip otherwise).
-    // Whitelist tickers bypass the chain-presence kill; if Stage 3/4 later
-    // can't find a usable chain they'll surface "Cannot evaluate", but we
-    // don't drop the ticker from the board at screen time.
-    //
-    // Three-way classification so an upstream Schwab outage doesn't
-    // wipe the board:
-    //   verified_present → chain came back with the target Friday expiry → keep
-    //   verified_absent  → chain came back valid but no weekly expiry → drop
-    //                      (whitelist still bypasses)
-    //   unverified       → safeGetChain returned null OR chainHasWeeklyExpiry
-    //                      saw a degenerate / empty chain → keep with
-    //                      chainUnverified=true so the UI can flag it
-    //                      and Stage 3/4 will retry the fetch
+    // Step 5 (chain verification) was previously inline here — it now
+    // lives in /api/screener/screen/verify-chains, called by the
+    // client in batches of 10 with per-batch retry. Splitting it out
+    // means a Schwab outage can no longer turn the screen into an
+    // empty board: Stream A (this route) returns survivors as soon
+    // as Finnhub + ETF/blacklist + price filters resolve, and the
+    // client backfills chain-verification status into the displayed
+    // table as each Stream C batch completes.
     type WithChain = Survivor & {
       expiry: string;
       price: number;
-      chainUnverified: boolean;
     };
-    const afterChain: WithChain[] = [];
-    for (const row of afterPrice) {
+    const afterChain: WithChain[] = afterPrice.map((row) => {
       const price = prices[row.symbol.toUpperCase()] ?? 0;
       const candidate = buildCandidateFromEarnings(
         { symbol: row.symbol, date: row.date, timing: row.timing },
         price,
       );
-      if (!connected) {
-        afterChain.push({
-          ...row,
-          expiry: candidate.expiry,
-          price,
-          chainUnverified: true,
-        });
-        stats.unverifiedChain!.push(row.symbol.toUpperCase());
-        continue;
-      }
-      const chain = await safeGetChain(
-        row.symbol,
-        candidate.expiry,
-        candidate.expiry,
-      );
-      // Distinguish "Schwab unreachable" (null) from "chain present but
-      // missing the weekly Friday we wanted" (non-null + check fails).
-      // Empty/malformed chain objects also count as unverified — a
-      // valid response from Schwab always carries at least the
-      // putExpDateMap structure even when the strike list is empty.
-      const reachable = chain !== null;
-      const looksValid =
-        reachable &&
-        ((chain.putExpDateMap &&
-          Object.keys(chain.putExpDateMap).length > 0) ||
-          (chain.callExpDateMap &&
-            Object.keys(chain.callExpDateMap).length > 0));
-      if (looksValid && chainHasWeeklyExpiry(chain!, candidate.expiry)) {
-        afterChain.push({
-          ...row,
-          expiry: candidate.expiry,
-          price,
-          chainUnverified: false,
-        });
-      } else if (!reachable || !looksValid) {
-        // Schwab errored or returned an empty response — pass through.
-        afterChain.push({
-          ...row,
-          expiry: candidate.expiry,
-          price,
-          chainUnverified: true,
-        });
-        stats.unverifiedChain!.push(row.symbol.toUpperCase());
-      } else if (row.isWhitelisted) {
-        afterChain.push({
-          ...row,
-          expiry: candidate.expiry,
-          price,
-          chainUnverified: false,
-        });
-      } else {
-        stats.droppedByChain.push(row.symbol.toUpperCase());
-      }
-    }
+      return { ...row, expiry: candidate.expiry, price };
+    });
     stats.afterChainFilter = afterChain.length;
-    const verifiedCount =
-      afterChain.length - (stats.unverifiedChain?.length ?? 0);
     console.log(
-      `[screen] weekly-chain check: ${verifiedCount} passed, ` +
-        `${stats.droppedByChain.length} failed, ` +
-        `${stats.unverifiedChain?.length ?? 0} unverified ` +
-        `(Schwab unavailable). Dropped: ${stats.droppedByChain.slice(0, 6).join(",")}. ` +
-        `Unverified: ${(stats.unverifiedChain ?? []).slice(0, 6).join(",")}`,
+      `[screen] chain verification deferred to /verify-chains stream — ` +
+        `${afterChain.length} survivors forwarded to Stage 1+2`,
     );
-    if (
-      (stats.unverifiedChain?.length ?? 0) > 0 &&
-      stats.droppedByChain.length === 0 &&
-      verifiedCount === 0
-    ) {
-      console.warn(
-        `[screen] All ${afterChain.length} survivors went through unverified — ` +
-          `Schwab options endpoint is likely down or auth has expired.`,
-      );
-    }
 
     // Step 6 + 7: classify and score stages 1+2
     let yahooBudget = YAHOO_FALLBACK_BUDGET;
@@ -280,11 +204,9 @@ export async function POST() {
       };
 
       const result = await evaluateStagesOneTwo(candidate, context);
-      // Stamp the unverified flag through to the result so the UI can
-      // surface a "chain unverified" badge / hint without re-deriving.
-      if (row.chainUnverified) {
-        (result as { chainUnverified?: boolean }).chainUnverified = true;
-      }
+      // Chain-verification status is filled in by the client after
+      // /verify-chains batches complete. Initialize undefined so the
+      // UI can distinguish "not yet checked" from "checked + absent".
       results.push(result);
     }
 

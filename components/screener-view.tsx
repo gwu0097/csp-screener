@@ -516,6 +516,11 @@ export function ScreenerView({ connected }: Props) {
   >({});
   // Transient toast for Track confirmations. One line above the table.
   const [trackToast, setTrackToast] = useState<string | null>(null);
+  // Stream C (chain verification) progress strip — populated while
+  // batches stream in, cleared a few seconds after completion.
+  const [chainProgress, setChainProgress] = useState<
+    { done: number; total: number; phase: "verifying" | "done" } | null
+  >(null);
   // Default sort: finalGrade (A→F). ascending=true means A before F because
   // gradeOrder returns 0 for A, 3 for F. Tracked rows always float to top.
   const [sortKey, setSortKey] = useState<SortKey>("grade");
@@ -864,50 +869,231 @@ export function ScreenerView({ connected }: Props) {
     setMessage(null);
     setExpanded({});
     setLastStats(null);
+    setChainProgress(null);
     try {
-      const res = await fetch("/api/screener/screen", { method: "POST", cache: "no-store" });
-      const json = (await res.json().catch(() => ({}))) as {
+      // ---- Stream A: calendar + filters + Stage 1+2 scoring ----
+      // Fast — 2-5s typical. Returns the full survivor list with
+      // chain verification DEFERRED to /verify-chains so a Schwab
+      // outage can't blank the board.
+      setMessage("Fetching earnings calendar…");
+      const r1 = await fetch("/api/screener/screen", {
+        method: "POST",
+        cache: "no-store",
+      });
+      const j1 = (await r1.json().catch(() => ({}))) as {
         results?: ScreenerResult[];
         prices?: Record<string, number>;
         screenedAt?: string;
         stats?: ScreenStats;
         error?: string;
       };
-      if (!res.ok || json.error) {
+      if (!r1.ok || j1.error) {
         const interpreted = await interpretFetchError(
-          new Response(JSON.stringify(json), { status: res.status }),
+          new Response(JSON.stringify(j1), { status: r1.status }),
           "Screen Today",
         );
         setError({ err: interpreted, retry: () => screenToday() });
         setStatus("error");
-        if (json.stats) setLastStats(json.stats);
+        if (j1.stats) setLastStats(j1.stats);
         return;
       }
-      const nextResults = json.results ?? [];
-      const nextPrices = json.prices ?? {};
-      const nextStats = json.stats ?? null;
-      const timestampIso = json.screenedAt ?? new Date().toISOString();
-      // Save BEFORE setState — both localStorage (this device) and
-      // Supabase (cross-device hydration on next mount).
+      const initialResults: ScreenerResult[] = j1.results ?? [];
+      const initialPrices = j1.prices ?? {};
+      const initialStats = j1.stats ?? null;
+      const timestampIso = j1.screenedAt ?? new Date().toISOString();
+
+      // Surface the result list IMMEDIATELY so the user sees
+      // candidates while Stream C runs. Stage 1+2 grades are already
+      // present; chain verification only adds a per-row badge and
+      // drops verified-absent rows.
+      setResults(initialResults);
+      setPrices(initialPrices);
+      setScreenedAt(new Date(timestampIso));
+      setLastStats(initialStats);
+      setGroupMode(null);
+      setScreenIsGraded(false);
+      setMessage(
+        `Screened ${initialResults.length} candidates — verifying option chains…`,
+      );
+
+      // ---- Stream C: chain verification, batched ----
+      const BATCH_SIZE = 10;
+      const GLOBAL_TIMEOUT_MS = 45_000;
+      const RETRY_BACKOFF_MS = 2_000;
+      const startedAt = Date.now();
+      const batches: ScreenerResult[][] = [];
+      for (let i = 0; i < initialResults.length; i += BATCH_SIZE) {
+        batches.push(initialResults.slice(i, i + BATCH_SIZE));
+      }
+      type VerifyRow = {
+        symbol: string;
+        status: "present" | "absent" | "unverified";
+        reason?: string;
+      };
+      const verifyOnce = async (
+        batch: ScreenerResult[],
+      ): Promise<{ rows: VerifyRow[] | null; status: number | null }> => {
+        try {
+          const res = await fetch(
+            "/api/screener/screen/verify-chains",
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                candidates: batch.map((c) => ({
+                  symbol: c.symbol,
+                  date: c.earningsDate,
+                  timing: c.earningsTiming,
+                  price: c.price,
+                })),
+              }),
+              cache: "no-store",
+            },
+          );
+          if (!res.ok) return { rows: null, status: res.status };
+          const json = (await res.json()) as { verifications?: VerifyRow[] };
+          return { rows: json.verifications ?? [], status: res.status };
+        } catch {
+          return { rows: null, status: null };
+        }
+      };
+
+      const dropSymbols = new Set<string>();
+      let verifiedCount = 0;
+      let absentCount = 0;
+      let unverifiedCount = 0;
+      let workingResults = [...initialResults];
+      const isLatestRunRef = { current: true }; // guards against double-run races
+
+      setChainProgress({
+        done: 0,
+        total: initialResults.length,
+        phase: "verifying",
+      });
+
+      let timedOut = false;
+      for (let b = 0; b < batches.length; b += 1) {
+        if (Date.now() - startedAt > GLOBAL_TIMEOUT_MS) {
+          timedOut = true;
+          // Mark all remaining batches as unverified.
+          for (let r = b; r < batches.length; r += 1) {
+            for (const c of batches[r]) {
+              workingResults = workingResults.map((row) =>
+                row.symbol === c.symbol
+                  ? ({ ...row, chainUnverified: true } as ScreenerResult)
+                  : row,
+              );
+              unverifiedCount += 1;
+            }
+          }
+          break;
+        }
+        const batch = batches[b];
+        let attempt = await verifyOnce(batch);
+        if (
+          (!attempt.rows && attempt.status !== 401 && attempt.status !== 403) ||
+          attempt.status === 504 ||
+          attempt.status === 503 ||
+          attempt.status === 429
+        ) {
+          await new Promise((res) => setTimeout(res, RETRY_BACKOFF_MS));
+          attempt = await verifyOnce(batch);
+        }
+        const verifications = attempt.rows;
+        if (!verifications) {
+          // Two-attempt failure → mark all unverified, continue.
+          for (const c of batch) {
+            workingResults = workingResults.map((row) =>
+              row.symbol === c.symbol
+                ? ({ ...row, chainUnverified: true } as ScreenerResult)
+                : row,
+            );
+            unverifiedCount += 1;
+          }
+        } else {
+          const byKey = new Map(
+            verifications.map((v) => [v.symbol.toUpperCase(), v]),
+          );
+          for (const c of batch) {
+            const v = byKey.get(c.symbol.toUpperCase());
+            if (!v || v.status === "unverified") {
+              workingResults = workingResults.map((row) =>
+                row.symbol === c.symbol
+                  ? ({ ...row, chainUnverified: true } as ScreenerResult)
+                  : row,
+              );
+              unverifiedCount += 1;
+            } else if (v.status === "present") {
+              workingResults = workingResults.map((row) =>
+                row.symbol === c.symbol
+                  ? ({ ...row, chainUnverified: false } as ScreenerResult)
+                  : row,
+              );
+              verifiedCount += 1;
+            } else {
+              // verified_absent — drop unless whitelisted.
+              absentCount += 1;
+              if (!c.isWhitelisted) {
+                dropSymbols.add(c.symbol.toUpperCase());
+              } else {
+                workingResults = workingResults.map((row) =>
+                  row.symbol === c.symbol
+                    ? ({ ...row, chainUnverified: false } as ScreenerResult)
+                    : row,
+                );
+              }
+            }
+          }
+        }
+        // Push the running set into the table after each batch so
+        // candidates appear / drop incrementally.
+        const displayed = workingResults.filter(
+          (r) => !dropSymbols.has(r.symbol.toUpperCase()),
+        );
+        if (isLatestRunRef.current) {
+          setResults(displayed);
+          setChainProgress({
+            done: Math.min((b + 1) * BATCH_SIZE, initialResults.length),
+            total: initialResults.length,
+            phase: "verifying",
+          });
+        }
+      }
+
+      const finalResults = workingResults.filter(
+        (r) => !dropSymbols.has(r.symbol.toUpperCase()),
+      );
+      setResults(finalResults);
+      setChainProgress({
+        done: initialResults.length,
+        total: initialResults.length,
+        phase: "done",
+      });
+
+      // Persist the final post-verification snapshot.
       persistScreenSnapshot({
-        candidates: nextResults,
-        prices: nextPrices,
+        candidates: finalResults,
+        prices: initialPrices,
         screenedAt: timestampIso,
         graded: false,
-        // ScreenStats here counts candidates per filter stage rather
-        // than per analysis pass; map them onto pass1/pass2 columns
-        // so the DB row stays comparable across screener types.
-        pass1Count: nextStats?.afterPriceFilter ?? null,
-        pass2Count: nextStats?.final ?? null,
+        pass1Count: initialStats?.afterPriceFilter ?? null,
+        pass2Count: finalResults.length,
       });
-      setScreenIsGraded(false);
-      setResults(nextResults);
-      setPrices(nextPrices);
-      setScreenedAt(new Date(timestampIso));
-      setLastStats(nextStats);
-      setGroupMode(null);
       setStatus("idle");
-      setMessage(`Screened ${nextResults.length} candidates`);
+      const tail =
+        absentCount > 0 || unverifiedCount > 0
+          ? ` · ${verifiedCount} verified${
+              absentCount > 0 ? ` · ${absentCount} dropped` : ""
+            }${unverifiedCount > 0 ? ` · ${unverifiedCount} unverified` : ""}`
+          : "";
+      setMessage(
+        timedOut
+          ? `Screened ${finalResults.length} candidates · chain verification incomplete (${unverifiedCount} unverified after 45s timeout)`
+          : `Screened ${finalResults.length} candidates${tail}`,
+      );
+      // Auto-clear the progress strip after a beat so it doesn't
+      // linger past the user noticing it finished.
+      window.setTimeout(() => setChainProgress(null), 4000);
     } catch (e) {
       setError({
         err: interpretError(e, "Screen Today"),
@@ -1725,6 +1911,42 @@ export function ScreenerView({ connected }: Props) {
             }
             onDismiss={() => setError(null)}
           />
+        )}
+
+        {chainProgress && (
+          <div
+            className={`rounded-lg border px-3 py-2 text-xs ${
+              chainProgress.phase === "done"
+                ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-200"
+                : "border-sky-500/30 bg-sky-500/10 text-sky-200"
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              {chainProgress.phase === "verifying" ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <span>✓</span>
+              )}
+              <span className="font-medium">
+                {chainProgress.phase === "verifying"
+                  ? "Stream C — verifying option chains"
+                  : "Stream C — verification complete"}
+              </span>
+              <span className="font-mono">
+                {chainProgress.done}/{chainProgress.total}
+              </span>
+            </div>
+            {chainProgress.phase === "verifying" && chainProgress.total > 0 && (
+              <div className="mt-1.5 h-1 overflow-hidden rounded bg-sky-500/20">
+                <div
+                  className="h-full bg-sky-400/70 transition-[width] duration-200"
+                  style={{
+                    width: `${Math.min(100, (chainProgress.done / chainProgress.total) * 100)}%`,
+                  }}
+                />
+              </div>
+            )}
+          </div>
         )}
 
         {showStaleNotice && (
