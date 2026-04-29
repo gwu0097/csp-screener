@@ -219,6 +219,38 @@ export type ValuationModelV2 = {
   // turnaround names where the prior period was negative; this field
   // gives the projected sustainable rate.
   analyst_eps_growth_lt?: number | null;
+
+  // Auto-computed assumptions from earnings_releases + EDGAR quarterly
+  // data, used to seed the Tier 1 / Tier 2 rev_growth_y* defaults when
+  // present. The UI surfaces these so the user can see exactly which
+  // recent quarters drove the base case before overriding manually.
+  // Both fields are absent on saved rows from before this auto-set
+  // landed; the model still works — defaults fall back to the older
+  // recommendTier1 logic in that case.
+  growth_assumptions?: {
+    baseCase: number; // decimal (0.25 = 25%)
+    bearCase: number;
+    bullCase: number;
+    dataPoints: Array<{
+      quarter: string;
+      periodEnd: string;
+      growth: number; // percent
+      used: boolean;
+      flagged?: string;
+      source: "release" | "edgar";
+    }>;
+    method: string;
+    source: "earnings_releases" | "edgar" | "blend";
+  } | null;
+  ttm_eps?: {
+    ttmEps: number;
+    quarters: Array<{
+      quarter: string;
+      eps: number;
+      source: "release" | "edgar" | "derived";
+    }>;
+    method: string;
+  } | null;
 };
 
 export type ValuationCategory = "growth" | "value" | "blend" | "pre_profit";

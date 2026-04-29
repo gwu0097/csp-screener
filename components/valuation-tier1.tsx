@@ -352,9 +352,17 @@ function StartingPoint({
           source="EDGAR"
         />
         <KV
-          label="Trailing EPS"
+          label={
+            model.ttm_eps
+              ? "Trailing EPS (TTM actuals)"
+              : "Trailing EPS"
+          }
           value={fmtPrice(model.last_eps ?? 0)}
-          source="Yahoo"
+          source={
+            model.ttm_eps
+              ? `${model.ttm_eps.method}`
+              : "Yahoo"
+          }
         />
         {model.forward_eps !== null && model.forward_eps !== undefined && (
           <KV
@@ -393,6 +401,40 @@ function StartingPoint({
           />
         </div>
       </div>
+      {model.growth_assumptions && (
+        <div className="mt-2 rounded border border-emerald-500/20 bg-emerald-500/[0.04] p-2 text-[10px]">
+          <div className="mb-0.5 flex items-center gap-2">
+            <span className="font-semibold uppercase tracking-wide text-emerald-300">
+              Growth assumptions (auto-set)
+            </span>
+            <span className="font-mono text-foreground">
+              bear {(model.growth_assumptions.bearCase * 100).toFixed(0)}% ·
+              base {(model.growth_assumptions.baseCase * 100).toFixed(0)}% ·
+              bull {(model.growth_assumptions.bullCase * 100).toFixed(0)}%
+            </span>
+          </div>
+          <div className="text-muted-foreground">
+            {model.growth_assumptions.method}
+          </div>
+          {model.growth_assumptions.dataPoints.length > 0 && (
+            <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-muted-foreground/80">
+              {model.growth_assumptions.dataPoints.map((p) => (
+                <span
+                  key={p.periodEnd}
+                  className={p.used ? "" : "line-through opacity-60"}
+                >
+                  {p.quarter}{" "}
+                  <span className="font-mono">
+                    {p.growth >= 0 ? "+" : ""}
+                    {p.growth.toFixed(0)}%
+                  </span>
+                  {p.flagged ? ` (${p.flagged})` : ""}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

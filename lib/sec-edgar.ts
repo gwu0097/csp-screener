@@ -954,6 +954,342 @@ export function extractTextSection(
   return tail.slice(0, 50 + endRel);
 }
 
+// ---------------- Auto valuation assumptions ----------------
+//
+// Pulls real-world growth + EPS data from earnings_releases (8-K
+// extractions) and blends with EDGAR quarterly/annual when needed,
+// so the valuation model can default its Y1 assumptions to actuals
+// instead of hardcoded annual-history projections.
+//
+// The Supabase client is passed in to keep this file dependency-free
+// from the supabase wrapper. Any object with the standard
+// .from(table).select(...).eq(...).order(...).limit(...) chain works.
+
+type GrowthRow = {
+  quarter: string;
+  periodEnd: string;
+  growth: number; // percent (e.g. 15 not 0.15)
+  used: boolean;
+  flagged?: string;
+  source: "release" | "edgar";
+};
+
+export type GrowthAssumptions = {
+  // All three returned as DECIMAL fractions (0.25 = 25%) for direct
+  // assignment into ScenarioInputs.rev_growth_y*.
+  baseCase: number;
+  bearCase: number;
+  bullCase: number;
+  dataPoints: Array<{
+    quarter: string;
+    periodEnd: string;
+    growth: number; // percent
+    used: boolean;
+    flagged?: string;
+    source: "release" | "edgar";
+  }>;
+  method: string;
+  source: "earnings_releases" | "edgar" | "blend";
+};
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type SupaLike = { from: (table: string) => any };
+
+const ACQUISITION_OUTLIER_PCT = 80;
+
+export async function computeRevenueGrowthAssumptions(
+  symbol: string,
+  sb: SupaLike,
+  quarterly?: QuarterlyMetrics[],
+): Promise<GrowthAssumptions | null> {
+  // 1. Pull last 6 quarters from earnings_releases.
+  type ReleaseRow = {
+    quarter: string;
+    period_end: string;
+    revenue_growth_pct: number | null;
+  };
+  let releases: ReleaseRow[] = [];
+  try {
+    const r = await sb
+      .from("earnings_releases")
+      .select("quarter, period_end, revenue_growth_pct")
+      .eq("symbol", symbol)
+      .order("period_end", { ascending: false })
+      .limit(6);
+    if (!r.error && Array.isArray(r.data)) releases = r.data as ReleaseRow[];
+  } catch {
+    /* missing table — fall through to EDGAR */
+  }
+  const releaseRows: GrowthRow[] = releases
+    .filter((r) => typeof r.revenue_growth_pct === "number")
+    .map((r) => ({
+      quarter: r.quarter,
+      periodEnd: r.period_end,
+      growth: r.revenue_growth_pct as number,
+      used: true,
+      source: "release" as const,
+    }));
+
+  // 2. Compute YoY growth from EDGAR quarterly when needed (joining
+  //    each quarter to its same-quarter prior-year sibling).
+  const edgarRows: GrowthRow[] = [];
+  if (quarterly && quarterly.length >= 4) {
+    const byKey = new Map<string, QuarterlyMetrics>();
+    for (const q of quarterly) {
+      byKey.set(`${q.fiscalYear}|${q.fiscalQuarter}`, q);
+    }
+    const sorted = [...quarterly].sort((a, b) =>
+      b.periodEnd.localeCompare(a.periodEnd),
+    );
+    for (const q of sorted) {
+      const prior = byKey.get(`${q.fiscalYear - 1}|${q.fiscalQuarter}`);
+      if (
+        q.revenue !== null &&
+        prior?.revenue !== null &&
+        prior?.revenue !== undefined &&
+        prior.revenue > 0
+      ) {
+        edgarRows.push({
+          quarter: q.fiscalLabel,
+          periodEnd: q.periodEnd,
+          growth: ((q.revenue - prior.revenue) / prior.revenue) * 100,
+          used: true,
+          source: "edgar",
+        });
+      }
+    }
+  }
+
+  // 3. Merge: prefer release-sourced rows when both have the same
+  //    period_end, supplement with EDGAR for older/missing quarters.
+  const merged: GrowthRow[] = [];
+  const seenDates = new Set<string>();
+  for (const row of releaseRows) {
+    if (!seenDates.has(row.periodEnd)) {
+      merged.push(row);
+      seenDates.add(row.periodEnd);
+    }
+  }
+  for (const row of edgarRows) {
+    if (!seenDates.has(row.periodEnd)) {
+      merged.push(row);
+      seenDates.add(row.periodEnd);
+    }
+  }
+  // Sort newest-first; cap at 6 quarters for the weighted average.
+  merged.sort((a, b) => b.periodEnd.localeCompare(a.periodEnd));
+  const dataPoints = merged.slice(0, 6);
+
+  if (dataPoints.length < 2) return null;
+
+  // 4. Flag acquisition outliers (> 80% growth) — keep them visible
+  //    but exclude from the weighted average.
+  for (const p of dataPoints) {
+    if (Math.abs(p.growth) > ACQUISITION_OUTLIER_PCT) {
+      p.used = false;
+      p.flagged = "acquisition-driven";
+    }
+  }
+  const usable = dataPoints.filter((p) => p.used);
+  if (usable.length === 0) return null;
+
+  // 5. Weighted average — most recent gets weight 3, second 2, rest 1.
+  const weights = [3, 2, 1, 1, 1, 1];
+  let weightedTotal = 0;
+  let weightSum = 0;
+  for (let i = 0; i < usable.length; i += 1) {
+    const w = weights[i] ?? 1;
+    weightedTotal += w * usable[i].growth;
+    weightSum += w;
+  }
+  const weightedAvgPct = weightSum > 0 ? weightedTotal / weightSum : 0;
+  const round5 = (n: number) => Math.round(n / 5) * 5;
+  const baseCasePct = round5(weightedAvgPct);
+  const bearCasePct = Math.max(5, baseCasePct - 15);
+  const bullCasePct = Math.min(150, baseCasePct + 20);
+
+  // 6. Method string for UI display.
+  const fmtPctSigned = (n: number) =>
+    `${n >= 0 ? "+" : ""}${n.toFixed(0)}%`;
+  const includedDescs = usable
+    .slice(0, 3)
+    .map((p) => `${p.quarter}: ${fmtPctSigned(p.growth)}`)
+    .join(", ");
+  const flaggedDescs = dataPoints
+    .filter((p) => p.flagged)
+    .map(
+      (p) =>
+        `${p.quarter} (${fmtPctSigned(p.growth)}, ${p.flagged})`,
+    )
+    .join(", ");
+  const sourceLabel: GrowthAssumptions["source"] =
+    releaseRows.length > 0 && edgarRows.length > 0
+      ? "blend"
+      : releaseRows.length > 0
+        ? "earnings_releases"
+        : "edgar";
+  const sourceDesc =
+    sourceLabel === "earnings_releases"
+      ? "8-K actuals"
+      : sourceLabel === "edgar"
+        ? "EDGAR YoY"
+        : "8-K + EDGAR";
+  const usedCount = Math.min(usable.length, 3);
+  const method =
+    `Weighted avg of last ${usedCount} quarter${usedCount === 1 ? "" : "s"} ` +
+    `(${includedDescs})${flaggedDescs ? `; excl. ${flaggedDescs}` : ""}. ` +
+    `Source: ${sourceDesc}.`;
+
+  return {
+    baseCase: baseCasePct / 100,
+    bearCase: bearCasePct / 100,
+    bullCase: bullCasePct / 100,
+    dataPoints,
+    method,
+    source: sourceLabel,
+  };
+}
+
+// ---------------- TTM EPS from actuals ----------------
+
+export type TtmEpsResult = {
+  ttmEps: number;
+  quarters: Array<{
+    quarter: string;
+    eps: number;
+    source: "release" | "edgar" | "derived";
+  }>;
+  method: string;
+};
+
+export async function computeTtmEps(
+  symbol: string,
+  sb: SupaLike,
+  opts: {
+    quarterly?: QuarterlyMetrics[];
+    annualEps?: Array<{ year: number; eps: number | null }>;
+  } = {},
+): Promise<TtmEpsResult | null> {
+  // 1. Releases first.
+  type ReleaseRow = {
+    quarter: string;
+    period_end: string;
+    eps_diluted: number | null;
+  };
+  let releases: ReleaseRow[] = [];
+  try {
+    const r = await sb
+      .from("earnings_releases")
+      .select("quarter, period_end, eps_diluted")
+      .eq("symbol", symbol)
+      .order("period_end", { ascending: false })
+      .limit(6);
+    if (!r.error && Array.isArray(r.data)) releases = r.data as ReleaseRow[];
+  } catch {
+    /* missing — fall through */
+  }
+  const collected: Array<{
+    quarter: string;
+    periodEnd: string;
+    eps: number;
+    source: "release" | "edgar" | "derived";
+  }> = [];
+  const seen = new Set<string>();
+
+  for (const r of releases) {
+    if (collected.length >= 4) break;
+    if (typeof r.eps_diluted !== "number") continue;
+    if (seen.has(r.period_end)) continue;
+    collected.push({
+      quarter: r.quarter,
+      periodEnd: r.period_end,
+      eps: r.eps_diluted,
+      source: "release",
+    });
+    seen.add(r.period_end);
+  }
+
+  // 2. Fill from EDGAR quarterly (Q1/Q2/Q3 — Q4 is null in our
+  //    extractor since per-share derivation is unreliable; we'll
+  //    handle Q4 via annual derivation separately).
+  if (collected.length < 4 && opts.quarterly) {
+    const sorted = [...opts.quarterly].sort((a, b) =>
+      b.periodEnd.localeCompare(a.periodEnd),
+    );
+    for (const q of sorted) {
+      if (collected.length >= 4) break;
+      if (seen.has(q.periodEnd)) continue;
+      if (q.eps === null || q.fiscalQuarter === 4) continue;
+      collected.push({
+        quarter: q.fiscalLabel,
+        periodEnd: q.periodEnd,
+        eps: q.eps,
+        source: "edgar",
+      });
+      seen.add(q.periodEnd);
+    }
+  }
+
+  // 3. Derive Q4 from FY annual EPS minus Q1+Q2+Q3 EPS — accepts
+  //    share-count drift; result is usually within a few cents.
+  if (collected.length < 4 && opts.quarterly && opts.annualEps) {
+    const byYearQ = new Map<string, QuarterlyMetrics>();
+    for (const q of opts.quarterly) {
+      byYearQ.set(`${q.fiscalYear}|${q.fiscalQuarter}`, q);
+    }
+    const annualSorted = [...opts.annualEps]
+      .filter((a) => a.eps !== null)
+      .sort((a, b) => b.year - a.year);
+    for (const a of annualSorted) {
+      if (collected.length >= 4) break;
+      const periodEnd = `${a.year}-12-31`;
+      if (seen.has(periodEnd)) continue;
+      const q1 = byYearQ.get(`${a.year}|1`);
+      const q2 = byYearQ.get(`${a.year}|2`);
+      const q3 = byYearQ.get(`${a.year}|3`);
+      if (
+        q1?.eps === null ||
+        q1?.eps === undefined ||
+        q2?.eps === null ||
+        q2?.eps === undefined ||
+        q3?.eps === null ||
+        q3?.eps === undefined
+      ) {
+        continue;
+      }
+      const q4Eps =
+        (a.eps as number) - (q1.eps as number) - (q2.eps as number) - (q3.eps as number);
+      collected.push({
+        quarter: `Q4 ${a.year}`,
+        periodEnd,
+        eps: q4Eps,
+        source: "derived",
+      });
+      seen.add(periodEnd);
+    }
+  }
+
+  collected.sort((a, b) => b.periodEnd.localeCompare(a.periodEnd));
+  const final = collected.slice(0, 4);
+  if (final.length < 4) return null;
+
+  const ttmEps = final.reduce((s, q) => s + q.eps, 0);
+  const sources = Array.from(new Set(final.map((q) => q.source))).join(" + ");
+  const method =
+    final
+      .map((q) => `${q.quarter} $${q.eps.toFixed(2)}`)
+      .join(" + ") + ` = $${ttmEps.toFixed(2)} (${sources})`;
+  return {
+    ttmEps,
+    quarters: final.map((q) => ({
+      quarter: q.quarter,
+      eps: q.eps,
+      source: q.source,
+    })),
+    method,
+  };
+}
+
 // TTM revenue from a sorted-newest-first quarterly array. Returns null
 // when fewer than 4 quarters are available OR any of the most recent
 // 4 has a null revenue value.

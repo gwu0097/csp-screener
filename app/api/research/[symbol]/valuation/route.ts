@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import YahooFinance from "yahoo-finance2";
 import {
+  computeRevenueGrowthAssumptions,
+  computeTtmEps,
   convertAnnualToUsd,
   convertDCFExtrasToUsd,
   convertQuarterlyToUsd,
@@ -436,6 +438,64 @@ export async function POST(
       taxRate,
     });
 
+    // Auto-set rev_growth defaults from actuals when we have at least
+    // 2 quarters of release / EDGAR data. The annual-history-driven
+    // `recommendTier1` defaults can be wildly off for fast-decel
+    // names (HOOD's annual base would be +51% even though the most
+    // recent two quarters printed +15% / +27%). The user can still
+    // override on the client; we just ship better starting numbers.
+    const supabaseClient = createServerClient();
+    const growthAssumptions = await computeRevenueGrowthAssumptions(
+      symbol,
+      supabaseClient,
+      quarterly,
+    );
+    if (growthAssumptions) {
+      // Tier 1: y1=y2=y3 set to the scenario rate (matches existing
+      // recommendTier1 pattern of flat 3-year growth).
+      const tier1Set = (s: ScenarioSet[keyof ScenarioSet], rate: number) => {
+        s.rev_growth_y1 = rate;
+        s.rev_growth_y2 = rate;
+        s.rev_growth_y3 = rate;
+      };
+      tier1Set(tier1System.bear, growthAssumptions.bearCase);
+      tier1Set(tier1System.base, growthAssumptions.baseCase);
+      tier1Set(tier1System.bull, growthAssumptions.bullCase);
+      // Tier 2 DCF: only override y1+y2 — Y3-Y5 keep the DCF's
+      // natural fade toward terminal growth.
+      const tier2Set = (
+        s: DCFScenarioSet[keyof DCFScenarioSet],
+        rate: number,
+      ) => {
+        s.rev_growth_y1 = rate;
+        s.rev_growth_y2 = rate;
+      };
+      tier2Set(tier2System.bear, growthAssumptions.bearCase);
+      tier2Set(tier2System.base, growthAssumptions.baseCase);
+      tier2Set(tier2System.bull, growthAssumptions.bullCase);
+      console.log(
+        `[valuation:${symbol}] auto rev_growth: bear=${(growthAssumptions.bearCase * 100).toFixed(0)}% base=${(growthAssumptions.baseCase * 100).toFixed(0)}% bull=${(growthAssumptions.bullCase * 100).toFixed(0)}% (${growthAssumptions.method})`,
+      );
+    }
+
+    // TTM EPS from actuals — replaces Yahoo's stale trailingEps when
+    // we can build 4 contiguous quarters from earnings_releases +
+    // EDGAR. Q4 EPS is derived from FY annual minus Q1+Q2+Q3 (share-
+    // count drift caveat: usually within a few cents).
+    const ttmEpsResult = await computeTtmEps(symbol, supabaseClient, {
+      quarterly,
+      annualEps: annual.map((a) => ({ year: a.year, eps: a.eps })),
+    });
+    const effectiveLastEps =
+      ttmEpsResult && Number.isFinite(ttmEpsResult.ttmEps)
+        ? ttmEpsResult.ttmEps
+        : yh.trailingEps;
+    if (ttmEpsResult) {
+      console.log(
+        `[valuation:${symbol}] TTM EPS from actuals: ${ttmEpsResult.method}`,
+      );
+    }
+
     const tier1Ctx = {
       last_revenue: lastRevenue,
       shares_outstanding: sharesOutstanding,
@@ -472,7 +532,7 @@ export async function POST(
       shares_outstanding: sharesOutstanding,
       last_revenue: lastRevenue,
       last_op_margin: lastRow.op_margin ?? 0,
-      last_eps: yh.trailingEps,
+      last_eps: effectiveLastEps,
       forward_pe: yh.forwardPE,
       trailing_pe: yh.trailingPE,
       sector: yh.sector,
@@ -514,6 +574,8 @@ export async function POST(
         system_outputs: tier2SysOut,
       },
       comps,
+      growth_assumptions: growthAssumptions ?? null,
+      ttm_eps: ttmEpsResult ?? null,
     };
 
     const saved = await saveModule(symbol, "valuation_model", output);
