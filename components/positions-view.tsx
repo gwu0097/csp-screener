@@ -236,19 +236,19 @@ function TickerSubHeader({
         ? "text-emerald-300"
         : "text-rose-300";
   return (
-    <div className="flex items-baseline justify-between gap-2 px-3 pt-2 text-xs">
+    <div className="flex items-baseline justify-between gap-2 border-t border-border/40 px-3 pt-3 pb-1 text-xs first:border-t-0 first:pt-2">
       <div className="flex items-baseline gap-2">
-        <span className="text-sm font-semibold text-foreground">{symbol}</span>
-        <span className="text-muted-foreground">
-          ({contractCount} {contractCount === 1 ? "contract" : "contracts"})
+        <span className="text-sm font-bold tracking-wide text-foreground">{symbol}</span>
+        <span className="font-mono text-[11px] text-muted-foreground">
+          {contractCount} {contractCount === 1 ? "contract" : "contracts"}
         </span>
         {stockPrice !== null && (
-          <span className="font-mono text-muted-foreground">
-            — {fmtDollars(stockPrice)}
+          <span className="font-mono text-[11px] text-muted-foreground/80">
+            · {fmtDollars(stockPrice)}
           </span>
         )}
       </div>
-      <span className={cn("font-mono", pnlCls)}>
+      <span className={cn("font-mono text-xs font-semibold", pnlCls)}>
         {fmtDollarsSigned(combinedPnl)}
       </span>
     </div>
@@ -394,6 +394,79 @@ const BROKER_LABEL: Record<string, string> = {
   other: "Other",
 };
 
+// Per-account accent palette — drives both the panel border and the
+// active-tab tint. Keep these subtle; the data is the loud part.
+type AccountAccent = {
+  panelBorder: string;
+  panelBg: string;
+  topBar: string;
+  text: string;
+  tabActive: string;
+  dot: string;
+};
+const ACCOUNT_ACCENT: Record<string, AccountAccent> = {
+  schwab: {
+    panelBorder: "border-sky-500/30",
+    panelBg: "bg-sky-500/[0.025]",
+    topBar: "bg-sky-500/60",
+    text: "text-sky-300",
+    tabActive: "bg-sky-500/15 text-sky-200 border-sky-500/40",
+    dot: "bg-sky-400",
+  },
+  schwab2: {
+    panelBorder: "border-purple-500/30",
+    panelBg: "bg-purple-500/[0.025]",
+    topBar: "bg-purple-500/60",
+    text: "text-purple-300",
+    tabActive: "bg-purple-500/15 text-purple-200 border-purple-500/40",
+    dot: "bg-purple-400",
+  },
+  robinhood: {
+    panelBorder: "border-emerald-500/30",
+    panelBg: "bg-emerald-500/[0.025]",
+    topBar: "bg-emerald-500/60",
+    text: "text-emerald-300",
+    tabActive: "bg-emerald-500/15 text-emerald-200 border-emerald-500/40",
+    dot: "bg-emerald-400",
+  },
+  other: {
+    panelBorder: "border-border",
+    panelBg: "",
+    topBar: "bg-muted-foreground/40",
+    text: "text-foreground",
+    tabActive: "bg-foreground/10 text-foreground border-foreground/20",
+    dot: "bg-muted-foreground",
+  },
+};
+
+function accentFor(key: string): AccountAccent {
+  return ACCOUNT_ACCENT[key] ?? ACCOUNT_ACCENT.other;
+}
+
+// Per-broker stats derived from the open positions in that group.
+function computeBrokerStats(items: OpenPositionClientView[]): {
+  maxProfit: number;
+  maxProfitMissing: number;
+  unrealized: number;
+  unrealizedAvailable: boolean;
+} {
+  const contributors = items.filter(
+    (p) => p.avgPremiumSold !== null && Number.isFinite(p.avgPremiumSold),
+  );
+  const maxProfit = contributors.reduce(
+    (s, p) => s + (p.avgPremiumSold as number) * p.remainingContracts * 100,
+    0,
+  );
+  const liveItems = items.filter((p) => p.pnlDollars !== null);
+  const unrealized = liveItems.reduce((s, p) => s + (p.pnlDollars ?? 0), 0);
+  return {
+    maxProfit,
+    maxProfitMissing: items.length - contributors.length,
+    unrealized,
+    unrealizedAvailable: liveItems.length > 0,
+  };
+}
+
 function groupByBroker<T extends { broker?: string | null; remainingContracts?: number }>(
   items: T[],
 ): Array<{ key: string; label: string; items: T[]; contractCount: number }> {
@@ -524,6 +597,10 @@ export function PositionsView() {
       return k;
     });
   }, []);
+  // Account filter — "all" or a single broker key. Tabs only appear
+  // when more than one broker has positions, so a single-account user
+  // never sees noise.
+  const [brokerFilter, setBrokerFilter] = useState<string>("all");
 
   const load = useCallback(async (live: boolean) => {
     if (live) setLiveLoading(true);
@@ -638,103 +715,149 @@ export function PositionsView() {
   );
   const maxProfitMissing = positions.length - maxProfitContributors.length;
 
+  const brokerGroups = groupByBroker(positions);
+  const visibleBrokerGroups =
+    brokerFilter === "all"
+      ? brokerGroups
+      : brokerGroups.filter((g) => g.key === brokerFilter);
+
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
-        <div className="flex flex-wrap items-center gap-3">
-          <span className="inline-flex items-center gap-2 font-medium text-foreground">
-            <Briefcase className="h-4 w-4" /> Positions
-          </span>
-          <span className="text-muted-foreground">
-            Open: <span className="text-foreground">{positions.length}</span>
-            {totalOpenContracts > 0 && (
-              <span className="text-muted-foreground"> ({totalOpenContracts} contracts)</span>
-            )}
-          </span>
-          {positions.length > 0 && (
-            <span className="text-muted-foreground">
-              Max Profit:{" "}
-              <span className="text-emerald-300">
-                {maxProfitContributors.length > 0
-                  ? fmtDollarsSigned(maxProfit)
-                  : "—"}
+      {/* ---------- Top stats panel ---------- */}
+      <div className="rounded-lg border border-border bg-background/60 p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="space-y-1.5">
+            <div className="font-mono text-xl font-semibold tracking-tight text-foreground tabular-nums sm:text-2xl">
+              <span>{positions.length}</span>
+              <span className="ml-2 text-base font-medium uppercase tracking-wider text-muted-foreground">
+                {positions.length === 1 ? "position" : "positions"}
               </span>
-              {maxProfitMissing > 0 && (
-                <span className="ml-1 text-[10px] text-muted-foreground/70">
-                  ({maxProfitMissing} excluded — no entry data)
-                </span>
-              )}
-            </span>
-          )}
-          {positions.length > 0 && (
-            <span className="text-muted-foreground">
-              Unrealized:{" "}
-              {data?.live ? (
-                <span className={unrealized >= 0 ? "text-emerald-300" : "text-rose-300"}>
-                  {fmtDollarsSigned(unrealized)}
-                </span>
-              ) : (
-                <span className="text-muted-foreground/70">—</span>
-              )}
-            </span>
-          )}
-          {market && (
-            <span className="text-muted-foreground">
-              VIX:{" "}
-              <span className={regimeColor(market.regime)}>
-                {market.vix !== null ? market.vix.toFixed(2) : "—"}
-                {market.regime ? ` (${market.regime})` : ""}
-              </span>
-            </span>
-          )}
-          {best && (
-            <span className="text-muted-foreground">
-              Best: <span className="text-foreground">{best.symbol}</span>{" "}
-              <span className="text-xs text-muted-foreground">({best.recommendation})</span>
-            </span>
-          )}
-        </div>
-        <div className="flex items-center gap-2">
-          {data && positions.length > 0 && (
-            <span className="text-xs text-muted-foreground">
-              {liveCacheFetchedAt
-                ? `Live data as of ${fmtTimeShort(liveCacheFetchedAt)}`
-                : "Live data not loaded"}
-              {liveSnapshotSummary && (
+              {totalOpenContracts > 0 && (
                 <>
-                  {" · "}
-                  {liveSnapshotSummary.written > 0
-                    ? `${liveSnapshotSummary.written} snapshot${liveSnapshotSummary.written === 1 ? "" : "s"} saved`
-                    : "snapshots up to date"}
+                  <span className="mx-3 text-muted-foreground/60">·</span>
+                  <span>{totalOpenContracts}</span>
+                  <span className="ml-2 text-base font-medium uppercase tracking-wider text-muted-foreground">
+                    {totalOpenContracts === 1 ? "contract" : "contracts"}
+                  </span>
                 </>
               )}
-            </span>
-          )}
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => load(false)}
-            disabled={loading || liveLoading}
-          >
-            {loading ? (
-              <Loader2 className="mr-2 h-3 w-3 animate-spin" />
-            ) : (
-              <RefreshCcw className="mr-2 h-3 w-3" />
+            </div>
+            <div className="flex flex-wrap items-baseline gap-x-5 gap-y-1 text-sm">
+              {positions.length > 0 && (
+                <div>
+                  <span className="text-muted-foreground">Max Profit </span>
+                  <span className="font-mono text-base font-semibold text-emerald-300">
+                    {maxProfitContributors.length > 0
+                      ? fmtDollarsSigned(maxProfit)
+                      : "—"}
+                  </span>
+                  {maxProfitMissing > 0 && (
+                    <span className="ml-1 text-[10px] text-muted-foreground/70">
+                      ({maxProfitMissing} excluded)
+                    </span>
+                  )}
+                </div>
+              )}
+              {positions.length > 0 && (
+                <div>
+                  <span className="text-muted-foreground">Unrealized </span>
+                  {data?.live ? (
+                    <span
+                      className={cn(
+                        "font-mono text-base font-semibold",
+                        unrealized >= 0 ? "text-emerald-300" : "text-rose-300",
+                      )}
+                    >
+                      {fmtDollarsSigned(unrealized)}
+                    </span>
+                  ) : (
+                    <span className="font-mono text-base font-semibold text-muted-foreground/70">—</span>
+                  )}
+                </div>
+              )}
+              {market && (
+                <div>
+                  <span className="text-muted-foreground">VIX </span>
+                  <span className={cn("font-mono text-base font-semibold", regimeColor(market.regime))}>
+                    {market.vix !== null ? market.vix.toFixed(2) : "—"}
+                  </span>
+                  {market.regime && (
+                    <span className={cn("ml-1 text-xs", regimeColor(market.regime))}>
+                      ({market.regime})
+                    </span>
+                  )}
+                </div>
+              )}
+              {best && (
+                <div className="text-muted-foreground">
+                  Best: <span className="text-foreground">{best.symbol}</span>{" "}
+                  <span className="text-xs">({best.recommendation})</span>
+                </div>
+              )}
+            </div>
+          </div>
+          <div className="flex flex-col items-end gap-2">
+            <div className="flex items-center gap-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setShowScreenshot(true)}
+                className="text-xs text-muted-foreground hover:text-foreground"
+              >
+                <Camera className="mr-1.5 h-3.5 w-3.5" />
+                Import
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setShowManual(true)}
+                className="text-xs text-muted-foreground hover:text-foreground"
+              >
+                <Plus className="mr-1.5 h-3.5 w-3.5" />
+                Add
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => load(false)}
+                disabled={loading || liveLoading}
+              >
+                {loading ? (
+                  <Loader2 className="mr-1.5 h-3 w-3 animate-spin" />
+                ) : (
+                  <RefreshCcw className="mr-1.5 h-3 w-3" />
+                )}
+                Refresh
+              </Button>
+              <Button
+                size="sm"
+                onClick={() => load(true)}
+                disabled={loading || liveLoading || positions.length === 0}
+              >
+                {liveLoading ? (
+                  <Loader2 className="mr-1.5 h-3 w-3 animate-spin" />
+                ) : (
+                  <Zap className="mr-1.5 h-3 w-3" />
+                )}
+                Live
+              </Button>
+            </div>
+            {data && positions.length > 0 && (
+              <span className="text-[11px] text-muted-foreground">
+                {liveCacheFetchedAt
+                  ? `Live data as of ${fmtTimeShort(liveCacheFetchedAt)}`
+                  : "Live data not loaded"}
+                {liveSnapshotSummary && (
+                  <>
+                    {" · "}
+                    {liveSnapshotSummary.written > 0
+                      ? `${liveSnapshotSummary.written} snapshot${liveSnapshotSummary.written === 1 ? "" : "s"} saved`
+                      : "snapshots up to date"}
+                  </>
+                )}
+              </span>
             )}
-            Refresh
-          </Button>
-          <Button
-            size="sm"
-            onClick={() => load(true)}
-            disabled={loading || liveLoading || positions.length === 0}
-          >
-            {liveLoading ? (
-              <Loader2 className="mr-2 h-3 w-3 animate-spin" />
-            ) : (
-              <Zap className="mr-2 h-3 w-3" />
-            )}
-            Refresh live data
-          </Button>
+          </div>
         </div>
       </div>
 
@@ -763,20 +886,49 @@ export function PositionsView() {
         </div>
       )}
 
-      <div className="flex flex-wrap items-center gap-2">
-        <Button onClick={() => setShowScreenshot(true)}>
-          <Camera className="mr-2 h-4 w-4" />
-          Import from screenshot
-        </Button>
-        <Button variant="secondary" onClick={() => setShowManual(true)}>
-          <Plus className="mr-2 h-4 w-4" />
-          Add manually
-        </Button>
-      </div>
-
-      <div className="flex items-center gap-2 pt-2">
-        <h2 className="text-sm font-semibold">Open positions ({positions.length})</h2>
-      </div>
+      {/* ---------- Account filter tabs ---------- */}
+      {brokerGroups.length > 1 && (
+        <div className="flex flex-wrap items-center gap-1 rounded-md border border-border bg-background/40 p-1 text-xs font-semibold uppercase tracking-wide">
+          <button
+            type="button"
+            onClick={() => setBrokerFilter("all")}
+            className={cn(
+              "rounded px-3 py-1 transition",
+              brokerFilter === "all"
+                ? "border border-foreground/30 bg-foreground/10 text-foreground"
+                : "border border-transparent text-muted-foreground hover:text-foreground",
+            )}
+          >
+            All
+            <span className="ml-1.5 font-mono normal-case text-muted-foreground">
+              {totalOpenContracts}
+            </span>
+          </button>
+          {brokerGroups.map((g) => {
+            const a = accentFor(g.key);
+            const active = brokerFilter === g.key;
+            return (
+              <button
+                key={g.key}
+                type="button"
+                onClick={() => setBrokerFilter(g.key)}
+                className={cn(
+                  "flex items-center gap-1.5 rounded px-3 py-1 transition",
+                  active
+                    ? cn("border", a.tabActive)
+                    : "border border-transparent text-muted-foreground hover:text-foreground",
+                )}
+              >
+                <span className={cn("h-1.5 w-1.5 rounded-full", a.dot)} />
+                {g.label}
+                <span className={cn("ml-0.5 font-mono normal-case", active ? "text-current" : "text-muted-foreground")}>
+                  {g.contractCount}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
 
       {loading && !data && (
         <div className="flex items-center justify-center rounded-lg border border-border bg-background/40 px-6 py-12 text-sm text-muted-foreground">
@@ -793,50 +945,108 @@ export function PositionsView() {
         </div>
       )}
 
-      {groupByBroker(positions).map((group) => (
-        <div key={group.key} className="space-y-2">
-          <div className="flex items-baseline gap-2 pt-2 text-xs font-semibold uppercase text-muted-foreground">
-            <span>{group.label}</span>
-            <span className="font-normal normal-case">
-              ({group.contractCount} {group.contractCount === 1 ? "contract" : "contracts"})
-            </span>
-          </div>
-          <PositionsTableHeader sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
-          {groupByTicker(group.items).map((tg) => (
-            <div key={tg.symbol} className="space-y-1">
-              <TickerSubHeader
-                symbol={tg.symbol}
-                contractCount={tg.contractCount}
-                stockPrice={tg.stockPrice}
-                combinedPnl={tg.combinedPnl}
-              />
-              {sortPositions(tg.items, sortKey, sortDir).map((p) => (
-                <PositionCard
-                  key={p.id}
-                  kind="open"
-                  position={p}
-                  hideSymbol
-                  hideStock
-                  onCloseSubmitted={onImportSuccess}
-                  onPositionRemoved={(id) => {
-                    // Optimistic remove — drop the row from local state so
-                    // the UI updates instantly. We don't refetch; the next
-                    // Refresh / page reload will reconcile against the DB.
-                    setData((prev) =>
-                      prev
-                        ? {
-                            ...prev,
-                            positions: prev.positions.filter((q) => q.id !== id),
-                          }
-                        : prev,
-                    );
-                  }}
-                />
+      {/* ---------- Account panels ---------- */}
+      {visibleBrokerGroups.map((group) => {
+        const accent = accentFor(group.key);
+        const stats = computeBrokerStats(group.items);
+        return (
+          <div
+            key={group.key}
+            className={cn(
+              "overflow-hidden rounded-lg border",
+              accent.panelBorder,
+              accent.panelBg,
+            )}
+          >
+            {/* Top accent stripe */}
+            <div className={cn("h-0.5 w-full", accent.topBar)} />
+
+            {/* Panel header */}
+            <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
+              <div className="flex items-baseline gap-3">
+                <span className={cn("text-base font-bold uppercase tracking-wider", accent.text)}>
+                  {group.label}
+                </span>
+                <span className="font-mono text-xs text-muted-foreground">
+                  {group.contractCount} {group.contractCount === 1 ? "contract" : "contracts"}
+                </span>
+              </div>
+              <div className="flex items-baseline gap-4 text-xs">
+                <div>
+                  <span className="text-muted-foreground">Max Profit </span>
+                  <span className="font-mono font-semibold text-emerald-300">
+                    {fmtDollarsSigned(stats.maxProfit)}
+                  </span>
+                  {stats.maxProfitMissing > 0 && (
+                    <span className="ml-1 text-[10px] text-muted-foreground/70">
+                      ({stats.maxProfitMissing} excluded)
+                    </span>
+                  )}
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Unrealized </span>
+                  {stats.unrealizedAvailable ? (
+                    <span
+                      className={cn(
+                        "font-mono font-semibold",
+                        stats.unrealized >= 0 ? "text-emerald-300" : "text-rose-300",
+                      )}
+                    >
+                      {fmtDollarsSigned(stats.unrealized)}
+                    </span>
+                  ) : (
+                    <span className="font-mono text-muted-foreground/70">—</span>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Sticky column header — sticks to viewport top while
+                scrolling past this panel; unsticks when the panel
+                scrolls out. */}
+            <div className="sticky top-0 z-10 border-y border-border/40 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80">
+              <PositionsTableHeader sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+            </div>
+
+            {/* Positions */}
+            <div className="space-y-1 px-2 pb-2">
+              {groupByTicker(group.items).map((tg) => (
+                <div key={tg.symbol} className="space-y-1">
+                  <TickerSubHeader
+                    symbol={tg.symbol}
+                    contractCount={tg.contractCount}
+                    stockPrice={tg.stockPrice}
+                    combinedPnl={tg.combinedPnl}
+                  />
+                  {sortPositions(tg.items, sortKey, sortDir).map((p) => (
+                    <PositionCard
+                      key={p.id}
+                      kind="open"
+                      position={p}
+                      hideSymbol
+                      hideStock
+                      onCloseSubmitted={onImportSuccess}
+                      onPositionRemoved={(id) => {
+                        // Optimistic remove — drop the row from local state so
+                        // the UI updates instantly. We don't refetch; the next
+                        // Refresh / page reload will reconcile against the DB.
+                        setData((prev) =>
+                          prev
+                            ? {
+                                ...prev,
+                                positions: prev.positions.filter((q) => q.id !== id),
+                              }
+                            : prev,
+                        );
+                      }}
+                    />
+                  ))}
+                </div>
               ))}
             </div>
-          ))}
-        </div>
-      ))}
+          </div>
+        );
+      })}
 
       {/* Closed positions — collapsed by default, fetched lazily */}
       <div className="pt-4">
@@ -871,36 +1081,57 @@ export function PositionsView() {
             )}
             {closedPositions !== null &&
               closedPositions.length > 0 &&
-              groupByBroker(closedPositions).map((group) => (
-                <div key={group.key} className="space-y-2">
-                  <div className="flex items-baseline gap-2 pt-1 text-xs font-semibold uppercase text-muted-foreground">
-                    <span>{group.label}</span>
-                    <span className="font-normal normal-case">
-                      ({group.items.length} {group.items.length === 1 ? "position" : "positions"})
-                    </span>
-                  </div>
-                  <PositionsTableHeader sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
-                  {groupByTicker(group.items).map((tg) => (
-                    <div key={tg.symbol} className="space-y-1">
-                      <TickerSubHeader
-                        symbol={tg.symbol}
-                        contractCount={tg.contractCount}
-                        stockPrice={tg.stockPrice}
-                        combinedPnl={tg.combinedPnl}
-                      />
-                      {sortPositions(tg.items, sortKey, sortDir).map((p) => (
-                        <PositionCard
-                          key={p.id}
-                          kind="closed"
-                          position={p}
-                          hideSymbol
-                          hideStock
-                        />
-                      ))}
+              groupByBroker(closedPositions)
+                .filter((g) => brokerFilter === "all" || g.key === brokerFilter)
+                .map((group) => {
+                  const accent = accentFor(group.key);
+                  return (
+                    <div
+                      key={group.key}
+                      className={cn(
+                        "overflow-hidden rounded-lg border",
+                        accent.panelBorder,
+                        accent.panelBg,
+                      )}
+                    >
+                      <div className={cn("h-0.5 w-full", accent.topBar)} />
+                      <div className="flex items-baseline justify-between gap-2 px-4 py-3">
+                        <div className="flex items-baseline gap-3">
+                          <span className={cn("text-base font-bold uppercase tracking-wider", accent.text)}>
+                            {group.label}
+                          </span>
+                          <span className="font-mono text-xs text-muted-foreground">
+                            {group.items.length} {group.items.length === 1 ? "position" : "positions"}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="sticky top-0 z-10 border-y border-border/40 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80">
+                        <PositionsTableHeader sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+                      </div>
+                      <div className="space-y-1 px-2 pb-2">
+                        {groupByTicker(group.items).map((tg) => (
+                          <div key={tg.symbol} className="space-y-1">
+                            <TickerSubHeader
+                              symbol={tg.symbol}
+                              contractCount={tg.contractCount}
+                              stockPrice={tg.stockPrice}
+                              combinedPnl={tg.combinedPnl}
+                            />
+                            {sortPositions(tg.items, sortKey, sortDir).map((p) => (
+                              <PositionCard
+                                key={p.id}
+                                kind="closed"
+                                position={p}
+                                hideSymbol
+                                hideStock
+                              />
+                            ))}
+                          </div>
+                        ))}
+                      </div>
                     </div>
-                  ))}
-                </div>
-              ))}
+                  );
+                })}
           </div>
         )}
       </div>

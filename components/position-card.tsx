@@ -190,21 +190,30 @@ function popColor(pop: number | null): string {
 
 function gradeColor(g: string | null | undefined): string {
   if (g === "A") return "bg-emerald-500/20 text-emerald-300 border-emerald-500/40";
-  if (g === "B") return "bg-sky-500/20 text-sky-300 border-sky-500/40";
-  if (g === "C") return "bg-amber-500/20 text-amber-300 border-amber-500/40";
+  if (g === "B") return "bg-teal-500/20 text-teal-300 border-teal-500/40";
+  if (g === "C") return "bg-yellow-500/20 text-yellow-200 border-yellow-500/40";
+  if (g === "D") return "bg-orange-500/20 text-orange-300 border-orange-500/40";
   if (g === "F") return "bg-rose-500/20 text-rose-300 border-rose-500/40";
   return "bg-muted/40 text-muted-foreground border-border";
 }
 
-// Badge tint classes — wraps the new computePositionBadge output for
-// both the status pill and the row background tint. Spec:
-//   green  → bg-emerald-900/40 text-emerald-400 border-emerald-700
-//   amber  → bg-amber-900/40   text-amber-400   border-amber-700
-//   red    → bg-red-900/40     text-red-400     border-red-700
-function badgePillClass(color: "green" | "amber" | "red"): string {
-  if (color === "red") return "bg-red-900/40 text-red-400 border-red-700";
-  if (color === "amber") return "bg-amber-900/40 text-amber-400 border-amber-700";
-  return "bg-emerald-900/40 text-emerald-400 border-emerald-700";
+// Status pill classes. Brighter than the old palette so a glance at
+// the row tells you exactly what the position needs. EMERGENCY_CUT is
+// the only one that pulses — it's the user's signal to drop everything
+// and go close the trade right now.
+function badgePillClass(color: "green" | "amber" | "red", badge?: string): string {
+  const pulse = badge === "EMERGENCY_CUT" ? " animate-pulse" : "";
+  if (badge === "MAX_PROFIT") {
+    return "bg-emerald-500/25 text-emerald-200 border-emerald-400 font-bold";
+  }
+  if (color === "red") {
+    return `bg-red-500/30 text-red-200 border-red-500 font-semibold${pulse}`;
+  }
+  if (color === "amber") {
+    return "bg-amber-500/25 text-amber-200 border-amber-500 font-semibold";
+  }
+  // green default — softer for HOLD-style positions so MAX_PROFIT pops
+  return "bg-emerald-500/15 text-emerald-300 border-emerald-500/40";
 }
 // Row background tint driven by badge type:
 //   EMERGENCY_CUT / CLOSE → red wash
@@ -353,7 +362,7 @@ export function PositionCard(props: Props) {
     : open
       ? {
           label: open.badgeLabel,
-          className: badgePillClass(open.badgeColor),
+          className: badgePillClass(open.badgeColor, open.badge),
           tooltip: open.badgeTooltip,
         }
       : {
@@ -378,15 +387,15 @@ export function PositionCard(props: Props) {
   return (
     <div
       className={cn(
-        "group rounded-md border border-border transition-colors",
+        "group rounded-md border border-border/60 transition-colors hover:border-foreground/20 hover:bg-foreground/[0.02]",
         rowTint,
-        expanded && "border-foreground/20",
+        expanded && "border-foreground/30 bg-foreground/[0.03]",
       )}
     >
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
-        className={cn(COLLAPSED_ROW_GRID, "py-2")}
+        className={cn(COLLAPSED_ROW_GRID, "py-2.5")}
       >
         {/* 1. Post-earnings dot */}
         <div className="flex h-4 w-4 items-center justify-center">
@@ -397,43 +406,48 @@ export function PositionCard(props: Props) {
           {props.hideSymbol ? null : p.symbol}
         </div>
         {/* 3. Strike */}
-        <div className="truncate text-left font-mono text-xs text-muted-foreground">
+        <div className="truncate text-left font-mono text-xs text-foreground/90">
           ${p.strike}
-          {p.optionType === "put" ? "P" : "C"}
+          <span className="text-muted-foreground">{p.optionType === "put" ? "P" : "C"}</span>
         </div>
         {/* 4. Expiry — hidden on mobile */}
-        <div className="hidden truncate text-left text-xs text-muted-foreground sm:block">
+        <div className="hidden truncate text-left font-mono text-xs text-muted-foreground sm:block">
           {shortExpiry(p.expiry)}
         </div>
         {/* 5. Qty */}
-        <div className="text-right text-xs text-muted-foreground">×{p.remainingContracts}</div>
+        <div className="text-right font-mono text-xs text-foreground/80">
+          ×{p.remainingContracts}
+        </div>
         {/* 6. Stock */}
         <div className="text-right font-mono text-xs text-muted-foreground">
           {props.hideStock ? null : stockPrice !== null ? `$${stockPrice.toFixed(2)}` : "—"}
         </div>
-        {/* 7. P&L */}
-        <div className={cn("text-right font-mono text-xs", pnlColor)}>
+        {/* 7. P&L — bold so it reads first when scanning the row */}
+        <div className={cn("text-right font-mono text-xs font-semibold", pnlColor)}>
           {fmtDollarsSigned(pnlDollars)}
         </div>
         {/* 8. POP% */}
-        <div className={cn("text-right text-xs", popColor(pop))}>
+        <div className={cn("text-right font-mono text-xs", popColor(pop))}>
           {pop !== null ? `${Math.round(pop * 100)}%` : "—"}
         </div>
-        {/* 9. % OTM — hidden on mobile */}
+        {/* 9. % OTM — hidden on mobile. Danger zone (<5% breathing room or
+              already ITM) flips amber/red regardless of sign. */}
         <div
           className={cn(
-            "hidden text-right text-xs sm:block",
+            "hidden text-right font-mono text-xs sm:block",
             distancePct === null
               ? "text-muted-foreground"
-              : distancePct >= 0
-                ? "text-emerald-300"
-                : "text-rose-300",
+              : distancePct < 0
+                ? "font-semibold text-rose-300"
+                : distancePct < 5
+                  ? "font-semibold text-amber-300"
+                  : "text-emerald-300",
           )}
         >
           {distancePct !== null ? `${distancePct.toFixed(1)}%` : "—"}
         </div>
         {/* 10. IV — hidden on mobile */}
-        <div className="hidden text-right text-xs text-muted-foreground sm:block">
+        <div className="hidden text-right font-mono text-xs text-muted-foreground sm:block">
           {iv !== null ? `${(iv * 100).toFixed(0)}%` : "—"}
         </div>
         {/* 11. θ (theta) — hidden on mobile */}
