@@ -6,24 +6,25 @@ import { getWatchlistSymbols } from "@/lib/watchlist";
 import { getIndustryClassification } from "@/lib/classification";
 import {
   buildCandidateFromEarnings,
-  evaluateStagesOneTwo,
   isLikelyCommonEquity,
   MIN_STOCK_PRICE,
-  safeGetChain,
-  ScreenContext,
   ScreenerResult,
 } from "@/lib/screener";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
-// Stages 1-2 screener: Finnhub earnings calendar + Schwab connection
-// check + batch Yahoo prices + per-symbol classification across the
-// watchlist. Hobby plan ceiling. A very large watchlist on a cold
-// classifier cache can clip — partial results still render.
-export const maxDuration = 60;
+// Stream A: minimal "what's reporting today?" screen. Now does ONLY
+// Finnhub calendar + ETF/blacklist filter + Yahoo batch prices +
+// price floor + classifier lookup (cached path only — no Yahoo
+// fallback). Stage 1+2 + Stage 3+4 scoring + Schwab chain fetches
+// have moved out:
+//   - Chain verification → /api/screener/screen/verify-chains (Stream C)
+//   - Stage 1+2 + Stage 3+4 scoring → Run Analysis (Pass 2 / 3a / 3b)
+// Cap at 30s — typical run is 3-8s now since the per-row Schwab call
+// (the previous timeout source — 125 rows × 1-2s sequential) is gone.
+export const maxDuration = 30;
 
 const MAX_RESULTS = 20;
-const YAHOO_FALLBACK_BUDGET = 10;
 
 type ScreenResponse = {
   connected: boolean;
@@ -169,14 +170,23 @@ export async function POST() {
         `${afterChain.length} survivors forwarded to Stage 1+2`,
     );
 
-    // Step 6 + 7: classify and score stages 1+2
-    let yahooBudget = YAHOO_FALLBACK_BUDGET;
+    // Step 6: build minimal candidate shells. Stage 1+2 + Stage 3+4
+    // scoring is deferred to Run Analysis; this route's job is just
+    // "what's reporting today?". Each row returns with stageOne /
+    // stageTwo / stageThree / stageFour all null/placeholder and
+    // recommendation = "Needs analysis", which the UI already handles
+    // (renders "—" in the score columns and surfaces the row).
+    //
+    // Classifier runs with yahooAllowed=false so a cache miss returns
+    // industry='unknown' instead of triggering a 1-2s Yahoo fetch per
+    // miss. Cached classification is effectively instant.
+    const t0 = Date.now();
     const results: ScreenerResult[] = [];
     for (const row of afterChain) {
       const upper = row.symbol.toUpperCase();
-      const cls = await getIndustryClassification(upper, { yahooAllowed: yahooBudget > 0 });
-      if (cls.source === "yahoo") yahooBudget -= 1;
-
+      const cls = await getIndustryClassification(upper, {
+        yahooAllowed: false,
+      });
       const isWhitelisted = whitelist.has(upper);
       const industryStatus: "pass" | "fail" | "unknown" = isWhitelisted
         ? "pass"
@@ -191,28 +201,43 @@ export async function POST() {
         row.price,
       );
 
-      const chain = connected
-        ? await safeGetChain(row.symbol, candidate.expiry, candidate.expiry)
-        : null;
-
-      const context: ScreenContext = {
-        connected,
-        chain,
-        industryClass: cls.industry as ScreenContext["industryClass"],
-        industryStatus,
+      results.push({
+        symbol: candidate.symbol,
+        price: candidate.price,
+        earningsDate: candidate.earningsDate,
+        earningsTiming: candidate.earningsTiming,
+        daysToExpiry: candidate.daysToExpiry,
+        expiry: candidate.expiry,
+        stoppedAt: null,
+        // stageOne is required on the type — placeholder lets the UI
+        // distinguish "screen-only row" from a fully-graded one
+        // without a schema change. Run Analysis overwrites it.
+        stageOne: {
+          pass: industryStatus !== "fail",
+          reason: "deferred to Run Analysis",
+          details: { industry: cls.industry ?? "" },
+        },
+        stageTwo: null,
+        stageThree: null,
+        stageFour: null,
+        recommendation: "Needs analysis",
+        errors: [],
         isWhitelisted,
-      };
-
-      const result = await evaluateStagesOneTwo(candidate, context);
-      // Chain-verification status is filled in by the client after
-      // /verify-chains batches complete. Initialize undefined so the
-      // UI can distinguish "not yet checked" from "checked + absent".
-      results.push(result);
+        industryStatus,
+        spreadTooWide: false,
+        threeLayer: null,
+      });
     }
 
-    results.sort((a, b) => (b.stageTwo?.score ?? -999) - (a.stageTwo?.score ?? -999));
-    const final = results.slice(0, MAX_RESULTS);
+    // No stageTwo.score yet — order by tracked + symbol so the
+    // returned list is stable and easy to scan. Run Analysis will
+    // re-sort by the proper score once Stage 1+2 lands.
+    results.sort((a, b) => a.symbol.localeCompare(b.symbol));
+    const final = results.slice(0, MAX_RESULTS * 6); // wider than the old 20 since we're not pre-scoring
     stats.final = final.length;
+    console.log(
+      `[screen] candidate-shell loop: ${results.length} rows in ${Date.now() - t0}ms`,
+    );
 
     console.log(
       `[screen] SUMMARY finnhub=${stats.finnhub} afterEtfBlacklist=${stats.afterEtfAndBlacklist} ` +
