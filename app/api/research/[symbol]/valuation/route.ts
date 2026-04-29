@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import YahooFinance from "yahoo-finance2";
 import {
+  computeForwardEPS,
   computeRevenueGrowthAssumptions,
   computeTtmEps,
   convertAnnualToUsd,
@@ -496,6 +497,34 @@ export async function POST(
       );
     }
 
+    // Independent forward-EPS estimate. Runs in parallel-able
+    // fashion — pulls from earnings_releases (actuals + guidance),
+    // EDGAR (history), and optionally calls Gemini Flash to extract
+    // structured guidance from the most recent press release. Result
+    // is informational alongside analyst consensus; the active EPS
+    // driving Tier 1 outputs remains the analyst value for now.
+    const forwardEpsDerived = await computeForwardEPS(
+      symbol,
+      supabaseClient,
+      {
+        quarterly,
+        annualEps: annual.map((a) => ({ year: a.year, eps: a.eps })),
+        growthAssumptions,
+        analystForwardEps: yh.forwardEps,
+      },
+    );
+    if (forwardEpsDerived) {
+      const divergencePct =
+        forwardEpsDerived.analystEps !== null && forwardEpsDerived.analystEps !== 0
+          ? (Math.abs(forwardEpsDerived.derivedEps - forwardEpsDerived.analystEps) /
+              Math.abs(forwardEpsDerived.analystEps)) *
+            100
+          : null;
+      console.log(
+        `[valuation:${symbol}] forward EPS derived=${forwardEpsDerived.derivedEps.toFixed(2)} analyst=${forwardEpsDerived.analystEps?.toFixed(2) ?? "—"} div=${divergencePct?.toFixed(0) ?? "—"}% conf=${forwardEpsDerived.confidence}`,
+      );
+    }
+
     const tier1Ctx = {
       last_revenue: lastRevenue,
       shares_outstanding: sharesOutstanding,
@@ -576,6 +605,7 @@ export async function POST(
       comps,
       growth_assumptions: growthAssumptions ?? null,
       ttm_eps: ttmEpsResult ?? null,
+      forward_eps_derived: forwardEpsDerived ?? null,
     };
 
     const saved = await saveModule(symbol, "valuation_model", output);

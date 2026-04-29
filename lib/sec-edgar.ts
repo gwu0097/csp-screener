@@ -1290,6 +1290,339 @@ export async function computeTtmEps(
   };
 }
 
+// ---------------- Independent Forward EPS estimator ----------------
+//
+// Builds a current-fiscal-year EPS estimate from actuals + management
+// guidance + a prior-year baseline, so the valuation model isn't
+// solely anchored to analyst consensus (which lags 48-72 hrs after
+// each earnings print). Pure math + one optional Gemini call to
+// parse free-form guidance text from the most recent 8-K — degrades
+// gracefully when guidance is missing or Gemini is unavailable.
+
+export type ForwardEpsBreakdownRow = {
+  quarter: string; // "Q1 2026"
+  estimate: number;
+  basis: "actual" | "mgmt_guided" | "yoy_growth" | "flat";
+};
+
+export type ForwardEpsResult = {
+  // Sum of the 4 quarters in the current fiscal year. Already in
+  // USD per share — no further conversion needed downstream.
+  derivedEps: number;
+  analystEps: number | null;
+  // Plain-language description of the calculation; fed to the UI
+  // tooltip so the user can see exactly which quarters were summed.
+  method: string;
+  quarters: ForwardEpsBreakdownRow[];
+  confidence: "high" | "medium" | "low";
+  guidanceNotesUsed?: string | null;
+};
+
+// Lazy import so this file doesn't pull in the Gemini wrapper unless
+// the function actually runs. Gemini is optional — if the call fails
+// we just fall through to the non-guided path.
+async function loadGemini():
+  Promise<((p: string, opts?: { label?: string; maxTokens?: number }) => Promise<string | null>) | null> {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const m = await import("@/lib/gemini");
+    return m.geminiSummarize;
+  } catch {
+    return null;
+  }
+}
+
+function parseQuarterLabel(s: string | null | undefined):
+  { year: number; q: 1 | 2 | 3 | 4 } | null {
+  if (!s) return null;
+  const m = s.match(/Q\s*([1-4])\s+(\d{4})/i);
+  if (!m) return null;
+  const year = Number(m[2]);
+  const q = Number(m[1]) as 1 | 2 | 3 | 4;
+  if (!Number.isFinite(year)) return null;
+  return { year, q };
+}
+
+type ReleaseEpsRow = {
+  quarter: string;
+  period_end: string;
+  reported_date: string;
+  eps_diluted: number | null;
+  guidance_notes: string | null;
+};
+
+type GuidanceExtraction = {
+  q2_revenue_direction: "above_q1" | "below_q1" | "similar_q1" | "unknown";
+  q2_color: string | null;
+  full_year_opex_low: number | null;
+  full_year_opex_high: number | null;
+  implied_annual_revenue_low: number | null;
+  implied_annual_revenue_high: number | null;
+  has_explicit_guidance: boolean;
+};
+
+function buildGuidancePrompt(notes: string): string {
+  return `You are reading an earnings press release's forward guidance section. Extract ONLY a JSON object with these fields. Use null when the value isn't disclosed. Do not invent numbers.
+
+{
+  "q2_revenue_direction": "above_q1" | "below_q1" | "similar_q1" | "unknown",
+  "q2_color": "one short sentence summarizing the Q2 outlook, or null",
+  "full_year_opex_low": number (USD millions) or null,
+  "full_year_opex_high": number (USD millions) or null,
+  "implied_annual_revenue_low": number (USD millions) or null,
+  "implied_annual_revenue_high": number (USD millions) or null,
+  "has_explicit_guidance": true if the company provided a numeric outlook for revenue or earnings; false otherwise
+}
+
+Return ONLY the JSON, no commentary or markdown fences.
+
+Guidance text:
+"""
+${notes}
+"""`;
+}
+
+function parseJsonObject(s: string): unknown | null {
+  const trimmed = s.replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
+  const start = trimmed.indexOf("{");
+  if (start < 0) return null;
+  let depth = 0;
+  for (let i = start; i < trimmed.length; i += 1) {
+    const ch = trimmed[i];
+    if (ch === "{") depth += 1;
+    else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        try {
+          return JSON.parse(trimmed.slice(start, i + 1));
+        } catch {
+          return null;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+export async function computeForwardEPS(
+  symbol: string,
+  sb: SupaLike,
+  opts: {
+    quarterly?: QuarterlyMetrics[];
+    annualEps?: Array<{ year: number; eps: number | null }>;
+    growthAssumptions?: GrowthAssumptions | null;
+    analystForwardEps?: number | null;
+  } = {},
+): Promise<ForwardEpsResult | null> {
+  // 1. Pull releases (most recent first).
+  let releases: ReleaseEpsRow[] = [];
+  try {
+    const r = await sb
+      .from("earnings_releases")
+      .select(
+        "quarter, period_end, reported_date, eps_diluted, guidance_notes",
+      )
+      .eq("symbol", symbol)
+      .order("period_end", { ascending: false })
+      .limit(8);
+    if (!r.error && Array.isArray(r.data)) releases = r.data as ReleaseEpsRow[];
+  } catch {
+    /* table missing → fall through */
+  }
+
+  // 2. Build a (year, q) → eps lookup spanning releases + EDGAR.
+  const epsByKey = new Map<string, { eps: number; basis: "actual"; quarter: string }>();
+  for (const r of releases) {
+    const lbl = parseQuarterLabel(r.quarter);
+    if (!lbl || typeof r.eps_diluted !== "number") continue;
+    const k = `${lbl.year}|${lbl.q}`;
+    if (!epsByKey.has(k)) {
+      epsByKey.set(k, { eps: r.eps_diluted, basis: "actual", quarter: r.quarter });
+    }
+  }
+  if (opts.quarterly) {
+    for (const q of opts.quarterly) {
+      const k = `${q.fiscalYear}|${q.fiscalQuarter}`;
+      if (!epsByKey.has(k) && q.eps !== null && q.fiscalQuarter !== 4) {
+        epsByKey.set(k, { eps: q.eps, basis: "actual", quarter: q.fiscalLabel });
+      }
+    }
+    // Q4 derivation from FY annual − sum(Q1..Q3) — same trick as
+    // computeTtmEps. Share-count drift is acceptable for the few-cent
+    // accuracy we need here.
+    if (opts.annualEps) {
+      for (const a of opts.annualEps) {
+        if (a.eps === null) continue;
+        const k = `${a.year}|4`;
+        if (epsByKey.has(k)) continue;
+        const q1 = opts.quarterly.find(
+          (q) => q.fiscalYear === a.year && q.fiscalQuarter === 1,
+        );
+        const q2 = opts.quarterly.find(
+          (q) => q.fiscalYear === a.year && q.fiscalQuarter === 2,
+        );
+        const q3 = opts.quarterly.find(
+          (q) => q.fiscalYear === a.year && q.fiscalQuarter === 3,
+        );
+        if (q1?.eps && q2?.eps && q3?.eps) {
+          epsByKey.set(k, {
+            eps: a.eps - q1.eps - q2.eps - q3.eps,
+            basis: "actual",
+            quarter: `Q4 ${a.year}`,
+          });
+        }
+      }
+    }
+  }
+
+  // 3. Determine the current fiscal year — most recent release wins,
+  //    falls back to most recent EDGAR quarter.
+  const mostRecentRelease = releases[0] ?? null;
+  const anchor = (() => {
+    if (mostRecentRelease) {
+      const lbl = parseQuarterLabel(mostRecentRelease.quarter);
+      if (lbl) return lbl;
+    }
+    if (opts.quarterly && opts.quarterly.length > 0) {
+      const sorted = [...opts.quarterly].sort((a, b) =>
+        b.periodEnd.localeCompare(a.periodEnd),
+      );
+      return { year: sorted[0].fiscalYear, q: sorted[0].fiscalQuarter };
+    }
+    return null;
+  })();
+  if (!anchor) return null;
+  const cfy = anchor.year;
+
+  // 4. Optional Gemini guidance extraction on the most recent release.
+  let guidance: GuidanceExtraction | null = null;
+  let guidanceNotesUsed: string | null = null;
+  if (mostRecentRelease?.guidance_notes) {
+    guidanceNotesUsed = mostRecentRelease.guidance_notes;
+    const gemini = await loadGemini();
+    if (gemini) {
+      const raw = await gemini(
+        buildGuidancePrompt(mostRecentRelease.guidance_notes),
+        { label: `forward-eps:${symbol}`, maxTokens: 600 },
+      );
+      if (raw) {
+        const parsed = parseJsonObject(raw) as GuidanceExtraction | null;
+        if (parsed) guidance = parsed;
+      }
+    }
+  }
+
+  // 5. Walk Q1..Q4 of the current fiscal year. Each slot is an
+  //    actual (if reported), a Q2 mgmt-guided estimate (if
+  //    guidance suggests above/below Q1), or a YoY-grown estimate
+  //    derived from the same quarter prior year.
+  const growthMultiplier = (() => {
+    if (
+      opts.growthAssumptions &&
+      Number.isFinite(opts.growthAssumptions.baseCase)
+    ) {
+      return 1 + opts.growthAssumptions.baseCase;
+    }
+    return 1.0;
+  })();
+
+  const breakdown: ForwardEpsBreakdownRow[] = [];
+  let derivedEps = 0;
+  let usedYoyAtLeastOnce = false;
+  let usedMgmtGuide = false;
+
+  for (let q = 1 as 1 | 2 | 3 | 4; q <= 4; q = (q + 1) as 1 | 2 | 3 | 4) {
+    const key = `${cfy}|${q}`;
+    const actual = epsByKey.get(key);
+    if (actual) {
+      derivedEps += actual.eps;
+      breakdown.push({
+        quarter: actual.quarter,
+        estimate: actual.eps,
+        basis: "actual",
+      });
+      continue;
+    }
+
+    // Forward quarter — find prior-year same-quarter EPS to anchor.
+    const priorKey = `${cfy - 1}|${q}`;
+    const prior = epsByKey.get(priorKey);
+    if (!prior) {
+      // No baseline; bail with low-confidence flat distribution
+      // using the most recent actual.
+      const latestActual = breakdown.find((b) => b.basis === "actual");
+      const fallback = latestActual?.estimate ?? 0;
+      derivedEps += fallback;
+      breakdown.push({
+        quarter: `Q${q} ${cfy}`,
+        estimate: fallback,
+        basis: "flat",
+      });
+      continue;
+    }
+
+    // Q2 management-guided uplift if the most recent guidance
+    // indicates direction. Multipliers are intentionally
+    // conservative — directional, not precise.
+    let est: number;
+    let basis: ForwardEpsBreakdownRow["basis"];
+    const isQ2 = q === 2;
+    const dir = guidance?.q2_revenue_direction;
+    const q1Actual = epsByKey.get(`${cfy}|1`)?.eps ?? null;
+    if (
+      isQ2 &&
+      q1Actual !== null &&
+      (dir === "above_q1" || dir === "below_q1" || dir === "similar_q1")
+    ) {
+      const mult =
+        dir === "above_q1" ? 1.175 : dir === "below_q1" ? 0.925 : 1.0;
+      est = q1Actual * mult;
+      basis = "mgmt_guided";
+      usedMgmtGuide = true;
+    } else {
+      est = prior.eps * growthMultiplier;
+      basis = "yoy_growth";
+      usedYoyAtLeastOnce = true;
+    }
+    derivedEps += est;
+    breakdown.push({
+      quarter: `Q${q} ${cfy}`,
+      estimate: est,
+      basis,
+    });
+  }
+
+  // 6. Method string.
+  const fmt = (n: number) => `$${n.toFixed(2)}`;
+  const summaryParts = breakdown.map(
+    (b) => `${b.quarter} ${fmt(b.estimate)} (${b.basis.replace("_", " ")})`,
+  );
+  const sourceLabel = (() => {
+    const parts: string[] = ["earnings_releases"];
+    if (opts.quarterly && opts.quarterly.length > 0) parts.push("EDGAR");
+    if (guidance) parts.push("Gemini-parsed guidance");
+    return parts.join(" + ");
+  })();
+  const method = `${summaryParts.join(", ")}. Source: ${sourceLabel}.`;
+
+  // 7. Confidence.
+  const hasExplicit = guidance?.has_explicit_guidance === true;
+  const confidence: ForwardEpsResult["confidence"] = hasExplicit
+    ? "high"
+    : usedMgmtGuide || (epsByKey.size >= 6 && usedYoyAtLeastOnce)
+      ? "medium"
+      : "low";
+
+  return {
+    derivedEps,
+    analystEps: opts.analystForwardEps ?? null,
+    method,
+    quarters: breakdown,
+    confidence,
+    guidanceNotesUsed,
+  };
+}
+
 // TTM revenue from a sorted-newest-first quarterly array. Returns null
 // when fewer than 4 quarters are available OR any of the most recent
 // 4 has a null revenue value.

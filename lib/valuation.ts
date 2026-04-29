@@ -251,6 +251,26 @@ export type ValuationModelV2 = {
     }>;
     method: string;
   } | null;
+
+  // Independent forward-EPS estimate built from earnings_releases +
+  // EDGAR quarterly + Gemini-parsed guidance. Surfaced alongside the
+  // analyst consensus value (forward_eps) so the model isn't blind
+  // during the 48-72 hr post-earnings window where analyst estimates
+  // haven't refreshed. The active EPS used in Tier 1 computation
+  // remains forward_eps for now (analyst); a follow-up will add a
+  // toggle that recomputes scenarios with the derived value.
+  forward_eps_derived?: {
+    derivedEps: number;
+    analystEps: number | null;
+    method: string;
+    quarters: Array<{
+      quarter: string;
+      estimate: number;
+      basis: "actual" | "mgmt_guided" | "yoy_growth" | "flat";
+    }>;
+    confidence: "high" | "medium" | "low";
+    guidanceNotesUsed?: string | null;
+  } | null;
 };
 
 export type ValuationCategory = "growth" | "value" | "blend" | "pre_profit";

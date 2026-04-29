@@ -4,7 +4,7 @@
 // the math is verifiable: rev y1/y2/y3, op income y3, net income y3,
 // EPS y1/y2/y3, price target, return, implied market cap.
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import {
   computeTier1All,
   SCENARIOS,
@@ -401,6 +401,9 @@ function StartingPoint({
           />
         </div>
       </div>
+      {model.forward_eps_derived && (
+        <ForwardEpsPanel model={model} />
+      )}
       {model.growth_assumptions && (
         <div className="mt-2 rounded border border-emerald-500/20 bg-emerald-500/[0.04] p-2 text-[10px]">
           <div className="mb-0.5 flex items-center gap-2">
@@ -435,6 +438,121 @@ function StartingPoint({
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// ---------- Independent forward EPS panel ----------
+//
+// Surfaces both the analyst consensus (model.forward_eps) and the
+// system-derived estimate (model.forward_eps_derived) side-by-side
+// with a per-quarter breakdown. Tier 1 outputs are still computed
+// from analyst EPS for now — a follow-up will add a toggle that
+// triggers a server-side recompute with the derived value. The
+// divergence banner cues the user when the analyst figure is likely
+// stale post-earnings.
+function ForwardEpsPanel({ model }: { model: ValuationModelV2 }) {
+  const [expanded, setExpanded] = useState(false);
+  const fwd = model.forward_eps_derived;
+  if (!fwd) return null;
+  const analyst = fwd.analystEps ?? model.forward_eps ?? null;
+  const divergencePct =
+    analyst !== null && analyst !== 0
+      ? (Math.abs(fwd.derivedEps - analyst) / Math.abs(analyst)) * 100
+      : null;
+  const divergent = divergencePct !== null && divergencePct >= 15;
+  const confidenceColor =
+    fwd.confidence === "high"
+      ? "text-emerald-300"
+      : fwd.confidence === "medium"
+        ? "text-amber-300"
+        : "text-muted-foreground";
+  const basisLabel: Record<
+    NonNullable<typeof fwd.quarters>[number]["basis"],
+    string
+  > = {
+    actual: "✓ reported",
+    mgmt_guided: "mgmt color",
+    yoy_growth: "YoY-grown",
+    flat: "flat",
+  };
+  return (
+    <div className="mt-2 rounded border border-sky-500/30 bg-sky-500/[0.04] p-2 text-[11px]">
+      <div className="mb-1 flex items-center justify-between gap-2">
+        <span className="text-[10px] font-semibold uppercase tracking-wide text-sky-300">
+          Forward EPS
+        </span>
+        <span className={`text-[9px] uppercase tracking-wide ${confidenceColor}`}>
+          confidence: {fwd.confidence}
+        </span>
+      </div>
+      <div className="grid grid-cols-1 gap-1 sm:grid-cols-2">
+        <div className="flex items-baseline justify-between gap-2 rounded border border-border/50 bg-background/40 px-2 py-1">
+          <span className="text-muted-foreground">Analyst consensus</span>
+          <span className="font-mono text-foreground">
+            {analyst !== null ? `$${analyst.toFixed(2)}` : "—"}
+          </span>
+        </div>
+        <div className="flex items-baseline justify-between gap-2 rounded border border-sky-500/40 bg-sky-500/10 px-2 py-1">
+          <span className="text-sky-200">System derived</span>
+          <span className="font-mono font-semibold text-sky-100">
+            ${fwd.derivedEps.toFixed(2)}
+          </span>
+        </div>
+      </div>
+      {divergent && (
+        <div className="mt-2 rounded border border-amber-500/40 bg-amber-500/10 p-1.5 text-amber-200">
+          ⚠️ Analyst consensus and derived estimate diverge by{" "}
+          {divergencePct?.toFixed(0)}%. Analyst figure may not yet reflect
+          the most recent earnings — consider sanity-checking against the
+          per-quarter breakdown below.
+        </div>
+      )}
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        className="mt-1.5 inline-flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground"
+      >
+        {expanded ? "▾ Hide breakdown" : "▸ Show quarter breakdown"}
+      </button>
+      {expanded && (
+        <div className="mt-1 space-y-0.5 rounded border border-border bg-background/40 p-2">
+          {fwd.quarters.map((q) => (
+            <div
+              key={q.quarter}
+              className="flex justify-between gap-2 text-[10px]"
+            >
+              <span className="font-mono text-muted-foreground">
+                {q.quarter}
+              </span>
+              <span className="flex items-baseline gap-2">
+                <span className="font-mono text-foreground">
+                  ${q.estimate.toFixed(2)}
+                </span>
+                <span className="text-muted-foreground">
+                  {basisLabel[q.basis]}
+                </span>
+              </span>
+            </div>
+          ))}
+          <div className="mt-1 border-t border-border/50 pt-1 flex justify-between text-[10px]">
+            <span className="font-semibold uppercase tracking-wide text-muted-foreground">
+              Full year derived
+            </span>
+            <span className="font-mono font-semibold text-sky-200">
+              ${fwd.derivedEps.toFixed(2)}
+            </span>
+          </div>
+          <div className="mt-1 text-[9px] text-muted-foreground">
+            {fwd.method}
+          </div>
+        </div>
+      )}
+      <div className="mt-1 text-[9px] text-muted-foreground">
+        Tier 1 price targets currently use analyst consensus. Toggle
+        to derived (coming soon) — for now, edit forward EPS in the
+        scenario columns below if you want to use the derived value.
+      </div>
     </div>
   );
 }
