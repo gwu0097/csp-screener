@@ -164,6 +164,13 @@ export type ScreenerResult = {
   isWhitelisted: boolean;
   industryStatus: "pass" | "fail" | "unknown";
   spreadTooWide: boolean;
+  // True when the weekly-chain check at screen time couldn't reach
+  // Schwab (token expired, network blip, empty response). The row is
+  // passed through anyway — Stage 3/4 will retry the chain fetch and
+  // surface "Cannot evaluate" if it really can't be priced. Matters
+  // because the alternative — dropping every row when Schwab is down —
+  // produces a misleading "0 candidates" board.
+  chainUnverified?: boolean;
   // Three-layer grade (industry standard + your trade history + current
   // news/vix regime). Populated by runStagesThreeFour when the analyze
   // route has news + personal context to feed in. Null when not computed
