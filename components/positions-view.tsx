@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { AlertTriangle, Briefcase, Camera, Loader2, Plus, RefreshCcw, Zap } from "lucide-react";
+import { AlertTriangle, ArrowDown, ArrowUp, Briefcase, Camera, Loader2, Plus, RefreshCcw, Zap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ImportScreenshotModal } from "@/components/import-screenshot-modal";
 import { ImportManualModal } from "@/components/import-manual-modal";
@@ -14,11 +14,168 @@ import {
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 
+type SortKey =
+  | "strike"
+  | "expiry"
+  | "qty"
+  | "pnl"
+  | "pop"
+  | "otm"
+  | "iv"
+  | "theta"
+  | "grade"
+  | "status";
+type SortDir = "asc" | "desc";
+
+// First-click direction per column. Strike/expiry default to asc
+// (smallest first reads naturally); everything else defaults to desc
+// so the "best" rows surface up top.
+const DEFAULT_SORT_DIR: Record<SortKey, SortDir> = {
+  strike: "asc",
+  expiry: "asc",
+  qty: "desc",
+  pnl: "desc",
+  pop: "desc",
+  otm: "desc",
+  iv: "desc",
+  theta: "desc",
+  grade: "asc",
+  status: "asc",
+};
+
+function gradeRank(g: string | null | undefined): number {
+  if (g === "A") return 0;
+  if (g === "B") return 1;
+  if (g === "C") return 2;
+  if (g === "D") return 3;
+  if (g === "F") return 4;
+  return 99;
+}
+
+function popOf(p: OpenPositionClientView | ClosedPositionClientView): number | null {
+  if ("currentDelta" in p && p.currentDelta !== null) return 1 - Math.abs(p.currentDelta);
+  return null;
+}
+
+function pnlOf(p: OpenPositionClientView | ClosedPositionClientView): number | null {
+  if ("pnlDollars" in p && p.pnlDollars !== undefined) return p.pnlDollars;
+  if ("realizedPnl" in p) return p.realizedPnl;
+  return null;
+}
+
+// Generic comparator. Numeric nulls sort to the end regardless of dir.
+function cmp(a: number | string | null, b: number | string | null, dir: SortDir): number {
+  if (a === null && b === null) return 0;
+  if (a === null) return 1;
+  if (b === null) return -1;
+  if (typeof a === "number" && typeof b === "number") {
+    return dir === "asc" ? a - b : b - a;
+  }
+  const sa = String(a);
+  const sb = String(b);
+  return dir === "asc" ? sa.localeCompare(sb) : sb.localeCompare(sa);
+}
+
+function sortPositions<T extends OpenPositionClientView | ClosedPositionClientView>(
+  items: T[],
+  key: SortKey,
+  dir: SortDir,
+): T[] {
+  const arr = [...items];
+  arr.sort((a, b) => {
+    switch (key) {
+      case "strike":
+        return cmp(a.strike, b.strike, dir);
+      case "expiry":
+        return cmp(a.expiry, b.expiry, dir);
+      case "qty":
+        return cmp(a.remainingContracts, b.remainingContracts, dir);
+      case "pnl":
+        return cmp(pnlOf(a), pnlOf(b), dir);
+      case "pop":
+        return cmp(popOf(a), popOf(b), dir);
+      case "otm":
+        return cmp(
+          "distanceToStrikePct" in a ? a.distanceToStrikePct ?? null : null,
+          "distanceToStrikePct" in b ? b.distanceToStrikePct ?? null : null,
+          dir,
+        );
+      case "iv":
+        return cmp(
+          "currentIv" in a ? a.currentIv ?? null : null,
+          "currentIv" in b ? b.currentIv ?? null : null,
+          dir,
+        );
+      case "theta":
+        return cmp(
+          "currentTheta" in a ? a.currentTheta ?? null : null,
+          "currentTheta" in b ? b.currentTheta ?? null : null,
+          dir,
+        );
+      case "grade":
+        return cmp(gradeRank(a.entryFinalGrade), gradeRank(b.entryFinalGrade), dir);
+      case "status": {
+        const sa = "badge" in a ? a.badge : "status" in a ? a.status : "";
+        const sb = "badge" in b ? b.badge : "status" in b ? b.status : "";
+        return cmp(sa, sb, dir);
+      }
+      default:
+        return 0;
+    }
+  });
+  return arr;
+}
+
+type TickerGroup<T> = {
+  symbol: string;
+  items: T[];
+  contractCount: number;
+  stockPrice: number | null;
+  combinedPnl: number | null;
+};
+
+// Sub-grouping inside a broker section. Sorts ticker groups by total
+// contract count desc so the largest exposures bubble to the top.
+function groupByTicker<
+  T extends OpenPositionClientView | ClosedPositionClientView,
+>(items: T[]): TickerGroup<T>[] {
+  const m = new Map<string, T[]>();
+  for (const it of items) {
+    const key = it.symbol.toUpperCase();
+    const arr = m.get(key) ?? [];
+    arr.push(it);
+    m.set(key, arr);
+  }
+  const out: TickerGroup<T>[] = [];
+  for (const [symbol, arr] of Array.from(m.entries())) {
+    const contractCount = arr.reduce((s, p) => s + (p.remainingContracts ?? 0), 0);
+    const stockPriceRow = arr.find(
+      (p): p is T & { currentStockPrice: number } =>
+        "currentStockPrice" in p && p.currentStockPrice !== null,
+    );
+    const stockPrice = stockPriceRow?.currentStockPrice ?? null;
+    const pnls = arr.map(pnlOf).filter((v): v is number => v !== null);
+    const combinedPnl = pnls.length === 0 ? null : pnls.reduce((s, v) => s + v, 0);
+    out.push({ symbol, items: arr, contractCount, stockPrice, combinedPnl });
+  }
+  out.sort((a, b) => b.contractCount - a.contractCount);
+  return out;
+}
+
 // Column header row for a group of position cards. Uses the exact same
 // grid template as the collapsed row so labels sit above their data.
 // Hidden on mobile (< sm) — the mobile card layout uses auto columns
-// and the labels wouldn't align anyway.
-function PositionsTableHeader() {
+// and the labels wouldn't align anyway. Each label is a button that
+// toggles the sort key/dir; sort applies within each ticker group.
+function PositionsTableHeader({
+  sortKey,
+  sortDir,
+  onSort,
+}: {
+  sortKey: SortKey;
+  sortDir: SortDir;
+  onSort: (k: SortKey) => void;
+}) {
   return (
     <div
       className={cn(
@@ -28,34 +185,116 @@ function PositionsTableHeader() {
     >
       {/* 1 dot */}
       <div />
-      {/* 2 */}
-      <div>Symbol</div>
-      {/* 3 */}
-      <div>Strike</div>
-      {/* 4 — hidden mobile */}
-      <div className="hidden sm:block">Expiry</div>
-      {/* 5 */}
-      <div className="text-right">Qty</div>
-      {/* 6 */}
-      <div className="text-right">Stock</div>
-      {/* 7 */}
-      <div className="text-right">P&amp;L</div>
-      {/* 8 */}
-      <div className="text-right">POP</div>
-      {/* 9 — hidden mobile */}
-      <div className="hidden text-right sm:block">% OTM</div>
-      {/* 10 — hidden mobile */}
-      <div className="hidden text-right sm:block">IV</div>
-      {/* 11 — hidden mobile */}
-      <div className="hidden text-right sm:block">θ</div>
-      {/* 12 */}
-      <div>Grade</div>
-      {/* 13 */}
-      <div className="text-right">Status</div>
+      {/* 2 — Symbol cell stays for grid alignment but isn't sortable
+              (rows under a ticker sub-header don't repeat the symbol). */}
+      <div />
+      {/* 3 Strike */}
+      <SortHeader k="strike" label="Strike" align="left" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+      {/* 4 Expiry — hidden mobile */}
+      <SortHeader k="expiry" label="Expiry" align="left" sortKey={sortKey} sortDir={sortDir} onSort={onSort} className="hidden sm:flex" />
+      {/* 5 Qty */}
+      <SortHeader k="qty" label="Qty" align="right" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+      {/* 6 Stock — also blanked under ticker sub-header. Kept for grid alignment. */}
+      <div />
+      {/* 7 P&L */}
+      <SortHeader k="pnl" label="P&L" align="right" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+      {/* 8 POP */}
+      <SortHeader k="pop" label="POP" align="right" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+      {/* 9 % OTM — hidden mobile */}
+      <SortHeader k="otm" label="% OTM" align="right" sortKey={sortKey} sortDir={sortDir} onSort={onSort} className="hidden sm:flex" />
+      {/* 10 IV — hidden mobile */}
+      <SortHeader k="iv" label="IV" align="right" sortKey={sortKey} sortDir={sortDir} onSort={onSort} className="hidden sm:flex" />
+      {/* 11 θ — hidden mobile */}
+      <SortHeader k="theta" label="θ" align="right" sortKey={sortKey} sortDir={sortDir} onSort={onSort} className="hidden sm:flex" />
+      {/* 12 Grade */}
+      <SortHeader k="grade" label="Grade" align="left" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+      {/* 13 Status */}
+      <SortHeader k="status" label="Status" align="right" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
     </div>
   );
 }
-import { fmtDollarsSigned } from "@/lib/format";
+
+// Ticker sub-header rendered above the rows for one symbol within a
+// broker section. Shows symbol + contract count + current price once,
+// plus the combined P&L for that ticker so the user can see the
+// per-name exposure at a glance instead of mentally summing rows.
+function TickerSubHeader({
+  symbol,
+  contractCount,
+  stockPrice,
+  combinedPnl,
+}: {
+  symbol: string;
+  contractCount: number;
+  stockPrice: number | null;
+  combinedPnl: number | null;
+}) {
+  const pnlCls =
+    combinedPnl === null
+      ? "text-muted-foreground"
+      : combinedPnl >= 0
+        ? "text-emerald-300"
+        : "text-rose-300";
+  return (
+    <div className="flex items-baseline justify-between gap-2 px-3 pt-2 text-xs">
+      <div className="flex items-baseline gap-2">
+        <span className="text-sm font-semibold text-foreground">{symbol}</span>
+        <span className="text-muted-foreground">
+          ({contractCount} {contractCount === 1 ? "contract" : "contracts"})
+        </span>
+        {stockPrice !== null && (
+          <span className="font-mono text-muted-foreground">
+            — {fmtDollars(stockPrice)}
+          </span>
+        )}
+      </div>
+      <span className={cn("font-mono", pnlCls)}>
+        {fmtDollarsSigned(combinedPnl)}
+      </span>
+    </div>
+  );
+}
+
+function SortHeader({
+  k,
+  label,
+  align,
+  sortKey,
+  sortDir,
+  onSort,
+  className,
+}: {
+  k: SortKey;
+  label: string;
+  align: "left" | "right";
+  sortKey: SortKey;
+  sortDir: SortDir;
+  onSort: (k: SortKey) => void;
+  className?: string;
+}) {
+  const active = sortKey === k;
+  return (
+    <button
+      type="button"
+      onClick={() => onSort(k)}
+      className={cn(
+        "flex items-center gap-0.5 text-[10px] font-semibold uppercase tracking-wide transition-colors",
+        align === "right" ? "justify-end" : "justify-start",
+        active ? "text-foreground" : "text-muted-foreground hover:text-foreground",
+        className,
+      )}
+    >
+      <span>{label}</span>
+      {active &&
+        (sortDir === "asc" ? (
+          <ArrowUp className="h-2.5 w-2.5" />
+        ) : (
+          <ArrowDown className="h-2.5 w-2.5" />
+        ))}
+    </button>
+  );
+}
+import { fmtDollars, fmtDollarsSigned } from "@/lib/format";
 import type { MarketContext } from "@/lib/market";
 
 // localStorage cache of the last successful /api/positions/open?live=true
@@ -267,6 +506,19 @@ export function PositionsView() {
   const [liveSnapshotSummary, setLiveSnapshotSummary] = useState<
     { written: number; skipped: number } | null
   >(null);
+  // Single sort state shared across every broker → ticker subgroup.
+  // Default: P&L desc — biggest winners up top, biggest losers at the
+  // bottom (or up top if user re-clicks to flip dir).
+  const [sortKey, setSortKey] = useState<SortKey>("pnl");
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
+  const onSort = useCallback((k: SortKey) => {
+    setSortKey((prevKey) => {
+      setSortDir((prevDir) =>
+        prevKey === k ? (prevDir === "asc" ? "desc" : "asc") : DEFAULT_SORT_DIR[k],
+      );
+      return k;
+    });
+  }, []);
 
   const load = useCallback(async (live: boolean) => {
     if (live) setLiveLoading(true);
@@ -512,27 +764,39 @@ export function PositionsView() {
               ({group.contractCount} {group.contractCount === 1 ? "contract" : "contracts"})
             </span>
           </div>
-          <PositionsTableHeader />
-          {group.items.map((p) => (
-            <PositionCard
-              key={p.id}
-              kind="open"
-              position={p}
-              onCloseSubmitted={onImportSuccess}
-              onPositionRemoved={(id) => {
-                // Optimistic remove — drop the row from local state so
-                // the UI updates instantly. We don't refetch; the next
-                // Refresh / page reload will reconcile against the DB.
-                setData((prev) =>
-                  prev
-                    ? {
-                        ...prev,
-                        positions: prev.positions.filter((q) => q.id !== id),
-                      }
-                    : prev,
-                );
-              }}
-            />
+          <PositionsTableHeader sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+          {groupByTicker(group.items).map((tg) => (
+            <div key={tg.symbol} className="space-y-1">
+              <TickerSubHeader
+                symbol={tg.symbol}
+                contractCount={tg.contractCount}
+                stockPrice={tg.stockPrice}
+                combinedPnl={tg.combinedPnl}
+              />
+              {sortPositions(tg.items, sortKey, sortDir).map((p) => (
+                <PositionCard
+                  key={p.id}
+                  kind="open"
+                  position={p}
+                  hideSymbol
+                  hideStock
+                  onCloseSubmitted={onImportSuccess}
+                  onPositionRemoved={(id) => {
+                    // Optimistic remove — drop the row from local state so
+                    // the UI updates instantly. We don't refetch; the next
+                    // Refresh / page reload will reconcile against the DB.
+                    setData((prev) =>
+                      prev
+                        ? {
+                            ...prev,
+                            positions: prev.positions.filter((q) => q.id !== id),
+                          }
+                        : prev,
+                    );
+                  }}
+                />
+              ))}
+            </div>
           ))}
         </div>
       ))}
@@ -578,9 +842,25 @@ export function PositionsView() {
                       ({group.items.length} {group.items.length === 1 ? "position" : "positions"})
                     </span>
                   </div>
-                  <PositionsTableHeader />
-                  {group.items.map((p) => (
-                    <PositionCard key={p.id} kind="closed" position={p} />
+                  <PositionsTableHeader sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
+                  {groupByTicker(group.items).map((tg) => (
+                    <div key={tg.symbol} className="space-y-1">
+                      <TickerSubHeader
+                        symbol={tg.symbol}
+                        contractCount={tg.contractCount}
+                        stockPrice={tg.stockPrice}
+                        combinedPnl={tg.combinedPnl}
+                      />
+                      {sortPositions(tg.items, sortKey, sortDir).map((p) => (
+                        <PositionCard
+                          key={p.id}
+                          kind="closed"
+                          position={p}
+                          hideSymbol
+                          hideStock
+                        />
+                      ))}
+                    </div>
                   ))}
                 </div>
               ))}

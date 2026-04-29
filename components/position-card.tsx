@@ -129,8 +129,18 @@ type Props =
       // disappears instantly without a full /api/positions/open
       // round-trip. Optional so closed-list usage can ignore it.
       onPositionRemoved?: (id: string) => void;
+      // When grouped under a per-ticker sub-header, blank the Symbol
+      // and Stock cells in the collapsed row — both already appear
+      // in the sub-header so repeating them is noise.
+      hideSymbol?: boolean;
+      hideStock?: boolean;
     }
-  | { kind: "closed"; position: ClosedPositionClientView };
+  | {
+      kind: "closed";
+      position: ClosedPositionClientView;
+      hideSymbol?: boolean;
+      hideStock?: boolean;
+    };
 
 // Grid template shared between the collapsed row and the column-header
 // row in positions-view. Keeping both on the same template guarantees
@@ -383,7 +393,9 @@ export function PositionCard(props: Props) {
           {p.postEarningsRec ? <RecDot rec={p.postEarningsRec} /> : null}
         </div>
         {/* 2. Symbol */}
-        <div className="truncate text-left font-semibold">{p.symbol}</div>
+        <div className="truncate text-left font-semibold">
+          {props.hideSymbol ? null : p.symbol}
+        </div>
         {/* 3. Strike */}
         <div className="truncate text-left font-mono text-xs text-muted-foreground">
           ${p.strike}
@@ -397,7 +409,7 @@ export function PositionCard(props: Props) {
         <div className="text-right text-xs text-muted-foreground">×{p.remainingContracts}</div>
         {/* 6. Stock */}
         <div className="text-right font-mono text-xs text-muted-foreground">
-          {stockPrice !== null ? `$${stockPrice.toFixed(2)}` : "—"}
+          {props.hideStock ? null : stockPrice !== null ? `$${stockPrice.toFixed(2)}` : "—"}
         </div>
         {/* 7. P&L */}
         <div className={cn("text-right font-mono text-xs", pnlColor)}>
