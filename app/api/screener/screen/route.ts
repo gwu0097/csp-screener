@@ -11,6 +11,7 @@ import {
   runStageTwo,
   ScreenerResult,
 } from "@/lib/screener";
+import { MIN_MARKET_CAP_BILLIONS } from "@/lib/screener-config";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -49,12 +50,14 @@ type ScreenResponse = {
     finnhub: number;
     afterEtfAndBlacklist: number;
     afterPriceFilter: number;
+    afterMcapFloor: number;
     afterQualityFilter: number;
     afterChainFilter: number;
     final: number;
     droppedByEtf: string[];
     droppedByBlacklist: string[];
     droppedByPrice: string[];
+    droppedByMcap: string[];
     droppedByQuality: string[];
     droppedByChain: string[];
     // Tickers passed through the weekly-chain check without verification
@@ -72,12 +75,14 @@ export async function POST() {
     finnhub: 0,
     afterEtfAndBlacklist: 0,
     afterPriceFilter: 0,
+    afterMcapFloor: 0,
     afterQualityFilter: 0,
     afterChainFilter: 0,
     final: 0,
     droppedByEtf: [],
     droppedByBlacklist: [],
     droppedByPrice: [],
+    droppedByMcap: [],
     droppedByQuality: [],
     droppedByChain: [],
     unverifiedChain: [],
@@ -217,30 +222,49 @@ export async function POST() {
         }),
       );
       for (const v of verdicts) {
-        if (v.stageTwo.pass) {
-          scored.push({
-            symbol: v.row.symbol,
-            date: v.row.date,
-            timing: v.row.timing,
-            isWhitelisted: v.row.isWhitelisted,
-            price: v.price,
-            cls: v.cls,
-            industryStatus: v.industryStatus,
-          });
-        } else {
-          stats.droppedByQuality.push(
-            `${v.row.symbol.toUpperCase()}(${v.stageTwo.score}/${v.stageTwo.maxScore})`,
+        const upper = v.row.symbol.toUpperCase();
+        const mcapB = v.stageTwo.details.marketCapBillions;
+        // Hard mcap floor — independent of Stage 2 score. Whitelisted
+        // names bypass (the user explicitly opted them in).
+        const meetsHardMcapFloor =
+          v.row.isWhitelisted ||
+          (mcapB !== null && mcapB >= MIN_MARKET_CAP_BILLIONS);
+        if (!meetsHardMcapFloor) {
+          stats.droppedByMcap.push(
+            `${upper}(${mcapB === null ? "null" : `$${mcapB}B`})`,
           );
+          continue;
         }
+        // Stage 2 quality gate — currently mc>=1 ($10B+) per
+        // SCREENER_CONFIG. Whitelisted bypass handled inside
+        // runStageTwo.
+        if (!v.stageTwo.pass) {
+          stats.droppedByQuality.push(
+            `${upper}(${mcapB === null ? "null" : `$${mcapB}B`})`,
+          );
+          continue;
+        }
+        scored.push({
+          symbol: v.row.symbol,
+          date: v.row.date,
+          timing: v.row.timing,
+          isWhitelisted: v.row.isWhitelisted,
+          price: v.price,
+          cls: v.cls,
+          industryStatus: v.industryStatus,
+        });
       }
       if (i + STAGE2_BATCH < afterPrice.length) {
         await sleep(STAGE2_BATCH_DELAY_MS);
       }
     }
+    stats.afterMcapFloor = afterPrice.length - stats.droppedByMcap.length;
     stats.afterQualityFilter = scored.length;
     console.log(
-      `[screen] Stage 2 quality floor: ${scored.length} pass / ${stats.droppedByQuality.length} dropped ` +
-        `in ${Date.now() - t0}ms (examples=${stats.droppedByQuality.slice(0, 6).join(",")})`,
+      `[screen] Stage 2 quality floor: ${scored.length} pass / ` +
+        `${stats.droppedByMcap.length} dropped @ <$${MIN_MARKET_CAP_BILLIONS}B / ` +
+        `${stats.droppedByQuality.length} dropped @ Stage 2 ` +
+        `in ${Date.now() - t0}ms`,
     );
 
     // Step 6 (chain verification) was previously inline here — it now
@@ -303,6 +327,7 @@ export async function POST() {
     console.log(
       `[screen] SUMMARY finnhub=${stats.finnhub} afterEtfBlacklist=${stats.afterEtfAndBlacklist} ` +
         `afterPrice(>=$${MIN_STOCK_PRICE})=${stats.afterPriceFilter} ` +
+        `afterMcap(>=$${MIN_MARKET_CAP_BILLIONS}B)=${stats.afterMcapFloor} ` +
         `afterQuality=${stats.afterQualityFilter} afterChain=${stats.afterChainFilter} ` +
         `(${stats.unverifiedChain?.length ?? 0} unverified) final=${stats.final} connected=${connected}`,
     );

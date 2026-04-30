@@ -7,6 +7,7 @@ import {
   ChevronDown,
   ChevronRight,
   History,
+  Info,
   Loader2,
   Pencil,
   RefreshCcw,
@@ -39,6 +40,7 @@ import { CrushHistoryTable } from "@/components/crush-history-table";
 import { OptionsFlowSection } from "@/components/options-flow-section";
 import { ErrorBanner } from "@/components/error-banner";
 import { SchwabTokenBanner } from "@/components/schwab-token-banner";
+import { ACTIVE_SCREENER } from "@/lib/screener-config";
 import {
   interpretError,
   interpretFetchError,
@@ -2012,6 +2014,8 @@ export function ScreenerView({ connected }: Props) {
           </div>
         )}
 
+        <ScreenerCriteriaPanel />
+
         {showStaleNotice && (
           <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
             <AlertTriangle className="mr-1.5 inline h-3 w-3" />
@@ -2340,6 +2344,55 @@ export function ScreenerView({ connected }: Props) {
 
       </div>
     </TooltipProvider>
+  );
+}
+
+// Expandable panel showing the active screener's filter criteria.
+// Sourced from ACTIVE_SCREENER (lib/screener-config.ts) so the same
+// numbers drive both the live route and this display — no drift.
+// Collapsed by default; opens to a labelled list of every gate.
+function ScreenerCriteriaPanel() {
+  const [open, setOpen] = useState(false);
+  const cfg = ACTIVE_SCREENER;
+  return (
+    <div className="rounded-lg border border-border bg-background/40 text-xs">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-muted-foreground hover:text-foreground"
+      >
+        <span className="inline-flex items-center gap-1.5">
+          <Info className="h-3.5 w-3.5" />
+          <span className="font-semibold uppercase tracking-wide">
+            {cfg.name}
+          </span>
+          <span className="text-muted-foreground/70">screener criteria</span>
+        </span>
+        {open ? (
+          <ChevronDown className="h-3.5 w-3.5" />
+        ) : (
+          <ChevronRight className="h-3.5 w-3.5" />
+        )}
+      </button>
+      {open && (
+        <div className="space-y-3 border-t border-border/60 px-3 py-2.5">
+          <p className="text-muted-foreground">{cfg.description}</p>
+          <ul className="space-y-1">
+            {Object.entries(cfg.filters).map(([key, f]) => (
+              <li key={key} className="flex items-baseline gap-2 font-mono">
+                <span className="text-emerald-300">·</span>
+                <span className="text-foreground">{f.label}</span>
+              </li>
+            ))}
+          </ul>
+          {cfg.notes && (
+            <p className="border-t border-border/40 pt-2 text-[11px] italic text-muted-foreground/80">
+              {cfg.notes}
+            </p>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 

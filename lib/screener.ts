@@ -37,7 +37,7 @@ import { computeOptionsFlow, type OptionsFlow } from "@/lib/options-flow";
 // Minimum stock price for a CSP candidate. Below this, strike granularity
 // gets too coarse and premium-to-capital ratios stop working for the
 // strategy. Enforced upstream in /api/screener/screen.
-export const MIN_STOCK_PRICE = 60;
+export const MIN_STOCK_PRICE = 70;
 
 // ---------- Types ----------
 
@@ -358,17 +358,19 @@ export async function runStageTwo(
   const overhangPenalty = ACTIVE_OVERHANG.has(normalizeSymbol(candidate.symbol)) ? -3 : 0;
   const industryPenalty = options.industryPenalty ?? 0;
   const score = preOverhang + overhangPenalty + industryPenalty;
-  const meetsFloor = preOverhang >= 6;
-  // Whitelisted symbols bypass the quality floor entirely — the user
-  // has already vouched for the name, so a low simplicity / mid-cap
-  // tier shouldn't downstream-block analysis. Score still computed so
-  // the Stage 2 detail card stays informative.
+  // v4 gate: require marketCapTier >= 1 (i.e. $10B+). Sub-scores for
+  // businessSimplicity and analystDispersion are still surfaced for
+  // display, but no longer drive pass/fail — the simulation showed
+  // they were knocking out legitimate $20-30B mid-cap CSP names on
+  // false-negative analyst data and the curated bs map is too thin
+  // to be a reliable gate. Whitelisted symbols bypass entirely.
+  const meetsFloor = marketCapTier >= 1;
   const pass = options.isWhitelisted ? true : meetsFloor;
   const reason = options.isWhitelisted
-    ? `Whitelisted — quality floor bypassed (raw ${preOverhang}/9)`
+    ? `Whitelisted — market cap floor bypassed (mcap=${mcapB ?? "null"}B)`
     : meetsFloor
-      ? "Quality floor met"
-      : `Quality ${preOverhang}/9 below 6 floor`;
+      ? `Market cap floor met (mcap=${mcapB ?? "null"}B, tier ${marketCapTier}/3)`
+      : `Below $10B market cap floor (mcap=${mcapB ?? "null"}B, tier ${marketCapTier}/3)`;
   return {
     score,
     maxScore: 9,
