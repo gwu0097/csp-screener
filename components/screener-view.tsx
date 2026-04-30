@@ -933,7 +933,7 @@ export function ScreenerView({ connected }: Props) {
       setGroupMode(null);
       setScreenIsGraded(false);
       setMessage(
-        `Screened ${initialResults.length} candidates — verifying option chains…`,
+        `Screened ${initialResults.length} candidates — scoring & verifying option chains…`,
       );
 
       // ---- Stream C: chain verification, batched ----
@@ -945,14 +945,13 @@ export function ScreenerView({ connected }: Props) {
       for (let i = 0; i < initialResults.length; i += BATCH_SIZE) {
         batches.push(initialResults.slice(i, i + BATCH_SIZE));
       }
-      type VerifyRow = {
-        symbol: string;
-        status: "present" | "absent" | "unverified";
-        reason?: string;
-      };
+      type EnrichedRow =
+        | { symbol: string; status: "scored"; result: ScreenerResult }
+        | { symbol: string; status: "unverified"; result: ScreenerResult; reason?: string }
+        | { symbol: string; status: "dropped"; reason?: string };
       const verifyOnce = async (
         batch: ScreenerResult[],
-      ): Promise<{ rows: VerifyRow[] | null; status: number | null }> => {
+      ): Promise<{ rows: EnrichedRow[] | null; status: number | null }> => {
         try {
           const res = await fetch(
             "/api/screener/screen/verify-chains",
@@ -965,22 +964,23 @@ export function ScreenerView({ connected }: Props) {
                   date: c.earningsDate,
                   timing: c.earningsTiming,
                   price: c.price,
+                  isWhitelisted: c.isWhitelisted,
                 })),
               }),
               cache: "no-store",
             },
           );
           if (!res.ok) return { rows: null, status: res.status };
-          const json = (await res.json()) as { verifications?: VerifyRow[] };
-          return { rows: json.verifications ?? [], status: res.status };
+          const json = (await res.json()) as { rows?: EnrichedRow[] };
+          return { rows: json.rows ?? [], status: res.status };
         } catch {
           return { rows: null, status: null };
         }
       };
 
       const dropSymbols = new Set<string>();
-      let verifiedCount = 0;
-      let absentCount = 0;
+      let scoredCount = 0;
+      let droppedCount = 0;
       let unverifiedCount = 0;
       let workingResults = [...initialResults];
       const isLatestRunRef = { current: true }; // guards against double-run races
@@ -1019,8 +1019,8 @@ export function ScreenerView({ connected }: Props) {
           await new Promise((res) => setTimeout(res, RETRY_BACKOFF_MS));
           attempt = await verifyOnce(batch);
         }
-        const verifications = attempt.rows;
-        if (!verifications) {
+        const enriched = attempt.rows;
+        if (!enriched) {
           // Two-attempt failure → mark all unverified, continue.
           for (const c of batch) {
             workingResults = workingResults.map((row) =>
@@ -1032,36 +1032,43 @@ export function ScreenerView({ connected }: Props) {
           }
         } else {
           const byKey = new Map(
-            verifications.map((v) => [v.symbol.toUpperCase(), v]),
+            enriched.map((v) => [v.symbol.toUpperCase(), v]),
           );
           for (const c of batch) {
             const v = byKey.get(c.symbol.toUpperCase());
-            if (!v || v.status === "unverified") {
+            if (!v) {
+              // Server didn't echo this candidate — keep the shell as
+              // unverified so the user can retry via Run Analysis.
               workingResults = workingResults.map((row) =>
                 row.symbol === c.symbol
                   ? ({ ...row, chainUnverified: true } as ScreenerResult)
                   : row,
               );
               unverifiedCount += 1;
-            } else if (v.status === "present") {
+            } else if (v.status === "dropped") {
+              droppedCount += 1;
+              dropSymbols.add(c.symbol.toUpperCase());
+            } else if (v.status === "unverified") {
+              // Stage 1+2 may still be populated — merge the partial
+              // result, flag the row as chainUnverified.
+              const enrichedRow: ScreenerResult = {
+                ...v.result,
+                chainUnverified: true,
+              } as ScreenerResult;
               workingResults = workingResults.map((row) =>
-                row.symbol === c.symbol
-                  ? ({ ...row, chainUnverified: false } as ScreenerResult)
-                  : row,
+                row.symbol === c.symbol ? enrichedRow : row,
               );
-              verifiedCount += 1;
+              unverifiedCount += 1;
             } else {
-              // verified_absent — drop unless whitelisted.
-              absentCount += 1;
-              if (!c.isWhitelisted) {
-                dropSymbols.add(c.symbol.toUpperCase());
-              } else {
-                workingResults = workingResults.map((row) =>
-                  row.symbol === c.symbol
-                    ? ({ ...row, chainUnverified: false } as ScreenerResult)
-                    : row,
-                );
-              }
+              // status === "scored" — full Stage 1+2+3+4 ScreenerResult.
+              const enrichedRow: ScreenerResult = {
+                ...v.result,
+                chainUnverified: false,
+              } as ScreenerResult;
+              workingResults = workingResults.map((row) =>
+                row.symbol === c.symbol ? enrichedRow : row,
+              );
+              scoredCount += 1;
             }
           }
         }
@@ -1090,25 +1097,29 @@ export function ScreenerView({ connected }: Props) {
         phase: "done",
       });
 
-      // Persist the final post-verification snapshot.
+      // Persist the final post-verification snapshot. Mark graded
+      // because Stream C now runs full Stage 1+2+3+4 — the only thing
+      // Run Analysis adds on top is the Pass 3 (Perplexity + three-
+      // layer grade), so the table is meaningfully scored already.
       persistScreenSnapshot({
         candidates: finalResults,
         prices: initialPrices,
         screenedAt: timestampIso,
-        graded: false,
+        graded: scoredCount > 0,
         pass1Count: initialStats?.afterPriceFilter ?? null,
         pass2Count: finalResults.length,
       });
+      setScreenIsGraded(scoredCount > 0);
       setStatus("idle");
       const tail =
-        absentCount > 0 || unverifiedCount > 0
-          ? ` · ${verifiedCount} verified${
-              absentCount > 0 ? ` · ${absentCount} dropped` : ""
+        droppedCount > 0 || unverifiedCount > 0
+          ? ` · ${scoredCount} scored${
+              droppedCount > 0 ? ` · ${droppedCount} dropped` : ""
             }${unverifiedCount > 0 ? ` · ${unverifiedCount} unverified` : ""}`
           : "";
       setMessage(
         timedOut
-          ? `Screened ${finalResults.length} candidates · chain verification incomplete (${unverifiedCount} unverified after 45s timeout)`
+          ? `Screened ${finalResults.length} candidates · scoring incomplete (${unverifiedCount} unverified after 45s timeout)`
           : `Screened ${finalResults.length} candidates${tail}`,
       );
       // Auto-clear the progress strip after a beat so it doesn't
@@ -1996,8 +2007,8 @@ export function ScreenerView({ connected }: Props) {
               )}
               <span className="font-medium">
                 {chainProgress.phase === "verifying"
-                  ? "Stream C — verifying option chains"
-                  : "Stream C — verification complete"}
+                  ? "Stream C — scoring + chain verification"
+                  : "Stream C — scoring complete"}
               </span>
               <span className="font-mono">
                 {chainProgress.done}/{chainProgress.total}
