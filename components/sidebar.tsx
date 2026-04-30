@@ -20,6 +20,7 @@ import {
   Settings,
   Star,
   Telescope,
+  TrendingUp,
   X,
   Zap,
 } from "lucide-react";
@@ -226,20 +227,22 @@ export function Sidebar() {
           <SidebarLink item={POSITIONS} pathname={pathname} />
           {/* Performance is conceptually part of the Positions section
               — it summarises the equity curve and per-trade ROC built
-              from the positions table. Indented sub-link, visible on
-              mobile drawer + desktop, hidden in the icon-only tablet
-              rail (no room for indented labels). */}
+              from the positions table. Rendered with a top-level icon
+              + label so it visually matches the rest of the nav.
+              Visible on mobile drawer + desktop, hidden in the icon-
+              only tablet rail. */}
           <Link
             href="/intelligence/performance"
             className={cn(
-              "rounded-md py-1.5 pl-11 pr-3 text-sm",
+              "flex items-center gap-3 rounded-md px-3 py-2 text-sm",
               subActive(pathname, "/intelligence/performance")
-                ? "bg-white/5 font-medium text-white"
-                : "text-gray-500 hover:text-gray-200",
-              "block md:hidden lg:block",
+                ? "bg-white/10 text-white"
+                : "text-gray-400 hover:bg-white/5 hover:text-white",
+              "md:hidden lg:flex",
             )}
           >
-            Performance
+            <TrendingUp className="h-4 w-4 shrink-0" />
+            <span>Performance</span>
           </Link>
           <CollapsibleGroup
             group={INTELLIGENCE_GROUP}
