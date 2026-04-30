@@ -376,7 +376,6 @@ export function PositionCard(props: Props) {
   // it directly.
   const distancePct = open ? open.distanceToStrikePct : null;
   const iv = open ? open.currentIv : null;
-  const theta = open ? open.currentTheta : null;
 
   return (
     <div
@@ -436,11 +435,10 @@ export function PositionCard(props: Props) {
         <div className="hidden text-right font-mono text-base text-muted-foreground sm:block">
           {iv !== null ? `${(iv * 100).toFixed(0)}%` : "—"}
         </div>
-        {/* 9. Grade — center-aligned. Theta sits inline next to the badge
-              (desktop only) so we don't waste a whole grid column on a
-              live-only field. min-width on the grade cell guarantees both
-              fit without wrapping. */}
-        <div className="flex items-center justify-center gap-1.5">
+        {/* 9. Grade — center-aligned. Theta used to live inline here but
+              was noise for overnight CSP positions; the badge alone is
+              the signal. */}
+        <div className="flex items-center justify-center">
           {p.entryFinalGrade ? (
             <span
               className={cn(
@@ -452,11 +450,6 @@ export function PositionCard(props: Props) {
             </span>
           ) : (
             <span className="text-base text-muted-foreground">—</span>
-          )}
-          {theta !== null && (
-            <span className="hidden font-mono text-xs text-muted-foreground sm:inline">
-              θ {theta.toFixed(2)}
-            </span>
           )}
         </div>
         {/* 10. Status — badge centered. Trash + chevron affordances absolute-
