@@ -2281,6 +2281,13 @@ export function ScreenerView({ connected }: Props) {
                                   onApply={(o) =>
                                     setStrikeOverrides((prev) => ({ ...prev, [id]: o }))
                                   }
+                                  onReset={() =>
+                                    setStrikeOverrides((prev) => {
+                                      const next = { ...prev };
+                                      delete next[id];
+                                      return next;
+                                    })
+                                  }
                                 />
                               </TableCell>
                               <TableCell className={cn("text-sm font-mono", pctDropColor(displayedPrice, effStrike))}>
@@ -3317,6 +3324,7 @@ function EditableStrikeCell({
   override,
   availableStrikes,
   onApply,
+  onReset,
 }: {
   defaultStrike: number | null;
   override:
@@ -3326,11 +3334,42 @@ function EditableStrikeCell({
   onApply: (
     o: { strike: number; premium: number; delta: number; bidAskSpreadPct: number },
   ) => void;
+  onReset: () => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [val, setVal] = useState("");
   const displayStrike = override?.strike ?? defaultStrike;
-  const showHint = override !== null && defaultStrike !== null;
+  const userHasOverride = override !== null;
+
+  // Snap to the nearest available strike and write the override
+  // through the parent. Returns true on success, false on bad input —
+  // bad input leaves the existing override (if any) untouched, so the
+  // user's last committed value survives a sloppy blur.
+  function commit(): boolean {
+    const target = Number(val);
+    if (
+      !Number.isFinite(target) ||
+      target <= 0 ||
+      !availableStrikes ||
+      availableStrikes.length === 0
+    ) {
+      return false;
+    }
+    const nearest = availableStrikes.reduce((best, s) =>
+      Math.abs(s.strike - target) < Math.abs(best.strike - target) ? s : best,
+    );
+    const spreadPct =
+      nearest.mark > 0
+        ? ((nearest.ask - nearest.bid) / nearest.mark) * 100
+        : 0;
+    onApply({
+      strike: nearest.strike,
+      premium: nearest.mark,
+      delta: nearest.delta,
+      bidAskSpreadPct: spreadPct,
+    });
+    return true;
+  }
 
   if (editing) {
     return (
@@ -3342,34 +3381,22 @@ function EditableStrikeCell({
         onChange={(e) => setVal(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === "Enter") {
-            const target = Number(val);
-            if (
-              !Number.isFinite(target) ||
-              !availableStrikes ||
-              availableStrikes.length === 0
-            ) {
-              setEditing(false);
-              return;
-            }
-            const nearest = availableStrikes.reduce((best, s) =>
-              Math.abs(s.strike - target) < Math.abs(best.strike - target) ? s : best,
-            );
-            const spreadPct =
-              nearest.mark > 0
-                ? ((nearest.ask - nearest.bid) / nearest.mark) * 100
-                : 0;
-            onApply({
-              strike: nearest.strike,
-              premium: nearest.mark,
-              delta: nearest.delta,
-              bidAskSpreadPct: spreadPct,
-            });
+            commit();
             setEditing(false);
           } else if (e.key === "Escape") {
+            // Escape = bail out without saving the in-progress edit;
+            // the existing override (if any) stays put.
             setEditing(false);
           }
         }}
-        onBlur={() => setEditing(false)}
+        // Commit on blur so a misclick or focus steal doesn't drop
+        // the value. Preserves the user-typed strike across re-renders
+        // — the prior version threw away the typed value on blur and
+        // the cell silently fell back to defaultStrike.
+        onBlur={() => {
+          commit();
+          setEditing(false);
+        }}
         className="w-20 rounded border border-border bg-background px-1.5 py-0.5 text-sm font-mono"
       />
     );
@@ -3390,7 +3417,20 @@ function EditableStrikeCell({
     >
       <span className="text-sm">${fmtNum(displayStrike)}</span>
       <Pencil className="ml-1 inline h-3 w-3 opacity-0 transition-opacity group-hover:opacity-50" />
-      {showHint && defaultStrike !== null && (
+      {userHasOverride && (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onReset();
+          }}
+          className="ml-1 inline align-middle rounded border border-border px-1 text-[9px] uppercase text-muted-foreground hover:bg-foreground/10 hover:text-foreground"
+          title="Reset to suggested 2× EM strike"
+        >
+          ↺ reset
+        </button>
+      )}
+      {userHasOverride && defaultStrike !== null && (
         <div className="text-[10px] text-muted-foreground">
           2× EM: ${fmtNum(defaultStrike)}
         </div>
