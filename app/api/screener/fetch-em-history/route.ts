@@ -509,7 +509,13 @@ export async function POST(req: NextRequest) {
   // under the 60 s cap; the client's loop will pick up the new
   // targets on the next call.
   const slice = seededThisCall ? [] : targets.slice(0, EVENTS_PER_CALL);
-  let populated = seededThisCall ? (seedReport?.rowsAdded ?? 0) : 0;
+  // seedAdded = historical actual moves written by the seed step
+  // (Finnhub→encyclopedia or Yahoo fallback). Distinct from
+  // emPopulated, which counts Polygon-derived implied moves added
+  // by processEvent. The combined `populated` field stays in the
+  // response for back-compat with older client code.
+  const seedAdded = seededThisCall ? (seedReport?.rowsAdded ?? 0) : 0;
+  let emPopulated = 0;
   let skipped = 0;
   const messages: string[] = [];
   if (seedReport) {
@@ -542,7 +548,7 @@ export async function POST(req: NextRequest) {
       if (upd.error) {
         messages.push(`${row.earnings_date}: DB write failed`);
       } else {
-        populated += 1;
+        emPopulated += 1;
         messages.push(
           `${row.earnings_date}: EM=${(outcome.emPct * 100).toFixed(2)}% @ strike $${outcome.strike}${outcome.usedFallback ? " (used 5-BD fallback)" : ""}`,
         );
@@ -561,6 +567,7 @@ export async function POST(req: NextRequest) {
       messages.push(`${row.earnings_date}: ${outcome.reason}`);
     }
   }
+  const populated = seedAdded + emPopulated;
 
   // Re-fetch the full crush history so the client can drop-in
   // replace its rendered events list with the latest grades.
@@ -597,16 +604,25 @@ export async function POST(req: NextRequest) {
     };
   });
 
+  const eventsWithActual = events.filter((e) => e.actualMovePct !== null).length;
+  const eventsWithEm = events.filter(
+    (e) => e.actualMovePct !== null && e.impliedMovePct !== null,
+  ).length;
   const remainingMissing = events.filter(
     (e) => e.actualMovePct !== null && e.impliedMovePct === null,
   ).length;
 
   console.log(
-    `[fetch-em-history] ${symbol}: populated=${populated} skipped=${skipped} remaining=${remainingMissing} (processed ${slice.length}/${targets.length})`,
+    `[fetch-em-history] ${symbol}: seedAdded=${seedAdded} emPopulated=${emPopulated} skipped=${skipped} ` +
+      `remaining=${remainingMissing} (eventsWithActual=${eventsWithActual} eventsWithEm=${eventsWithEm}, processed ${slice.length}/${targets.length})`,
   );
 
   return NextResponse.json({
     populated,
+    seedAdded,
+    emPopulated,
+    eventsWithActual,
+    eventsWithEm,
     skipped,
     remainingMissing,
     processed: slice.length,

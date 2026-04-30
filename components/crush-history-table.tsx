@@ -7,6 +7,12 @@
 
 import { useEffect, useState } from "react";
 import { AlertTriangle, CheckCircle2, Loader2, XCircle } from "lucide-react";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 
 type CrushContext = {
   outlier_analyses: Array<{
@@ -36,16 +42,19 @@ type CrushHistoryEvent = {
 
 const SIMILAR_EM_TOLERANCE = 0.02; // ±2pp from today's EM
 
+// Em-dash on missing data — communicates "not available" rather than
+// "?" which previously looked like a parse failure. Per-cell tooltips
+// in the table explain the specific reason (no Polygon EM, etc.).
 function fmtPct(n: number | null, digits = 1): string {
-  if (n === null || !Number.isFinite(n)) return "?";
+  if (n === null || !Number.isFinite(n)) return "—";
   return `${(Math.abs(n) * 100).toFixed(digits)}%`;
 }
 
 // Signed version for the Actual column. Direction is encoded in the
 // sign of actualMovePct (positive = up, negative = down). Returns
-// "+14.8%" / "-11.6%" / "0.0%" / "?".
+// "+14.8%" / "-11.6%" / "0.0%" / "—".
 function fmtSignedPct(n: number | null, digits = 1): string {
-  if (n === null || !Number.isFinite(n)) return "?";
+  if (n === null || !Number.isFinite(n)) return "—";
   const pct = n * 100;
   if (pct > 0) return `+${pct.toFixed(digits)}%`;
   if (pct < 0) return `${pct.toFixed(digits)}%`; // already has the minus
@@ -59,7 +68,7 @@ function signedPctCls(n: number | null): string {
 }
 
 function fmtRatio(n: number | null): string {
-  if (n === null || !Number.isFinite(n)) return "?";
+  if (n === null || !Number.isFinite(n)) return "—";
   return n.toFixed(2);
 }
 
@@ -85,9 +94,43 @@ export function CrushHistoryTable({
 }) {
   const [refreshed, setRefreshed] = useState<CrushHistoryEvent[] | null>(null);
   const [fetchStatus, setFetchStatus] = useState<"idle" | "fetching" | "done" | "error">("idle");
-  const [populatedCount, setPopulatedCount] = useState(0);
+  // Two-count tracking: actuals come from the seed step (Finnhub /
+  // Yahoo backfill), implied moves come from the Polygon backfill.
+  // The old single "Populated N quarters" message was misleading
+  // when seed succeeded but Polygon found no contracts — the user
+  // saw "✓ Populated 4" with empty Ratio/Grade columns and assumed
+  // something was broken.
+  const [actualPopulated, setActualPopulated] = useState(0);
+  const [emPopulated, setEmPopulated] = useState(0);
+  const [eventsWithActual, setEventsWithActual] = useState(0);
   const [fetchProgress, setFetchProgress] = useState<string | null>(null);
   const [fetchError, setFetchError] = useState<string | null>(null);
+
+  // On mount: read the latest events for this symbol from the DB so
+  // a re-expand never shows stale stageThree.details.crushHistory
+  // baked into the screener_results cache (which can be hours old).
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        const res = await fetch(
+          `/api/screener/crush-history?symbol=${encodeURIComponent(todaySymbol)}`,
+          { cache: "no-store" },
+        );
+        if (!res.ok) return;
+        const json = (await res.json()) as { events?: CrushHistoryEvent[] };
+        if (!cancelled && Array.isArray(json.events)) {
+          setRefreshed(json.events);
+        }
+      } catch {
+        /* fall back to props.events */
+      }
+    }
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [todaySymbol]);
 
   const liveEvents = refreshed ?? events ?? [];
 
@@ -98,9 +141,13 @@ export function CrushHistoryTable({
     console.log("[fetch-em] starting for:", todaySymbol);
     setFetchStatus("fetching");
     setFetchError(null);
-    setPopulatedCount(0);
+    setActualPopulated(0);
+    setEmPopulated(0);
+    setEventsWithActual(0);
     setFetchProgress(null);
-    let totalPopulated = 0;
+    let totalActual = 0;
+    let totalEm = 0;
+    let lastEventsWithActual = 0;
     let totalSkipMessages: string[] = [];
     let lastRemaining = Number.POSITIVE_INFINITY;
     // Loop until backend reports remainingMissing===0. Bail out if a
@@ -117,6 +164,10 @@ export function CrushHistoryTable({
         const json = (await res.json()) as
           | {
               populated: number;
+              seedAdded?: number;
+              emPopulated?: number;
+              eventsWithActual?: number;
+              eventsWithEm?: number;
               skipped: number;
               remainingMissing: number;
               processed: number;
@@ -133,20 +184,24 @@ export function CrushHistoryTable({
           setFetchError(`Failed to fetch EM data — ${msg}`);
           return;
         }
-        totalPopulated += json.populated;
+        const seedAddedThisCall = json.seedAdded ?? 0;
+        const emAddedThisCall = json.emPopulated ?? json.populated ?? 0;
+        totalActual += seedAddedThisCall;
+        totalEm += emAddedThisCall;
+        lastEventsWithActual = json.eventsWithActual ?? lastEventsWithActual;
         totalSkipMessages = totalSkipMessages.concat(json.messages ?? []);
-        setPopulatedCount(totalPopulated);
+        setActualPopulated(totalActual);
+        setEmPopulated(totalEm);
+        setEventsWithActual(lastEventsWithActual);
         setRefreshed(json.events);
         setFetchProgress(
           json.remainingMissing > 0
-            ? `Populated ${totalPopulated} · ${json.remainingMissing} remaining…`
+            ? `Populated ${totalActual + totalEm} · ${json.remainingMissing} EM remaining…`
             : null,
         );
         if (json.remainingMissing === 0) {
           // True success — only branch where the button is replaced.
-          if (totalPopulated === 0) {
-            // Edge case: nothing was actually missing (UI/server drift).
-            // Fall through to error so the button stays available.
+          if (totalActual + totalEm === 0) {
             setFetchStatus("error");
             setFetchError(
               "Failed to fetch EM data — server reported nothing to populate. Try again.",
@@ -158,12 +213,12 @@ export function CrushHistoryTable({
         }
         if (json.remainingMissing >= lastRemaining) {
           // No progress — every remaining row is being skipped. Surface
-          // the skip messages so the user knows why and offer a retry.
+          // the skip messages so the user knows why.
           console.warn(
             "[fetch-em] no progress — surfaceable skip messages:",
             totalSkipMessages,
           );
-          if (totalPopulated === 0) {
+          if (totalActual + totalEm === 0) {
             setFetchStatus("error");
             setFetchError(
               `Failed to fetch EM data — try again. ${
@@ -173,7 +228,7 @@ export function CrushHistoryTable({
             );
             return;
           }
-          // Some populated, some persistently skipped — partial success.
+          // Partial success — actuals seeded, EMs couldn't be populated.
           setFetchStatus("done");
           return;
         }
@@ -187,8 +242,7 @@ export function CrushHistoryTable({
         return;
       }
     }
-    // Hit iteration cap without finishing — treat as partial.
-    if (totalPopulated === 0) {
+    if (totalActual + totalEm === 0) {
       setFetchStatus("error");
       setFetchError("Failed to fetch EM data — too many iterations without progress. Try again.");
       return;
@@ -234,7 +288,7 @@ export function CrushHistoryTable({
         <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
           Earnings history
         </div>
-        {!(fetchStatus === "done" && populatedCount > 0) && (
+        {!(fetchStatus === "done" && (actualPopulated > 0 || emPopulated > 0)) && (
           <button
             type="button"
             onClick={handleFetchEmHistory}
@@ -256,10 +310,25 @@ export function CrushHistoryTable({
             )}
           </button>
         )}
-        {fetchStatus === "done" && populatedCount > 0 && (
-          <span className="text-[10px] font-semibold uppercase tracking-wide text-emerald-300">
-            ✓ Populated {populatedCount} {populatedCount === 1 ? "quarter" : "quarters"}
-          </span>
+        {fetchStatus === "done" && (actualPopulated > 0 || emPopulated > 0) && (
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] font-semibold uppercase tracking-wide">
+            {actualPopulated > 0 && (
+              <span className="text-emerald-300">
+                ✓ {actualPopulated} actual {actualPopulated === 1 ? "move" : "moves"} populated
+              </span>
+            )}
+            {eventsWithActual > 0 && (
+              emPopulated < eventsWithActual ? (
+                <span className="text-amber-300">
+                  · ⚠️ {emPopulated}/{eventsWithActual} implied moves (no Polygon data)
+                </span>
+              ) : (
+                <span className="text-emerald-300">
+                  · ✓ {emPopulated}/{eventsWithActual} implied moves
+                </span>
+              )
+            )}
+          </div>
         )}
       </div>
       {fetchStatus === "fetching" && fetchProgress && (
@@ -309,7 +378,20 @@ export function CrushHistoryTable({
                 >
                   <td className="px-2 py-1 font-mono">{e.qtrLabel}</td>
                   <td className="px-2 py-1 text-right font-mono">
-                    {fmtPct(e.impliedMovePct)}
+                    {e.impliedMovePct === null ? (
+                      <TooltipProvider delayDuration={200}>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <span className="cursor-help text-muted-foreground">—</span>
+                          </TooltipTrigger>
+                          <TooltipContent className="max-w-xs text-xs">
+                            Implied move not available for this quarter — Polygon had no options data.
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    ) : (
+                      fmtPct(e.impliedMovePct)
+                    )}
                   </td>
                   <td
                     className={`px-2 py-1 text-right font-mono ${signedPctCls(e.actualMovePct)}`}
@@ -317,15 +399,45 @@ export function CrushHistoryTable({
                     {fmtSignedPct(e.actualMovePct)}
                   </td>
                   <td className="px-2 py-1 text-right font-mono">
-                    {fmtRatio(e.ratio)}
+                    {e.ratio === null && e.actualMovePct !== null && e.impliedMovePct === null ? (
+                      <TooltipProvider delayDuration={200}>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <span className="cursor-help text-muted-foreground">—</span>
+                          </TooltipTrigger>
+                          <TooltipContent className="max-w-xs text-xs">
+                            Ratio needs both actual and implied move. Implied move not available for this quarter.
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    ) : (
+                      fmtRatio(e.ratio)
+                    )}
                   </td>
                   <td className="px-2 py-1 text-center">
-                    <span
-                      className={`inline-flex items-center gap-0.5 rounded px-1 py-0.5 font-mono font-semibold ${gradeBadgeCls(e.grade)}`}
-                    >
-                      {e.grade ?? "?"}
-                      {isF && <span title="Stock overshot implied move">⚠️</span>}
-                    </span>
+                    {e.grade === null && e.actualMovePct !== null && e.impliedMovePct === null ? (
+                      <TooltipProvider delayDuration={200}>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <span
+                              className={`inline-flex cursor-help items-center gap-0.5 rounded px-1 py-0.5 font-mono font-semibold ${gradeBadgeCls(null)}`}
+                            >
+                              —
+                            </span>
+                          </TooltipTrigger>
+                          <TooltipContent className="max-w-xs text-xs">
+                            Grade requires the implied/actual ratio. Implied move not available for this quarter.
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    ) : (
+                      <span
+                        className={`inline-flex items-center gap-0.5 rounded px-1 py-0.5 font-mono font-semibold ${gradeBadgeCls(e.grade)}`}
+                      >
+                        {e.grade ?? "—"}
+                        {isF && <span title="Stock overshot implied move">⚠️</span>}
+                      </span>
+                    )}
                   </td>
                   <td className="px-2 py-1 text-[10px] text-muted-foreground">
                     {isSimilar && (
