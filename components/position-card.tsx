@@ -162,7 +162,7 @@ type Props =
 // `hidden sm:block` so they're pulled out of the grid flow on mobile,
 // leaving only the 7 visible cells which match the mobile template.
 export const COLLAPSED_ROW_GRID =
-  "grid w-full items-center gap-2 px-3 text-sm " +
+  "grid w-full items-center gap-2 px-3 text-base " +
   "grid-cols-[24px_minmax(80px,8fr)_minmax(50px,5fr)_minmax(80px,9fr)_minmax(60px,6fr)_minmax(70px,7fr)_minmax(130px,12fr)] " +
   "sm:grid-cols-[24px_minmax(80px,8fr)_minmax(70px,7fr)_minmax(50px,5fr)_minmax(80px,9fr)_minmax(60px,6fr)_minmax(70px,7fr)_minmax(60px,6fr)_minmax(70px,7fr)_minmax(130px,12fr)]";
 
@@ -389,38 +389,38 @@ export function PositionCard(props: Props) {
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
-        className={cn(COLLAPSED_ROW_GRID, "py-2.5")}
+        className={cn(COLLAPSED_ROW_GRID, "py-1.5")}
       >
         {/* 1. Post-earnings dot */}
         <div className="flex h-4 w-4 items-center justify-center">
           {p.postEarningsRec ? <RecDot rec={p.postEarningsRec} /> : null}
         </div>
         {/* 2. Strike */}
-        <div className="truncate text-right font-mono text-sm text-foreground/90">
+        <div className="truncate text-right font-mono text-base text-foreground/90">
           ${p.strike}
           <span className="text-muted-foreground">{p.optionType === "put" ? "P" : "C"}</span>
         </div>
         {/* 3. Expiry — hidden on mobile */}
-        <div className="hidden truncate text-right font-mono text-sm text-muted-foreground sm:block">
+        <div className="hidden truncate text-right font-mono text-base text-muted-foreground sm:block">
           {shortExpiry(p.expiry)}
         </div>
         {/* 4. Qty */}
-        <div className="text-right font-mono text-sm text-foreground/80">
+        <div className="text-right font-mono text-base text-foreground/80">
           ×{p.remainingContracts}
         </div>
         {/* 5. P&L — bold so it reads first when scanning the row */}
-        <div className={cn("text-right font-mono text-sm font-semibold", pnlColor)}>
+        <div className={cn("text-right font-mono text-base font-semibold", pnlColor)}>
           {fmtDollarsSigned(pnlDollars)}
         </div>
         {/* 6. POP% */}
-        <div className={cn("text-right font-mono text-sm", popColor(pop))}>
+        <div className={cn("text-right font-mono text-base", popColor(pop))}>
           {pop !== null ? `${Math.round(pop * 100)}%` : "—"}
         </div>
         {/* 7. % OTM — hidden on mobile. Danger zone (<5% breathing room or
               already ITM) flips amber/red regardless of sign. */}
         <div
           className={cn(
-            "hidden text-right font-mono text-sm sm:block",
+            "hidden text-right font-mono text-base sm:block",
             distancePct === null
               ? "text-muted-foreground"
               : distancePct < 0
@@ -433,7 +433,7 @@ export function PositionCard(props: Props) {
           {distancePct !== null ? `${distancePct.toFixed(1)}%` : "—"}
         </div>
         {/* 8. IV — hidden on mobile */}
-        <div className="hidden text-right font-mono text-sm text-muted-foreground sm:block">
+        <div className="hidden text-right font-mono text-base text-muted-foreground sm:block">
           {iv !== null ? `${(iv * 100).toFixed(0)}%` : "—"}
         </div>
         {/* 9. Grade — center-aligned. Theta sits inline next to the badge
@@ -444,17 +444,17 @@ export function PositionCard(props: Props) {
           {p.entryFinalGrade ? (
             <span
               className={cn(
-                "inline-block rounded border px-1.5 py-0.5 text-xs font-semibold",
+                "inline-block rounded border px-1.5 py-0.5 text-sm font-semibold",
                 gradeColor(p.entryFinalGrade),
               )}
             >
               {p.entryFinalGrade}
             </span>
           ) : (
-            <span className="text-sm text-muted-foreground">—</span>
+            <span className="text-base text-muted-foreground">—</span>
           )}
           {theta !== null && (
-            <span className="hidden font-mono text-[11px] text-muted-foreground sm:inline">
+            <span className="hidden font-mono text-xs text-muted-foreground sm:inline">
               θ {theta.toFixed(2)}
             </span>
           )}
@@ -470,7 +470,7 @@ export function PositionCard(props: Props) {
                 <TooltipTrigger asChild>
                   <span
                     className={cn(
-                      "rounded border px-2 py-0.5 text-[11px] font-semibold whitespace-nowrap",
+                      "rounded border px-2 py-0.5 text-sm font-semibold whitespace-nowrap",
                       status.className,
                     )}
                   >
@@ -485,7 +485,7 @@ export function PositionCard(props: Props) {
           ) : (
             <span
               className={cn(
-                "rounded border px-2 py-0.5 text-[11px] font-semibold whitespace-nowrap",
+                "rounded border px-2 py-0.5 text-sm font-semibold whitespace-nowrap",
                 status.className,
               )}
             >

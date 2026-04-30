@@ -172,7 +172,7 @@ function PositionsTableHeader({
     <div
       className={cn(
         COLLAPSED_ROW_GRID,
-        "hidden py-1.5 text-[11px] font-semibold uppercase text-muted-foreground sm:grid",
+        "hidden py-1.5 text-sm font-semibold uppercase text-muted-foreground sm:grid",
       )}
     >
       {/* 1 dot */}
@@ -222,19 +222,19 @@ function TickerSubHeader({
         ? "text-emerald-300"
         : "text-rose-300";
   return (
-    <div className="flex items-baseline justify-between gap-2 border-t border-border/40 px-3 pt-3 pb-1 text-xs first:border-t-0 first:pt-2">
+    <div className="flex items-baseline justify-between gap-2 border-t border-border/40 px-3 pt-2 pb-0.5 text-sm first:border-t-0 first:pt-1">
       <div className="flex items-baseline gap-2">
-        <span className="text-sm font-bold tracking-wide text-foreground">{symbol}</span>
-        <span className="font-mono text-[11px] text-muted-foreground">
+        <span className="text-lg font-bold tracking-wide text-foreground">{symbol}</span>
+        <span className="font-mono text-sm text-muted-foreground">
           {contractCount} {contractCount === 1 ? "contract" : "contracts"}
         </span>
         {stockPrice !== null && (
-          <span className="font-mono text-[11px] text-muted-foreground/80">
+          <span className="font-mono text-sm text-muted-foreground/80">
             · {fmtDollars(stockPrice)}
           </span>
         )}
       </div>
-      <span className={cn("font-mono text-xs font-semibold", pnlCls)}>
+      <span className={cn("font-mono text-base font-semibold", pnlCls)}>
         {fmtDollarsSigned(combinedPnl)}
       </span>
     </div>
@@ -264,7 +264,7 @@ function SortHeader({
       type="button"
       onClick={() => onSort(k)}
       className={cn(
-        "flex items-center gap-0.5 text-[11px] font-semibold uppercase tracking-wide transition-colors",
+        "flex items-center gap-0.5 text-sm font-semibold uppercase tracking-wide transition-colors",
         align === "right"
           ? "justify-end"
           : align === "center"
@@ -712,9 +712,9 @@ export function PositionsView() {
       : brokerGroups.filter((g) => g.key === brokerFilter);
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       {/* ---------- Top stats panel ---------- */}
-      <div className="rounded-lg border border-border bg-background/60 p-4">
+      <div className="rounded-lg border border-border bg-background/60 p-3">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="space-y-1.5">
             <div className="font-mono text-xl font-semibold tracking-tight text-foreground tabular-nums sm:text-2xl">
@@ -952,23 +952,23 @@ export function PositionsView() {
             <div className={cn("h-0.5 w-full", accent.topBar)} />
 
             {/* Panel header */}
-            <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
+            <div className="flex flex-wrap items-center justify-between gap-3 px-3 py-2">
               <div className="flex items-baseline gap-3">
-                <span className={cn("text-base font-bold uppercase tracking-wider", accent.text)}>
+                <span className={cn("text-2xl font-bold uppercase tracking-wider", accent.text)}>
                   {group.label}
                 </span>
-                <span className="font-mono text-xs text-muted-foreground">
+                <span className="font-mono text-sm text-muted-foreground">
                   {group.contractCount} {group.contractCount === 1 ? "contract" : "contracts"}
                 </span>
               </div>
-              <div className="flex items-baseline gap-4 text-xs">
+              <div className="flex items-baseline gap-4 text-sm">
                 <div>
                   <span className="text-muted-foreground">Max Profit </span>
                   <span className="font-mono font-semibold text-emerald-300">
                     {fmtDollarsSigned(stats.maxProfit)}
                   </span>
                   {stats.maxProfitMissing > 0 && (
-                    <span className="ml-1 text-[10px] text-muted-foreground/70">
+                    <span className="ml-1 text-xs text-muted-foreground/70">
                       ({stats.maxProfitMissing} excluded)
                     </span>
                   )}
@@ -999,7 +999,7 @@ export function PositionsView() {
             </div>
 
             {/* Positions */}
-            <div className="space-y-1 px-2 pb-2">
+            <div className="space-y-0.5 px-2 pb-2">
               {groupByTicker(group.items).map((tg) => (
                 <div key={tg.symbol} className="space-y-1">
                   <TickerSubHeader
@@ -1083,12 +1083,12 @@ export function PositionsView() {
                       )}
                     >
                       <div className={cn("h-0.5 w-full", accent.topBar)} />
-                      <div className="flex items-baseline justify-between gap-2 px-4 py-3">
+                      <div className="flex items-baseline justify-between gap-2 px-3 py-2">
                         <div className="flex items-baseline gap-3">
-                          <span className={cn("text-base font-bold uppercase tracking-wider", accent.text)}>
+                          <span className={cn("text-2xl font-bold uppercase tracking-wider", accent.text)}>
                             {group.label}
                           </span>
-                          <span className="font-mono text-xs text-muted-foreground">
+                          <span className="font-mono text-sm text-muted-foreground">
                             {group.items.length} {group.items.length === 1 ? "position" : "positions"}
                           </span>
                         </div>
@@ -1096,7 +1096,7 @@ export function PositionsView() {
                       <div className="sticky top-0 z-10 border-y border-border/40 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80">
                         <PositionsTableHeader sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
                       </div>
-                      <div className="space-y-1 px-2 pb-2">
+                      <div className="space-y-0.5 px-2 pb-2">
                         {groupByTicker(group.items).map((tg) => (
                           <div key={tg.symbol} className="space-y-1">
                             <TickerSubHeader
