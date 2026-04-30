@@ -1214,14 +1214,7 @@ export async function evaluateStagesOneTwo(
 
 // Takes an existing stage-1/2 ScreenerResult and fills in stages 3 + 4 using
 // fresh Schwab + Yahoo data. Returns a new ScreenerResult (does not mutate).
-export async function runStagesThreeFour(
-  base: ScreenerResult,
-  // Optional pre-fetched chain. Callers that already have the chain
-  // in hand (e.g. screen/verify-chains, which pre-probes Schwab to
-  // distinguish "absent" from "unverified") pass it in to avoid a
-  // second Schwab round-trip. Pass `undefined` to fetch fresh.
-  prefetchedChain?: SchwabOptionsChain | null,
-): Promise<ScreenerResult> {
+export async function runStagesThreeFour(base: ScreenerResult): Promise<ScreenerResult> {
   const candidate: EarningsCandidate = {
     symbol: base.symbol,
     price: base.price,
@@ -1231,10 +1224,7 @@ export async function runStagesThreeFour(
     expiry: base.expiry,
   };
 
-  const chain =
-    prefetchedChain !== undefined
-      ? prefetchedChain
-      : await safeGetChain(candidate.symbol, candidate.expiry, candidate.expiry);
+  const chain = await safeGetChain(candidate.symbol, candidate.expiry, candidate.expiry);
 
   // ---- DEBUG: SPOT-only chain dump (full Schwab response shape).
   // Captures the actual response right after the Schwab fetch so we

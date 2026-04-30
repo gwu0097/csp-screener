@@ -3,26 +3,40 @@ import { getTodayEarnings } from "@/lib/earnings";
 import { getBatchPrices } from "@/lib/price";
 import { isSchwabConnected } from "@/lib/schwab";
 import { getWatchlistSymbols } from "@/lib/watchlist";
-import { getIndustryClassification } from "@/lib/classification";
+import { getIndustryClassification, type IndustryClass } from "@/lib/classification";
 import {
   buildCandidateFromEarnings,
   isLikelyCommonEquity,
   MIN_STOCK_PRICE,
+  runStageTwo,
   ScreenerResult,
 } from "@/lib/screener";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
-// Stream A: minimal "what's reporting today?" screen. Now does ONLY
-// Finnhub calendar + ETF/blacklist filter + Yahoo batch prices +
-// price floor + classifier lookup (cached path only — no Yahoo
-// fallback). Stage 1+2 + Stage 3+4 scoring + Schwab chain fetches
-// have moved out:
-//   - Chain verification → /api/screener/screen/verify-chains (Stream C)
-//   - Stage 1+2 + Stage 3+4 scoring → Run Analysis (Pass 2 / 3a / 3b)
-// Cap at 30s — typical run is 3-8s now since the per-row Schwab call
-// (the previous timeout source — 125 rows × 1-2s sequential) is gone.
-export const maxDuration = 30;
+// Stream A: filter-only "what's reporting today and is it worth
+// scoring?" pass. Pipeline:
+//   1. Finnhub earnings calendar
+//   2. ETF / blacklist filter
+//   3. $70 price floor (Yahoo batch quotes)
+//   4. Stage 2 quality floor (business simplicity + market cap +
+//      analyst dispersion). Yahoo + Finnhub data only — no Schwab
+//      calls. Drops bloat candidates so the table comes back tight.
+//   5. Industry classification cached lookup (Yahoo fallback only
+//      for whitelisted names).
+// All option-chain math (Stage 1 crush, Stage 3+4 strike/premium,
+// Pass 3 Perplexity, three-layer grade) runs via Run Analysis.
+// Stream C (verify-chains) does a binary present/absent chain probe
+// alongside this — orchestrated client-side.
+//
+// Stage 2 batches through Finnhub /stock/recommendation in chunks
+// of 8 with a 250ms gap so we don't trip the free-tier 60/min rate
+// limit on a fresh-cache day. Steady-state with cached market caps
+// the whole pipeline runs in ~5-10s.
+export const maxDuration = 60;
+const STAGE2_BATCH = 8;
+const STAGE2_BATCH_DELAY_MS = 250;
+const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
 
 const MAX_RESULTS = 20;
 
@@ -35,11 +49,13 @@ type ScreenResponse = {
     finnhub: number;
     afterEtfAndBlacklist: number;
     afterPriceFilter: number;
+    afterQualityFilter: number;
     afterChainFilter: number;
     final: number;
     droppedByEtf: string[];
     droppedByBlacklist: string[];
     droppedByPrice: string[];
+    droppedByQuality: string[];
     droppedByChain: string[];
     // Tickers passed through the weekly-chain check without verification
     // because Schwab returned null/error/empty. They're still in the
@@ -56,11 +72,13 @@ export async function POST() {
     finnhub: 0,
     afterEtfAndBlacklist: 0,
     afterPriceFilter: 0,
+    afterQualityFilter: 0,
     afterChainFilter: 0,
     final: 0,
     droppedByEtf: [],
     droppedByBlacklist: [],
     droppedByPrice: [],
+    droppedByQuality: [],
     droppedByChain: [],
     unverifiedChain: [],
   };
@@ -144,70 +162,111 @@ export async function POST() {
         `(dropped=${stats.droppedByPrice.length}; examples=${stats.droppedByPrice.slice(0, 6).join(",")})`,
     );
 
-    // Step 5 (chain verification) was previously inline here — it now
-    // lives in /api/screener/screen/verify-chains, called by the
-    // client in batches of 10 with per-batch retry. Splitting it out
-    // means a Schwab outage can no longer turn the screen into an
-    // empty board: Stream A (this route) returns survivors as soon
-    // as Finnhub + ETF/blacklist + price filters resolve, and the
-    // client backfills chain-verification status into the displayed
-    // table as each Stream C batch completes.
-    type WithChain = Survivor & {
-      expiry: string;
+    // Step 5: Stage 2 quality floor. Computes business simplicity +
+    // market cap tier + analyst dispersion per survivor (Yahoo +
+    // Finnhub data only — NO Schwab). Drops anything that fails the
+    // floor unless whitelisted (runStageTwo forces pass=true for
+    // whitelisted names, so the drop branch only fires on
+    // non-whitelisted candidates that genuinely fail).
+    //
+    // Industry classification piggy-backs on the same per-symbol
+    // async block so we don't pay for it twice (cached lookup +
+    // optional Yahoo fallback for whitelisted unknowns).
+    type Scored = Survivor & {
       price: number;
+      cls: { industry: string; source: string; pass: boolean };
+      industryStatus: "pass" | "fail" | "unknown";
     };
-    const afterChain: WithChain[] = afterPrice.map((row) => {
-      const price = prices[row.symbol.toUpperCase()] ?? 0;
-      const candidate = buildCandidateFromEarnings(
-        { symbol: row.symbol, date: row.date, timing: row.timing },
-        price,
+    const t0 = Date.now();
+    const scored: Scored[] = [];
+    for (let i = 0; i < afterPrice.length; i += STAGE2_BATCH) {
+      const batch = afterPrice.slice(i, i + STAGE2_BATCH);
+      const verdicts = await Promise.all(
+        batch.map(async (row) => {
+          const upper = row.symbol.toUpperCase();
+          const price = prices[upper] ?? 0;
+          let cls = await getIndustryClassification(upper, {
+            yahooAllowed: false,
+          });
+          if (row.isWhitelisted && cls.source === "unknown") {
+            cls = await getIndustryClassification(upper, { yahooAllowed: true });
+          }
+          const industryStatus: "pass" | "fail" | "unknown" = row.isWhitelisted
+            ? "pass"
+            : cls.source === "unknown"
+              ? "unknown"
+              : cls.pass
+                ? "pass"
+                : "fail";
+          const industryPenalty =
+            row.isWhitelisted ||
+            industryStatus === "pass" ||
+            industryStatus === "unknown"
+              ? 0
+              : -2;
+          const candidate = buildCandidateFromEarnings(
+            { symbol: row.symbol, date: row.date, timing: row.timing },
+            price,
+          );
+          const stageTwo = await runStageTwo(
+            candidate,
+            cls.industry as IndustryClass,
+            { industryPenalty, isWhitelisted: row.isWhitelisted },
+          );
+          return { row, price, cls, industryStatus, stageTwo };
+        }),
       );
-      return { ...row, expiry: candidate.expiry, price };
-    });
-    stats.afterChainFilter = afterChain.length;
+      for (const v of verdicts) {
+        if (v.stageTwo.pass) {
+          scored.push({
+            symbol: v.row.symbol,
+            date: v.row.date,
+            timing: v.row.timing,
+            isWhitelisted: v.row.isWhitelisted,
+            price: v.price,
+            cls: v.cls,
+            industryStatus: v.industryStatus,
+          });
+        } else {
+          stats.droppedByQuality.push(
+            `${v.row.symbol.toUpperCase()}(${v.stageTwo.score}/${v.stageTwo.maxScore})`,
+          );
+        }
+      }
+      if (i + STAGE2_BATCH < afterPrice.length) {
+        await sleep(STAGE2_BATCH_DELAY_MS);
+      }
+    }
+    stats.afterQualityFilter = scored.length;
     console.log(
-      `[screen] chain verification deferred to /verify-chains stream — ` +
-        `${afterChain.length} survivors forwarded to Stage 1+2`,
+      `[screen] Stage 2 quality floor: ${scored.length} pass / ${stats.droppedByQuality.length} dropped ` +
+        `in ${Date.now() - t0}ms (examples=${stats.droppedByQuality.slice(0, 6).join(",")})`,
     );
 
-    // Step 6: build minimal candidate shells. Stage 1+2 + Stage 3+4
-    // scoring is deferred to Run Analysis; this route's job is just
-    // "what's reporting today?". Each row returns with stageOne /
-    // stageTwo / stageThree / stageFour all null/placeholder and
-    // recommendation = "Needs analysis", which the UI already handles
-    // (renders "—" in the score columns and surfaces the row).
-    //
-    // Classifier runs with yahooAllowed=false so a cache miss returns
-    // industry='unknown' instead of triggering a 1-2s Yahoo fetch per
-    // miss. Cached classification is effectively instant.
-    const t0 = Date.now();
-    const results: ScreenerResult[] = [];
-    for (const row of afterChain) {
-      const upper = row.symbol.toUpperCase();
-      const isWhitelisted = whitelist.has(upper);
-      // Whitelisted symbols are allowed the slower Yahoo fallback —
-      // the user explicitly cares about these names, so spending
-      // ~1-2s on a sector lookup beats showing "unknown" forever.
-      let cls = await getIndustryClassification(upper, {
-        yahooAllowed: false,
-      });
-      if (isWhitelisted && cls.source === "unknown") {
-        cls = await getIndustryClassification(upper, { yahooAllowed: true });
-      }
-      const industryStatus: "pass" | "fail" | "unknown" = isWhitelisted
-        ? "pass"
-        : cls.source === "unknown"
-          ? "unknown"
-          : cls.pass
-            ? "pass"
-            : "fail";
+    // Step 6 (chain verification) was previously inline here — it now
+    // lives in /api/screener/screen/verify-chains, called by the
+    // client in batches with per-batch retry. Splitting it out means
+    // a Schwab outage can't turn the screen into an empty board:
+    // Stream A returns survivors as soon as filters + Stage 2 quality
+    // resolve, and the client backfills chain-verification status
+    // into the displayed table as each Stream C batch completes.
+    stats.afterChainFilter = scored.length;
+    console.log(
+      `[screen] chain verification deferred to /verify-chains stream — ` +
+        `${scored.length} survivors forwarded`,
+    );
 
+    // Step 7: build candidate shells. Stage 1 / Stage 3 / Stage 4 +
+    // three-layer grade are deferred to Run Analysis; this route's
+    // job is "what's reporting today and worth scoring?". Each row
+    // returns with stageThree / stageFour null and recommendation =
+    // "Needs analysis", which the UI already handles.
+    const results: ScreenerResult[] = scored.map((row) => {
       const candidate = buildCandidateFromEarnings(
         { symbol: row.symbol, date: row.date, timing: row.timing },
         row.price,
       );
-
-      results.push({
+      return {
         symbol: candidate.symbol,
         price: candidate.price,
         earningsDate: candidate.earningsDate,
@@ -219,35 +278,32 @@ export async function POST() {
         // distinguish "screen-only row" from a fully-graded one
         // without a schema change. Run Analysis overwrites it.
         stageOne: {
-          pass: industryStatus !== "fail",
+          pass: row.industryStatus !== "fail",
           reason: "deferred to Run Analysis",
-          details: { industry: cls.industry ?? "" },
+          details: { industry: row.cls.industry ?? "" },
         },
         stageTwo: null,
         stageThree: null,
         stageFour: null,
         recommendation: "Needs analysis",
         errors: [],
-        isWhitelisted,
-        industryStatus,
+        isWhitelisted: row.isWhitelisted,
+        industryStatus: row.industryStatus,
         spreadTooWide: false,
         threeLayer: null,
-      });
-    }
+      };
+    });
 
-    // No stageTwo.score yet — order by tracked + symbol so the
-    // returned list is stable and easy to scan. Run Analysis will
-    // re-sort by the proper score once Stage 1+2 lands.
+    // Stable order by symbol — Run Analysis will re-sort by score
+    // once grades land.
     results.sort((a, b) => a.symbol.localeCompare(b.symbol));
-    const final = results.slice(0, MAX_RESULTS * 6); // wider than the old 20 since we're not pre-scoring
+    const final = results.slice(0, MAX_RESULTS * 6);
     stats.final = final.length;
-    console.log(
-      `[screen] candidate-shell loop: ${results.length} rows in ${Date.now() - t0}ms`,
-    );
 
     console.log(
       `[screen] SUMMARY finnhub=${stats.finnhub} afterEtfBlacklist=${stats.afterEtfAndBlacklist} ` +
-        `afterPrice(>=$${MIN_STOCK_PRICE})=${stats.afterPriceFilter} afterChain=${stats.afterChainFilter} ` +
+        `afterPrice(>=$${MIN_STOCK_PRICE})=${stats.afterPriceFilter} ` +
+        `afterQuality=${stats.afterQualityFilter} afterChain=${stats.afterChainFilter} ` +
         `(${stats.unverifiedChain?.length ?? 0} unverified) final=${stats.final} connected=${connected}`,
     );
 

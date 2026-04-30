@@ -448,6 +448,11 @@ export function ScreenerView({ connected }: Props) {
   // bare Screen Today or applyWatchlist (which can introduce new
   // ungraded rows).
   const [screenIsGraded, setScreenIsGraded] = useState<boolean>(false);
+  // Count of candidates dropped from the displayed list because
+  // Schwab couldn't verify their option chain (token expired,
+  // Schwab outage, etc.). Surfaced as a small note below the table
+  // so the user knows the screen isn't necessarily exhaustive.
+  const [unverifiedExcluded, setUnverifiedExcluded] = useState<number>(0);
   // Two-stream Pass 3 state. After Pass 2 lands, the client kicks
   // off an independent News stream (Perplexity, /api/screener/
   // analyze/pass3a) and a Grade stream (personal history + three-
@@ -890,6 +895,7 @@ export function ScreenerView({ connected }: Props) {
     setExpanded({});
     setLastStats(null);
     setChainProgress(null);
+    setUnverifiedExcluded(0);
     try {
       // ---- Stream A: calendar + filters + Stage 1+2 scoring ----
       // Fast — 2-5s typical. Returns the full survivor list with
@@ -945,13 +951,14 @@ export function ScreenerView({ connected }: Props) {
       for (let i = 0; i < initialResults.length; i += BATCH_SIZE) {
         batches.push(initialResults.slice(i, i + BATCH_SIZE));
       }
-      type EnrichedRow =
-        | { symbol: string; status: "scored"; result: ScreenerResult }
-        | { symbol: string; status: "unverified"; result: ScreenerResult; reason?: string }
-        | { symbol: string; status: "dropped"; reason?: string };
+      type VerifyRow = {
+        symbol: string;
+        status: "present" | "absent" | "unverified";
+        reason?: string;
+      };
       const verifyOnce = async (
         batch: ScreenerResult[],
-      ): Promise<{ rows: EnrichedRow[] | null; status: number | null }> => {
+      ): Promise<{ rows: VerifyRow[] | null; status: number | null }> => {
         try {
           const res = await fetch(
             "/api/screener/screen/verify-chains",
@@ -964,25 +971,31 @@ export function ScreenerView({ connected }: Props) {
                   date: c.earningsDate,
                   timing: c.earningsTiming,
                   price: c.price,
-                  isWhitelisted: c.isWhitelisted,
                 })),
               }),
               cache: "no-store",
             },
           );
           if (!res.ok) return { rows: null, status: res.status };
-          const json = (await res.json()) as { rows?: EnrichedRow[] };
-          return { rows: json.rows ?? [], status: res.status };
+          const json = (await res.json()) as { verifications?: VerifyRow[] };
+          return { rows: json.verifications ?? [], status: res.status };
         } catch {
           return { rows: null, status: null };
         }
       };
 
+      // dropSymbols: removed from the displayed list. Three reasons
+      // a row lands here:
+      //   - verified absent (chain present but no weekly Friday) for
+      //     a non-whitelisted name
+      //   - unverified (Schwab unreachable) — surfaced as a count
+      //     below the table instead
+      //   - server didn't echo the candidate
       const dropSymbols = new Set<string>();
-      let scoredCount = 0;
-      let droppedCount = 0;
+      let presentCount = 0;
+      let absentCount = 0;
       let unverifiedCount = 0;
-      let workingResults = [...initialResults];
+      const workingResults = [...initialResults];
       const isLatestRunRef = { current: true }; // guards against double-run races
 
       setChainProgress({
@@ -995,14 +1008,9 @@ export function ScreenerView({ connected }: Props) {
       for (let b = 0; b < batches.length; b += 1) {
         if (Date.now() - startedAt > GLOBAL_TIMEOUT_MS) {
           timedOut = true;
-          // Mark all remaining batches as unverified.
           for (let r = b; r < batches.length; r += 1) {
             for (const c of batches[r]) {
-              workingResults = workingResults.map((row) =>
-                row.symbol === c.symbol
-                  ? ({ ...row, chainUnverified: true } as ScreenerResult)
-                  : row,
-              );
+              dropSymbols.add(c.symbol.toUpperCase());
               unverifiedCount += 1;
             }
           }
@@ -1019,66 +1027,44 @@ export function ScreenerView({ connected }: Props) {
           await new Promise((res) => setTimeout(res, RETRY_BACKOFF_MS));
           attempt = await verifyOnce(batch);
         }
-        const enriched = attempt.rows;
-        if (!enriched) {
-          // Two-attempt failure → mark all unverified, continue.
+        const verifications = attempt.rows;
+        if (!verifications) {
+          // Two-attempt failure → drop the whole batch as unverified.
           for (const c of batch) {
-            workingResults = workingResults.map((row) =>
-              row.symbol === c.symbol
-                ? ({ ...row, chainUnverified: true } as ScreenerResult)
-                : row,
-            );
+            dropSymbols.add(c.symbol.toUpperCase());
             unverifiedCount += 1;
           }
         } else {
           const byKey = new Map(
-            enriched.map((v) => [v.symbol.toUpperCase(), v]),
+            verifications.map((v) => [v.symbol.toUpperCase(), v]),
           );
           for (const c of batch) {
             const v = byKey.get(c.symbol.toUpperCase());
-            if (!v) {
-              // Server didn't echo this candidate — keep the shell as
-              // unverified so the user can retry via Run Analysis.
-              workingResults = workingResults.map((row) =>
-                row.symbol === c.symbol
-                  ? ({ ...row, chainUnverified: true } as ScreenerResult)
-                  : row,
-              );
-              unverifiedCount += 1;
-            } else if (v.status === "dropped") {
-              droppedCount += 1;
+            if (!v || v.status === "unverified") {
+              // Schwab couldn't verify this row — drop, surface in count.
               dropSymbols.add(c.symbol.toUpperCase());
-            } else if (v.status === "unverified") {
-              // Stage 1+2 may still be populated — merge the partial
-              // result, flag the row as chainUnverified.
-              const enrichedRow: ScreenerResult = {
-                ...v.result,
-                chainUnverified: true,
-              } as ScreenerResult;
-              workingResults = workingResults.map((row) =>
-                row.symbol === c.symbol ? enrichedRow : row,
-              );
               unverifiedCount += 1;
+            } else if (v.status === "absent") {
+              // Verified absent — drop unless whitelisted.
+              absentCount += 1;
+              if (!c.isWhitelisted) {
+                dropSymbols.add(c.symbol.toUpperCase());
+              }
             } else {
-              // status === "scored" — full Stage 1+2+3+4 ScreenerResult.
-              const enrichedRow: ScreenerResult = {
-                ...v.result,
-                chainUnverified: false,
-              } as ScreenerResult;
-              workingResults = workingResults.map((row) =>
-                row.symbol === c.symbol ? enrichedRow : row,
-              );
-              scoredCount += 1;
+              // Present — keep as-is. No grade injection here; Run
+              // Analysis adds Stage 1 + Stage 3+4 + Pass 3 on top.
+              presentCount += 1;
             }
           }
         }
         // Push the running set into the table after each batch so
-        // candidates appear / drop incrementally.
+        // candidates drop incrementally as Schwab verifies them.
         const displayed = workingResults.filter(
           (r) => !dropSymbols.has(r.symbol.toUpperCase()),
         );
         if (isLatestRunRef.current) {
           setResults(displayed);
+          setUnverifiedExcluded(unverifiedCount);
           setChainProgress({
             done: Math.min((b + 1) * BATCH_SIZE, initialResults.length),
             total: initialResults.length,
@@ -1097,29 +1083,28 @@ export function ScreenerView({ connected }: Props) {
         phase: "done",
       });
 
-      // Persist the final post-verification snapshot. Mark graded
-      // because Stream C now runs full Stage 1+2+3+4 — the only thing
-      // Run Analysis adds on top is the Pass 3 (Perplexity + three-
-      // layer grade), so the table is meaningfully scored already.
+      // Persist the post-verification snapshot. Stream C is binary
+      // chain-presence — no grades injected here — so screenIsGraded
+      // stays false; Run Analysis is what flips it true.
       persistScreenSnapshot({
         candidates: finalResults,
         prices: initialPrices,
         screenedAt: timestampIso,
-        graded: scoredCount > 0,
+        graded: false,
         pass1Count: initialStats?.afterPriceFilter ?? null,
         pass2Count: finalResults.length,
       });
-      setScreenIsGraded(scoredCount > 0);
+      setUnverifiedExcluded(unverifiedCount);
       setStatus("idle");
       const tail =
-        droppedCount > 0 || unverifiedCount > 0
-          ? ` · ${scoredCount} scored${
-              droppedCount > 0 ? ` · ${droppedCount} dropped` : ""
-            }${unverifiedCount > 0 ? ` · ${unverifiedCount} unverified` : ""}`
+        absentCount > 0 || unverifiedCount > 0
+          ? ` · ${presentCount} verified${
+              absentCount > 0 ? ` · ${absentCount} no weekly chain` : ""
+            }${unverifiedCount > 0 ? ` · ${unverifiedCount} unverified (excluded)` : ""}`
           : "";
       setMessage(
         timedOut
-          ? `Screened ${finalResults.length} candidates · scoring incomplete (${unverifiedCount} unverified after 45s timeout)`
+          ? `Screened ${finalResults.length} candidates · chain verification incomplete (${unverifiedCount} unverified after 45s timeout)`
           : `Screened ${finalResults.length} candidates${tail}`,
       );
       // Auto-clear the progress strip after a beat so it doesn't
@@ -2338,6 +2323,18 @@ export function ScreenerView({ connected }: Props) {
                 })}
               </TableBody>
             </Table>
+          </div>
+        )}
+
+        {hasResults && unverifiedExcluded > 0 && (
+          <div className="flex items-center gap-1.5 text-[11px] text-amber-300/80">
+            <AlertTriangle className="h-3 w-3" />
+            <span>
+              {unverifiedExcluded} candidate
+              {unverifiedExcluded === 1 ? "" : "s"} excluded — Schwab couldn&apos;t
+              verify the option chain (token expired or temporary outage). Reconnect
+              Schwab in Settings and re-run Screen Today to see them.
+            </span>
           </div>
         )}
 
