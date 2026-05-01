@@ -65,6 +65,50 @@ export function isWeekendUTC(d: Date): boolean {
   return day === 0 || day === 6;
 }
 
+// US/Eastern wall-clock check — true at or after 4:00pm ET, which is
+// the equity option close. Uses Intl.DateTimeFormat with explicit
+// timezone instead of UTC arithmetic so DST and the UTC date-rollover
+// (UTC date increments at 8pm ET in summer / 7pm ET in winter) don't
+// produce false-positive same-day-after-close hits before market
+// actually closes.
+export function isAfterMarketCloseET(d: Date = new Date()): boolean {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    hour: "numeric",
+    minute: "numeric",
+    hour12: false,
+  })
+    .format(d)
+    .split(":")
+    .map((s) => Number(s.trim()));
+  const hour = parts[0];
+  const minute = parts[1] ?? 0;
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return false;
+  // 4:00pm ET. Hour can come back as "24" in the 12-hour-cycle edge
+  // (midnight ET); treat anything >= 16 as after close.
+  if (hour > 16) return true;
+  if (hour === 16 && minute >= 0) return true;
+  return false;
+}
+
+// Today's calendar date in US/Eastern. Used to decide whether a
+// position with expiry === todayET is in its expiry day. UTC-based
+// today rolls forward at 8pm ET (summer) / 7pm ET (winter), which
+// would briefly mis-classify Friday-evening positions as past-expiry
+// before market close — using ET keeps the boundary at midnight ET.
+export function todayEasternIso(): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const y = parts.find((p) => p.type === "year")?.value ?? "";
+  const m = parts.find((p) => p.type === "month")?.value ?? "";
+  const d = parts.find((p) => p.type === "day")?.value ?? "";
+  return `${y}-${m}-${d}`;
+}
+
 // P&L math, exposed for tests. Auto-expire = full premium kept.
 // Assignment = premium minus ITM delta at strike.
 export function computeAutoExpirePnl(
@@ -95,11 +139,9 @@ type ExpiredOpenPosition = {
   opened_date: string;
   closed_date: string | null;
   notes: string | null;
+  broker: string | null;
 };
 
-function todayIso(): string {
-  return new Date().toISOString().slice(0, 10);
-}
 
 // Pulls a live Schwab chain and returns the stock price + put price at
 // the position's strike. Used by runAutoExpire to bypass any stale
@@ -124,19 +166,28 @@ export async function fetchFreshExpirySnapshot(
   return { stock_price, option_price };
 }
 
-// Returns every position still flagged open whose expiry date is
-// strictly before today. Same-day (expiry === today) stays open —
-// the position resolves at close; we only act the day after.
+// Returns every position still flagged open whose expiry has either:
+//   - strictly elapsed (expiry < today, ET calendar), OR
+//   - is today AND market has closed (>= 4pm ET).
+// Pre-close same-day positions stay open — they're surfaced via the
+// row badge instead. The broker column is included so the
+// confirmation modal can group rows by account.
 export async function getExpiredPositions(): Promise<ExpiredOpenPosition[]> {
   const sb = createServerClient();
   const r = await sb
     .from("positions")
     .select(
-      "id,symbol,strike,expiry,total_contracts,avg_premium_sold,status,opened_date,closed_date,notes",
+      "id,symbol,strike,expiry,total_contracts,avg_premium_sold,status,opened_date,closed_date,notes,broker",
     )
-    .eq("status", "open")
-    .lt("expiry", todayIso());
-  return (r.data ?? []) as ExpiredOpenPosition[];
+    .eq("status", "open");
+  const all = (r.data ?? []) as ExpiredOpenPosition[];
+  const todayEt = todayEasternIso();
+  const afterClose = isAfterMarketCloseET();
+  return all.filter((p) => {
+    if (p.expiry < todayEt) return true;
+    if (p.expiry === todayEt && afterClose) return true;
+    return false;
+  });
 }
 
 // Classifies a single expired position based on its most recent
@@ -296,10 +347,27 @@ export type PendingVerification = {
   classification: ExpiryClassification;
 };
 
+// Same-day after-close auto-expire candidates that the user must
+// confirm in a modal before they're written off as worthless. Held
+// out of the silent auto_expired bucket so we never book a "+$X
+// premium kept" P&L without a click on the same trading day.
+export type PendingConfirmation = {
+  positionId: string;
+  symbol: string;
+  strike: number;
+  expiry: string;
+  totalContracts: number;
+  pctFromStrike: number | null;
+  stockPrice: number | null;
+  optionPrice: number | null;
+  broker: string | null;
+};
+
 export type AutoExpireReport = {
   auto_expired: AutoExpiredSummary[];
   needs_verification: PendingVerification[];
   pending: PendingVerification[];
+  pending_confirmation: PendingConfirmation[];
   skipped: boolean;
   skipReason?: string;
 };
@@ -321,12 +389,14 @@ export async function runAutoExpire(): Promise<AutoExpireReport> {
     auto_expired: [],
     needs_verification: [],
     pending: [],
+    pending_confirmation: [],
     skipped: false,
   };
   if (isWeekendUTC(new Date())) {
     console.log("[expire] weekend gate — skipping");
     return { ...empty, skipped: true, skipReason: "weekend" };
   }
+  const todayEt = todayEasternIso();
 
   let positions: ExpiredOpenPosition[];
   try {
@@ -392,6 +462,51 @@ export async function runAutoExpire(): Promise<AutoExpireReport> {
     console.log(
       `[expire] classified: ${p.symbol} ${p.strike} → ${classification} (pct=${pctFromStrike !== null ? (pctFromStrike * 100).toFixed(2) + "%" : "—"})`,
     );
+    // Same-day after-close path: don't auto-expire silently. Tighten
+    // the rule to require >5% OTM (the deep-OTM safety threshold)
+    // and route to pending_confirmation so the user clicks through
+    // the modal first. Past-date rows keep the existing silent
+    // auto-expire — those events resolved a calendar day ago and
+    // assignment notices have cleared.
+    const isSameDay = p.expiry === todayEt;
+    if (
+      isSameDay &&
+      classification === "auto_expire" &&
+      pctFromStrike !== null &&
+      pctFromStrike > 0.05
+    ) {
+      report.pending_confirmation.push({
+        positionId: p.id,
+        symbol: p.symbol,
+        strike: Number(p.strike),
+        expiry: p.expiry,
+        totalContracts: Number(p.total_contracts ?? 0),
+        pctFromStrike,
+        stockPrice: fresh.stock_price,
+        optionPrice: fresh.option_price,
+        broker: p.broker ?? null,
+      });
+      continue;
+    }
+    // Same-day but inside the 5% safety window — fall through to
+    // verify_assignment so the user manually confirms assignment vs
+    // expiry. The 2-5% OTM + low option price branch in the generic
+    // classifier is too aggressive for an event that resolved this
+    // afternoon (assignment notices haven't issued yet).
+    if (isSameDay && classification === "auto_expire") {
+      report.needs_verification.push({
+        positionId: p.id,
+        symbol: p.symbol,
+        strike: Number(p.strike),
+        expiry: p.expiry,
+        pctFromStrike,
+        stockPrice: fresh.stock_price,
+        optionPrice: fresh.option_price,
+        classification: "verify_assignment",
+      });
+      continue;
+    }
+
     if (classification === "auto_expire") {
       let r: { ok: boolean; realized_pnl: number; reason?: string };
       try {

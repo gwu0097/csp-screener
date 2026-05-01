@@ -1,5 +1,7 @@
 // Shared types + recommendation engine for /positions.
 // Pure functions: no I/O here, so they're trivially unit-testable.
+
+import { isAfterMarketCloseET } from "@/lib/expire-positions";
 //
 // Two layers live here:
 //   1. Recommendation engine (Urgency/Momentum + recommendPosition)
@@ -337,6 +339,25 @@ export function computePositionBadge(input: PositionBadgeInput): BadgeResult {
 
   // ---------- PRIORITY 1: expiry day ----------
   if (isExpiryDay) {
+    // After-close + comfortably OTM → eligible for the same-day
+    // confirmation flow. Show a green "EXPIRES TODAY ✓" so the user
+    // knows the modal will pick this row up. Stricter than the live
+    // "EXPIRING ✓" rule below (>5% vs ≥2% with low option price)
+    // because the same-day after-close path doesn't get the benefit
+    // of an overnight assignment-notice window.
+    if (
+      isAfterMarketCloseET() &&
+      pctFromStrike !== null &&
+      pctFromStrike > 0.05
+    ) {
+      return {
+        badge: "EXPIRES_TODAY",
+        label: "EXPIRES TODAY ✓",
+        color: "green",
+        tooltip: `${(pctFromStrike * 100).toFixed(1)}% OTM after market close — eligible to confirm worthless. Confirm in the modal at the top of the page.`,
+        ruleFired: "EXPIRES_TODAY_AFTER_CLOSE",
+      };
+    }
     // ITM — real danger on expiry day
     if (pctFromStrike !== null && pctFromStrike < -0.005) {
       return {

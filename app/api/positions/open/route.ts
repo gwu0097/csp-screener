@@ -178,6 +178,7 @@ export async function GET(req: NextRequest) {
       auto_expired: [],
       needs_verification: [],
       pending: [],
+      pending_confirmation: [],
       skipped: false,
       skipReason: e instanceof Error ? e.message : "unknown",
     };

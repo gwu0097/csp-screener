@@ -13,6 +13,10 @@ import {
 } from "@/components/position-card";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
+import {
+  ExpireConfirmationModal,
+  type PendingConfirmationRow,
+} from "@/components/expire-confirmation-modal";
 
 type SortKey =
   | "strike"
@@ -291,6 +295,11 @@ import type { MarketContext } from "@/lib/market";
 // response — lets us populate live fields immediately on page load
 // instead of flashing "—" until the user hits Refresh live data.
 const LS_LIVE_CACHE = "positions_live_cache";
+// sessionStorage flag — once the same-day after-close confirmation
+// modal has been dismissed (cancel or confirm), don't re-show it
+// for the rest of this browser session even if pending_confirmation
+// keeps coming back from the server. Resets on tab close.
+const LS_EXPIRE_MODAL_SHOWN = "expire_modal_shown_this_session";
 
 // Fields that only exist on a live fetch. Everything else on the open
 // position row (grades, opened date, etc.) comes from the DB and is
@@ -508,6 +517,7 @@ type ExpireReport = {
   }>;
   needs_verification: unknown[];
   pending: unknown[];
+  pending_confirmation: PendingConfirmationRow[];
   skipped: boolean;
   skipReason?: string;
 };
@@ -591,6 +601,19 @@ export function PositionsView() {
   // when more than one broker has positions, so a single-account user
   // never sees noise.
   const [brokerFilter, setBrokerFilter] = useState<string>("all");
+  // Same-day after-close confirmation modal. Populated by the
+  // /api/positions/open response's expireReport.pending_confirmation
+  // list. Gated by a sessionStorage flag so dismissing the modal
+  // (cancel or confirm) doesn't keep re-firing on every Refresh.
+  const [pendingConfirmation, setPendingConfirmation] = useState<
+    PendingConfirmationRow[]
+  >([]);
+  const [confirmationDismissed, setConfirmationDismissed] = useState<boolean>(
+    () => {
+      if (typeof window === "undefined") return false;
+      return sessionStorage.getItem(LS_EXPIRE_MODAL_SHOWN) === "1";
+    },
+  );
 
   const load = useCallback(async (live: boolean) => {
     if (live) setLiveLoading(true);
@@ -637,6 +660,11 @@ export function PositionsView() {
         });
         setMessage(`✓ Expired worthless: ${bits.join(" | ")}`);
       }
+      // Same-day after-close pending_confirmation list. Modal opens
+      // automatically when non-empty AND the session flag isn't set
+      // yet — see the render block at the bottom.
+      const pending = json.expireReport?.pending_confirmation ?? [];
+      setPendingConfirmation(pending);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load positions");
     } finally {
@@ -648,6 +676,51 @@ export function PositionsView() {
   useEffect(() => {
     void load(false);
   }, [load]);
+
+  function dismissExpireModal() {
+    setConfirmationDismissed(true);
+    try {
+      sessionStorage.setItem(LS_EXPIRE_MODAL_SHOWN, "1");
+    } catch {
+      /* ignore */
+    }
+    setPendingConfirmation([]);
+  }
+
+  async function confirmExpireWorthless(positionIds: string[]) {
+    try {
+      const res = await fetch("/api/positions/confirm-expire", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ positionIds }),
+        cache: "no-store",
+      });
+      const json = (await res.json()) as
+        | { expiredCount: number; failedCount: number; totalRealizedPnl: number }
+        | { error: string };
+      if (!res.ok || "error" in json) {
+        const msg = "error" in json ? json.error : `HTTP ${res.status}`;
+        setError(`Confirm expire failed: ${msg}`);
+        return;
+      }
+      const sign = json.totalRealizedPnl >= 0 ? "+" : "";
+      const failedSuffix =
+        json.failedCount > 0 ? ` · ${json.failedCount} failed` : "";
+      setMessage(
+        `✓ ${json.expiredCount} position${json.expiredCount === 1 ? "" : "s"} expired worthless · ${sign}$${json.totalRealizedPnl.toFixed(2)} P&L locked in${failedSuffix}`,
+      );
+    } catch (e) {
+      setError(
+        `Confirm expire failed: ${e instanceof Error ? e.message : "network error"}`,
+      );
+    } finally {
+      // Always set the session flag and refresh — even on failure the
+      // modal shouldn't loop, and a refresh will recompute the
+      // pending_confirmation list cleanly.
+      dismissExpireModal();
+      await load(false);
+    }
+  }
 
   const onImportSuccess = (msg: string) => {
     setMessage(msg);
@@ -1124,6 +1197,12 @@ export function PositionsView() {
         onSuccess={onImportSuccess}
       />
       <ImportManualModal open={showManual} onOpenChange={setShowManual} onSuccess={onImportSuccess} />
+      <ExpireConfirmationModal
+        open={pendingConfirmation.length > 0 && !confirmationDismissed}
+        rows={pendingConfirmation}
+        onCancel={dismissExpireModal}
+        onConfirm={confirmExpireWorthless}
+      />
     </div>
   );
 }
