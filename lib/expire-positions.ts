@@ -1,14 +1,11 @@
-// Auto-expire + assignment handling for positions that have passed
-// their expiry date. Two paths:
-//   - auto_expire: clearly OTM + near-zero premium at last snapshot →
-//     close worthless, full premium kept.
-//   - verify_assignment: too close to strike at last snapshot → leave
-//     open, surface a warning in the UI, wait for user to confirm.
-//
-// Runs on Monday+ only — assignment notices don't clear until Monday
-// morning for Friday expiries, so we can't auto-close anything over
-// the weekend without risking a false "worthless" on a genuinely
-// assigned position.
+// Expiry classification + user-confirmed close for positions past
+// their expiry date. The classifier tags each position as:
+//   - auto_expire: clearly OTM at the latest snapshot — safe to mark
+//     worthless. The user still confirms in a modal; nothing closes
+//     silently.
+//   - verify_assignment: too close to strike at last snapshot —
+//     surfaced in the modal with a warning so the user can verify
+//     against their broker before closing or recording assignment.
 import { createServerClient } from "@/lib/supabase";
 import { recordPositionOutcome } from "@/lib/post-earnings";
 import { fetchChainSafe, pickPutContract } from "@/lib/snapshots";
@@ -347,10 +344,11 @@ export type PendingVerification = {
   classification: ExpiryClassification;
 };
 
-// Same-day after-close auto-expire candidates that the user must
-// confirm in a modal before they're written off as worthless. Held
-// out of the silent auto_expired bucket so we never book a "+$X
-// premium kept" P&L without a click on the same trading day.
+// Every expired position (past or same-day after-close) the user
+// must confirm in a modal before it's marked worthless. The modal
+// uses pctFromStrike to label each row: comfortably OTM (>5%) vs
+// within the assignment window (<=5%, where the user should verify
+// against their broker before confirming).
 export type PendingConfirmation = {
   positionId: string;
   symbol: string;
@@ -372,10 +370,12 @@ export type AutoExpireReport = {
   skipReason?: string;
 };
 
-// Orchestrator. Weekend-gated (Sat/Sun return skipped) so we don't act
-// before Monday assignment notices clear. Auto-closes clearly-worthless
-// positions in place; returns the remaining (needs_verification +
-// pending) positions for the UI to surface as warnings.
+// Orchestrator. Returns every expired position (past or same-day
+// after-close) to the UI as a pending_confirmation row. No silent
+// auto-close — the modal IS the protection, so no day-of-week gate
+// is needed. The classifier output (and pctFromStrike) feeds the
+// per-row label so the user sees which rows are clearly worthless
+// vs which need an assignment check.
 //
 // Classification reads a FRESH chain rather than the latest
 // position_snapshots row. Snapshots written earlier in the day may
@@ -392,11 +392,6 @@ export async function runAutoExpire(): Promise<AutoExpireReport> {
     pending_confirmation: [],
     skipped: false,
   };
-  if (isWeekendUTC(new Date())) {
-    console.log("[expire] weekend gate — skipping");
-    return { ...empty, skipped: true, skipReason: "weekend" };
-  }
-  const todayEt = todayEasternIso();
 
   let positions: ExpiredOpenPosition[];
   try {
@@ -462,110 +457,17 @@ export async function runAutoExpire(): Promise<AutoExpireReport> {
     console.log(
       `[expire] classified: ${p.symbol} ${p.strike} → ${classification} (pct=${pctFromStrike !== null ? (pctFromStrike * 100).toFixed(2) + "%" : "—"})`,
     );
-    // Same-day after-close path: don't auto-expire silently. Tighten
-    // the rule to require >5% OTM (the deep-OTM safety threshold)
-    // and route to pending_confirmation so the user clicks through
-    // the modal first. Past-date rows keep the existing silent
-    // auto-expire — those events resolved a calendar day ago and
-    // assignment notices have cleared.
-    const isSameDay = p.expiry === todayEt;
-    if (
-      isSameDay &&
-      classification === "auto_expire" &&
-      pctFromStrike !== null &&
-      pctFromStrike > 0.05
-    ) {
-      report.pending_confirmation.push({
-        positionId: p.id,
-        symbol: p.symbol,
-        strike: Number(p.strike),
-        expiry: p.expiry,
-        totalContracts: Number(p.total_contracts ?? 0),
-        pctFromStrike,
-        stockPrice: fresh.stock_price,
-        optionPrice: fresh.option_price,
-        broker: p.broker ?? null,
-      });
-      continue;
-    }
-    // Same-day but inside the 5% safety window — fall through to
-    // verify_assignment so the user manually confirms assignment vs
-    // expiry. The 2-5% OTM + low option price branch in the generic
-    // classifier is too aggressive for an event that resolved this
-    // afternoon (assignment notices haven't issued yet).
-    if (isSameDay && classification === "auto_expire") {
-      report.needs_verification.push({
-        positionId: p.id,
-        symbol: p.symbol,
-        strike: Number(p.strike),
-        expiry: p.expiry,
-        pctFromStrike,
-        stockPrice: fresh.stock_price,
-        optionPrice: fresh.option_price,
-        classification: "verify_assignment",
-      });
-      continue;
-    }
-
-    if (classification === "auto_expire") {
-      let r: { ok: boolean; realized_pnl: number; reason?: string };
-      try {
-        r = await autoExpirePosition(p.id);
-      } catch (e) {
-        console.log(
-          `[expire] ERROR autoExpirePosition ${p.symbol} ${p.strike}: ${e instanceof Error ? e.message : e}`,
-        );
-        r = { ok: false, realized_pnl: 0, reason: "threw" };
-      }
-      if (r.ok) {
-        console.log(
-          `[expire] auto-expired: ${p.symbol} ${p.strike} pnl=$${r.realized_pnl.toFixed(2)}`,
-        );
-        report.auto_expired.push({
-          positionId: p.id,
-          symbol: p.symbol,
-          strike: Number(p.strike),
-          expiry: p.expiry,
-          realized_pnl: r.realized_pnl,
-        });
-      } else {
-        console.log(
-          `[expire] auto-expire FAILED: ${p.symbol} ${p.strike} reason=${r.reason ?? "unknown"}`,
-        );
-        report.pending.push({
-          positionId: p.id,
-          symbol: p.symbol,
-          strike: Number(p.strike),
-          expiry: p.expiry,
-          pctFromStrike,
-          stockPrice: fresh.stock_price,
-          optionPrice: fresh.option_price,
-          classification: "pending",
-        });
-      }
-    } else if (classification === "verify_assignment") {
-      report.needs_verification.push({
-        positionId: p.id,
-        symbol: p.symbol,
-        strike: Number(p.strike),
-        expiry: p.expiry,
-        pctFromStrike,
-        stockPrice: fresh.stock_price,
-        optionPrice: fresh.option_price,
-        classification,
-      });
-    } else {
-      report.pending.push({
-        positionId: p.id,
-        symbol: p.symbol,
-        strike: Number(p.strike),
-        expiry: p.expiry,
-        pctFromStrike,
-        stockPrice: fresh.stock_price,
-        optionPrice: fresh.option_price,
-        classification,
-      });
-    }
+    report.pending_confirmation.push({
+      positionId: p.id,
+      symbol: p.symbol,
+      strike: Number(p.strike),
+      expiry: p.expiry,
+      totalContracts: Number(p.total_contracts ?? 0),
+      pctFromStrike,
+      stockPrice: fresh.stock_price,
+      optionPrice: fresh.option_price,
+      broker: p.broker ?? null,
+    });
   }
 
   return report;
