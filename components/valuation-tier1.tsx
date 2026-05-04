@@ -4,7 +4,7 @@
 // the math is verifiable: rev y1/y2/y3, op income y3, net income y3,
 // EPS y1/y2/y3, price target, return, implied market cap.
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   computeTier1All,
   SCENARIOS,
@@ -135,6 +135,7 @@ const ROWS: Row[] = [
 ];
 
 export function ValuationTier1({
+  symbol,
   model,
   userInputs,
   editable,
@@ -143,6 +144,7 @@ export function ValuationTier1({
   onChangeTaxRate,
   onChangeForwardEps,
 }: {
+  symbol: string;
   model: ValuationModelV2;
   userInputs: ScenarioSet;
   editable: boolean;
@@ -210,6 +212,7 @@ export function ValuationTier1({
   return (
     <div className="space-y-4">
       <StartingPoint
+        symbol={symbol}
         model={model}
         editable={editable}
         onChangeShares={onChangeShares}
@@ -325,13 +328,51 @@ export function ValuationTier1({
   );
 }
 
+// Latest earnings_releases row used for staleness detection. Wider
+// shape exists in the API; we only consume what we need here.
+type LatestEarningsRow = {
+  quarter: string;
+  reported_date: string;
+};
+
+// Days between an ISO date string (YYYY-MM-DD) and today, computed
+// against UTC midnight on both sides so the result doesn't drift by
+// the local-timezone hour. Approximate (off-by-≤1 across DST), but
+// fine for a "X days ago" badge.
+function daysSinceIso(iso: string): number {
+  const reported = new Date(`${iso}T00:00:00Z`);
+  if (Number.isNaN(reported.getTime())) return Number.POSITIVE_INFINITY;
+  const now = new Date();
+  const todayUtcMs = Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate(),
+  );
+  return Math.floor((todayUtcMs - reported.getTime()) / 86400000);
+}
+
+function fmtReportedDate(iso: string): string {
+  const d = new Date(`${iso}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+}
+
+const STALENESS_DISMISS_KEY = "valuation:earnings-stale-dismissed";
+
 function StartingPoint({
+  symbol,
   model,
   editable,
   onChangeShares,
   onChangeTaxRate,
   onChangeForwardEps,
 }: {
+  symbol: string;
   model: ValuationModelV2;
   editable: boolean;
   onChangeShares: (v: number) => void;
@@ -342,9 +383,83 @@ function StartingPoint({
     model.last_eps && model.last_eps > 0
       ? model.current_price / model.last_eps
       : null;
+
+  // Latest reported earnings row, used to flag whether analyst
+  // consensus may still be pre-earnings (Yahoo typically refreshes
+  // 48-72h after a release). Per-symbol session dismiss so the user
+  // can hide the banner without it returning every reload.
+  const [latestEarnings, setLatestEarnings] = useState<LatestEarningsRow | null>(null);
+  const dismissKey = `${STALENESS_DISMISS_KEY}:${symbol}`;
+  const [dismissed, setDismissed] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return sessionStorage.getItem(dismissKey) === "1";
+  });
+  useEffect(() => {
+    let cancelled = false;
+    setLatestEarnings(null);
+    setDismissed(
+      typeof window !== "undefined" &&
+        sessionStorage.getItem(dismissKey) === "1",
+    );
+    void (async () => {
+      try {
+        const res = await fetch(
+          `/api/research/${encodeURIComponent(symbol)}/earnings-releases`,
+          { cache: "no-store" },
+        );
+        if (!res.ok) return;
+        const json = (await res.json()) as {
+          releases?: Array<{ quarter: string; reported_date: string }>;
+        };
+        if (cancelled) return;
+        const top = json.releases?.[0];
+        if (top) {
+          setLatestEarnings({
+            quarter: top.quarter,
+            reported_date: top.reported_date,
+          });
+        }
+      } catch {
+        /* swallow — staleness banner is best-effort */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [symbol, dismissKey]);
+
+  const daysAgo =
+    latestEarnings !== null ? daysSinceIso(latestEarnings.reported_date) : null;
+  const isStale = daysAgo !== null && daysAgo >= 0 && daysAgo <= 5;
+  const isCritical = isStale && (daysAgo as number) < 4;
+  const derived = model.forward_eps_derived?.derivedEps ?? null;
+  const analyst = model.forward_eps_derived?.analystEps ?? null;
+
+  function dismissStaleness() {
+    setDismissed(true);
+    try {
+      sessionStorage.setItem(dismissKey, "1");
+    } catch {
+      /* ignore */
+    }
+  }
+
   return (
     <div>
       <SectionLabel>Starting point</SectionLabel>
+      {isStale && !dismissed && (
+        <StalenessBanner
+          critical={Boolean(isCritical && derived !== null)}
+          daysAgo={daysAgo as number}
+          quarter={latestEarnings?.quarter ?? ""}
+          reportedDate={latestEarnings?.reported_date ?? ""}
+          analyst={analyst}
+          derived={derived}
+          editable={editable}
+          onUseDerived={() => derived !== null && onChangeForwardEps(derived)}
+          onDismiss={dismissStaleness}
+        />
+      )}
       <div className="grid grid-cols-2 gap-x-4 gap-y-1 rounded border border-border bg-background/40 p-2 sm:grid-cols-3">
         <KV
           label="Base Revenue (TTM)"
@@ -376,6 +491,7 @@ function StartingPoint({
             model={model}
             editable={editable}
             onChange={onChangeForwardEps}
+            highlightDerived={Boolean(isCritical && derived !== null)}
           />
         ) : null}
         <KV
@@ -449,6 +565,105 @@ function StartingPoint({
   );
 }
 
+// ---------- Post-earnings staleness banner ----------
+//
+// Surfaces when the symbol reported earnings within the last 5 days.
+// Critical mode (<4 days, derived available): amber banner with a
+// one-click "Use Derived Estimate" CTA, since analyst consensus on
+// Yahoo typically takes 48-72h to incorporate the new actuals.
+// Soft mode (>=4 days OR no derived): sky-blue informational note.
+function StalenessBanner({
+  critical,
+  daysAgo,
+  quarter,
+  reportedDate,
+  analyst,
+  derived,
+  editable,
+  onUseDerived,
+  onDismiss,
+}: {
+  critical: boolean;
+  daysAgo: number;
+  quarter: string;
+  reportedDate: string;
+  analyst: number | null;
+  derived: number | null;
+  editable: boolean;
+  onUseDerived: () => void;
+  onDismiss: () => void;
+}) {
+  const dayLabel = `${daysAgo} day${daysAgo === 1 ? "" : "s"} ago`;
+  const dateLabel = reportedDate ? fmtReportedDate(reportedDate) : "";
+  const cls = critical
+    ? "border-amber-500/40 bg-amber-500/10 text-amber-100"
+    : "border-sky-500/30 bg-sky-500/[0.06] text-sky-100";
+  return (
+    <div className={`mb-2 rounded border ${cls} px-3 py-2 text-xs`}>
+      <div className="flex items-start gap-2">
+        <span className="mt-0.5 shrink-0">{critical ? "⚠️" : "ℹ️"}</span>
+        <div className="flex-1 space-y-1">
+          {critical ? (
+            <p>
+              Earnings reported {dayLabel}
+              {quarter || dateLabel ? (
+                <>
+                  {" "}({quarter}
+                  {quarter && dateLabel ? " — " : ""}
+                  {dateLabel})
+                </>
+              ) : null}
+              .{" "}
+              {analyst !== null ? (
+                <>
+                  Analyst consensus (
+                  <span className="font-mono">${analyst.toFixed(2)}</span>)
+                  likely reflects pre-earnings estimates and hasn&apos;t been
+                  updated yet.{" "}
+                </>
+              ) : null}
+              {derived !== null ? (
+                <>
+                  The derived estimate (
+                  <span className="font-mono">${derived.toFixed(2)}</span>)
+                  already incorporates actual {quarter || "the latest"}{" "}
+                  results — recommended for accuracy.
+                </>
+              ) : null}
+            </p>
+          ) : (
+            <p>
+              Earnings reported {dayLabel}
+              {dateLabel ? <> ({dateLabel})</> : null}. Analyst estimates may
+              have been revised since — verify consensus reflects the latest
+              results.
+            </p>
+          )}
+          {critical && derived !== null && (
+            <button
+              type="button"
+              disabled={!editable}
+              onClick={onUseDerived}
+              className="rounded border border-amber-400/60 bg-amber-500/20 px-2 py-0.5 text-[11px] font-semibold text-amber-50 hover:bg-amber-500/30 disabled:opacity-50"
+            >
+              Use Derived Estimate (${derived.toFixed(2)})
+            </button>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={onDismiss}
+          className="ml-1 shrink-0 text-foreground/50 hover:text-foreground"
+          title="Dismiss for this session"
+          aria-label="Dismiss"
+        >
+          ×
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ---------- Forward EPS editable field ----------
 //
 // Inline editor for model.forward_eps. Drives Tier 1 price targets
@@ -462,10 +677,12 @@ function ForwardEpsField({
   model,
   editable,
   onChange,
+  highlightDerived = false,
 }: {
   model: ValuationModelV2;
   editable: boolean;
   onChange: (v: number) => void;
+  highlightDerived?: boolean;
 }) {
   const fwd = model.forward_eps_derived;
   const analyst = fwd?.analystEps ?? null;
@@ -515,10 +732,19 @@ function ForwardEpsField({
           type="button"
           disabled={!editable}
           onClick={() => onChange(derived)}
-          className="rounded border border-sky-500/40 bg-sky-500/10 px-1.5 py-0.5 text-[10px] text-sky-200 hover:bg-sky-500/20 disabled:opacity-50"
-          title="Use system-derived estimate"
+          className={
+            highlightDerived
+              ? "rounded border border-amber-400 bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-amber-100 ring-2 ring-amber-400/60 hover:bg-amber-500/30 disabled:opacity-50"
+              : "rounded border border-sky-500/40 bg-sky-500/10 px-1.5 py-0.5 text-[10px] text-sky-200 hover:bg-sky-500/20 disabled:opacity-50"
+          }
+          title={
+            highlightDerived
+              ? "Recommended — analyst consensus may not yet reflect the latest earnings"
+              : "Use system-derived estimate"
+          }
         >
           Derived ${derived.toFixed(2)}
+          {highlightDerived ? " ★" : ""}
         </button>
       )}
     </div>

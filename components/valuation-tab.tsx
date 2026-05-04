@@ -519,6 +519,7 @@ function V2View({
 
       {activeTab === "tier1" ? (
         <ValuationTier1
+          symbol={symbol}
           model={displayModel}
           userInputs={tier1User}
           editable={isLatest}
