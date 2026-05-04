@@ -601,19 +601,39 @@ export function PositionsView() {
   // when more than one broker has positions, so a single-account user
   // never sees noise.
   const [brokerFilter, setBrokerFilter] = useState<string>("all");
-  // Same-day after-close confirmation modal. Populated by the
-  // /api/positions/open response's expireReport.pending_confirmation
-  // list. Gated by a sessionStorage flag so dismissing the modal
-  // (cancel or confirm) doesn't keep re-firing on every Refresh.
+  // Expiry confirmation modal. Populated from the /api/positions/open
+  // response's expireReport.pending_confirmation list.
+  //
+  // Two dismiss states:
+  //   modalOpen — current visibility, toggled freely.
+  //   permanentlyDismissed — set ONLY after a confirm round-trip.
+  //     Persisted to sessionStorage so a Refresh/Live (which re-fires
+  //     the auto-open) doesn't keep popping the modal after the user
+  //     has already acted. The banner remains as the manual re-entry
+  //     point while rows persist.
+  // X / Cancel is a soft dismiss — closes the modal without setting
+  // the persistent flag, so the next Refresh/Live (or page reload)
+  // re-opens it. The user has to explicitly Confirm to silence it.
   const [pendingConfirmation, setPendingConfirmation] = useState<
     PendingConfirmationRow[]
   >([]);
-  const [confirmationDismissed, setConfirmationDismissed] = useState<boolean>(
+  const [modalOpen, setModalOpen] = useState(false);
+  const [permanentlyDismissed, setPermanentlyDismissed] = useState<boolean>(
     () => {
       if (typeof window === "undefined") return false;
       return sessionStorage.getItem(LS_EXPIRE_MODAL_SHOWN) === "1";
     },
   );
+
+  // Auto-open whenever a fresh load returns a non-empty pending list,
+  // unless the user has already confirmed once this session. Each
+  // load() produces a new array reference, so this fires on every
+  // Refresh/Live as long as rows are present.
+  useEffect(() => {
+    if (pendingConfirmation.length > 0 && !permanentlyDismissed) {
+      setModalOpen(true);
+    }
+  }, [pendingConfirmation, permanentlyDismissed]);
 
   const load = useCallback(async (live: boolean) => {
     if (live) setLiveLoading(true);
@@ -677,14 +697,24 @@ export function PositionsView() {
     void load(false);
   }, [load]);
 
-  function dismissExpireModal() {
-    setConfirmationDismissed(true);
+  // Soft dismiss — X button or Cancel. Closes the modal but keeps
+  // rows so the banner stays visible and Refresh/Live can re-open.
+  function softDismissModal() {
+    setModalOpen(false);
+  }
+
+  // Persistent dismiss — only after a confirm round-trip. Sets the
+  // session flag so Refresh/Live no longer auto-pops; the banner is
+  // still the manual re-entry path while rows remain (e.g. partial
+  // confirm with some rows unchecked).
+  function permanentDismissModal() {
+    setModalOpen(false);
+    setPermanentlyDismissed(true);
     try {
       sessionStorage.setItem(LS_EXPIRE_MODAL_SHOWN, "1");
     } catch {
       /* ignore */
     }
-    setPendingConfirmation([]);
   }
 
   async function confirmExpireWorthless(positionIds: string[]) {
@@ -714,10 +744,10 @@ export function PositionsView() {
         `Confirm expire failed: ${e instanceof Error ? e.message : "network error"}`,
       );
     } finally {
-      // Always set the session flag and refresh — even on failure the
-      // modal shouldn't loop, and a refresh will recompute the
-      // pending_confirmation list cleanly.
-      dismissExpireModal();
+      // Persistent dismiss + refresh. Refresh recomputes the pending
+      // list from the server; if the user partial-confirmed, leftover
+      // rows feed the banner.
+      permanentDismissModal();
       await load(false);
     }
   }
@@ -923,6 +953,26 @@ export function PositionsView() {
           </div>
         </div>
       </div>
+
+      {pendingConfirmation.length > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-200">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="h-4 w-4 shrink-0" />
+            <span>
+              {pendingConfirmation.length} position
+              {pendingConfirmation.length === 1 ? "" : "s"} expired — review
+              and confirm to mark as worthless.
+            </span>
+          </div>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() => setModalOpen(true)}
+          >
+            Review &amp; Confirm
+          </Button>
+        </div>
+      )}
 
       {market?.warning && (
         <div
@@ -1198,9 +1248,9 @@ export function PositionsView() {
       />
       <ImportManualModal open={showManual} onOpenChange={setShowManual} onSuccess={onImportSuccess} />
       <ExpireConfirmationModal
-        open={pendingConfirmation.length > 0 && !confirmationDismissed}
+        open={modalOpen && pendingConfirmation.length > 0}
         rows={pendingConfirmation}
-        onCancel={dismissExpireModal}
+        onCancel={softDismissModal}
         onConfirm={confirmExpireWorthless}
       />
     </div>
