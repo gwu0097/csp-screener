@@ -137,15 +137,20 @@ export function ExpireConfirmationModal({ open, rows, onCancel, onConfirm }: Pro
 
   return (
     <Dialog open={open} onOpenChange={(v) => { if (!v && !submitting) onCancel(); }}>
-      <DialogContent className="max-w-2xl">
-        <DialogHeader>
+      {/* flex column + max-h so the row list scrolls internally on
+          short viewports (mobile). Without this, a long expiring
+          list pushes the Cancel/Confirm buttons off-screen, leaving
+          the user unable to dismiss while Radix keeps body scroll
+          locked — the page then appears frozen. */}
+      <DialogContent className="flex max-h-[90vh] max-w-2xl flex-col">
+        <DialogHeader className="shrink-0">
           <DialogTitle className="flex items-center gap-2 text-amber-200">
             <AlertTriangle className="h-5 w-5" />
             Expiring Positions
           </DialogTitle>
         </DialogHeader>
 
-        <p className="text-sm text-muted-foreground">
+        <p className="shrink-0 text-sm text-muted-foreground">
           These positions are at or past expiry. Rows labeled{" "}
           <span className="text-emerald-300">Worthless</span> are comfortably
           out-of-the-money (&gt;5%) and safe to close. Rows labeled{" "}
@@ -154,7 +159,7 @@ export function ExpireConfirmationModal({ open, rows, onCancel, onConfirm }: Pro
           uncheck to leave them open.
         </p>
 
-        <div className="flex items-center justify-between text-xs">
+        <div className="flex shrink-0 items-center justify-between text-xs">
           <button
             type="button"
             className="text-foreground/70 underline-offset-2 hover:text-foreground hover:underline disabled:opacity-50"
@@ -171,7 +176,7 @@ export function ExpireConfirmationModal({ open, rows, onCancel, onConfirm }: Pro
           </span>
         </div>
 
-        <div className="space-y-3">
+        <div className="-mx-6 min-h-0 flex-1 space-y-3 overflow-y-auto px-6">
           {grouped.map((g) => (
             <div key={g.key} className="space-y-1.5">
               <div className="text-xs font-bold uppercase tracking-wider text-foreground/80">
@@ -225,7 +230,7 @@ export function ExpireConfirmationModal({ open, rows, onCancel, onConfirm }: Pro
           ))}
         </div>
 
-        <div className="rounded border border-border bg-background/40 px-3 py-1.5 text-xs text-muted-foreground">
+        <div className="shrink-0 rounded border border-border bg-background/40 px-3 py-1.5 text-xs text-muted-foreground">
           {selectedCount} position{selectedCount === 1 ? "" : "s"} ·{" "}
           {selectedContracts} contract{selectedContracts === 1 ? "" : "s"}
           {verifyCount > 0 ? (
@@ -234,7 +239,7 @@ export function ExpireConfirmationModal({ open, rows, onCancel, onConfirm }: Pro
           {" "}· P&L calculated from entry premium on confirm.
         </div>
 
-        <DialogFooter>
+        <DialogFooter className="shrink-0">
           <Button variant="secondary" onClick={onCancel} disabled={submitting}>
             Cancel
           </Button>
