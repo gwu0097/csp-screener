@@ -427,6 +427,37 @@ export async function GET(req: NextRequest) {
         ? ((currentStockPrice - strike) / currentStockPrice) * 100
         : null;
 
+    // Diagnostic: when Live refresh leaves a position without a P&L or
+    // POP (delta) figure, log exactly which step dropped it. Includes
+    // broker so we can correlate with Robinhood / Schwab2 patterns.
+    // The cascade is chain → contract → mark/delta → premium; the
+    // first null wins as `fail`.
+    if (live) {
+      const popMissing = delta === null;
+      const pnlMissing = pnlDollars === null;
+      if (popMissing || pnlMissing) {
+        const premiumSoldOk = premiumSold > 0;
+        const failStep =
+          chain === null
+            ? "chain"
+            : contract === null
+              ? "contract"
+              : mark === null && delta === null
+                ? "mark+delta"
+                : mark === null
+                  ? "mark"
+                  : delta === null
+                    ? "delta"
+                    : !premiumSoldOk
+                      ? "no_premium"
+                      : "unknown";
+        const fmt = (v: number | null) => (v === null ? "null" : String(v));
+        console.log(
+          `[positions:live-diag] broker=${p.broker ?? "null"} symbol=${p.symbol} strike=${strike} expiry=${expiry} qty=${remaining} chain=${chain === null ? "miss" : "hit"} contract=${contract === null ? "miss" : "hit"} mark=${fmt(mark)} delta=${fmt(delta)} iv=${fmt(iv)} stock=${fmt(currentStockPrice)} yahooStock=${fmt(yahooPrice)} entryPremium=${fmt(p.avg_premium_sold !== null ? Number(p.avg_premium_sold) : null)} pnlDollars=${fmt(pnlDollars)} pnlPct=${fmt(pnlPct)} fail=${failStep}`,
+        );
+      }
+    }
+
     const closesArr = bars.map((b) => b.close).filter((c) => c > 0);
     const twoDayDrop = isTwoDayDrop(closesArr);
 
