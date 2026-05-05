@@ -275,19 +275,35 @@ export async function getOptionsChain(
 // Used by /api/positions/open and /api/trades/bulk-create's close
 // snapshot. Screener flow keeps the default + targeted-retry pattern
 // because it builds availableStrikes off the wide chain on demand.
+// windowDays > 0 widens the request to fromDate=expiry-N, toDate=expiry+N
+// so positions whose stored expiry doesn't exactly land on a listed
+// weekly (off-by-1/2 days from broker import quirks) still get a
+// usable chain back. Caller's pickContractFromChain handles nearest-
+// expiration fallback. Default 0 preserves the strict-date semantics
+// other call sites depend on.
 export async function getOptionsChainWide(
   symbol: string,
   expiry: string,
+  windowDays = 0,
 ): Promise<SchwabOptionsChain> {
+  const fromDate = windowDays > 0 ? addDaysIso(expiry, -windowDays) : expiry;
+  const toDate = windowDays > 0 ? addDaysIso(expiry, windowDays) : expiry;
   return schwabGet<SchwabOptionsChain>(`${MARKETDATA_BASE}/chains`, {
     symbol,
     contractType: "PUT",
     strikeCount: 200,
-    fromDate: expiry,
-    toDate: expiry,
+    fromDate,
+    toDate,
     includeUnderlyingQuote: true,
     strategy: "SINGLE",
   });
+}
+
+function addDaysIso(iso: string, days: number): string {
+  const d = new Date(`${iso}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return iso;
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
 }
 
 // CALL options chain in a date window — used by the swing screener to

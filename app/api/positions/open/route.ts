@@ -109,18 +109,51 @@ function daysBetween(a: Date, b: Date): number {
   return Math.round((b.getTime() - a.getTime()) / (24 * 60 * 60 * 1000));
 }
 
+// Nearest-date fallback for off-by-a-few-day stored expiries (e.g. a
+// Robinhood import that wrote 2026-08-05 when the actual listed
+// weekly is 2026-08-07). Only kicks in when prefix-match fails AND
+// the closest listed expiration is within MAX_EXP_DRIFT_MS of the
+// requested date — beyond that the chain is genuinely the wrong
+// expiration and we'd rather return null than mis-mark the position.
+const MAX_EXP_DRIFT_MS = 14 * 86400000;
+
 function pickContractFromChain(
   chain: Awaited<ReturnType<typeof getOptionsChain>>,
   strike: number,
   expiry: string,
-): SchwabOptionContract | null {
+): { contract: SchwabOptionContract | null; pickedExpKey: string | null; expDriftDays: number | null } {
   const keys = Object.keys(chain.putExpDateMap ?? {});
-  const expKey = keys.find((k) => k.startsWith(expiry));
-  if (!expKey) return null;
+  if (keys.length === 0) {
+    return { contract: null, pickedExpKey: null, expDriftDays: null };
+  }
+  let expKey: string | undefined = keys.find((k) => k.startsWith(expiry));
+  let driftDays = 0;
+  if (!expKey) {
+    const target = new Date(`${expiry}T00:00:00Z`).getTime();
+    let bestKey: string | null = null;
+    let bestDiff = Infinity;
+    for (const k of keys) {
+      const datePart = k.split(":")[0];
+      const t = new Date(`${datePart}T00:00:00Z`).getTime();
+      if (Number.isNaN(t)) continue;
+      const diff = Math.abs(t - target);
+      if (diff < bestDiff) {
+        bestKey = k;
+        bestDiff = diff;
+      }
+    }
+    if (bestKey === null || bestDiff > MAX_EXP_DRIFT_MS) {
+      return { contract: null, pickedExpKey: null, expDriftDays: null };
+    }
+    expKey = bestKey;
+    driftDays = Math.round(bestDiff / 86400000);
+  }
   const strikes = chain.putExpDateMap[expKey];
   const wanted = String(Number(strike));
   const direct = strikes[wanted] ?? strikes[strike.toFixed(2)] ?? null;
-  if (direct && direct.length > 0) return direct[0];
+  if (direct && direct.length > 0) {
+    return { contract: direct[0], pickedExpKey: expKey, expDriftDays: driftDays };
+  }
   let best: SchwabOptionContract | null = null;
   let bestDiff = Infinity;
   for (const contracts of Object.values(strikes)) {
@@ -132,7 +165,7 @@ function pickContractFromChain(
       }
     }
   }
-  return best;
+  return { contract: best, pickedExpKey: expKey, expDriftDays: driftDays };
 }
 
 // Wraps an async upstream with a hard timeout; resolves to null on timeout
@@ -378,7 +411,11 @@ export async function GET(req: NextRequest) {
     // strike to the nearest in-window contract, producing the wrong
     // mark + a wildly wrong P&L on the position card.
     const chainPromise = live
-      ? withTimeout(getOptionsChainWide(p.symbol, expiry), 15000, `chain(${p.symbol})`)
+      ? withTimeout(
+          getOptionsChainWide(p.symbol, expiry, 7),
+          15000,
+          `chain(${p.symbol})`,
+        )
       : Promise.resolve(null);
     const barsPromise = live
       ? withTimeout(
@@ -398,7 +435,10 @@ export async function GET(req: NextRequest) {
       barsPromise,
     ]);
 
-    const contract = chain ? pickContractFromChain(chain, strike, expiry) : null;
+    const pickResult = chain
+      ? pickContractFromChain(chain, strike, expiry)
+      : { contract: null, pickedExpKey: null, expDriftDays: null };
+    const contract = pickResult.contract;
     const currentStockPrice =
       chain?.underlying?.mark ??
       chain?.underlying?.last ??
@@ -435,7 +475,9 @@ export async function GET(req: NextRequest) {
     if (live) {
       const popMissing = delta === null;
       const pnlMissing = pnlDollars === null;
-      if (popMissing || pnlMissing) {
+      const drifted =
+        pickResult.expDriftDays !== null && pickResult.expDriftDays > 0;
+      if (popMissing || pnlMissing || drifted) {
         const premiumSoldOk = premiumSold > 0;
         const failStep =
           chain === null
@@ -450,10 +492,15 @@ export async function GET(req: NextRequest) {
                     ? "delta"
                     : !premiumSoldOk
                       ? "no_premium"
-                      : "unknown";
+                      : "ok_drifted";
         const fmt = (v: number | null) => (v === null ? "null" : String(v));
+        const expKeys = chain
+          ? Object.keys(chain.putExpDateMap ?? {})
+              .slice(0, 6)
+              .join(",")
+          : "";
         console.log(
-          `[positions:live-diag] broker=${p.broker ?? "null"} symbol=${p.symbol} strike=${strike} expiry=${expiry} qty=${remaining} chain=${chain === null ? "miss" : "hit"} contract=${contract === null ? "miss" : "hit"} mark=${fmt(mark)} delta=${fmt(delta)} iv=${fmt(iv)} stock=${fmt(currentStockPrice)} yahooStock=${fmt(yahooPrice)} entryPremium=${fmt(p.avg_premium_sold !== null ? Number(p.avg_premium_sold) : null)} pnlDollars=${fmt(pnlDollars)} pnlPct=${fmt(pnlPct)} fail=${failStep}`,
+          `[positions:live-diag] broker=${p.broker ?? "null"} symbol=${p.symbol} strike=${strike} expiry=${expiry} qty=${remaining} chain=${chain === null ? "miss" : "hit"} contract=${contract === null ? "miss" : "hit"} pickedExpKey=${pickResult.pickedExpKey ?? "null"} expDriftDays=${pickResult.expDriftDays ?? "null"} chainKeys=[${expKeys}] mark=${fmt(mark)} delta=${fmt(delta)} iv=${fmt(iv)} stock=${fmt(currentStockPrice)} yahooStock=${fmt(yahooPrice)} entryPremium=${fmt(p.avg_premium_sold !== null ? Number(p.avg_premium_sold) : null)} pnlDollars=${fmt(pnlDollars)} pnlPct=${fmt(pnlPct)} fail=${failStep}`,
         );
       }
     }
