@@ -51,6 +51,7 @@ export type OpenPositionClientView = {
   avgPremiumSold: number | null;
   openedDate: string;
   currentStockPrice: number | null;
+  priceSource?: "pre" | "post" | "regular" | null;
   currentMark: number | null;
   currentBid: number | null;
   currentAsk: number | null;
@@ -732,12 +733,35 @@ function PositionDetailsColumn({
 }
 
 function LiveDataColumn({ p }: { p: OpenPositionClientView }) {
+  // Extended-hours quote indicator. Yahoo's marketState=PRE/POST is
+  // surfaced as 'pre' | 'post' from the open route — show a small
+  // colored tag so the user knows this isn't the regular-session
+  // close. 'regular' / null → no tag, render the stock figure
+  // unadorned.
+  const stockSuffix =
+    p.priceSource === "post" ? (
+      <span className="ml-1 rounded bg-amber-500/15 px-1 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wide text-amber-300">
+        AH
+      </span>
+    ) : p.priceSource === "pre" ? (
+      <span className="ml-1 rounded bg-sky-500/15 px-1 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wide text-sky-300">
+        PM
+      </span>
+    ) : null;
   return (
     <div className="space-y-1 rounded border border-border bg-background/40 p-3">
       <div className="mb-1 text-xs font-semibold uppercase text-muted-foreground">
         Live
       </div>
-      <Row k="Current stock" v={fmtDollars(p.currentStockPrice)} />
+      <Row
+        k="Current stock"
+        v={
+          <span>
+            {fmtDollars(p.currentStockPrice)}
+            {stockSuffix}
+          </span>
+        }
+      />
       <Row k="Current option" v={fmtDollars(p.currentMark)} />
       <Row
         k="Current IV"

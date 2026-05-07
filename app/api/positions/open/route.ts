@@ -5,7 +5,7 @@ import {
   getOptionsChainWide,
   SchwabOptionContract,
 } from "@/lib/schwab";
-import { getCurrentPrice, getHistoricalPrices } from "@/lib/yahoo";
+import { getQuoteWithExtended, getHistoricalPrices } from "@/lib/yahoo";
 import { getMarketContext } from "@/lib/market";
 import {
   computePositionBadge,
@@ -57,6 +57,11 @@ type OpenPosition = {
   avgPremiumSold: number | null;
   openedDate: string;
   currentStockPrice: number | null;
+  // 'pre' = pre-market quote, 'post' = after-hours quote, 'regular' =
+  // normal session, null = no live data resolved. The UI shows an
+  // AH/PM badge for the non-regular sessions so the user knows the
+  // figure isn't the official close.
+  priceSource: "pre" | "post" | "regular" | null;
   currentMark: number | null;
   currentBid: number | null;
   currentAsk: number | null;
@@ -404,7 +409,11 @@ export async function GET(req: NextRequest) {
     const expiry = p.expiry;
     const dte = daysBetween(now, new Date(expiry + "T00:00:00Z"));
 
-    const spotPromise = withTimeout(getCurrentPrice(p.symbol), 5000, `spot(${p.symbol})`);
+    const spotPromise = withTimeout(
+      getQuoteWithExtended(p.symbol),
+      5000,
+      `spot(${p.symbol})`,
+    );
     // Wide chain (strikeCount=200) so deep-OTM positions like SPOT $410
     // on a $495 stock are actually in the response — the default 30-
     // strike chain centers on ATM and silently fuzzy-snaps a far-OTM
@@ -429,7 +438,7 @@ export async function GET(req: NextRequest) {
         ).then((r) => r ?? [])
       : Promise.resolve([] as Awaited<ReturnType<typeof getHistoricalPrices>>);
 
-    const [yahooPrice, chain, bars] = await Promise.all([
+    const [yahooQuote, chain, bars] = await Promise.all([
       spotPromise,
       chainPromise,
       barsPromise,
@@ -439,12 +448,33 @@ export async function GET(req: NextRequest) {
       ? pickContractFromChain(chain, strike, expiry)
       : { contract: null, pickedExpKey: null, expDriftDays: null };
     const contract = pickResult.contract;
-    const currentStockPrice =
-      chain?.underlying?.mark ??
-      chain?.underlying?.last ??
-      chain?.underlyingPrice ??
-      yahooPrice ??
-      null;
+
+    // Stock-price source priority. Yahoo's extended-hours quote
+    // (PRE/POST) takes precedence so % OTM reflects the latest
+    // tradable price the user can actually act on. Schwab's chain
+    // underlying.mark tracks regular session and is the right answer
+    // during market hours OR when Yahoo doesn't have an extended
+    // quote available.
+    const yahooPrice = yahooQuote?.price ?? null;
+    let currentStockPrice: number | null;
+    let priceSource: "pre" | "post" | "regular" | null;
+    if (
+      yahooQuote &&
+      (yahooQuote.source === "pre" || yahooQuote.source === "post") &&
+      yahooQuote.price !== null &&
+      yahooQuote.price > 0
+    ) {
+      currentStockPrice = yahooQuote.price;
+      priceSource = yahooQuote.source;
+    } else {
+      currentStockPrice =
+        chain?.underlying?.mark ??
+        chain?.underlying?.last ??
+        chain?.underlyingPrice ??
+        yahooPrice ??
+        null;
+      priceSource = currentStockPrice !== null ? "regular" : null;
+    }
 
     const mark = contract?.mark ?? null;
     const bid = contract?.bid ?? null;
@@ -554,6 +584,7 @@ export async function GET(req: NextRequest) {
       avgPremiumSold: p.avg_premium_sold !== null ? Number(p.avg_premium_sold) : null,
       openedDate: p.opened_date,
       currentStockPrice,
+      priceSource,
       currentMark: mark,
       currentBid: bid,
       currentAsk: ask,

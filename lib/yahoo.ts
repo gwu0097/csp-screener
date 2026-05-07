@@ -296,6 +296,56 @@ export async function getYahooNews(
   }
 }
 
+// Like getCurrentPrice but surfaces *which* session the price came
+// from. Used by the Positions live refresh so the UI can flag when
+// the stock figure is an extended-hours quote (PM/AH) instead of the
+// official regular-session close. Yahoo's marketState values are
+// 'PRE' / 'PREPRE' (pre-market), 'REGULAR', 'POST' / 'POSTPOST'
+// (after-hours), and 'CLOSED' (overnight / weekend).
+export type QuoteWithExtended = {
+  price: number | null;
+  source: "pre" | "post" | "regular" | null;
+  marketState: string | null;
+};
+
+export async function getQuoteWithExtended(
+  symbol: string,
+): Promise<QuoteWithExtended> {
+  try {
+    const record = await quoteRaw(symbol);
+    if (!record) return { price: null, source: null, marketState: null };
+
+    const ms = typeof record.marketState === "string" ? record.marketState : null;
+    const reg = pickNumber(record, "regularMarketPrice");
+    const pre = pickNumber(record, "preMarketPrice");
+    const post = pickNumber(record, "postMarketPrice");
+
+    if ((ms === "PRE" || ms === "PREPRE") && pre !== null && pre > 0) {
+      return { price: pre, source: "pre", marketState: ms };
+    }
+    if ((ms === "POST" || ms === "POSTPOST") && post !== null && post > 0) {
+      return { price: post, source: "post", marketState: ms };
+    }
+    if (reg !== null && reg > 0) {
+      return { price: reg, source: "regular", marketState: ms };
+    }
+    // Last-ditch fallbacks — match the priority cascade in
+    // getCurrentPrice for symbols with intermittent regular-session
+    // data. We still tag as "regular" so the UI doesn't claim an
+    // extended-hours session that didn't actually quote.
+    for (const field of ["regularMarketPreviousClose", "bid", "ask"] as const) {
+      const v = pickNumber(record, field);
+      if (v !== null && v > 0) {
+        return { price: v, source: "regular", marketState: ms };
+      }
+    }
+    return { price: null, source: null, marketState: ms };
+  } catch (e) {
+    logYahooFailure(`getQuoteWithExtended(${symbol})`, e);
+    return { price: null, source: null, marketState: null };
+  }
+}
+
 export async function getCurrentPrice(symbol: string): Promise<number | null> {
   try {
     const record = await quoteRaw(symbol);
