@@ -54,7 +54,18 @@ For each options row:
 - symbol: the ticker in the Symbol column (e.g. NOW, GE, TSLA)
 - strike: the number before PUT or CALL in StrikeType column. Strike prices are always 3-4 digits before the decimal for stocks trading above $100. If you see a strike like 47.5 or 47.50 for a stock trading above $100, it is likely 347.5 or 347.50 — re-read the full strike price carefully from the StrikeType column.
 - optionType: 'put' or 'call' from StrikeType column
-- expiry: the Exp column uses 'D MMM YY' or 'DD MMM YY' format — the number BEFORE the month is the DAY OF MONTH, the two-digit number AFTER the month is the YEAR (add 2000 to get the four-digit year). Examples: '1 MAY 26' = 2026-05-01 (May 1, 2026, NOT May 26); '26 MAY 26' = 2026-05-26 (May 26, 2026); '24 APR 26' = 2026-04-24. Single-digit days (1, 2, …, 9) appear without a leading zero — do not confuse them with a year suffix. Return the result in YYYY-MM-DD format.
+- expiry: the Exp column uses 'D MMM YY' or 'DD MMM YY' format. Read it as DAY-MONTH-YEAR strictly:
+    * The token BEFORE the month is the DAY (a 1-2 digit number, range 1-31).
+    * The MONTH is the 3-letter abbreviation (JAN, FEB, MAR, APR, MAY, JUN, JUL, AUG, SEP, OCT, NOV, DEC).
+    * The token AFTER the month is the YEAR. The year is always '26' (= 2026) on a recent Schwab screenshot. Add 2000 to get the four-digit year.
+    NEVER confuse the year suffix '26' with the day number. The position before the month is ALWAYS the day; the position after the month is ALWAYS the year.
+    Single-digit days (1, 2, 3, 4, 5, 6, 7, 8, 9) appear WITHOUT a leading zero. These are the ambiguous cases the model most often gets wrong:
+      '1 MAY 26'  → 2026-05-01  (May 1 2026 — NOT May 26 2026)
+      '8 MAY 26'  → 2026-05-08  (May 8 2026 — NOT May 26 2026)
+      '9 JUN 26'  → 2026-06-09  (June 9 2026 — NOT June 26 2026)
+      '24 APR 26' → 2026-04-24  (April 24 2026, correct)
+      '26 MAY 26' → 2026-05-26  (May 26 2026, correct — both day and year happen to be 26)
+    Return the result in strict YYYY-MM-DD format.
 - premium: the Price column value
 - timePlaced: YYYY-MM-DD from the Time Placed column (first column). Drop the time-of-day portion — date only.
 
@@ -471,8 +482,9 @@ export async function POST(req: NextRequest) {
     }
 
     // Log the raw model output so we can see exactly what format it used.
+    // 8000-char window so multi-trade screenshots don't get truncated.
     console.log(
-      `[parse-screenshot] raw content (len=${content.length}): ${content.slice(0, 2000)}`,
+      `[parse-screenshot] raw content (len=${content.length}): ${content.slice(0, 8000)}`,
     );
 
     const extracted = extractJsonFromText(content);
@@ -504,15 +516,55 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // Today (UTC date) is used to validate that timePlaced is not in
+    // the future and that expiry is not already in the past — both
+    // are signals that Gemini misread a Schwab "DD MMM YY" cell
+    // (typically reading the year-suffix as the day).
+    const todayUtc = new Date().toISOString().slice(0, 10);
+
+    type Rejection = { symbol: string; reason: string };
     let trades: ParsedTrade[] | ParsedStockTrade[];
+    const rejections: Rejection[] = [];
     if (tradeType === "stock") {
       trades = parsed
         .map((r) => coerceStockTrade(r, broker))
         .filter((t): t is ParsedStockTrade => t !== null);
     } else {
-      trades = parsed
-        .map((r) => coerceTrade(r, broker))
-        .filter((t): t is ParsedTrade => t !== null);
+      const accepted: ParsedTrade[] = [];
+      for (const r of parsed) {
+        const t = coerceTrade(r, broker);
+        if (!t) continue; // structural reject (missing fields, bad strike/contracts, etc.)
+        if (t.timePlaced && t.timePlaced > todayUtc) {
+          rejections.push({
+            symbol: t.symbol,
+            reason: `Trade rejected — date appears invalid (timePlaced: ${t.timePlaced} is in the future). Please edit the date before confirming.`,
+          });
+          continue;
+        }
+        if (t.expiry < todayUtc) {
+          rejections.push({
+            symbol: t.symbol,
+            reason: `Trade rejected — expiry ${t.expiry} is in the past. Already-expired options shouldn't import.`,
+          });
+          continue;
+        }
+        accepted.push(t);
+      }
+      trades = accepted;
+    }
+
+    // Per-trade log so we can compare what Gemini emitted vs what
+    // the parser ended up with after normalization. Catches cases
+    // where the raw response and the coerced result diverge.
+    if (tradeType !== "stock") {
+      for (const t of trades as ParsedTrade[]) {
+        console.log(
+          `[parse-screenshot] coerced: symbol=${t.symbol} action=${t.action} strike=${t.strike} expiry=${t.expiry} timePlaced=${t.timePlaced ?? "null"} contracts=${t.contracts} premium=${t.premium}`,
+        );
+      }
+      for (const r of rejections) {
+        console.log(`[parse-screenshot] rejected: ${r.symbol} — ${r.reason}`);
+      }
     }
 
     // NB: model_trades is the array parsed from the model's response, not the
@@ -520,9 +572,9 @@ export async function POST(req: NextRequest) {
     // with no trades — check the logged raw content to see what the model
     // actually produced.
     console.log(
-      `[parse-screenshot] broker=${broker} tradeType=${tradeType} model_trades=${parsed.length} accepted=${trades.length}`,
+      `[parse-screenshot] broker=${broker} tradeType=${tradeType} model_trades=${parsed.length} accepted=${trades.length} rejected=${rejections.length}`,
     );
-    return NextResponse.json({ trades });
+    return NextResponse.json({ trades, rejections });
   } catch (e) {
     console.error("[parse-screenshot] failed:", e);
     return NextResponse.json(

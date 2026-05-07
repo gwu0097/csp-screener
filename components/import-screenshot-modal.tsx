@@ -69,12 +69,14 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
   const [parsing, setParsing] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [parsed, setParsed] = useState<ParsedTrade[] | null>(null);
+  const [rejections, setRejections] = useState<Array<{ symbol: string; reason: string }>>([]);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const reset = useCallback(() => {
     setDataUrl(null);
     setParsed(null);
+    setRejections([]);
     setError(null);
     setParsing(false);
     setConfirming(false);
@@ -153,14 +155,20 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ image: dataUrl, broker }),
       });
-      const json = (await res.json()) as { trades?: ParsedTrade[]; error?: string };
+      const json = (await res.json()) as {
+        trades?: ParsedTrade[];
+        rejections?: Array<{ symbol: string; reason: string }>;
+        error?: string;
+      };
       if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
       const trades = (json.trades ?? []).map((t) => ({
         ...t,
         timePlaced: t.timePlaced && t.timePlaced.length >= 10 ? t.timePlaced : todayIso(),
       }));
       setParsed(trades);
-      if (trades.length === 0) {
+      const rej = json.rejections ?? [];
+      setRejections(rej);
+      if (trades.length === 0 && rej.length === 0) {
         setError("No trades detected — try a sharper image or a different broker view");
       }
     } catch (e) {
@@ -404,6 +412,19 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
                 </tbody>
               </table>
             </div>
+          </div>
+        )}
+
+        {rejections.length > 0 && (
+          <div className="mt-2 space-y-1 rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-xs text-amber-100">
+            <div className="font-semibold uppercase tracking-wide text-amber-200">
+              {rejections.length} row{rejections.length === 1 ? "" : "s"} failed validation
+            </div>
+            {rejections.map((r, i) => (
+              <div key={i}>
+                ⚠️ <span className="font-mono">{r.symbol}</span>: {r.reason}
+              </div>
+            ))}
           </div>
         )}
 
