@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { AlertTriangle, ArrowDown, ArrowUp, Briefcase, Camera, Loader2, Plus, RefreshCcw, Zap } from "lucide-react";
+import { AlertTriangle, ArrowDown, ArrowUp, Briefcase, Camera, Loader2, Plus, RefreshCcw, Undo2, Zap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ImportScreenshotModal } from "@/components/import-screenshot-modal";
 import { ImportManualModal } from "@/components/import-manual-modal";
@@ -17,6 +17,7 @@ import {
   ExpireConfirmationModal,
   type PendingConfirmationRow,
 } from "@/components/expire-confirmation-modal";
+import { UndoImportPopover } from "@/components/undo-import-popover";
 
 type SortKey =
   | "strike"
@@ -614,6 +615,7 @@ export function PositionsView() {
   // X / Cancel is a soft dismiss — closes the modal without setting
   // the persistent flag, so the next Refresh/Live (or page reload)
   // re-opens it. The user has to explicitly Confirm to silence it.
+  const [showUndo, setShowUndo] = useState(false);
   const [pendingConfirmation, setPendingConfirmation] = useState<
     PendingConfirmationRow[]
   >([]);
@@ -891,6 +893,22 @@ export function PositionsView() {
           </div>
           <div className="flex flex-col items-end gap-2">
             <div className="flex items-center gap-2">
+              <div className="relative">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setShowUndo((v) => !v)}
+                  className="text-xs text-muted-foreground hover:text-foreground"
+                >
+                  <Undo2 className="mr-1.5 h-3.5 w-3.5" />
+                  Undo
+                </Button>
+                <UndoImportPopover
+                  open={showUndo}
+                  onClose={() => setShowUndo(false)}
+                  onUndone={() => void load(false)}
+                />
+              </div>
               <Button
                 variant="ghost"
                 size="sm"

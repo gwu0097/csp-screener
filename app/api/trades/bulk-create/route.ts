@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { randomUUID } from "node:crypto";
 import { createServerClient } from "@/lib/supabase";
 import {
   remainingContracts,
@@ -86,6 +87,13 @@ export async function POST(req: NextRequest) {
   let positionsCreated = 0;
   const positionsTouched = new Set<string>();
   let fillsInserted = 0;
+
+  // One batch_id per bulk-create call. Stamped on every NEW position
+  // and EVERY fill we insert below so the "Undo last import" flow on
+  // the Positions page can identify and roll back this exact import.
+  // Pre-existing positions are not stamped — undo only deletes rows
+  // that were freshly created in this call.
+  const importBatchId = randomUUID();
 
   const required = ["symbol", "action", "contracts", "strike", "expiry", "premium"] as const;
 
@@ -198,6 +206,7 @@ export async function POST(req: NextRequest) {
             status: "open",
             opened_date: fillDate,
             notes: input.notes ?? null,
+            import_batch_id: importBatchId,
           })
           .select()
           .single();
@@ -218,6 +227,7 @@ export async function POST(req: NextRequest) {
         premium: input.premium,
         fill_date: fillDate,
         fill_time: new Date().toISOString(),
+        import_batch_id: importBatchId,
       });
       if (fillErr) {
         errors.push(`${input.symbol}: fill insert failed — ${fillErr.message}`);
