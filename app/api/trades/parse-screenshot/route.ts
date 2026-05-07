@@ -48,9 +48,16 @@ Extract every filled options trade row. Ignore stock trades (StrikeType 'STOCK' 
 If Status = FILLED and the row is an option (not STOCK/ETF), you must include it. Count your FILLED rows before finalizing — do not skip any.
 
 For each options row:
-- action: if Side=SELL and QtyPos Effect contains 'TO OPEN' → 'open'
-         if Side=BUY and QtyPos Effect contains 'TO CLOSE' → 'close'
-- contracts: the number before 'TO OPEN' or 'TO CLOSE' (ignore the +/- sign)
+- action: determine whether this row OPENS or CLOSES a position. Rule cascade — apply in order, first match wins:
+    1. If the row text explicitly contains 'TO OPEN'  → action = 'open'
+    2. If the row text explicitly contains 'TO CLOSE' → action = 'close'
+    3. Else look at the Side/Action column AND the quantity sign:
+         - 'SOLD' / 'SELL' / negative quantity (e.g. -5, -2)   → action = 'open'
+           (Schwab marks a sell-to-open short put with SOLD and a negative quantity; this is the typical CSP entry.)
+         - 'BOT' / 'BUY'  / positive quantity (e.g. +12, +6)   → action = 'close'
+           (Closing a short put = buy-to-close, marked BOT with a positive quantity.)
+    The +/- sign on the quantity is the most reliable signal — negative = open, positive = close.
+- contracts: the ABSOLUTE VALUE of the quantity (always a positive integer). Strip any leading sign and any 'TO OPEN' / 'TO CLOSE' suffix. Examples: '-5 TO OPEN' → 5, '+12 TO CLOSE' → 12, '-2' → 2, '+6' → 6.
 - symbol: the ticker in the Symbol column (e.g. NOW, GE, TSLA)
 - strike: the number before PUT or CALL in StrikeType column. Strike prices are always 3-4 digits before the decimal for stocks trading above $100. If you see a strike like 47.5 or 47.50 for a stock trading above $100, it is likely 347.5 or 347.50 — re-read the full strike price carefully from the StrikeType column.
 - optionType: 'put' or 'call' from StrikeType column
