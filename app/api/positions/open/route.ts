@@ -71,6 +71,12 @@ type OpenPosition = {
   dte: number;
   pnlDollars: number | null;
   pnlPct: number | null;
+  // Why pnlDollars is what it is. 'mark' = computed off the live
+  // option mark (most accurate). 'intrinsic' = ITM put estimate
+  // when the option mark is unavailable: pnl = (entry - intrinsic)
+  // × qty × 100. 'maxProfitOtm' = OTM put with no mark — assume
+  // worthless and credit full premium. null = no P&L computed.
+  pnlSource: "mark" | "intrinsic" | "maxProfitOtm" | null;
   distanceToStrikePct: number | null;
   thetaDecayTotal: number | null;
   momentum: Momentum | null;
@@ -485,12 +491,34 @@ export async function GET(req: NextRequest) {
     const iv = rawIv !== null ? (rawIv > 1 ? rawIv / 100 : rawIv) : null;
 
     const premiumSold = Number(p.avg_premium_sold ?? 0);
-    const pnlDollars =
-      mark !== null && premiumSold > 0
-        ? (premiumSold - mark) * remaining * 100
-        : null;
-    const pnlPct =
-      mark !== null && premiumSold > 0 ? ((premiumSold - mark) / premiumSold) * 100 : null;
+    let pnlDollars: number | null = null;
+    let pnlPct: number | null = null;
+    let pnlSource: "mark" | "intrinsic" | "maxProfitOtm" | null = null;
+    if (mark !== null && premiumSold > 0) {
+      pnlDollars = (premiumSold - mark) * remaining * 100;
+      pnlPct = ((premiumSold - mark) / premiumSold) * 100;
+      pnlSource = "mark";
+    } else if (
+      currentStockPrice !== null &&
+      currentStockPrice > 0 &&
+      premiumSold > 0
+    ) {
+      // Mark missing — fall back to an intrinsic-value estimate so
+      // the position card still shows a number on expiry day when
+      // option chains stop quoting. ITM puts: subtract intrinsic
+      // from the entry premium. OTM puts: assume worthless and
+      // credit full premium.
+      if (currentStockPrice < strike) {
+        const intrinsic = strike - currentStockPrice;
+        pnlDollars = (premiumSold - intrinsic) * remaining * 100;
+        pnlPct = ((premiumSold - intrinsic) / premiumSold) * 100;
+        pnlSource = "intrinsic";
+      } else {
+        pnlDollars = premiumSold * remaining * 100;
+        pnlPct = 100;
+        pnlSource = "maxProfitOtm";
+      }
+    }
 
     const distanceToStrikePct =
       currentStockPrice !== null && currentStockPrice > 0
@@ -594,6 +622,7 @@ export async function GET(req: NextRequest) {
       dte: Math.max(0, dte),
       pnlDollars,
       pnlPct,
+      pnlSource,
       distanceToStrikePct,
       thetaDecayTotal,
       momentum,

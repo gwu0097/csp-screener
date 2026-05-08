@@ -349,12 +349,19 @@ export type PendingVerification = {
 // uses pctFromStrike to label each row: comfortably OTM (>5%) vs
 // within the assignment window (<=5%, where the user should verify
 // against their broker before confirming).
+//
+// totalContracts is the REMAINING contract count (open fills minus
+// close fills) — what the user actually still owes / will be assigned
+// on. The DB column position.total_contracts is the historical "ever
+// opened" count and would over-count a position that's been
+// partially closed already.
 export type PendingConfirmation = {
   positionId: string;
   symbol: string;
   strike: number;
   expiry: string;
   totalContracts: number;
+  avgPremiumSold: number | null;
   pctFromStrike: number | null;
   stockPrice: number | null;
   optionPrice: number | null;
@@ -407,6 +414,43 @@ export async function runAutoExpire(): Promise<AutoExpireReport> {
   );
   if (positions.length === 0) return empty;
 
+  // Pull the full fill set for every expired position so we can
+  // report REMAINING contracts (not the historical total_contracts
+  // denormalized on the row, which over-counts after partial
+  // closes). The modal uses this to size assignment + worthless
+  // confirms correctly.
+  const fillsByPosition = new Map<
+    string,
+    Array<{ fill_type: string; contracts: number; premium: number; fill_date: string }>
+  >();
+  {
+    const sb = createServerClient();
+    const fillRes = await sb
+      .from("fills")
+      .select("position_id, fill_type, contracts, premium, fill_date")
+      .in(
+        "position_id",
+        positions.map((p) => p.id),
+      );
+    const fillRows = (fillRes.data ?? []) as Array<{
+      position_id: string;
+      fill_type: string;
+      contracts: number;
+      premium: number;
+      fill_date: string;
+    }>;
+    for (const row of fillRows) {
+      const arr = fillsByPosition.get(row.position_id) ?? [];
+      arr.push({
+        fill_type: row.fill_type,
+        contracts: row.contracts,
+        premium: row.premium,
+        fill_date: row.fill_date,
+      });
+      fillsByPosition.set(row.position_id, arr);
+    }
+  }
+
   // Parallelize the per-position chain fetch — each is ~1-3s, 5 in
   // serial would chew most of the 60s route budget.
   const freshByPosition = new Map<
@@ -457,12 +501,28 @@ export async function runAutoExpire(): Promise<AutoExpireReport> {
     console.log(
       `[expire] classified: ${p.symbol} ${p.strike} → ${classification} (pct=${pctFromStrike !== null ? (pctFromStrike * 100).toFixed(2) + "%" : "—"})`,
     );
+    const positionFills = fillsByPosition.get(p.id) ?? [];
+    const opened = positionFills
+      .filter((f) => f.fill_type === "open")
+      .reduce((s, f) => s + f.contracts, 0);
+    const closed = positionFills
+      .filter((f) => f.fill_type === "close")
+      .reduce((s, f) => s + f.contracts, 0);
+    const remaining = Math.max(0, opened - closed);
+    // Average open premium across all open fills (contracts-weighted).
+    const openContractTotal = opened;
+    const openDollarTotal = positionFills
+      .filter((f) => f.fill_type === "open")
+      .reduce((s, f) => s + f.premium * f.contracts, 0);
+    const avgPremiumSold =
+      openContractTotal > 0 ? openDollarTotal / openContractTotal : null;
     report.pending_confirmation.push({
       positionId: p.id,
       symbol: p.symbol,
       strike: Number(p.strike),
       expiry: p.expiry,
-      totalContracts: Number(p.total_contracts ?? 0),
+      totalContracts: remaining,
+      avgPremiumSold,
       pctFromStrike,
       stockPrice: fresh.stock_price,
       optionPrice: fresh.option_price,

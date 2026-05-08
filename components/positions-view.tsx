@@ -18,6 +18,7 @@ import {
   type PendingConfirmationRow,
 } from "@/components/expire-confirmation-modal";
 import { UndoImportPopover } from "@/components/undo-import-popover";
+import type { ConfirmItem } from "@/components/expire-confirmation-modal";
 
 type SortKey =
   | "strike"
@@ -719,16 +720,21 @@ export function PositionsView() {
     }
   }
 
-  async function confirmExpireWorthless(positionIds: string[]) {
+  async function confirmExpireWorthless(items: ConfirmItem[]) {
     try {
       const res = await fetch("/api/positions/confirm-expire", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ positionIds }),
+        body: JSON.stringify({ items }),
         cache: "no-store",
       });
       const json = (await res.json()) as
-        | { expiredCount: number; failedCount: number; totalRealizedPnl: number }
+        | {
+            expiredCount: number;
+            assignedCount: number;
+            failedCount: number;
+            totalRealizedPnl: number;
+          }
         | { error: string };
       if (!res.ok || "error" in json) {
         const msg = "error" in json ? json.error : `HTTP ${res.status}`;
@@ -738,8 +744,18 @@ export function PositionsView() {
       const sign = json.totalRealizedPnl >= 0 ? "+" : "";
       const failedSuffix =
         json.failedCount > 0 ? ` · ${json.failedCount} failed` : "";
+      const parts: string[] = [];
+      if (json.expiredCount > 0) {
+        parts.push(
+          `${json.expiredCount} expired worthless`,
+        );
+      }
+      if (json.assignedCount > 0) {
+        parts.push(`${json.assignedCount} assigned`);
+      }
+      const summary = parts.join(" · ") || "0 closed";
       setMessage(
-        `✓ ${json.expiredCount} position${json.expiredCount === 1 ? "" : "s"} expired worthless · ${sign}$${json.totalRealizedPnl.toFixed(2)} P&L locked in${failedSuffix}`,
+        `✓ ${summary} · ${sign}$${json.totalRealizedPnl.toFixed(2)} P&L locked in${failedSuffix}`,
       );
     } catch (e) {
       setError(

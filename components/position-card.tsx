@@ -61,6 +61,10 @@ export type OpenPositionClientView = {
   dte: number;
   pnlDollars: number | null;
   pnlPct: number | null;
+  // 'mark' = computed off live option mark. 'intrinsic' = ITM put
+  // estimate when option mark is unavailable. 'maxProfitOtm' = OTM
+  // put assumed worthless. null = no P&L computed.
+  pnlSource?: "mark" | "intrinsic" | "maxProfitOtm" | null;
   distanceToStrikePct: number | null;
   thetaDecayTotal: number | null;
   momentum: Momentum | null;
@@ -365,12 +369,34 @@ export function PositionCard(props: Props) {
         };
   const pnlDollars = open ? open.pnlDollars : (closed?.realizedPnl ?? null);
   const pnlPct = open ? open.pnlPct : null;
+  // pnlSource is set by /api/positions/open when the live mark is
+  // unavailable and we fall back to an intrinsic-value (ITM) or
+  // max-profit (OTM) estimate. Closed rows always treat as 'mark'-
+  // exact since the realized P&L is final.
+  const pnlSource = open?.pnlSource ?? "mark";
+  const pnlIsEstimate =
+    pnlSource === "intrinsic" || pnlSource === "maxProfitOtm";
   const pnlColor =
     pnlDollars === null
       ? "text-muted-foreground"
-      : pnlDollars >= 0
-        ? "text-emerald-300"
-        : "text-rose-300";
+      : pnlSource === "intrinsic"
+        ? // ITM estimate is amber regardless of sign — it's an
+          // approximation of a likely-loss scenario.
+          "text-amber-300"
+        : pnlSource === "maxProfitOtm"
+          ? // OTM estimate uses a softer green — it's the best-case
+            // assumption (full premium kept) and we're not 100% sure.
+            "text-emerald-200/80"
+          : pnlDollars >= 0
+            ? "text-emerald-300"
+            : "text-rose-300";
+  const pnlPrefix = pnlIsEstimate ? "~" : "";
+  const pnlTooltip =
+    pnlSource === "intrinsic"
+      ? `Estimated P&L based on intrinsic value (strike − stock price). Actual closing price may differ.`
+      : pnlSource === "maxProfitOtm"
+        ? `Estimated P&L assuming OTM at expiry (full premium kept). Actual closing price may differ.`
+        : "";
   // Live-only fields; closed rows render as "—" since these are
   // meaningful at a moment-in-time only. Stock price moved into the
   // ticker sub-header in positions-view, so the row no longer renders
@@ -409,7 +435,11 @@ export function PositionCard(props: Props) {
           ×{p.remainingContracts}
         </div>
         {/* 5. P&L — bold so it reads first when scanning the row */}
-        <div className={cn("text-right font-mono text-base font-semibold", pnlColor)}>
+        <div
+          className={cn("text-right font-mono text-base font-semibold", pnlColor)}
+          title={pnlTooltip || undefined}
+        >
+          {pnlPrefix}
           {fmtDollarsSigned(pnlDollars)}
         </div>
         {/* 6. POP% */}

@@ -25,11 +25,19 @@ export type PendingConfirmationRow = {
   symbol: string;
   strike: number;
   expiry: string;
+  // REMAINING contract count — already net of any close fills.
   totalContracts: number;
+  avgPremiumSold?: number | null;
   pctFromStrike: number | null;
   stockPrice: number | null;
   optionPrice: number | null;
   broker: string | null;
+};
+
+export type ConfirmItem = {
+  positionId: string;
+  action: "worthless" | "assigned";
+  stockPrice: number | null;
 };
 
 const BROKER_LABEL: Record<string, string> = {
@@ -67,8 +75,11 @@ type Props = {
   rows: PendingConfirmationRow[];
   onCancel: () => void;
   // Should resolve only after the bulk-confirm round-trip completes
-  // and the parent has refreshed the positions list.
-  onConfirm: (positionIds: string[]) => Promise<void>;
+  // and the parent has refreshed the positions list. Items carry the
+  // per-row action (worthless vs assigned + the stock price) so the
+  // route can record assignments with the correct intrinsic-value
+  // P&L.
+  onConfirm: (items: ConfirmItem[]) => Promise<void>;
 };
 
 export function ExpireConfirmationModal({ open, rows, onCancel, onConfirm }: Props) {
@@ -129,7 +140,14 @@ export function ExpireConfirmationModal({ open, rows, onCancel, onConfirm }: Pro
     if (noneChecked) return;
     setSubmitting(true);
     try {
-      await onConfirm(rows.filter((r) => selectedIds.has(r.positionId)).map((r) => r.positionId));
+      const items: ConfirmItem[] = rows
+        .filter((r) => selectedIds.has(r.positionId))
+        .map((r) => ({
+          positionId: r.positionId,
+          action: isWorthlessSafe(r.pctFromStrike) ? "worthless" : "assigned",
+          stockPrice: r.stockPrice,
+        }));
+      await onConfirm(items);
     } finally {
       setSubmitting(false);
     }
@@ -216,9 +234,12 @@ export function ExpireConfirmationModal({ open, rows, onCancel, onConfirm }: Pro
                             Worthless
                           </span>
                         ) : (
-                          <span className="inline-flex items-center gap-1 rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-amber-300">
+                          <span
+                            className="inline-flex items-center gap-1 rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-amber-200"
+                            title="Position is within 5% of strike — likely ITM. Confirming will record an assignment with intrinsic-value P&L."
+                          >
                             <AlertTriangle className="h-3 w-3" />
-                            Verify
+                            Assign
                           </span>
                         )}
                       </span>
@@ -234,9 +255,9 @@ export function ExpireConfirmationModal({ open, rows, onCancel, onConfirm }: Pro
           {selectedCount} position{selectedCount === 1 ? "" : "s"} ·{" "}
           {selectedContracts} contract{selectedContracts === 1 ? "" : "s"}
           {verifyCount > 0 ? (
-            <> · <span className="text-amber-300">{verifyCount} need verification</span></>
+            <> · <span className="text-amber-300">{verifyCount} will record as assigned (intrinsic P&L)</span></>
           ) : null}
-          {" "}· P&L calculated from entry premium on confirm.
+          {" "}· Worthless rows credit full premium; assigned rows use strike − stock price.
         </div>
 
         <DialogFooter className="shrink-0">
