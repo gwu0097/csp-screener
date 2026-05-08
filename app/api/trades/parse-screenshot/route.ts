@@ -43,9 +43,28 @@ const PROMPT_SCHWAB = `This is a screenshot of a ThinkorSwim (ThinkOrSwim) broke
 
 Column headers are: Time Placed, Spread, Side, QtyPos Effect, Symbol, Exp, StrikeType, Price, TIF, Status
 
-Extract every filled options trade row. Ignore stock trades (StrikeType 'STOCK' or 'ETF') AND ignore rows where Status column says CANCELED or EXPIRED. Only include rows with Status exactly FILLED.
+STATUS FILTER (do this first, before extracting any data):
+Only extract rows where the Status column shows exactly 'FILLED'.
+Skip every row whose Status is 'CANCELED', 'EXPIRED', 'REJECTED', or anything other than FILLED. Skip stock trades too (StrikeType 'STOCK' or 'ETF').
+For each FILLED option row (or each leg of a FILLED spread, see SPREAD HANDLING below) you MUST include it. Count your FILLED rows before finalizing — do not skip any.
 
-If Status = FILLED and the row is an option (not STOCK/ETF), you must include it. Count your FILLED rows before finalizing — do not skip any.
+SPREAD HANDLING:
+The 'Spread' column tells you the order type:
+- 'SINGLE' = one option leg, one row → emit ONE trade.
+- 'DIAGONAL', 'VERTICAL', 'CALENDAR', 'IRON_CONDOR', etc. = MULTI-LEG order. Schwab displays each leg on its own physical line, sharing the Time Placed / Spread / Status of the first leg. The Status (FILLED/etc.) applies to BOTH/ALL legs together.
+For multi-leg orders:
+  • Emit EACH leg as a SEPARATE trade in the output array (a DIAGONAL produces TWO trade entries, a VERTICAL with 2 legs produces TWO entries, etc.).
+  • Each leg has its OWN Side, Qty (with sign), Symbol, Exp, StrikeType, Price — read each independently.
+  • Per-leg action comes from THAT leg's text/sign (a DIAGONAL typically has one SELL TO OPEN leg and one BUY TO CLOSE leg; they emit as action='open' and action='close' respectively).
+  • PRICE QUIRK: for multi-leg orders, one leg often shows 'CREDIT' / 'DEBIT' in the Price column (or 'NET CREDIT' / 'NET DEBIT') instead of a numeric LMT price — that's the SPREAD'S net credit/debit, not the individual leg's premium. The other leg shows the real numeric LMT price. For the leg that shows CREDIT/DEBIT (no per-leg numeric price), set premium = 0 in your output. The numeric-price leg gets its actual price.
+
+Worked example (DIAGONAL row spans two lines, one Status applies to both):
+  5/8/26 12:54:27  DIAGONAL  SELL  -3 TO OPEN   ANET  15 MAY 26 (Weeklys)  150 PUT  4.75 LMT  DAY  FILLED
+                              BUY   +3 TO CLOSE  ANET   8 MAY 26 (Weeklys)  146 PUT  CREDIT
+Emits TWO trades:
+  { action: 'open',  symbol: 'ANET', strike: 150, expiry: '2026-05-15', optionType: 'put', contracts: 3, premium: 4.75, timePlaced: '2026-05-08' }
+  { action: 'close', symbol: 'ANET', strike: 146, expiry: '2026-05-08', optionType: 'put', contracts: 3, premium: 0,    timePlaced: '2026-05-08' }
+(The CREDIT leg gets premium=0 because the per-leg price isn't shown — the user will edit the close price manually.)
 
 For each options row:
 - action: determine whether this row OPENS or CLOSES a position. Rule cascade — apply in order, first match wins:
