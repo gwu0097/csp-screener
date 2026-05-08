@@ -406,6 +406,7 @@ export function PerformanceSection({
     stockUnrealized: number;
     optionsCount: number;
     stockCount: number;
+    positionLines: Array<{ label: string; pnl: number }>;
   } | null>(null);
   const [unrealizedLoading, setUnrealizedLoading] = useState(false);
   const [unrealizedError, setUnrealizedError] = useState<string | null>(null);
@@ -423,8 +424,18 @@ export function PerformanceSection({
           cache: "no-store",
         });
         const json = (await res.json()) as {
-          positions?: Array<{ pnlDollars: number | null }>;
-          stockPositions?: Array<{ pnlDollars: number | null }>;
+          positions?: Array<{
+            symbol: string;
+            strike: number;
+            optionType: "put" | "call";
+            remainingContracts: number;
+            pnlDollars: number | null;
+          }>;
+          stockPositions?: Array<{
+            symbol: string;
+            shares: number;
+            pnlDollars: number | null;
+          }>;
           error?: string;
         };
         if (cancelled) return;
@@ -433,6 +444,16 @@ export function PerformanceSection({
         }
         const opts = json.positions ?? [];
         const stocks = json.stockPositions ?? [];
+        const positionLines: Array<{ label: string; pnl: number }> = [
+          ...opts.map((o) => ({
+            label: `${o.symbol} $${o.strike}${o.optionType === "put" ? "P" : "C"} ×${o.remainingContracts}`,
+            pnl: o.pnlDollars ?? 0,
+          })),
+          ...stocks.map((s) => ({
+            label: `${s.symbol} stock ×${s.shares}`,
+            pnl: s.pnlDollars ?? 0,
+          })),
+        ];
         setUnrealized({
           optionsUnrealized: opts.reduce(
             (s, p) => s + (p.pnlDollars ?? 0),
@@ -444,6 +465,7 @@ export function PerformanceSection({
           ),
           optionsCount: opts.length,
           stockCount: stocks.length,
+          positionLines,
         });
       } catch (e) {
         if (!cancelled) {
@@ -467,7 +489,7 @@ export function PerformanceSection({
     equity_curve.length > 0
       ? equity_curve[equity_curve.length - 1].cumulativePnl
       : 0;
-  const displayCurve =
+  const displayCurve: ChartPoint[] =
     mode === "total" && unrealized && equity_curve.length > 0
       ? [
           ...equity_curve,
@@ -478,6 +500,11 @@ export function PerformanceSection({
             cumulativePnl: lastCumulative + totalUnrealized,
             tradeCount: unrealized.optionsCount + unrealized.stockCount,
             trades: [] as Array<{ symbol: string; pnl: number }>,
+            nowDetails: {
+              lines: unrealized.positionLines,
+              unrealized: totalUnrealized,
+              realized: stats.total_pnl,
+            },
           },
         ]
       : equity_curve;
@@ -637,6 +664,16 @@ export function PerformanceSection({
   );
 }
 
+// Augmented chart-point type — the synthetic "Now" point in Total mode
+// carries an extra `nowDetails` payload so the tooltip can render the
+// per-position breakdown instead of the historical-bucket layout.
+type NowDetails = {
+  lines: Array<{ label: string; pnl: number }>;
+  unrealized: number;
+  realized: number;
+};
+type ChartPoint = EquityPoint & { nowDetails?: NowDetails };
+
 // Rich tooltip for the equity curve — lists every trade inside the
 // bucket, then shows bucket total + running cumulative P&L. Recharts
 // passes `payload` with the raw data point at payload[0].payload.
@@ -645,12 +682,57 @@ function EquityTooltip({
   payload,
 }: {
   active?: boolean;
-  payload?: Array<{ payload: EquityPoint }>;
+  payload?: Array<{ payload: ChartPoint }>;
 }) {
   if (!active || !payload || payload.length === 0) return null;
   const b = payload[0].payload;
   const totalColor = b.tradePnl >= 0 ? "text-emerald-300" : "text-rose-300";
   const cumColor = b.cumulativePnl >= 0 ? "text-emerald-300" : "text-rose-300";
+
+  if (b.nowDetails) {
+    const nd = b.nowDetails;
+    const unrealizedColor = nd.unrealized >= 0 ? "text-emerald-300" : "text-rose-300";
+    const realizedColor = nd.realized >= 0 ? "text-emerald-300" : "text-rose-300";
+    return (
+      <div className="min-w-[220px] rounded border border-border bg-zinc-900/95 p-2 text-xs shadow-lg">
+        <div className="mb-1 font-medium text-foreground">
+          {b.label}{" "}
+          <span className="text-muted-foreground">
+            ({b.tradeCount} open {b.tradeCount === 1 ? "position" : "positions"})
+          </span>
+        </div>
+        {nd.lines.length > 0 && (
+          <div className="space-y-0.5">
+            {nd.lines.map((l, i) => (
+              <div
+                key={`${l.label}-${i}`}
+                className="flex justify-between gap-3 font-mono"
+              >
+                <span>{l.label}</span>
+                <span className={l.pnl >= 0 ? "text-emerald-300" : "text-rose-300"}>
+                  {fmtMoney(l.pnl, true)}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="my-1 border-t border-border" />
+        <div className="flex justify-between gap-3">
+          <span className="text-muted-foreground">Unrealized:</span>
+          <span className={unrealizedColor}>{fmtMoney(nd.unrealized, true)}</span>
+        </div>
+        <div className="flex justify-between gap-3">
+          <span className="text-muted-foreground">Realized:</span>
+          <span className={realizedColor}>{fmtMoney(nd.realized, true)}</span>
+        </div>
+        <div className="flex justify-between gap-3">
+          <span className="text-muted-foreground">Total:</span>
+          <span className={cumColor}>{fmtMoney(b.cumulativePnl, true)}</span>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-w-[180px] rounded border border-border bg-zinc-900/95 p-2 text-xs shadow-lg">
       <div className="mb-1 font-medium text-foreground">
