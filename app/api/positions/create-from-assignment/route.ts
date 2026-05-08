@@ -161,9 +161,12 @@ export async function POST(req: NextRequest) {
       });
       continue;
     }
-    const avgPremium =
-      p.avg_premium_sold !== null ? Number(p.avg_premium_sold) : 0;
-    const costBasis = Math.round((strike - avgPremium) * 100) / 100;
+    // Option A accounting: cost basis = strike. The put already
+    // captured the premium as realized_pnl; the stock carries the
+    // raw strike outlay. Unrealized on the stock = (spot − strike)
+    // × shares accounts for all assignment-side market loss without
+    // overlapping with the put's P&L.
+    const costBasis = strike;
     const shares = contracts * 100;
 
     const insert = await sb

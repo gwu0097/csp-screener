@@ -177,7 +177,10 @@ export async function POST(req: NextRequest) {
       const contracts = contractsByPosition.get(row.id) ?? 0;
       const avgPremium =
         row.avg_premium_sold !== null ? Number(row.avg_premium_sold) : null;
-      const costBasis = avgPremium !== null ? strike - avgPremium : strike;
+      // Option A: cost basis = strike. Premium is realized on the
+      // put; market loss lives on the stock as (spot − strike) ×
+      // shares. Don't deduct premium here — that would double-count
+      // it against the put's realized_pnl.
       assignments.push({
         positionId: row.id,
         symbol: row.symbol,
@@ -185,7 +188,7 @@ export async function POST(req: NextRequest) {
         strike,
         contracts,
         avgPremiumSold: avgPremium,
-        costBasis: Math.round(costBasis * 100) / 100,
+        costBasis: strike,
         shares: contracts * 100,
         expiry: row.expiry,
       });

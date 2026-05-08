@@ -254,8 +254,12 @@ export function ExpireConfirmationModal({ open, rows, onCancel, onConfirm }: Pro
                     Number.isFinite(r.avgPremiumSold)
                       ? r.avgPremiumSold
                       : null;
-                  const costBasis =
-                    avgPremium !== null ? r.strike - avgPremium : r.strike;
+                  // Option A cost basis = strike. Premium stays on
+                  // the put as realized P&L; the stock entry is the
+                  // raw strike. (spot − strike) × shares tracks
+                  // assignment-side market loss without
+                  // double-counting against the put's premium kept.
+                  const costBasis = r.strike;
                   const shares = r.totalContracts * 100;
                   return (
                     <li
@@ -301,15 +305,14 @@ export function ExpireConfirmationModal({ open, rows, onCancel, onConfirm }: Pro
                       {!worthless && (
                         <div className="ml-6 space-y-0.5 text-xs">
                           <div className="text-muted-foreground">
-                            Cost basis = ${r.strike.toFixed(2)} −{" "}
-                            {avgPremium !== null
-                              ? `$${avgPremium.toFixed(2)}`
-                              : "—"}{" "}
-                            ={" "}
+                            Cost basis ={" "}
                             <span className="text-foreground">
                               ${costBasis.toFixed(2)}
-                            </span>
-                            /share
+                            </span>{" "}
+                            /share (strike).{" "}
+                            {avgPremium !== null
+                              ? `Premium $${avgPremium.toFixed(2)} stays as realized P&L.`
+                              : null}
                           </div>
                           <label
                             className={`flex cursor-pointer items-center gap-2 ${

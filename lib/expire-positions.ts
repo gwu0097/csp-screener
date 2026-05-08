@@ -349,17 +349,19 @@ export async function recordAssignment(
 
   const strike = Number(pos.strike);
   const stockPrice = Number(stockPriceAtExpiry);
-  const intrinsic = Math.max(0, strike - stockPrice);
 
-  // Augment with a synthetic close at intrinsic for the assigned
-  // remainder so realizedPnl() blends pre-existing close fills (e.g.
-  // the 4 rolled contracts) with the just-assigned 3 cleanly.
+  // Option A accounting: the put closes with full premium retained
+  // (synthetic close at $0, same as worthless). The market loss
+  // doesn't live on the put — it carries forward as the stock
+  // position's cost basis = strike. Stock unrealized P&L = (spot −
+  // strike) × shares accounts for the entire assignment loss.
+  // Avoids double-counting against realized_pnl on the put.
   const augmentedFills: Fill[] = [
     ...priorFills,
     {
       fill_type: "close",
       contracts: remaining,
-      premium: intrinsic,
+      premium: 0,
       fill_date: pos.expiry,
     },
   ];
