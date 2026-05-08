@@ -88,6 +88,7 @@ export async function POST(req: NextRequest) {
             action: "assigned" as const,
             ok: r.ok,
             realized_pnl: r.realized_pnl,
+            contracts_closed: r.contracts_closed,
             stock_price_used: stockPrice,
             reason: r.reason,
           };
@@ -105,6 +106,7 @@ export async function POST(req: NextRequest) {
               : ("worthless" as const),
           ok: r.ok,
           realized_pnl: r.realized_pnl,
+          contracts_closed: r.contracts_closed,
           stock_price_used: null,
           reason: r.reason,
         };
@@ -114,6 +116,7 @@ export async function POST(req: NextRequest) {
           action,
           ok: false,
           realized_pnl: 0,
+          contracts_closed: 0,
           stock_price_used: null,
           reason: e instanceof Error ? e.message : "threw",
         };
@@ -129,13 +132,18 @@ export async function POST(req: NextRequest) {
   ).length;
   const assignedCount = ok.filter((r) => r.action === "assigned").length;
 
-  // For every successful assignment, look up the put's strike + avg
-  // entry premium + contracts so the UI can render the
-  // stock-position prompt without a second round-trip.
-  // costBasis = strike − avg_premium_per_share. Shares = contracts × 100.
-  const assignedIds = ok
-    .filter((r) => r.action === "assigned")
-    .map((r) => r.positionId);
+  // For every successful assignment, look up the put's symbol /
+  // strike / etc. so the UI can render the stock-prompt rows. The
+  // CONTRACTS count comes from result.contracts_closed (computed off
+  // remaining = opened − prior_closes inside recordAssignment) — NOT
+  // from total_contracts on the row, which is the historical "ever
+  // opened" count and over-counts after partial closes / rolls.
+  const assignedResults = ok.filter((r) => r.action === "assigned");
+  const contractsByPosition = new Map<string, number>();
+  for (const r of assignedResults) {
+    contractsByPosition.set(r.positionId, r.contracts_closed ?? 0);
+  }
+  const assignedIds = assignedResults.map((r) => r.positionId);
   type AssignmentDetail = {
     positionId: string;
     symbol: string;
@@ -153,7 +161,7 @@ export async function POST(req: NextRequest) {
     const detailRes = await sb
       .from("positions")
       .select(
-        "id,symbol,broker,strike,expiry,total_contracts,avg_premium_sold",
+        "id,symbol,broker,strike,expiry,avg_premium_sold",
       )
       .in("id", assignedIds);
     type Row = {
@@ -162,12 +170,11 @@ export async function POST(req: NextRequest) {
       broker: string | null;
       strike: number;
       expiry: string;
-      total_contracts: number | null;
       avg_premium_sold: number | null;
     };
     for (const row of (detailRes.data ?? []) as Row[]) {
       const strike = Number(row.strike);
-      const contracts = Number(row.total_contracts ?? 0);
+      const contracts = contractsByPosition.get(row.id) ?? 0;
       const avgPremium =
         row.avg_premium_sold !== null ? Number(row.avg_premium_sold) : null;
       const costBasis = avgPremium !== null ? strike - avgPremium : strike;

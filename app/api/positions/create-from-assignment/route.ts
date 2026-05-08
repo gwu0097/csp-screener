@@ -79,6 +79,38 @@ export async function POST(req: NextRequest) {
   };
   const parents = (lookup.data ?? []) as Parent[];
 
+  // Compute REMAINING contracts per parent from its fill set so the
+  // share count reflects only the contracts that were actually
+  // assigned (= opened − prior closes), not the historical "ever
+  // opened" count on the row. Parents with partial-close / roll
+  // history would otherwise mint too many shares.
+  const fillsRes = await sb
+    .from("fills")
+    .select("position_id, fill_type, contracts")
+    .in("position_id", ids);
+  type FillRow = {
+    position_id: string;
+    fill_type: string;
+    contracts: number;
+  };
+  const fillsByPos = new Map<string, FillRow[]>();
+  for (const f of (fillsRes.data ?? []) as FillRow[]) {
+    const arr = fillsByPos.get(f.position_id) ?? [];
+    arr.push(f);
+    fillsByPos.set(f.position_id, arr);
+  }
+  const remainingByPos = new Map<string, number>();
+  for (const id of ids) {
+    const fills = fillsByPos.get(id) ?? [];
+    const opened = fills
+      .filter((f) => f.fill_type === "open")
+      .reduce((s, f) => s + f.contracts, 0);
+    const closed = fills
+      .filter((f) => f.fill_type === "close")
+      .reduce((s, f) => s + f.contracts, 0);
+    remainingByPos.set(id, Math.max(0, opened - closed));
+  }
+
   // Skip parents that already have a stock_long row pointing back
   // (idempotent guard against double-clicks / retries).
   const existRes = await sb
@@ -118,11 +150,14 @@ export async function POST(req: NextRequest) {
       continue;
     }
     const strike = Number(p.strike);
-    const contracts = Number(p.total_contracts ?? 0);
+    // Use REMAINING (opened − prior_closes), not total_contracts —
+    // see fills computation above. NET 7-opened/4-rolled → remaining
+    // = 3 → 300 shares. total_contracts would have produced 700.
+    const contracts = remainingByPos.get(p.id) ?? 0;
     if (contracts <= 0) {
       skipped.push({
         parentId: p.id,
-        reason: "parent has 0 contracts — nothing to create",
+        reason: "parent has 0 remaining contracts — nothing to create",
       });
       continue;
     }

@@ -9,6 +9,7 @@
 import { createServerClient } from "@/lib/supabase";
 import { recordPositionOutcome } from "@/lib/post-earnings";
 import { fetchChainSafe, pickPutContract } from "@/lib/snapshots";
+import { realizedPnl, type Fill } from "@/lib/positions";
 
 export type ExpiryClassification = "auto_expire" | "verify_assignment" | "pending";
 
@@ -225,7 +226,7 @@ export async function classifyExpiredPosition(
 
 export async function autoExpirePosition(
   positionId: string,
-): Promise<{ ok: boolean; realized_pnl: number; reason?: string }> {
+): Promise<{ ok: boolean; realized_pnl: number; contracts_closed: number; reason?: string }> {
   const sb = createServerClient();
   const posRes = await sb
     .from("positions")
@@ -233,18 +234,56 @@ export async function autoExpirePosition(
     .eq("id", positionId)
     .limit(1);
   const pos = ((posRes.data ?? []) as ExpiredOpenPosition[])[0];
-  if (!pos) return { ok: false, realized_pnl: 0, reason: "not_found" };
+  if (!pos) return { ok: false, realized_pnl: 0, contracts_closed: 0, reason: "not_found" };
 
-  const premium = Number(pos.avg_premium_sold ?? 0);
-  const contracts = Number(pos.total_contracts ?? 0);
-  const realized_pnl = computeAutoExpirePnl(premium, contracts);
+  // Compute REMAINING contracts off the fill set rather than reading
+  // total_contracts (which is the historical "ever opened" count and
+  // over-counts after partial closes / rolls).
+  const fillsRes = await sb
+    .from("fills")
+    .select("fill_type, contracts, premium, fill_date")
+    .eq("position_id", positionId);
+  const priorFills = ((fillsRes.data ?? []) as Fill[]) ?? [];
+  const opened = priorFills
+    .filter((f) => f.fill_type === "open")
+    .reduce((s, f) => s + f.contracts, 0);
+  const closedContracts = priorFills
+    .filter((f) => f.fill_type === "close")
+    .reduce((s, f) => s + f.contracts, 0);
+  const remaining = Math.max(0, opened - closedContracts);
+
+  if (remaining === 0) {
+    // Already fully closed. Surface the existing realized_pnl as a
+    // no-op so the caller can decide whether to flag this.
+    return {
+      ok: false,
+      realized_pnl: 0,
+      contracts_closed: 0,
+      reason: "no_remaining_contracts",
+    };
+  }
+
+  // Compute total realized P&L by augmenting fills with a synthetic
+  // close at premium=0 for the expiring remainder. realizedPnl()
+  // already handles the (sold − bought) × closedContracts × 100
+  // math correctly across mixed-premium close fills.
+  const augmentedFills: Fill[] = [
+    ...priorFills,
+    {
+      fill_type: "close",
+      contracts: remaining,
+      premium: 0,
+      fill_date: pos.expiry,
+    },
+  ];
+  const realized_pnl = Math.round(realizedPnl(augmentedFills) * 100) / 100;
 
   // Pull pct-from-strike from the latest snapshot so the note has the
   // number that justified the auto-close (useful for later audit).
   const { pctFromStrike } = await classifyExpiredPosition(pos);
   const pctStr =
     pctFromStrike !== null ? `${(pctFromStrike * 100).toFixed(2)}%` : "unknown";
-  const noteAdd = `Auto-expired worthless. Stock ${pctStr} OTM at last snapshot.`;
+  const noteAdd = `Auto-expired worthless (${remaining} contract${remaining === 1 ? "" : "s"}). Stock ${pctStr} OTM at last snapshot.`;
   const notes = pos.notes ? `${pos.notes} | ${noteAdd}` : noteAdd;
 
   const u = await sb
@@ -259,7 +298,7 @@ export async function autoExpirePosition(
     .eq("id", positionId);
   if (u.error) {
     console.warn(`[expire] autoExpirePosition(${positionId}) failed: ${u.error.message}`);
-    return { ok: false, realized_pnl, reason: u.error.message };
+    return { ok: false, realized_pnl, contracts_closed: remaining, reason: u.error.message };
   }
 
   try {
@@ -270,13 +309,13 @@ export async function autoExpirePosition(
     );
   }
 
-  return { ok: true, realized_pnl };
+  return { ok: true, realized_pnl, contracts_closed: remaining };
 }
 
 export async function recordAssignment(
   positionId: string,
   stockPriceAtExpiry: number,
-): Promise<{ ok: boolean; realized_pnl: number; reason?: string }> {
+): Promise<{ ok: boolean; realized_pnl: number; contracts_closed: number; reason?: string }> {
   const sb = createServerClient();
   const posRes = await sb
     .from("positions")
@@ -284,19 +323,49 @@ export async function recordAssignment(
     .eq("id", positionId)
     .limit(1);
   const pos = ((posRes.data ?? []) as ExpiredOpenPosition[])[0];
-  if (!pos) return { ok: false, realized_pnl: 0, reason: "not_found" };
+  if (!pos) return { ok: false, realized_pnl: 0, contracts_closed: 0, reason: "not_found" };
+
+  // Same remaining-from-fills logic as autoExpirePosition.
+  const fillsRes = await sb
+    .from("fills")
+    .select("fill_type, contracts, premium, fill_date")
+    .eq("position_id", positionId);
+  const priorFills = ((fillsRes.data ?? []) as Fill[]) ?? [];
+  const opened = priorFills
+    .filter((f) => f.fill_type === "open")
+    .reduce((s, f) => s + f.contracts, 0);
+  const closedContracts = priorFills
+    .filter((f) => f.fill_type === "close")
+    .reduce((s, f) => s + f.contracts, 0);
+  const remaining = Math.max(0, opened - closedContracts);
+  if (remaining === 0) {
+    return {
+      ok: false,
+      realized_pnl: 0,
+      contracts_closed: 0,
+      reason: "no_remaining_contracts",
+    };
+  }
 
   const strike = Number(pos.strike);
-  const contracts = Number(pos.total_contracts ?? 0);
-  const premium = Number(pos.avg_premium_sold ?? 0);
-  const realized_pnl = computeAssignmentPnl(
-    strike,
-    Number(stockPriceAtExpiry),
-    premium,
-    contracts,
-  );
+  const stockPrice = Number(stockPriceAtExpiry);
+  const intrinsic = Math.max(0, strike - stockPrice);
 
-  const noteAdd = `Assigned. Stock at $${Number(stockPriceAtExpiry).toFixed(2)} vs $${strike.toFixed(2)} strike. Shares received at assignment.`;
+  // Augment with a synthetic close at intrinsic for the assigned
+  // remainder so realizedPnl() blends pre-existing close fills (e.g.
+  // the 4 rolled contracts) with the just-assigned 3 cleanly.
+  const augmentedFills: Fill[] = [
+    ...priorFills,
+    {
+      fill_type: "close",
+      contracts: remaining,
+      premium: intrinsic,
+      fill_date: pos.expiry,
+    },
+  ];
+  const realized_pnl = Math.round(realizedPnl(augmentedFills) * 100) / 100;
+
+  const noteAdd = `Assigned (${remaining} contract${remaining === 1 ? "" : "s"}). Stock at $${stockPrice.toFixed(2)} vs $${strike.toFixed(2)} strike. Shares received at assignment.`;
   const notes = pos.notes ? `${pos.notes} | ${noteAdd}` : noteAdd;
 
   const u = await sb
@@ -311,7 +380,7 @@ export async function recordAssignment(
     .eq("id", positionId);
   if (u.error) {
     console.warn(`[expire] recordAssignment(${positionId}) failed: ${u.error.message}`);
-    return { ok: false, realized_pnl, reason: u.error.message };
+    return { ok: false, realized_pnl, contracts_closed: remaining, reason: u.error.message };
   }
 
   try {
@@ -322,7 +391,7 @@ export async function recordAssignment(
     );
   }
 
-  return { ok: true, realized_pnl };
+  return { ok: true, realized_pnl, contracts_closed: remaining };
 }
 
 export type AutoExpiredSummary = {

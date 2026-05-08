@@ -788,21 +788,22 @@ export async function GET(req: NextRequest) {
       string,
       { price: number | null; source: "pre" | "post" | "regular" | null }
     >();
-    if (live) {
-      await Promise.all(
-        uniqueSymbols.map(async (sym) => {
-          const q = await withTimeout(
-            getQuoteWithExtended(sym),
-            5000,
-            `stock-spot(${sym})`,
-          );
-          quoteMap.set(sym, {
-            price: q?.price ?? null,
-            source: q?.source ?? null,
-          });
-        }),
-      );
-    }
+    // Always fetch spot for stocks regardless of `live` — they're
+    // single Yahoo calls, fast, and the user expects a current
+    // unrealized P&L on every Refresh, not just on Live.
+    await Promise.all(
+      uniqueSymbols.map(async (sym) => {
+        const q = await withTimeout(
+          getQuoteWithExtended(sym),
+          5000,
+          `stock-spot(${sym})`,
+        );
+        quoteMap.set(sym, {
+          price: q?.price ?? null,
+          source: q?.source ?? null,
+        });
+      }),
+    );
     for (const r of stockRows) {
       const sym = r.symbol.toUpperCase();
       const shares = Number(
