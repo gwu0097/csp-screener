@@ -468,6 +468,61 @@ function computeBrokerStats(items: OpenPositionClientView[]): {
   };
 }
 
+// Bucket stock rows by broker key using the same broker-key
+// normalization as groupByBroker. Returned as a Map so callers can
+// look up by key while iterating the option-broker groups.
+function groupStocksByBroker(
+  stocks: StockPositionRow[],
+): Map<string, StockPositionRow[]> {
+  const groups = new Map<string, StockPositionRow[]>();
+  for (const s of stocks) {
+    const b = (s.broker ?? "").toLowerCase();
+    const key =
+      b === "schwab" || b === "schwab2" || b === "robinhood"
+        ? b
+        : b.length > 0
+          ? b
+          : "other";
+    const arr = groups.get(key) ?? [];
+    arr.push(s);
+    groups.set(key, arr);
+  }
+  return groups;
+}
+
+// Status badge for a stock row. Maps pnlPct (percent, e.g. -4.04) to
+// one of three states:
+//   GAIN  — pnlPct > 0 (above cost basis)
+//   HOLD  — within 10% below cost basis
+//   LOSS  — more than 10% below cost basis
+// pnlPct null falls back to HOLD so the cell never blanks.
+function stockStatusBadge(
+  pnlPct: number | null,
+): { label: "GAIN" | "HOLD" | "LOSS"; className: string } {
+  if (pnlPct === null || !Number.isFinite(pnlPct)) {
+    return {
+      label: "HOLD",
+      className: "border-emerald-500/40 bg-emerald-500/15 text-emerald-300",
+    };
+  }
+  if (pnlPct > 0) {
+    return {
+      label: "GAIN",
+      className: "border-emerald-500/40 bg-emerald-500/20 text-emerald-200",
+    };
+  }
+  if (pnlPct < -10) {
+    return {
+      label: "LOSS",
+      className: "border-rose-500/40 bg-rose-500/15 text-rose-200",
+    };
+  }
+  return {
+    label: "HOLD",
+    className: "border-emerald-500/40 bg-emerald-500/15 text-emerald-300",
+  };
+}
+
 function groupByBroker<T extends { broker?: string | null; remainingContracts?: number }>(
   items: T[],
 ): Array<{ key: string; label: string; items: T[]; contractCount: number }> {
@@ -911,6 +966,21 @@ export function PositionsView() {
     brokerFilter === "all"
       ? brokerGroups
       : brokerGroups.filter((g) => g.key === brokerFilter);
+  // Stocks bucketed by broker key — used to inject a "STOCK POSITIONS"
+  // subsection inside each broker panel, and to render fallback panels
+  // for any broker that has stocks but no options (orphan brokers).
+  const stocksByBrokerKey = groupStocksByBroker(data?.stockPositions ?? []);
+  const optionBrokerKeys = new Set(brokerGroups.map((g) => g.key));
+  const orphanStockBrokers: Array<{ key: string; label: string; stocks: StockPositionRow[] }> = [];
+  for (const [key, stocks] of Array.from(stocksByBrokerKey.entries())) {
+    if (optionBrokerKeys.has(key)) continue;
+    if (brokerFilter !== "all" && brokerFilter !== key) continue;
+    orphanStockBrokers.push({
+      key,
+      label: BROKER_LABEL[key] ?? key,
+      stocks,
+    });
+  }
 
   return (
     <div className="space-y-3">
@@ -1268,6 +1338,66 @@ export function PositionsView() {
                   ))}
                 </div>
               ))}
+              <BrokerStockSubsection stocks={stocksByBrokerKey.get(group.key) ?? []} />
+            </div>
+          </div>
+        );
+      })}
+
+      {/* Orphan-broker stock panels — same panel chrome as the option
+          panels but containing only the stock subsection. Renders for
+          brokers that have assigned shares but no remaining options. */}
+      {orphanStockBrokers.map((o) => {
+        const accent = accentFor(o.key);
+        const stockUnrealizedForBroker = o.stocks.reduce(
+          (s, r) => s + (r.pnlDollars ?? 0),
+          0,
+        );
+        const stockUnrealizedAvailable = o.stocks.some(
+          (r) => r.pnlDollars !== null,
+        );
+        const totalShares = o.stocks.reduce((s, r) => s + r.shares, 0);
+        return (
+          <div
+            key={`stocks-${o.key}`}
+            className={cn(
+              "overflow-hidden rounded-lg border",
+              accent.panelBorder,
+              accent.panelBg,
+            )}
+          >
+            <div className={cn("h-0.5 w-full", accent.topBar)} />
+            <div className="flex flex-wrap items-center justify-between gap-3 px-3 py-2">
+              <div className="flex items-baseline gap-3">
+                <span className={cn("text-2xl font-bold uppercase tracking-wider", accent.text)}>
+                  {o.label}
+                </span>
+                <span className="font-mono text-sm text-muted-foreground">
+                  {totalShares} {totalShares === 1 ? "share" : "shares"}
+                </span>
+              </div>
+              <div className="flex items-baseline gap-4 text-sm">
+                <div>
+                  <span className="text-muted-foreground">Unrealized </span>
+                  {stockUnrealizedAvailable ? (
+                    <span
+                      className={cn(
+                        "font-mono font-semibold",
+                        stockUnrealizedForBroker >= 0
+                          ? "text-emerald-300"
+                          : "text-rose-300",
+                      )}
+                    >
+                      {fmtDollarsSigned(stockUnrealizedForBroker)}
+                    </span>
+                  ) : (
+                    <span className="font-mono text-muted-foreground/70">—</span>
+                  )}
+                </div>
+              </div>
+            </div>
+            <div className="space-y-0.5 px-2 pb-2">
+              <BrokerStockSubsection stocks={o.stocks} />
             </div>
           </div>
         );
@@ -1355,8 +1485,6 @@ export function PositionsView() {
         )}
       </div>
 
-      <StockPositionsSection rows={data?.stockPositions ?? []} />
-
       <ImportScreenshotModal
         open={showScreenshot}
         onOpenChange={setShowScreenshot}
@@ -1373,85 +1501,203 @@ export function PositionsView() {
   );
 }
 
-// Standalone stock-positions section, rendered below the option
-// account panels. Stock rows live in the same `positions` table but
-// with position_type='stock_long' / 'stock_short'; the API splits
-// them out so the option grid doesn't have to know about them.
-function StockPositionsSection({ rows }: { rows: StockPositionRow[] }) {
-  if (!rows || rows.length === 0) return null;
+// "STOCK POSITIONS" subsection rendered inside a broker panel. Stocks
+// live in the same `positions` table (position_type='stock_long' /
+// 'stock_short'); the API splits them out so the options grid stays
+// option-only. The grid here uses COLLAPSED_ROW_GRID so columns line
+// up with the option rows above — column slots map as:
+//   Strike  → Cost basis        (always visible, right-aligned)
+//   Expiry  → Spot + AH/PM      (sm-only, right-aligned)
+//   Qty     → ×shares           (always visible, right-aligned)
+//   P&L     → P&L $             (always visible, right-aligned)
+//   POP     → % change          (always visible, right-aligned)
+//   % OTM   → empty             (sm-only)
+//   IV      → empty             (sm-only)
+//   Grade   → empty             (always visible)
+//   Status  → GAIN / HOLD / LOSS (always visible, center)
+function BrokerStockSubsection({
+  stocks,
+}: {
+  stocks: StockPositionRow[];
+}) {
+  if (stocks.length === 0) return null;
+  // Group multiple lots of the same symbol into one ticker subheader,
+  // mirroring the option ticker grouping. Combined P&L sums the lots
+  // so the user sees the per-name exposure even when shares were
+  // assigned across two transactions.
+  const byTicker = new Map<string, StockPositionRow[]>();
+  for (const s of stocks) {
+    const arr = byTicker.get(s.symbol) ?? [];
+    arr.push(s);
+    byTicker.set(s.symbol, arr);
+  }
+  const tickerGroups = Array.from(byTicker.entries()).sort(([a], [b]) =>
+    a.localeCompare(b),
+  );
+
   return (
-    <div className="rounded-lg border border-border bg-background/40 p-3">
-      <div className="mb-2 flex items-baseline justify-between">
-        <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-          Stock positions
-        </h3>
-        <span className="text-[10px] text-muted-foreground/70">
-          From assignment · live spot updates on Refresh
+    <div className="space-y-1">
+      {/* Inline divider with the section label, sitting between the
+          option rows above and the stock rows below. */}
+      <div className="flex items-center gap-2 px-2 pt-3 pb-1">
+        <div className="h-px flex-1 bg-border/50" />
+        <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+          Stock Positions
+        </span>
+        <div className="h-px flex-1 bg-border/50" />
+      </div>
+      {tickerGroups.map(([symbol, lots]) => (
+        <StockTickerGroup key={symbol} symbol={symbol} lots={lots} />
+      ))}
+    </div>
+  );
+}
+
+// Per-ticker group inside the stock subsection. Renders a TickerSubHeader-
+// style summary, then one row per lot. Most assignments produce a single
+// lot per ticker, so usually this collapses to "header + one row".
+function StockTickerGroup({
+  symbol,
+  lots,
+}: {
+  symbol: string;
+  lots: StockPositionRow[];
+}) {
+  const totalShares = lots.reduce((s, r) => s + r.shares, 0);
+  const liveLots = lots.filter((r) => r.pnlDollars !== null);
+  const combinedPnl =
+    liveLots.length > 0
+      ? liveLots.reduce((s, r) => s + (r.pnlDollars ?? 0), 0)
+      : null;
+  // All lots should share a spot price (same symbol, same fetch); use
+  // the first non-null. priceSource likewise.
+  const spot =
+    lots.find((r) => r.currentStockPrice !== null)?.currentStockPrice ?? null;
+  const priceSource =
+    lots.find((r) => r.priceSource !== null)?.priceSource ?? null;
+  const pnlCls =
+    combinedPnl === null
+      ? "text-muted-foreground"
+      : combinedPnl >= 0
+        ? "text-emerald-300"
+        : "text-rose-300";
+  return (
+    <div className="space-y-1">
+      <div className="flex items-baseline justify-between gap-2 border-t border-border/40 px-3 pt-2 pb-0.5 text-sm first:border-t-0 first:pt-1">
+        <div className="flex items-baseline gap-2">
+          <span className="text-lg font-bold tracking-wide text-foreground">
+            {symbol}
+          </span>
+          <span className="font-mono text-sm text-muted-foreground">
+            {totalShares} {totalShares === 1 ? "share" : "shares"}
+          </span>
+          {spot !== null && (
+            <span className="font-mono text-sm text-muted-foreground/80">
+              · {fmtDollars(spot)}
+              {priceSource === "post" ? " AH" : priceSource === "pre" ? " PM" : ""}
+            </span>
+          )}
+        </div>
+        <span className={cn("font-mono text-base font-semibold", pnlCls)}>
+          {fmtDollarsSigned(combinedPnl)}
         </span>
       </div>
-      <div className="space-y-1.5">
-        {rows.map((r) => {
-          const pnl = r.pnlDollars;
-          const pnlColor =
-            pnl === null
-              ? "text-muted-foreground"
-              : pnl >= 0
-                ? "text-emerald-300"
-                : "text-rose-300";
-          const sourceTag =
-            r.priceSource === "post" ? (
-              <span className="ml-1 rounded bg-amber-500/15 px-1 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-300">
-                AH
-              </span>
-            ) : r.priceSource === "pre" ? (
-              <span className="ml-1 rounded bg-sky-500/15 px-1 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-sky-300">
-                PM
-              </span>
-            ) : null;
-          return (
-            <div
-              key={r.id}
-              className="flex flex-wrap items-baseline gap-x-4 gap-y-1 rounded border border-border/60 bg-background/40 px-3 py-2 text-sm"
-            >
-              <span className="font-mono font-semibold text-foreground">
-                {r.symbol}
-              </span>
-              <span className="text-muted-foreground">
-                {r.shares} shares
-                {r.positionType === "stock_short" ? " (short)" : ""}
-              </span>
-              <span className="text-muted-foreground">
-                cost basis{" "}
-                <span className="font-mono text-foreground">
-                  ${r.costBasis !== null ? r.costBasis.toFixed(2) : "—"}
-                </span>
-              </span>
-              <span className="text-muted-foreground">
-                spot{" "}
-                <span className="font-mono text-foreground">
-                  {r.currentStockPrice !== null
-                    ? `$${r.currentStockPrice.toFixed(2)}`
-                    : "—"}
-                </span>
-                {sourceTag}
-              </span>
-              <span className={`font-mono font-semibold ${pnlColor}`}>
-                {pnl !== null
-                  ? `${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`
-                  : "—"}
-                {r.pnlPct !== null ? (
-                  <span className="ml-1 text-xs text-muted-foreground/80">
-                    ({r.pnlPct >= 0 ? "+" : ""}
-                    {r.pnlPct.toFixed(2)}%)
-                  </span>
-                ) : null}
-              </span>
-              <span className="ml-auto text-[10px] uppercase tracking-wider text-muted-foreground">
-                {r.broker}
-              </span>
-            </div>
-          );
-        })}
+      {lots.map((r) => (
+        <StockRow key={r.id} row={r} />
+      ))}
+    </div>
+  );
+}
+
+function StockRow({ row }: { row: StockPositionRow }) {
+  const pnl = row.pnlDollars;
+  const pnlColor =
+    pnl === null
+      ? "text-muted-foreground"
+      : pnl >= 0
+        ? "text-emerald-300"
+        : "text-rose-300";
+  const pctColor =
+    row.pnlPct === null
+      ? "text-muted-foreground"
+      : row.pnlPct >= 0
+        ? "text-emerald-300"
+        : "text-rose-300";
+  const dotColor =
+    pnl === null
+      ? "bg-muted-foreground/40"
+      : pnl >= 0
+        ? "bg-emerald-400"
+        : "bg-rose-400";
+  const sourceTag =
+    row.priceSource === "post" ? (
+      <span className="ml-1 rounded bg-amber-500/15 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-amber-300">
+        AH
+      </span>
+    ) : row.priceSource === "pre" ? (
+      <span className="ml-1 rounded bg-sky-500/15 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-sky-300">
+        PM
+      </span>
+    ) : null;
+  const status = stockStatusBadge(row.pnlPct);
+  const shareLabel = row.positionType === "stock_short" ? "shrt" : null;
+  return (
+    <div
+      className={cn(
+        COLLAPSED_ROW_GRID,
+        "rounded border border-border/40 bg-background/30 py-1.5",
+      )}
+    >
+      {/* col 1 — dot */}
+      <div className="flex items-center justify-center">
+        <span className={cn("h-2 w-2 rounded-full", dotColor)} />
+      </div>
+      {/* col 2 — Cost basis (Strike slot) */}
+      <div className="text-right font-mono text-foreground">
+        {row.costBasis !== null ? `$${row.costBasis.toFixed(2)}` : "—"}
+      </div>
+      {/* col 3 — Spot (Expiry slot, sm only) */}
+      <div className="hidden text-right font-mono text-foreground sm:block">
+        {row.currentStockPrice !== null
+          ? `$${row.currentStockPrice.toFixed(2)}`
+          : "—"}
+        {sourceTag}
+      </div>
+      {/* col 4 — Shares (Qty slot) */}
+      <div className="text-right font-mono text-foreground">
+        ×{row.shares}
+        {shareLabel ? (
+          <span className="ml-1 text-[10px] uppercase text-muted-foreground">
+            {shareLabel}
+          </span>
+        ) : null}
+      </div>
+      {/* col 5 — P&L */}
+      <div className={cn("text-right font-mono font-semibold", pnlColor)}>
+        {pnl !== null ? fmtDollarsSigned(pnl) : "—"}
+      </div>
+      {/* col 6 — % change (POP slot) */}
+      <div className={cn("text-right font-mono", pctColor)}>
+        {row.pnlPct !== null
+          ? `${row.pnlPct >= 0 ? "+" : ""}${row.pnlPct.toFixed(2)}%`
+          : "—"}
+      </div>
+      {/* col 7 — empty (% OTM slot, sm only) */}
+      <div className="hidden sm:block" />
+      {/* col 8 — empty (IV slot, sm only) */}
+      <div className="hidden sm:block" />
+      {/* col 9 — empty (Grade slot) */}
+      <div />
+      {/* col 10 — Status badge */}
+      <div className="flex items-center justify-center">
+        <span
+          className={cn(
+            "rounded border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider",
+            status.className,
+          )}
+        >
+          {status.label}
+        </span>
       </div>
     </div>
   );
