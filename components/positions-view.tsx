@@ -19,10 +19,6 @@ import {
 } from "@/components/expire-confirmation-modal";
 import { UndoImportPopover } from "@/components/undo-import-popover";
 import type { ConfirmItem } from "@/components/expire-confirmation-modal";
-import {
-  AssignmentStockPromptModal,
-  type AssignmentRow,
-} from "@/components/assignment-stock-prompt-modal";
 
 type SortKey =
   | "strike"
@@ -641,11 +637,6 @@ export function PositionsView() {
   const [pendingConfirmation, setPendingConfirmation] = useState<
     PendingConfirmationRow[]
   >([]);
-  // Populated by confirmExpireWorthless when /api/positions/confirm-expire
-  // returns assignments[]. Drives the follow-up
-  // AssignmentStockPromptModal where the user picks which assignments to
-  // auto-create a stock_long row for.
-  const [assignmentRows, setAssignmentRows] = useState<AssignmentRow[]>([]);
   const [modalOpen, setModalOpen] = useState(false);
   const [permanentlyDismissed, setPermanentlyDismissed] = useState<boolean>(
     () => {
@@ -747,11 +738,28 @@ export function PositionsView() {
   }
 
   async function confirmExpireWorthless(items: ConfirmItem[]) {
+    // Single-action flow: the modal collects worthless / assigned /
+    // create-stock intent per row, then this handler dispatches both
+    // confirm-expire and (if any rows opted in) create-from-assignment
+    // back-to-back. The user sees one Confirm click → one toast.
     try {
+      const stockTargetIds = new Set(
+        items.filter((i) => i.createStock && i.action === "assigned").map(
+          (i) => i.positionId,
+        ),
+      );
+      // Strip createStock from the payload — the server doesn't need
+      // it; it's a client-side intent for the follow-up call.
+      const apiItems = items.map((i) => ({
+        positionId: i.positionId,
+        action: i.action,
+        stockPrice: i.stockPrice,
+      }));
+
       const res = await fetch("/api/positions/confirm-expire", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ items }),
+        body: JSON.stringify({ items: apiItems }),
         cache: "no-store",
       });
       const json = (await res.json()) as
@@ -760,7 +768,7 @@ export function PositionsView() {
             assignedCount: number;
             failedCount: number;
             totalRealizedPnl: number;
-            assignments?: AssignmentRow[];
+            assignments?: Array<{ positionId: string }>;
           }
         | { error: string };
       if (!res.ok || "error" in json) {
@@ -768,27 +776,59 @@ export function PositionsView() {
         setError(`Confirm expire failed: ${msg}`);
         return;
       }
+
+      // Step 2 (chained): create stock positions for the rows the
+      // user opted into. Filter to ids that actually became
+      // assigned this round-trip — protects against race conditions
+      // where assignment fails server-side.
+      let stockSummary = "";
+      const successfullyAssigned = new Set(
+        (json.assignments ?? []).map((a) => a.positionId),
+      );
+      const toCreate = Array.from(stockTargetIds).filter((id) =>
+        successfullyAssigned.has(id),
+      );
+      if (toCreate.length > 0) {
+        try {
+          const sres = await fetch("/api/positions/create-from-assignment", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              items: toCreate.map((id) => ({ assignedPositionId: id })),
+            }),
+            cache: "no-store",
+          });
+          const sjson = (await sres.json()) as {
+            created_count?: number;
+            skipped_count?: number;
+            error?: string;
+          };
+          if (sres.ok && !sjson.error) {
+            const c = sjson.created_count ?? 0;
+            const sk = sjson.skipped_count ?? 0;
+            stockSummary = ` · ${c} stock position${c === 1 ? "" : "s"} created${
+              sk > 0 ? ` (${sk} skipped)` : ""
+            }`;
+          } else {
+            stockSummary = ` · stock create failed: ${sjson.error ?? `HTTP ${sres.status}`}`;
+          }
+        } catch (e) {
+          stockSummary = ` · stock create failed: ${e instanceof Error ? e.message : "network error"}`;
+        }
+      }
+
       const sign = json.totalRealizedPnl >= 0 ? "+" : "";
       const failedSuffix =
         json.failedCount > 0 ? ` · ${json.failedCount} failed` : "";
       const parts: string[] = [];
-      if (json.expiredCount > 0) {
-        parts.push(
-          `${json.expiredCount} expired worthless`,
-        );
-      }
-      if (json.assignedCount > 0) {
+      if (json.expiredCount > 0)
+        parts.push(`${json.expiredCount} expired worthless`);
+      if (json.assignedCount > 0)
         parts.push(`${json.assignedCount} assigned`);
-      }
       const summary = parts.join(" · ") || "0 closed";
       setMessage(
-        `✓ ${summary} · ${sign}$${json.totalRealizedPnl.toFixed(2)} P&L locked in${failedSuffix}`,
+        `✓ ${summary} · ${sign}$${json.totalRealizedPnl.toFixed(2)} P&L${failedSuffix}${stockSummary}`,
       );
-      // Stage the follow-up stock-creation prompt. Cleared after the
-      // user confirms or dismisses the AssignmentStockPromptModal.
-      if (json.assignments && json.assignments.length > 0) {
-        setAssignmentRows(json.assignments);
-      }
     } catch (e) {
       setError(
         `Confirm expire failed: ${e instanceof Error ? e.message : "network error"}`,
@@ -798,50 +838,6 @@ export function PositionsView() {
       // list from the server; if the user partial-confirmed, leftover
       // rows feed the banner.
       permanentDismissModal();
-      await load(false);
-    }
-  }
-
-  // After-confirm handler for the AssignmentStockPromptModal. Posts
-  // the picked assignment IDs to /api/positions/create-from-assignment
-  // which inserts stock_long rows (cost basis = strike − avg
-  // premium). Refreshes the positions list and closes the prompt.
-  async function createStockFromAssignment(positionIds: string[]) {
-    try {
-      const res = await fetch("/api/positions/create-from-assignment", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          items: positionIds.map((id) => ({ assignedPositionId: id })),
-        }),
-        cache: "no-store",
-      });
-      const json = (await res.json()) as {
-        created_count?: number;
-        skipped_count?: number;
-        skipped?: Array<{ reason: string }>;
-        error?: string;
-      };
-      if (!res.ok || json.error) {
-        throw new Error(json.error ?? `HTTP ${res.status}`);
-      }
-      const created = json.created_count ?? 0;
-      const skipped = json.skipped_count ?? 0;
-      const skipNote =
-        skipped > 0
-          ? ` · ${skipped} skipped (${(json.skipped ?? [])
-              .map((s) => s.reason)
-              .join(", ")})`
-          : "";
-      setMessage(
-        `✓ Created ${created} stock position${created === 1 ? "" : "s"} from assignment${skipNote}`,
-      );
-    } catch (e) {
-      setError(
-        `Stock create failed: ${e instanceof Error ? e.message : "network error"}`,
-      );
-    } finally {
-      setAssignmentRows([]);
       await load(false);
     }
   }
@@ -1364,12 +1360,6 @@ export function PositionsView() {
         rows={pendingConfirmation}
         onCancel={softDismissModal}
         onConfirm={confirmExpireWorthless}
-      />
-      <AssignmentStockPromptModal
-        open={assignmentRows.length > 0}
-        rows={assignmentRows}
-        onCancel={() => setAssignmentRows([])}
-        onConfirm={createStockFromAssignment}
       />
     </div>
   );

@@ -38,6 +38,10 @@ export type ConfirmItem = {
   positionId: string;
   action: "worthless" | "assigned";
   stockPrice: number | null;
+  // Only meaningful when action='assigned'. When true, the parent
+  // chains a follow-up call to /api/positions/create-from-assignment
+  // for this id. Default for assigned rows = true.
+  createStock?: boolean;
 };
 
 const BROKER_LABEL: Record<string, string> = {
@@ -64,10 +68,15 @@ function fmtPctOtm(p: number | null): string {
   return `${pct > 0 ? "+" : ""}${pct.toFixed(1)}% OTM`;
 }
 
-// Anything strictly above 5% OTM is in the safe-to-close band; null
-// or below counts as "verify" so the user explicitly opts in.
-function isWorthlessSafe(p: number | null): boolean {
-  return p !== null && Number.isFinite(p) && p > 0.05;
+// Deterministic ITM/OTM rule for puts:
+//   stockPrice > strike  → expired worthless
+//   stockPrice <= strike → assigned
+// Rows with no stockPrice (Yahoo + Schwab both failed) default to
+// 'assigned' as the defensive choice — better to mis-tag as a no-op
+// assignment than silently let a real assignment slip through as
+// worthless.
+function isExpiredWorthless(r: PendingConfirmationRow): boolean {
+  return r.stockPrice !== null && r.stockPrice > r.strike;
 }
 
 type Props = {
@@ -89,8 +98,22 @@ export function ExpireConfirmationModal({ open, rows, onCancel, onConfirm }: Pro
   const [selectedIds, setSelectedIds] = useState<Set<string>>(
     () => new Set(rows.map((r) => r.positionId)),
   );
+  // Per-row "Create stock position from this assignment" checkbox.
+  // Default-checked for every row currently labeled assigned. Reset
+  // alongside the main selection whenever the row set changes.
+  const [createStockIds, setCreateStockIds] = useState<Set<string>>(
+    () =>
+      new Set(
+        rows.filter((r) => !isExpiredWorthless(r)).map((r) => r.positionId),
+      ),
+  );
   useEffect(() => {
     setSelectedIds(new Set(rows.map((r) => r.positionId)));
+    setCreateStockIds(
+      new Set(
+        rows.filter((r) => !isExpiredWorthless(r)).map((r) => r.positionId),
+      ),
+    );
   }, [rows]);
 
   // Sort the broker buckets in canonical order (Schwab first, then
@@ -125,6 +148,14 @@ export function ExpireConfirmationModal({ open, rows, onCancel, onConfirm }: Pro
       return next;
     });
   }
+  function toggleCreateStock(id: string) {
+    setCreateStockIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
 
   const allChecked = selectedIds.size === rows.length && rows.length > 0;
   const noneChecked = selectedIds.size === 0;
@@ -132,8 +163,14 @@ export function ExpireConfirmationModal({ open, rows, onCancel, onConfirm }: Pro
   const selectedContracts = rows
     .filter((r) => selectedIds.has(r.positionId))
     .reduce((s, r) => s + r.totalContracts, 0);
-  const verifyCount = rows.filter(
-    (r) => selectedIds.has(r.positionId) && !isWorthlessSafe(r.pctFromStrike),
+  const assignedCount = rows.filter(
+    (r) => selectedIds.has(r.positionId) && !isExpiredWorthless(r),
+  ).length;
+  const createStockCount = rows.filter(
+    (r) =>
+      selectedIds.has(r.positionId) &&
+      !isExpiredWorthless(r) &&
+      createStockIds.has(r.positionId),
   ).length;
 
   async function handleConfirm() {
@@ -142,11 +179,15 @@ export function ExpireConfirmationModal({ open, rows, onCancel, onConfirm }: Pro
     try {
       const items: ConfirmItem[] = rows
         .filter((r) => selectedIds.has(r.positionId))
-        .map((r) => ({
-          positionId: r.positionId,
-          action: isWorthlessSafe(r.pctFromStrike) ? "worthless" : "assigned",
-          stockPrice: r.stockPrice,
-        }));
+        .map((r) => {
+          const worthless = isExpiredWorthless(r);
+          return {
+            positionId: r.positionId,
+            action: worthless ? "worthless" : "assigned",
+            stockPrice: r.stockPrice,
+            createStock: !worthless && createStockIds.has(r.positionId),
+          };
+        });
       await onConfirm(items);
     } finally {
       setSubmitting(false);
@@ -200,49 +241,95 @@ export function ExpireConfirmationModal({ open, rows, onCancel, onConfirm }: Pro
               <div className="text-xs font-bold uppercase tracking-wider text-foreground/80">
                 {g.label}
               </div>
-              <ul className="space-y-1 rounded border border-border bg-background/40 px-3 py-2 text-sm">
+              <ul className="space-y-1.5 rounded border border-border bg-background/40 px-3 py-2 text-sm">
                 {g.items.map((r) => {
-                  const safe = isWorthlessSafe(r.pctFromStrike);
+                  const worthless = isExpiredWorthless(r);
                   const checked = selectedIds.has(r.positionId);
+                  const wantStock = createStockIds.has(r.positionId);
+                  // Cost basis = strike − avg entry premium per share.
+                  // Falls back to just strike when we don't have an
+                  // entry premium recorded.
+                  const avgPremium: number | null =
+                    typeof r.avgPremiumSold === "number" &&
+                    Number.isFinite(r.avgPremiumSold)
+                      ? r.avgPremiumSold
+                      : null;
+                  const costBasis =
+                    avgPremium !== null ? r.strike - avgPremium : r.strike;
+                  const shares = r.totalContracts * 100;
                   return (
                     <li
                       key={r.positionId}
-                      className="flex items-center justify-between gap-3 font-mono"
+                      className="space-y-1 font-mono"
                     >
-                      <label className="flex flex-1 cursor-pointer items-center gap-2">
-                        <input
-                          type="checkbox"
-                          className="h-4 w-4 cursor-pointer accent-emerald-500"
-                          checked={checked}
-                          onChange={() => toggle(r.positionId)}
-                          disabled={submitting}
-                        />
-                        <span>
-                          <span className="font-semibold text-foreground">{r.symbol}</span>{" "}
-                          <span className="text-muted-foreground">
-                            ${r.strike}P {shortExpiry(r.expiry)} ×{r.totalContracts}
+                      <div className="flex items-center justify-between gap-3">
+                        <label className="flex flex-1 cursor-pointer items-center gap-2">
+                          <input
+                            type="checkbox"
+                            className="h-4 w-4 cursor-pointer accent-emerald-500"
+                            checked={checked}
+                            onChange={() => toggle(r.positionId)}
+                            disabled={submitting}
+                          />
+                          <span>
+                            <span className="font-semibold text-foreground">{r.symbol}</span>{" "}
+                            <span className="text-muted-foreground">
+                              ${r.strike}P {shortExpiry(r.expiry)} ×{r.totalContracts}
+                            </span>
                           </span>
-                        </span>
-                      </label>
-                      <span className="flex items-center gap-2 whitespace-nowrap">
-                        <span className={safe ? "text-emerald-300" : "text-amber-300"}>
-                          {fmtPctOtm(r.pctFromStrike)}
-                        </span>
-                        {safe ? (
-                          <span className="inline-flex items-center gap-1 rounded bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-emerald-300">
-                            <CheckCircle2 className="h-3 w-3" />
-                            Worthless
+                        </label>
+                        <span className="flex items-center gap-2 whitespace-nowrap">
+                          <span className={worthless ? "text-emerald-300" : "text-amber-300"}>
+                            {fmtPctOtm(r.pctFromStrike)}
                           </span>
-                        ) : (
-                          <span
-                            className="inline-flex items-center gap-1 rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-amber-200"
-                            title="Position is within 5% of strike — likely ITM. Confirming will record an assignment with intrinsic-value P&L."
+                          {worthless ? (
+                            <span className="inline-flex items-center gap-1 rounded bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-emerald-300">
+                              <CheckCircle2 className="h-3 w-3" />
+                              Worthless
+                            </span>
+                          ) : (
+                            <span
+                              className="inline-flex items-center gap-1 rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-amber-200"
+                              title="Stock at or below strike — position will be recorded as assigned with intrinsic-value P&L."
+                            >
+                              <AlertTriangle className="h-3 w-3" />
+                              Assigned
+                            </span>
+                          )}
+                        </span>
+                      </div>
+                      {!worthless && (
+                        <div className="ml-6 space-y-0.5 text-xs">
+                          <div className="text-muted-foreground">
+                            Cost basis = ${r.strike.toFixed(2)} −{" "}
+                            {avgPremium !== null
+                              ? `$${avgPremium.toFixed(2)}`
+                              : "—"}{" "}
+                            ={" "}
+                            <span className="text-foreground">
+                              ${costBasis.toFixed(2)}
+                            </span>
+                            /share
+                          </div>
+                          <label
+                            className={`flex cursor-pointer items-center gap-2 ${
+                              checked ? "text-foreground/90" : "text-muted-foreground/60"
+                            }`}
                           >
-                            <AlertTriangle className="h-3 w-3" />
-                            Assign
-                          </span>
-                        )}
-                      </span>
+                            <input
+                              type="checkbox"
+                              className="h-3.5 w-3.5 cursor-pointer accent-emerald-500"
+                              checked={wantStock}
+                              onChange={() => toggleCreateStock(r.positionId)}
+                              disabled={submitting || !checked}
+                            />
+                            <span>
+                              Create {shares} shares of {r.symbol} at{" "}
+                              <span className="font-mono">${costBasis.toFixed(2)}</span>
+                            </span>
+                          </label>
+                        </div>
+                      )}
                     </li>
                   );
                 })}
@@ -254,10 +341,17 @@ export function ExpireConfirmationModal({ open, rows, onCancel, onConfirm }: Pro
         <div className="shrink-0 rounded border border-border bg-background/40 px-3 py-1.5 text-xs text-muted-foreground">
           {selectedCount} position{selectedCount === 1 ? "" : "s"} ·{" "}
           {selectedContracts} contract{selectedContracts === 1 ? "" : "s"}
-          {verifyCount > 0 ? (
-            <> · <span className="text-amber-300">{verifyCount} will record as assigned (intrinsic P&L)</span></>
+          {assignedCount > 0 ? (
+            <>
+              {" "}·{" "}
+              <span className="text-amber-300">
+                {assignedCount} assigned
+                {createStockCount > 0
+                  ? ` · ${createStockCount} stock position${createStockCount === 1 ? "" : "s"} will be created`
+                  : ""}
+              </span>
+            </>
           ) : null}
-          {" "}· Worthless rows credit full premium; assigned rows use strike − stock price.
         </div>
 
         <DialogFooter className="shrink-0">
