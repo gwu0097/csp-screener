@@ -36,7 +36,7 @@ export function EquityCurve({ points, range }: Props) {
     // curve's shape within the window is harder to read.
     const windowed = points.filter((p) => p.date >= cutoff);
     if (windowed.length === 0) return windowed;
-    const base = windowed[0].cumPnl - windowed[0].pnl;
+    const base = windowed[0].cumPnl;
     return windowed.map((p) => ({ ...p, cumPnl: p.cumPnl - base }));
   }, [points, range]);
 
