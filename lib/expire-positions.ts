@@ -580,6 +580,16 @@ export async function runAutoExpire(): Promise<AutoExpireReport> {
       .filter((f) => f.fill_type === "close")
       .reduce((s, f) => s + f.contracts, 0);
     const remaining = Math.max(0, opened - closed);
+    // Skip rows with no remaining contracts. Phantom rows (strike=0,
+    // total_contracts=0) and fully-closed-but-still-flagged-open rows
+    // would otherwise surface in the modal as "$0P ×0 contracts" and
+    // trigger the expiry banner with nothing actionable behind it.
+    if (remaining === 0) {
+      console.log(
+        `[expire] skipping ${p.symbol} ${p.strike} — 0 remaining contracts`,
+      );
+      continue;
+    }
     // Average open premium across all open fills (contracts-weighted).
     const openContractTotal = opened;
     const openDollarTotal = positionFills
