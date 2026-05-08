@@ -239,7 +239,20 @@ export async function GET(req: NextRequest) {
   if (pErr) {
     return NextResponse.json({ error: pErr.message }, { status: 500 });
   }
-  const positionsList = (posRows ?? []) as PositionRow[];
+  const allRows = (posRows ?? []) as PositionRow[];
+
+  // Partition by position_type. Pre-migration rows have NULL
+  // position_type and are treated as options (the original meaning
+  // of the table). Stock rows are surfaced via a separate
+  // stockPositions[] in the response so the UI can render them in a
+  // dedicated section without the option-specific columns.
+  const positionsList: PositionRow[] = [];
+  const stockRows: PositionRow[] = [];
+  for (const r of allRows) {
+    const t = (r as unknown as { position_type?: string | null }).position_type;
+    if (t === "stock_long" || t === "stock_short") stockRows.push(r);
+    else positionsList.push(r);
+  }
 
   // Fetch all fills for these positions in one call.
   const positionIds = positionsList.map((p) => p.id);
@@ -746,9 +759,101 @@ export async function GET(req: NextRequest) {
     return a.dte - b.dte;
   });
 
+  // Stock positions (assigned shares, etc.) — fetch live spot once
+  // per unique symbol and zip into the response. No chain lookup
+  // (stocks don't have one). Cost basis is stored as
+  // entry_stock_price; total_contracts on a stock row holds the
+  // share count.
+  type StockOut = {
+    id: string;
+    symbol: string;
+    broker: string;
+    positionType: "stock_long" | "stock_short";
+    shares: number;
+    costBasis: number | null;
+    currentStockPrice: number | null;
+    priceSource: "pre" | "post" | "regular" | null;
+    pnlDollars: number | null;
+    pnlPct: number | null;
+    openedDate: string | null;
+    notes: string | null;
+    assignmentSourceId: string | null;
+  };
+  const stockPositions: StockOut[] = [];
+  if (stockRows.length > 0) {
+    const uniqueSymbols = Array.from(
+      new Set(stockRows.map((r) => r.symbol.toUpperCase())),
+    );
+    const quoteMap = new Map<
+      string,
+      { price: number | null; source: "pre" | "post" | "regular" | null }
+    >();
+    if (live) {
+      await Promise.all(
+        uniqueSymbols.map(async (sym) => {
+          const q = await withTimeout(
+            getQuoteWithExtended(sym),
+            5000,
+            `stock-spot(${sym})`,
+          );
+          quoteMap.set(sym, {
+            price: q?.price ?? null,
+            source: q?.source ?? null,
+          });
+        }),
+      );
+    }
+    for (const r of stockRows) {
+      const sym = r.symbol.toUpperCase();
+      const shares = Number(
+        (r as unknown as { total_contracts: number }).total_contracts ?? 0,
+      );
+      const costBasis =
+        (r as unknown as { entry_stock_price?: number | null })
+          .entry_stock_price ?? null;
+      const q = quoteMap.get(sym) ?? { price: null, source: null };
+      const direction =
+        (r as unknown as { position_type?: string }).position_type ===
+        "stock_short"
+          ? "stock_short"
+          : "stock_long";
+      const pnl =
+        q.price !== null && costBasis !== null
+          ? direction === "stock_long"
+            ? (q.price - costBasis) * shares
+            : (costBasis - q.price) * shares
+          : null;
+      const pnlPct =
+        pnl !== null && costBasis !== null && costBasis > 0
+          ? (pnl / (costBasis * shares)) * 100
+          : null;
+      stockPositions.push({
+        id: r.id,
+        symbol: r.symbol,
+        broker:
+          (r as unknown as { broker?: string }).broker ?? "schwab",
+        positionType: direction,
+        shares,
+        costBasis: costBasis !== null ? Number(costBasis) : null,
+        currentStockPrice: q.price,
+        priceSource: q.source,
+        pnlDollars: pnl !== null ? Math.round(pnl * 100) / 100 : null,
+        pnlPct: pnlPct !== null ? Math.round(pnlPct * 100) / 100 : null,
+        openedDate:
+          (r as unknown as { opened_date?: string | null }).opened_date ?? null,
+        notes:
+          (r as unknown as { notes?: string | null }).notes ?? null,
+        assignmentSourceId:
+          (r as unknown as { assignment_source_id?: string | null })
+            .assignment_source_id ?? null,
+      });
+    }
+  }
+
   return NextResponse.json({
     market,
     positions,
+    stockPositions,
     opportunityAvailable,
     live,
     expireReport,

@@ -3,6 +3,7 @@ import {
   autoExpirePosition,
   recordAssignment,
 } from "@/lib/expire-positions";
+import { createServerClient } from "@/lib/supabase";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -128,11 +129,68 @@ export async function POST(req: NextRequest) {
   ).length;
   const assignedCount = ok.filter((r) => r.action === "assigned").length;
 
+  // For every successful assignment, look up the put's strike + avg
+  // entry premium + contracts so the UI can render the
+  // stock-position prompt without a second round-trip.
+  // costBasis = strike − avg_premium_per_share. Shares = contracts × 100.
+  const assignedIds = ok
+    .filter((r) => r.action === "assigned")
+    .map((r) => r.positionId);
+  type AssignmentDetail = {
+    positionId: string;
+    symbol: string;
+    broker: string | null;
+    strike: number;
+    contracts: number;
+    avgPremiumSold: number | null;
+    costBasis: number;
+    shares: number;
+    expiry: string;
+  };
+  const assignments: AssignmentDetail[] = [];
+  if (assignedIds.length > 0) {
+    const sb = createServerClient();
+    const detailRes = await sb
+      .from("positions")
+      .select(
+        "id,symbol,broker,strike,expiry,total_contracts,avg_premium_sold",
+      )
+      .in("id", assignedIds);
+    type Row = {
+      id: string;
+      symbol: string;
+      broker: string | null;
+      strike: number;
+      expiry: string;
+      total_contracts: number | null;
+      avg_premium_sold: number | null;
+    };
+    for (const row of (detailRes.data ?? []) as Row[]) {
+      const strike = Number(row.strike);
+      const contracts = Number(row.total_contracts ?? 0);
+      const avgPremium =
+        row.avg_premium_sold !== null ? Number(row.avg_premium_sold) : null;
+      const costBasis = avgPremium !== null ? strike - avgPremium : strike;
+      assignments.push({
+        positionId: row.id,
+        symbol: row.symbol,
+        broker: row.broker ?? null,
+        strike,
+        contracts,
+        avgPremiumSold: avgPremium,
+        costBasis: Math.round(costBasis * 100) / 100,
+        shares: contracts * 100,
+        expiry: row.expiry,
+      });
+    }
+  }
+
   return NextResponse.json({
     expiredCount,
     assignedCount,
     failedCount: failed.length,
     totalRealizedPnl: Math.round(totalPnl * 100) / 100,
     results,
+    assignments,
   });
 }

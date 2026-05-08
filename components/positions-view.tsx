@@ -19,6 +19,10 @@ import {
 } from "@/components/expire-confirmation-modal";
 import { UndoImportPopover } from "@/components/undo-import-popover";
 import type { ConfirmItem } from "@/components/expire-confirmation-modal";
+import {
+  AssignmentStockPromptModal,
+  type AssignmentRow,
+} from "@/components/assignment-stock-prompt-modal";
 
 type SortKey =
   | "strike"
@@ -524,9 +528,26 @@ type ExpireReport = {
   skipReason?: string;
 };
 
+export type StockPositionRow = {
+  id: string;
+  symbol: string;
+  broker: string;
+  positionType: "stock_long" | "stock_short";
+  shares: number;
+  costBasis: number | null;
+  currentStockPrice: number | null;
+  priceSource: "pre" | "post" | "regular" | null;
+  pnlDollars: number | null;
+  pnlPct: number | null;
+  openedDate: string | null;
+  notes: string | null;
+  assignmentSourceId: string | null;
+};
+
 type PositionsResponse = {
   market: MarketContext;
   positions: OpenPositionClientView[];
+  stockPositions?: StockPositionRow[];
   opportunityAvailable: boolean;
   live: boolean;
   expireReport?: ExpireReport;
@@ -620,6 +641,11 @@ export function PositionsView() {
   const [pendingConfirmation, setPendingConfirmation] = useState<
     PendingConfirmationRow[]
   >([]);
+  // Populated by confirmExpireWorthless when /api/positions/confirm-expire
+  // returns assignments[]. Drives the follow-up
+  // AssignmentStockPromptModal where the user picks which assignments to
+  // auto-create a stock_long row for.
+  const [assignmentRows, setAssignmentRows] = useState<AssignmentRow[]>([]);
   const [modalOpen, setModalOpen] = useState(false);
   const [permanentlyDismissed, setPermanentlyDismissed] = useState<boolean>(
     () => {
@@ -734,6 +760,7 @@ export function PositionsView() {
             assignedCount: number;
             failedCount: number;
             totalRealizedPnl: number;
+            assignments?: AssignmentRow[];
           }
         | { error: string };
       if (!res.ok || "error" in json) {
@@ -757,6 +784,11 @@ export function PositionsView() {
       setMessage(
         `✓ ${summary} · ${sign}$${json.totalRealizedPnl.toFixed(2)} P&L locked in${failedSuffix}`,
       );
+      // Stage the follow-up stock-creation prompt. Cleared after the
+      // user confirms or dismisses the AssignmentStockPromptModal.
+      if (json.assignments && json.assignments.length > 0) {
+        setAssignmentRows(json.assignments);
+      }
     } catch (e) {
       setError(
         `Confirm expire failed: ${e instanceof Error ? e.message : "network error"}`,
@@ -766,6 +798,50 @@ export function PositionsView() {
       // list from the server; if the user partial-confirmed, leftover
       // rows feed the banner.
       permanentDismissModal();
+      await load(false);
+    }
+  }
+
+  // After-confirm handler for the AssignmentStockPromptModal. Posts
+  // the picked assignment IDs to /api/positions/create-from-assignment
+  // which inserts stock_long rows (cost basis = strike − avg
+  // premium). Refreshes the positions list and closes the prompt.
+  async function createStockFromAssignment(positionIds: string[]) {
+    try {
+      const res = await fetch("/api/positions/create-from-assignment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          items: positionIds.map((id) => ({ assignedPositionId: id })),
+        }),
+        cache: "no-store",
+      });
+      const json = (await res.json()) as {
+        created_count?: number;
+        skipped_count?: number;
+        skipped?: Array<{ reason: string }>;
+        error?: string;
+      };
+      if (!res.ok || json.error) {
+        throw new Error(json.error ?? `HTTP ${res.status}`);
+      }
+      const created = json.created_count ?? 0;
+      const skipped = json.skipped_count ?? 0;
+      const skipNote =
+        skipped > 0
+          ? ` · ${skipped} skipped (${(json.skipped ?? [])
+              .map((s) => s.reason)
+              .join(", ")})`
+          : "";
+      setMessage(
+        `✓ Created ${created} stock position${created === 1 ? "" : "s"} from assignment${skipNote}`,
+      );
+    } catch (e) {
+      setError(
+        `Stock create failed: ${e instanceof Error ? e.message : "network error"}`,
+      );
+    } finally {
+      setAssignmentRows([]);
       await load(false);
     }
   }
@@ -1275,6 +1351,8 @@ export function PositionsView() {
         )}
       </div>
 
+      <StockPositionsSection rows={data?.stockPositions ?? []} />
+
       <ImportScreenshotModal
         open={showScreenshot}
         onOpenChange={setShowScreenshot}
@@ -1287,6 +1365,96 @@ export function PositionsView() {
         onCancel={softDismissModal}
         onConfirm={confirmExpireWorthless}
       />
+      <AssignmentStockPromptModal
+        open={assignmentRows.length > 0}
+        rows={assignmentRows}
+        onCancel={() => setAssignmentRows([])}
+        onConfirm={createStockFromAssignment}
+      />
+    </div>
+  );
+}
+
+// Standalone stock-positions section, rendered below the option
+// account panels. Stock rows live in the same `positions` table but
+// with position_type='stock_long' / 'stock_short'; the API splits
+// them out so the option grid doesn't have to know about them.
+function StockPositionsSection({ rows }: { rows: StockPositionRow[] }) {
+  if (!rows || rows.length === 0) return null;
+  return (
+    <div className="rounded-lg border border-border bg-background/40 p-3">
+      <div className="mb-2 flex items-baseline justify-between">
+        <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+          Stock positions
+        </h3>
+        <span className="text-[10px] text-muted-foreground/70">
+          From assignment · live spot updates on Refresh
+        </span>
+      </div>
+      <div className="space-y-1.5">
+        {rows.map((r) => {
+          const pnl = r.pnlDollars;
+          const pnlColor =
+            pnl === null
+              ? "text-muted-foreground"
+              : pnl >= 0
+                ? "text-emerald-300"
+                : "text-rose-300";
+          const sourceTag =
+            r.priceSource === "post" ? (
+              <span className="ml-1 rounded bg-amber-500/15 px-1 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-300">
+                AH
+              </span>
+            ) : r.priceSource === "pre" ? (
+              <span className="ml-1 rounded bg-sky-500/15 px-1 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-sky-300">
+                PM
+              </span>
+            ) : null;
+          return (
+            <div
+              key={r.id}
+              className="flex flex-wrap items-baseline gap-x-4 gap-y-1 rounded border border-border/60 bg-background/40 px-3 py-2 text-sm"
+            >
+              <span className="font-mono font-semibold text-foreground">
+                {r.symbol}
+              </span>
+              <span className="text-muted-foreground">
+                {r.shares} shares
+                {r.positionType === "stock_short" ? " (short)" : ""}
+              </span>
+              <span className="text-muted-foreground">
+                cost basis{" "}
+                <span className="font-mono text-foreground">
+                  ${r.costBasis !== null ? r.costBasis.toFixed(2) : "—"}
+                </span>
+              </span>
+              <span className="text-muted-foreground">
+                spot{" "}
+                <span className="font-mono text-foreground">
+                  {r.currentStockPrice !== null
+                    ? `$${r.currentStockPrice.toFixed(2)}`
+                    : "—"}
+                </span>
+                {sourceTag}
+              </span>
+              <span className={`font-mono font-semibold ${pnlColor}`}>
+                {pnl !== null
+                  ? `${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`
+                  : "—"}
+                {r.pnlPct !== null ? (
+                  <span className="ml-1 text-xs text-muted-foreground/80">
+                    ({r.pnlPct >= 0 ? "+" : ""}
+                    {r.pnlPct.toFixed(2)}%)
+                  </span>
+                ) : null}
+              </span>
+              <span className="ml-auto text-[10px] uppercase tracking-wider text-muted-foreground">
+                {r.broker}
+              </span>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
