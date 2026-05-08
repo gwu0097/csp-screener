@@ -395,6 +395,98 @@ export function PerformanceSection({
   const { stats, equity_curve } = data;
   const pnlColor = stats.total_pnl >= 0 ? "text-emerald-300" : "text-rose-300";
 
+  // Equity curve mode. 'realized' (default) plots cumulative
+  // realized P&L exactly as before. 'total' fetches today's open
+  // positions (options + stocks), sums unrealized, and appends a
+  // "Now" point to the curve so the user sees realized + mark-to-
+  // market exposure on one chart. Fetched once per toggle to total.
+  const [mode, setMode] = useState<"realized" | "total">("realized");
+  const [unrealized, setUnrealized] = useState<{
+    optionsUnrealized: number;
+    stockUnrealized: number;
+    optionsCount: number;
+    stockCount: number;
+  } | null>(null);
+  const [unrealizedLoading, setUnrealizedLoading] = useState(false);
+  const [unrealizedError, setUnrealizedError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (mode !== "total" || unrealized !== null) return;
+    let cancelled = false;
+    setUnrealizedLoading(true);
+    setUnrealizedError(null);
+    void (async () => {
+      try {
+        // live=true so option marks are fresh; stocks always fetch
+        // spot regardless of the live flag (see open route).
+        const res = await fetch("/api/positions/open?live=true", {
+          cache: "no-store",
+        });
+        const json = (await res.json()) as {
+          positions?: Array<{ pnlDollars: number | null }>;
+          stockPositions?: Array<{ pnlDollars: number | null }>;
+          error?: string;
+        };
+        if (cancelled) return;
+        if (!res.ok || json.error) {
+          throw new Error(json.error ?? `HTTP ${res.status}`);
+        }
+        const opts = json.positions ?? [];
+        const stocks = json.stockPositions ?? [];
+        setUnrealized({
+          optionsUnrealized: opts.reduce(
+            (s, p) => s + (p.pnlDollars ?? 0),
+            0,
+          ),
+          stockUnrealized: stocks.reduce(
+            (s, p) => s + (p.pnlDollars ?? 0),
+            0,
+          ),
+          optionsCount: opts.length,
+          stockCount: stocks.length,
+        });
+      } catch (e) {
+        if (!cancelled) {
+          setUnrealizedError(
+            e instanceof Error ? e.message : "Failed to fetch open positions",
+          );
+        }
+      } finally {
+        if (!cancelled) setUnrealizedLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [mode, unrealized]);
+
+  const totalUnrealized = unrealized
+    ? unrealized.optionsUnrealized + unrealized.stockUnrealized
+    : 0;
+  const lastCumulative =
+    equity_curve.length > 0
+      ? equity_curve[equity_curve.length - 1].cumulativePnl
+      : 0;
+  const displayCurve =
+    mode === "total" && unrealized && equity_curve.length > 0
+      ? [
+          ...equity_curve,
+          {
+            bucketKey: "now",
+            label: "Now",
+            tradePnl: totalUnrealized,
+            cumulativePnl: lastCumulative + totalUnrealized,
+            tradeCount: unrealized.optionsCount + unrealized.stockCount,
+            trades: [] as Array<{ symbol: string; pnl: number }>,
+          },
+        ]
+      : equity_curve;
+  const grandTotal = stats.total_pnl + (mode === "total" ? totalUnrealized : 0);
+  const grandTotalColor =
+    grandTotal >= 0 ? "text-emerald-300" : "text-rose-300";
+  const unrealizedColor =
+    totalUnrealized >= 0 ? "text-emerald-300" : "text-rose-300";
+
   return (
     <section className="space-y-4">
       <h2 className="text-lg font-semibold">Performance</h2>
@@ -444,15 +536,81 @@ export function PerformanceSection({
       </div>
 
       <div className="rounded-md border border-border bg-background/40 p-3">
-        <div className="mb-2 text-sm font-medium">Equity curve</div>
-        {equity_curve.length < 2 ? (
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <div className="text-sm font-medium">Equity curve</div>
+          <div className="inline-flex overflow-hidden rounded-md border border-border bg-background/60 text-xs">
+            <button
+              type="button"
+              className={`px-2.5 py-1 ${
+                mode === "realized"
+                  ? "bg-foreground/10 text-foreground"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+              onClick={() => setMode("realized")}
+            >
+              Realized
+            </button>
+            <button
+              type="button"
+              className={`px-2.5 py-1 ${
+                mode === "total"
+                  ? "bg-foreground/10 text-foreground"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+              onClick={() => setMode("total")}
+            >
+              Total
+            </button>
+          </div>
+        </div>
+        {mode === "total" && (
+          <div className="mb-2 rounded border border-border bg-background/50 px-2.5 py-1.5 text-xs">
+            {unrealizedLoading ? (
+              <span className="text-muted-foreground">
+                Fetching open-position marks…
+              </span>
+            ) : unrealizedError ? (
+              <span className="text-rose-300">
+                Failed to load unrealized: {unrealizedError}
+              </span>
+            ) : unrealized ? (
+              <div className="flex flex-wrap items-baseline gap-x-4 gap-y-0.5">
+                <span>
+                  <span className="text-muted-foreground">Realized: </span>
+                  <span className={`font-mono ${pnlColor}`}>
+                    {fmtMoney(stats.total_pnl, true)}
+                  </span>
+                </span>
+                <span>
+                  <span className="text-muted-foreground">Unrealized: </span>
+                  <span className={`font-mono ${unrealizedColor}`}>
+                    {fmtMoney(totalUnrealized, true)}
+                  </span>
+                </span>
+                <span>
+                  <span className="text-muted-foreground">Total: </span>
+                  <span className={`font-mono font-semibold ${grandTotalColor}`}>
+                    {fmtMoney(grandTotal, true)}
+                  </span>
+                </span>
+                <span className="ml-auto text-[10px] text-muted-foreground/70">
+                  {unrealized.optionsCount} option
+                  {unrealized.optionsCount === 1 ? "" : "s"} ·{" "}
+                  {unrealized.stockCount} stock
+                  {unrealized.stockCount === 1 ? "" : "s"}
+                </span>
+              </div>
+            ) : null}
+          </div>
+        )}
+        {displayCurve.length < 2 ? (
           <div className="py-8 text-center text-sm text-muted-foreground">
             Not enough trades in this range to display equity curve.
           </div>
         ) : (
           <div className="h-64 w-full">
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={equity_curve}>
+              <AreaChart data={displayCurve}>
                 <defs>
                   <linearGradient id="pnlGradient" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="0%" stopColor="#22c55e" stopOpacity={0.4} />

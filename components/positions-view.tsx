@@ -879,11 +879,19 @@ export function PositionsView() {
     (sum, p) => sum + p.remainingContracts,
     0,
   );
-  // Sum of unrealized P&L across positions that have live option marks.
-  const unrealized = positions.reduce(
+  // Sum of unrealized P&L across BOTH option positions (live mark −
+  // entry premium) and stock positions ((spot − cost basis) ×
+  // shares). Stocks are required here so the top-line "Unrealized"
+  // doesn't omit assigned-to-stock exposure.
+  const optionsUnrealized = positions.reduce(
     (sum, p) => sum + (p.pnlDollars ?? 0),
     0,
   );
+  const stockUnrealized = (data?.stockPositions ?? []).reduce(
+    (sum, s) => sum + (s.pnlDollars ?? 0),
+    0,
+  );
+  const unrealized = optionsUnrealized + stockUnrealized;
   // Max profit = total premium collected if every open position
   // expires worthless. Per position: avgPremiumSold × remainingContracts
   // × 100. Manually-added positions without fills carry avgPremiumSold=
