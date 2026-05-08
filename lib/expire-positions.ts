@@ -138,6 +138,7 @@ type ExpiredOpenPosition = {
   closed_date: string | null;
   notes: string | null;
   broker: string | null;
+  position_type: string | null;
 };
 
 
@@ -170,18 +171,30 @@ export async function fetchFreshExpirySnapshot(
 // Pre-close same-day positions stay open — they're surfaced via the
 // row badge instead. The broker column is included so the
 // confirmation modal can group rows by account.
+//
+// stock_long / stock_short rows are excluded — stocks don't expire,
+// and they legitimately store strike=0 + an `expiry` set to the
+// assignment day. Without this filter they'd surface in the modal
+// the day after assignment as a $0 strike row.
 export async function getExpiredPositions(): Promise<ExpiredOpenPosition[]> {
   const sb = createServerClient();
   const r = await sb
     .from("positions")
     .select(
-      "id,symbol,strike,expiry,total_contracts,avg_premium_sold,status,opened_date,closed_date,notes,broker",
+      "id,symbol,strike,expiry,total_contracts,avg_premium_sold,status,opened_date,closed_date,notes,broker,position_type",
     )
     .eq("status", "open");
   const all = (r.data ?? []) as ExpiredOpenPosition[];
   const todayEt = todayEasternIso();
   const afterClose = isAfterMarketCloseET();
   return all.filter((p) => {
+    // stock_long / stock_short rows are not options — they don't
+    // expire and they legitimately store strike=0 with `expiry` set
+    // to the assignment day. Excluded so they never enter the modal.
+    // NULL position_type is pre-migration data, treated as 'option'.
+    if (p.position_type === "stock_long" || p.position_type === "stock_short") {
+      return false;
+    }
     if (p.expiry < todayEt) return true;
     if (p.expiry === todayEt && afterClose) return true;
     return false;

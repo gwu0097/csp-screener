@@ -2,6 +2,12 @@
 // assignment-flow refactor: symbol=NET, strike=0 OR total_contracts=0,
 // status='open'. Scans, prints, then deletes the row(s) plus
 // dependent fills + position_snapshots. No-op if nothing matches.
+//
+// CRITICAL: stock_long / stock_short rows legitimately have strike=0
+// (stocks have no strike). Only option rows — position_type='option'
+// or NULL (pre-migration) — are checked. The first revision of this
+// script omitted that guard and deleted a real stock_long row; the
+// allowlist below prevents a repeat.
 
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -43,9 +49,12 @@ const sb = createClient(url, key);
 async function main() {
   const r = await sb
     .from("positions")
-    .select("id,symbol,strike,expiry,total_contracts,status,realized_pnl,created_at")
+    .select(
+      "id,symbol,strike,expiry,total_contracts,status,realized_pnl,created_at,position_type",
+    )
     .eq("symbol", "NET")
     .eq("status", "open")
+    .or("position_type.is.null,position_type.eq.option")
     .or("strike.eq.0,total_contracts.eq.0");
   if (r.error) {
     console.error("scan failed:", r.error.message);
