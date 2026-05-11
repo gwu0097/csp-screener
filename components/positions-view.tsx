@@ -1325,6 +1325,7 @@ export function PositionsView() {
                       key={p.id}
                       kind="open"
                       position={p}
+                      marketState={data?.market?.marketState ?? null}
                       onCloseSubmitted={onImportSuccess}
                       onPositionRemoved={(id) => {
                         // Optimistic remove — drop the row from local state so

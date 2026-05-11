@@ -134,6 +134,10 @@ type Props =
       // disappears instantly without a full /api/positions/open
       // round-trip. Optional so closed-list usage can ignore it.
       onPositionRemoved?: (id: string) => void;
+      // Current SPY marketState, threaded down from positions-view so
+      // the row can suppress option-mark-derived fields outside the
+      // regular session. null means "unknown" — fields render normally.
+      marketState?: string | null;
     }
   | {
       kind: "closed";
@@ -321,6 +325,16 @@ export function PositionCard(props: Props) {
   // guard on every field access.
   const open = props.kind === "open" ? props.position : null;
   const closed = props.kind === "closed" ? props.position : null;
+  // Outside the regular session, the option chain keeps quoting the
+  // last-traded mark — that's a stale price, not a real quote. Drop
+  // mark-derived fields (P&L, POP, IV) to "—" while leaving stock-
+  // price-derived fields (% OTM, status badge) intact. Intrinsic and
+  // maxProfitOtm estimates aren't from the live mark, so the `~`
+  // prefix continues to apply.
+  const marketState =
+    props.kind === "open" ? (props.marketState ?? null) : null;
+  const optionsStale =
+    marketState === "POST" || marketState === "POSTPOST" || marketState === "CLOSED";
   const p = props.position;
   const pop = open && open.currentDelta !== null ? 1 - Math.abs(open.currentDelta) : null;
   // Open rows use the priority-cascade badge from computePositionBadge
@@ -376,6 +390,9 @@ export function PositionCard(props: Props) {
   const pnlSource = open?.pnlSource ?? "mark";
   const pnlIsEstimate =
     pnlSource === "intrinsic" || pnlSource === "maxProfitOtm";
+  // Suppress only the live-mark variant — intrinsic / maxProfitOtm
+  // fall back to stock-price math, which is still valid AH.
+  const suppressMarkPnl = optionsStale && pnlSource === "mark";
   const pnlColor =
     pnlDollars === null
       ? "text-muted-foreground"
@@ -434,17 +451,43 @@ export function PositionCard(props: Props) {
         <div className="text-right font-mono text-base text-foreground/80">
           ×{p.remainingContracts}
         </div>
-        {/* 5. P&L — bold so it reads first when scanning the row */}
+        {/* 5. P&L — bold so it reads first when scanning the row.
+              Suppressed AH/closed when the figure would come from a
+              stale option mark. */}
         <div
-          className={cn("text-right font-mono text-base font-semibold", pnlColor)}
-          title={pnlTooltip || undefined}
+          className={cn(
+            "text-right font-mono text-base font-semibold",
+            suppressMarkPnl ? "text-muted-foreground" : pnlColor,
+          )}
+          title={
+            suppressMarkPnl
+              ? "P&L hidden outside regular session — option marks are stale last-traded prices after hours"
+              : pnlTooltip || undefined
+          }
         >
-          {pnlPrefix}
-          {fmtDollarsSigned(pnlDollars)}
+          {suppressMarkPnl ? (
+            "—"
+          ) : (
+            <>
+              {pnlPrefix}
+              {fmtDollarsSigned(pnlDollars)}
+            </>
+          )}
         </div>
-        {/* 6. POP% */}
-        <div className={cn("text-right font-mono text-base", popColor(pop))}>
-          {pop !== null ? `${Math.round(pop * 100)}%` : "—"}
+        {/* 6. POP% — also suppressed AH/closed since it's derived from
+              the option delta, which goes stale alongside the mark. */}
+        <div
+          className={cn(
+            "text-right font-mono text-base",
+            optionsStale ? "text-muted-foreground" : popColor(pop),
+          )}
+          title={
+            optionsStale
+              ? "POP hidden outside regular session — option deltas are stale after hours"
+              : undefined
+          }
+        >
+          {optionsStale ? "—" : pop !== null ? `${Math.round(pop * 100)}%` : "—"}
         </div>
         {/* 7. % OTM — hidden on mobile. Danger zone (<5% breathing room or
               already ITM) flips amber/red regardless of sign. */}
@@ -462,9 +505,16 @@ export function PositionCard(props: Props) {
         >
           {distancePct !== null ? `${distancePct.toFixed(1)}%` : "—"}
         </div>
-        {/* 8. IV — hidden on mobile */}
-        <div className="hidden text-right font-mono text-base text-muted-foreground sm:block">
-          {iv !== null ? `${(iv * 100).toFixed(0)}%` : "—"}
+        {/* 8. IV — hidden on mobile. Suppressed AH/closed (stale). */}
+        <div
+          className="hidden text-right font-mono text-base text-muted-foreground sm:block"
+          title={
+            optionsStale
+              ? "IV hidden outside regular session — last-traded value is stale after hours"
+              : undefined
+          }
+        >
+          {optionsStale ? "—" : iv !== null ? `${(iv * 100).toFixed(0)}%` : "—"}
         </div>
         {/* 9. Grade — center-aligned. Theta used to live inline here but
               was noise for overnight CSP positions; the badge alone is

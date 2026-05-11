@@ -1,4 +1,4 @@
-import { getCurrentPrice } from "./yahoo";
+import { getCurrentPrice, getQuoteWithExtended } from "./yahoo";
 
 export type MarketRegime = "calm" | "elevated" | "panic";
 
@@ -7,6 +7,13 @@ export type MarketContext = {
   spyPrice: number | null;
   regime: MarketRegime | null;
   warning: string | null;
+  // Yahoo marketState string for SPY: 'PRE' / 'PREPRE' / 'REGULAR' /
+  // 'POST' / 'POSTPOST' / 'CLOSED', or null when the quote failed.
+  // Drives UI suppression of option-mark-derived fields (P&L, POP,
+  // IV) outside regular session — option chains keep quoting stale
+  // last-traded prices after the close and surfacing them as live
+  // numbers misleads the user.
+  marketState: string | null;
 };
 
 // Regime thresholds match the Positions page warnings:
@@ -27,10 +34,16 @@ export function regimeWarning(regime: MarketRegime | null): string | null {
 }
 
 export async function getMarketContext(): Promise<MarketContext> {
-  const [vix, spyPrice] = await Promise.all([
+  const [vix, spyQuote] = await Promise.all([
     getCurrentPrice("^VIX"),
-    getCurrentPrice("SPY"),
+    getQuoteWithExtended("SPY"),
   ]);
   const regime = classifyRegime(vix);
-  return { vix, spyPrice, regime, warning: regimeWarning(regime) };
+  return {
+    vix,
+    spyPrice: spyQuote.price,
+    regime,
+    warning: regimeWarning(regime),
+    marketState: spyQuote.marketState,
+  };
 }
