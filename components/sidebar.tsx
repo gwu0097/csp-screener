@@ -11,6 +11,7 @@ import {
   BookSearch,
   Briefcase,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   Layers,
   Lightbulb,
@@ -35,9 +36,10 @@ import { cn } from "@/lib/utils";
 type NavItem = { href: string; label: string; icon: LucideIcon };
 type SubItem = { href: string; label: string };
 
-// Collapsible group: a top-level entry that expands to show sub-items on
-// desktop, and collapses to a single tablet icon that links to the first
-// sub-item when there's no room for the expanded list.
+// Collapsible group: a top-level entry that expands to show sub-items
+// when the sidebar is in expanded mode, and collapses to a single
+// tooltip-tagged icon (linking to the first sub-item) when the
+// sidebar is in collapsed mode.
 type NavGroup = {
   key: string;
   icon: LucideIcon;
@@ -45,6 +47,14 @@ type NavGroup = {
   basePath: string;
   subItems: SubItem[];
 };
+
+// Effective rendering mode for sidebar children. The mobile drawer
+// always uses "expanded"; desktop honors the persisted collapse
+// toggle.
+type Mode = "expanded" | "collapsed";
+
+// localStorage key for the persisted desktop collapse state.
+const LS_COLLAPSED = "sidebar_collapsed";
 
 // ------------ OPTIONS ------------
 const SCREENER_GROUP: NavGroup = {
@@ -59,6 +69,11 @@ const SCREENER_GROUP: NavGroup = {
 };
 
 const POSITIONS: NavItem = { href: "/positions", label: "Positions", icon: Briefcase };
+const PERFORMANCE: NavItem = {
+  href: "/intelligence/performance",
+  label: "Performance",
+  icon: TrendingUp,
+};
 
 const INTELLIGENCE_GROUP: NavGroup = {
   key: "intelligence",
@@ -151,6 +166,41 @@ export function Sidebar() {
   const pathname = usePathname() ?? "/";
   const [mobileOpen, setMobileOpen] = useState(false);
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
+  // Desktop collapse state. Defaults to false on the server; the
+  // useEffect below hydrates it from localStorage on the client.
+  const [collapsed, setCollapsed] = useState<boolean>(false);
+  // Viewport tracker — mobile drawer always renders the expanded
+  // view regardless of the persisted desktop collapse state.
+  const [isMobile, setIsMobile] = useState<boolean>(false);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(LS_COLLAPSED);
+      if (raw !== null) setCollapsed(raw === "1");
+    } catch {
+      /* ignore — localStorage unavailable (private mode, etc.) */
+    }
+  }, []);
+
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 767px)");
+    const handler = () => setIsMobile(mq.matches);
+    handler();
+    mq.addEventListener("change", handler);
+    return () => mq.removeEventListener("change", handler);
+  }, []);
+
+  function toggleCollapsed() {
+    setCollapsed((c) => {
+      const next = !c;
+      try {
+        localStorage.setItem(LS_COLLAPSED, next ? "1" : "0");
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
+  }
 
   // Auto-expand any group whose sub-item is currently active. Don't
   // collapse groups on navigation away — respect the user's last toggle.
@@ -170,9 +220,13 @@ export function Sidebar() {
     setOpenGroups((prev) => ({ ...prev, [key]: !prev[key] }));
   }
 
+  const mode: Mode = isMobile ? "expanded" : collapsed ? "collapsed" : "expanded";
+
   return (
     <TooltipProvider delayDuration={150}>
-      {/* Mobile hamburger */}
+      {/* Mobile hamburger — opens the drawer overlay. The drawer
+          always renders in expanded mode regardless of the desktop
+          collapse state. */}
       <button
         type="button"
         onClick={() => setMobileOpen(true)}
@@ -191,20 +245,24 @@ export function Sidebar() {
 
       <aside
         className={cn(
-          "flex shrink-0 flex-col border-r border-white/10 bg-zinc-900 transition-transform",
-          "fixed inset-y-0 left-0 z-50 w-60",
+          "flex shrink-0 flex-col border-r border-white/10 bg-zinc-900",
+          // Mobile drawer: fixed overlay, slides in/out
+          "fixed inset-y-0 left-0 z-50 w-60 transition-transform",
           mobileOpen ? "translate-x-0" : "-translate-x-full",
-          "md:static md:translate-x-0 md:w-14",
-          "lg:w-60",
+          // Desktop: in-flow, width controlled by the collapse state.
+          // Width transitions smoothly when the user toggles.
+          "md:static md:translate-x-0 md:transition-[width]",
+          mode === "collapsed" ? "md:w-14" : "md:w-60",
         )}
       >
         <div className="flex h-14 items-center justify-between border-b border-white/10 px-3">
           <Link
             href="/"
             className="flex items-center gap-2 font-semibold text-white"
+            aria-label="CSP Screener"
           >
             <BarChart3 className="h-5 w-5 shrink-0 text-emerald-400" />
-            <span className="text-sm md:hidden lg:inline">CSP Screener</span>
+            {mode === "expanded" && <span className="text-sm">CSP Screener</span>}
           </Link>
           <button
             type="button"
@@ -217,77 +275,89 @@ export function Sidebar() {
         </div>
 
         <nav className="flex flex-1 flex-col gap-0.5 overflow-y-auto p-2">
-          <SectionHeader label="Options" />
+          <SectionHeader label="Options" mode={mode} />
           <CollapsibleGroup
             group={SCREENER_GROUP}
             pathname={pathname}
             open={openGroups[SCREENER_GROUP.key] ?? false}
             onToggle={() => toggleGroup(SCREENER_GROUP.key)}
+            mode={mode}
           />
-          <SidebarLink item={POSITIONS} pathname={pathname} />
-          {/* Performance is conceptually part of the Positions section
-              — it summarises the equity curve and per-trade ROC built
-              from the positions table. Rendered with a top-level icon
-              + label so it visually matches the rest of the nav.
-              Visible on mobile drawer + desktop, hidden in the icon-
-              only tablet rail. */}
-          <Link
-            href="/intelligence/performance"
-            className={cn(
-              "flex items-center gap-3 rounded-md px-3 py-2 text-sm",
-              subActive(pathname, "/intelligence/performance")
-                ? "bg-white/10 text-white"
-                : "text-gray-400 hover:bg-white/5 hover:text-white",
-              "md:hidden lg:flex",
-            )}
-          >
-            <TrendingUp className="h-4 w-4 shrink-0" />
-            <span>Performance</span>
-          </Link>
+          <SidebarLink item={POSITIONS} pathname={pathname} mode={mode} />
+          <SidebarLink item={PERFORMANCE} pathname={pathname} mode={mode} />
           <CollapsibleGroup
             group={INTELLIGENCE_GROUP}
             pathname={pathname}
             open={openGroups[INTELLIGENCE_GROUP.key] ?? false}
             onToggle={() => toggleGroup(INTELLIGENCE_GROUP.key)}
+            mode={mode}
           />
 
-          <SectionHeader label="Swings" />
-          <SidebarLink item={SWINGS_DISCOVER} pathname={pathname} />
-          <SidebarLink item={SWINGS_IDEAS} pathname={pathname} />
+          <SectionHeader label="Swings" mode={mode} />
+          <SidebarLink item={SWINGS_DISCOVER} pathname={pathname} mode={mode} />
+          <SidebarLink item={SWINGS_IDEAS} pathname={pathname} mode={mode} />
           <CollapsibleGroup
             group={SWINGS_JOURNAL_GROUP}
             pathname={pathname}
             open={openGroups[SWINGS_JOURNAL_GROUP.key] ?? false}
             onToggle={() => toggleGroup(SWINGS_JOURNAL_GROUP.key)}
+            mode={mode}
           />
 
-          <SectionHeader label="Long Term" />
-          <SidebarLink item={LONGTERM_RESEARCH} pathname={pathname} />
-          <SidebarLink item={LONGTERM_IDEAS} pathname={pathname} />
-          <SidebarLink item={LONGTERM_WATCHLIST} pathname={pathname} />
-          <SidebarLink item={LONGTERM_PORTFOLIO} pathname={pathname} />
+          <SectionHeader label="Long Term" mode={mode} />
+          <SidebarLink item={LONGTERM_RESEARCH} pathname={pathname} mode={mode} />
+          <SidebarLink item={LONGTERM_IDEAS} pathname={pathname} mode={mode} />
+          <SidebarLink item={LONGTERM_WATCHLIST} pathname={pathname} mode={mode} />
+          <SidebarLink item={LONGTERM_PORTFOLIO} pathname={pathname} mode={mode} />
 
-          <SectionHeader label="Tools" />
-          <SidebarLink item={RESEARCH} pathname={pathname} />
-          <SidebarLink item={ENCYCLOPEDIA} pathname={pathname} />
-          <SidebarLink item={SETTINGS} pathname={pathname} />
+          <SectionHeader label="Tools" mode={mode} />
+          <SidebarLink item={RESEARCH} pathname={pathname} mode={mode} />
+          <SidebarLink item={ENCYCLOPEDIA} pathname={pathname} mode={mode} />
+          <SidebarLink item={SETTINGS} pathname={pathname} mode={mode} />
         </nav>
+
+        {/* Desktop-only collapse toggle. Mobile drawer doesn't surface
+            it — the drawer is binary (open/closed) and never lives in
+            the collapsed-rail layout. */}
+        <div className="hidden border-t border-white/10 p-2 md:block">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                onClick={toggleCollapsed}
+                className={cn(
+                  "flex w-full items-center gap-2 rounded-md py-2 text-sm text-gray-400 hover:bg-white/5 hover:text-white",
+                  mode === "collapsed" ? "justify-center px-0" : "justify-end px-3",
+                )}
+                aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+              >
+                {collapsed ? (
+                  <ChevronRight className="h-4 w-4" />
+                ) : (
+                  <ChevronLeft className="h-4 w-4" />
+                )}
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="right">
+              {collapsed ? "Expand sidebar" : "Collapse sidebar"}
+            </TooltipContent>
+          </Tooltip>
+        </div>
       </aside>
     </TooltipProvider>
   );
 }
 
-function SectionHeader({ label }: { label: string }) {
-  // Hidden on tablet (56px icon-only) — the uppercase label is too long
-  // to fit. Replaced by a thin divider instead so groups stay visually
-  // separated at that width.
+function SectionHeader({ label, mode }: { label: string; mode: Mode }) {
+  // In collapsed mode the uppercase label doesn't fit — replace with
+  // a thin divider so groups stay visually separated at narrow width.
+  if (mode === "collapsed") {
+    return <div className="my-2 border-t border-white/5" />;
+  }
   return (
-    <>
-      <div className="mt-4 block px-3 py-2 text-xs uppercase tracking-wider text-gray-500 md:hidden lg:block">
-        {label}
-      </div>
-      <div className="my-2 hidden border-t border-white/5 md:block lg:hidden" />
-    </>
+    <div className="mt-4 px-3 py-2 text-xs uppercase tracking-wider text-gray-500">
+      {label}
+    </div>
   );
 }
 
@@ -296,144 +366,105 @@ function CollapsibleGroup({
   pathname,
   open,
   onToggle,
+  mode,
 }: {
   group: NavGroup;
   pathname: string;
   open: boolean;
   onToggle: () => void;
+  mode: Mode;
 }) {
   const active = groupActive(pathname, group);
   const Icon = group.icon;
 
+  if (mode === "collapsed") {
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Link
+            href={group.subItems[0].href}
+            className={cn(
+              "flex items-center justify-center rounded-md px-3 py-2",
+              active
+                ? "bg-white/10 text-white"
+                : "text-gray-400 hover:bg-white/5 hover:text-white",
+            )}
+            aria-label={group.label}
+          >
+            <Icon className="h-4 w-4" />
+          </Link>
+        </TooltipTrigger>
+        <TooltipContent side="right">{group.label}</TooltipContent>
+      </Tooltip>
+    );
+  }
+
   return (
     <>
-      {/* Desktop: expandable toggle with inline sub-items */}
-      <div className="hidden lg:block">
-        <button
-          type="button"
-          onClick={onToggle}
-          className={cn(
-            "flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm",
-            active
-              ? "bg-white/10 text-white"
-              : "text-gray-400 hover:bg-white/5 hover:text-white",
-          )}
-        >
-          <Icon className="h-4 w-4 shrink-0" />
-          <span className="flex-1 text-left">{group.label}</span>
-          {open ? (
-            <ChevronDown className="h-3.5 w-3.5" />
-          ) : (
-            <ChevronRight className="h-3.5 w-3.5" />
-          )}
-        </button>
-        {open && (
-          <div className="mt-0.5 space-y-0.5">
-            {group.subItems.map((sub) => (
-              <Link
-                key={sub.href}
-                href={sub.href}
-                className={cn(
-                  "block rounded-md py-1.5 pl-11 pr-3 text-sm",
-                  subActive(pathname, sub.href)
-                    ? "bg-white/5 font-medium text-white"
-                    : "text-gray-500 hover:text-gray-200",
-                )}
-              >
-                {sub.label}
-              </Link>
-            ))}
-          </div>
+      <button
+        type="button"
+        onClick={onToggle}
+        className={cn(
+          "flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm",
+          active
+            ? "bg-white/10 text-white"
+            : "text-gray-400 hover:bg-white/5 hover:text-white",
         )}
-      </div>
-
-      {/* Tablet: single icon → first sub-item */}
-      <div className="hidden md:block lg:hidden">
-        <Tooltip>
-          <TooltipTrigger asChild>
+      >
+        <Icon className="h-4 w-4 shrink-0" />
+        <span className="flex-1 text-left">{group.label}</span>
+        {open ? (
+          <ChevronDown className="h-3.5 w-3.5" />
+        ) : (
+          <ChevronRight className="h-3.5 w-3.5" />
+        )}
+      </button>
+      {open && (
+        <div className="mt-0.5 space-y-0.5">
+          {group.subItems.map((sub) => (
             <Link
-              href={group.subItems[0].href}
+              key={sub.href}
+              href={sub.href}
               className={cn(
-                "flex items-center justify-center rounded-md px-3 py-2",
-                active
-                  ? "bg-white/10 text-white"
-                  : "text-gray-400 hover:bg-white/5 hover:text-white",
+                "block rounded-md py-1.5 pl-11 pr-3 text-sm",
+                subActive(pathname, sub.href)
+                  ? "bg-white/5 font-medium text-white"
+                  : "text-gray-500 hover:text-gray-200",
               )}
-              aria-label={group.label}
             >
-              <Icon className="h-4 w-4" />
+              {sub.label}
             </Link>
-          </TooltipTrigger>
-          <TooltipContent side="right">{group.label}</TooltipContent>
-        </Tooltip>
-      </div>
-
-      {/* Mobile drawer: same as desktop (drawer is wide enough) */}
-      <div className="md:hidden">
-        <button
-          type="button"
-          onClick={onToggle}
-          className={cn(
-            "flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm",
-            active
-              ? "bg-white/10 text-white"
-              : "text-gray-400 hover:bg-white/5 hover:text-white",
-          )}
-        >
-          <Icon className="h-4 w-4 shrink-0" />
-          <span className="flex-1 text-left">{group.label}</span>
-          {open ? (
-            <ChevronDown className="h-3.5 w-3.5" />
-          ) : (
-            <ChevronRight className="h-3.5 w-3.5" />
-          )}
-        </button>
-        {open && (
-          <div className="mt-0.5 space-y-0.5">
-            {group.subItems.map((sub) => (
-              <Link
-                key={sub.href}
-                href={sub.href}
-                className={cn(
-                  "block rounded-md py-1.5 pl-11 pr-3 text-sm",
-                  subActive(pathname, sub.href)
-                    ? "bg-white/5 font-medium text-white"
-                    : "text-gray-500 hover:text-gray-200",
-                )}
-              >
-                {sub.label}
-              </Link>
-            ))}
-          </div>
-        )}
-      </div>
+          ))}
+        </div>
+      )}
     </>
   );
 }
 
-function SidebarLink({ item, pathname }: { item: NavItem; pathname: string }) {
+function SidebarLink({
+  item,
+  pathname,
+  mode,
+}: {
+  item: NavItem;
+  pathname: string;
+  mode: Mode;
+}) {
   const active = itemActive(pathname, item.href);
   const Icon = item.icon;
-  const linkClasses = cn(
+  const base = cn(
     "flex items-center gap-3 rounded-md px-3 py-2 text-sm",
     active
       ? "bg-white/10 text-white"
       : "text-gray-400 hover:bg-white/5 hover:text-white",
   );
-  return (
-    <>
-      <Link href={item.href} className={cn(linkClasses, "hidden lg:flex")}>
-        <Icon className="h-4 w-4 shrink-0" />
-        <span>{item.label}</span>
-      </Link>
+  if (mode === "collapsed") {
+    return (
       <Tooltip>
         <TooltipTrigger asChild>
           <Link
             href={item.href}
-            className={cn(
-              linkClasses,
-              "justify-center md:flex lg:hidden",
-            )}
+            className={cn(base, "justify-center")}
             aria-label={item.label}
           >
             <Icon className="h-4 w-4" />
@@ -441,10 +472,12 @@ function SidebarLink({ item, pathname }: { item: NavItem; pathname: string }) {
         </TooltipTrigger>
         <TooltipContent side="right">{item.label}</TooltipContent>
       </Tooltip>
-      <Link href={item.href} className={cn(linkClasses, "md:hidden")}>
-        <Icon className="h-4 w-4 shrink-0" />
-        <span>{item.label}</span>
-      </Link>
-    </>
+    );
+  }
+  return (
+    <Link href={item.href} className={base}>
+      <Icon className="h-4 w-4 shrink-0" />
+      <span>{item.label}</span>
+    </Link>
   );
 }
