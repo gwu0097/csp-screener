@@ -45,8 +45,32 @@ Column headers are: Time Placed, Spread, Side, QtyPos Effect, Symbol, Exp, Strik
 
 STATUS FILTER (do this first, before extracting any data):
 Only extract rows where the Status column shows exactly 'FILLED'.
-Skip every row whose Status is 'CANCELED', 'EXPIRED', 'REJECTED', or anything other than FILLED. Skip stock trades too (StrikeType 'STOCK' or 'ETF').
-For each FILLED option row (or each leg of a FILLED spread, see SPREAD HANDLING below) you MUST include it. Count your FILLED rows before finalizing — do not skip any.
+Skip every row whose Status is 'CANCELED', 'EXPIRED', 'REJECTED', or anything other than FILLED.
+For each FILLED row you MUST include it — both option fills AND stock fills. Count your FILLED rows before finalizing — do not skip any.
+
+OPTION vs STOCK CLASSIFICATION (decide per row before extracting fields):
+A row is a STOCK trade when ANY of these indicators are present:
+  • StrikeType column reads exactly 'STOCK' or 'ETF'
+  • No expiry date in the Exp column (or the Exp cell is empty / a dash)
+  • No 'PUT' / 'CALL' suffix in the StrikeType column
+  • Symbol appears alone (e.g. 'NET', 'AMD') with no '100 (Weeklys)' suffix or expiry beside it
+  • Price column shows a stock-sized number ($25–$1000 range), not an option premium ($0.05–$25 range)
+
+A row is an OPTION trade when ALL of these are visible together:
+  • Exp column shows a date like '8 MAY 26', '15 MAY 26'
+  • StrikeType shows '120 PUT' / '347.50 CALL' (a strike followed by PUT / CALL)
+  • Optionally with '100 (Weeklys)', '(Weekly)', '(Mini)' or similar contract suffix
+  • Price column shows a small premium ($0.05–$25)
+
+When the indicators conflict, prefer the OPTION interpretation only if BOTH a numeric strike AND a PUT/CALL designation are visible. Otherwise default to STOCK.
+
+OUTPUT FORMAT:
+Return one mixed JSON array. Each element is either an OPTION fill or a STOCK fill — discriminate with a top-level "trade_type" field. Schemas:
+
+OPTION:  { "trade_type": "option", "action": "open"|"close", "contracts": N, "symbol": str, "strike": N, "expiry": "YYYY-MM-DD", "optionType": "put"|"call", "premium": N, "timePlaced": "YYYY-MM-DD" }
+STOCK:   { "trade_type": "stock",  "action": "buy"|"sell",    "shares":    N, "symbol": str, "price":  N, "date":   "YYYY-MM-DD" }
+
+If a row is unmistakably a stock fill, emit only the stock schema (no strike / expiry / optionType — leave those out entirely). If it's an option, emit only the option schema.
 
 SPREAD HANDLING:
 The 'Spread' column tells you the order type:
@@ -94,6 +118,14 @@ For each options row:
     Return the result in strict YYYY-MM-DD format.
 - premium: the Price column value
 - timePlaced: YYYY-MM-DD from the Time Placed column (first column). Drop the time-of-day portion — date only.
+
+For each stock row:
+- action: 'sell' if the Side column is 'SOLD' or 'SELL' (or the quantity is negative); 'buy' if the Side column is 'BOT' or 'BUY' (or the quantity is positive).
+- shares: the ABSOLUTE VALUE of the quantity (positive integer). Stock fills are typically larger than option contract counts — 100, 250, 500, etc.
+- symbol: the ticker in the Symbol column (e.g. NET, AMD, HOOD).
+- price: the number in the Price column. Strip ' LMT' / ' MKT' / 'AVG' suffixes. Stock prices are typically in the $25–$1000 range. For a stock fill at '202.50 LMT' emit price=202.50.
+- date: YYYY-MM-DD from the Time Placed column (date only).
+- Do NOT emit strike, expiry, optionType, premium, or timePlaced for stock rows.
 
 Return ONLY a JSON array, no explanation, no markdown.
 
@@ -549,15 +581,49 @@ export async function POST(req: NextRequest) {
     const todayUtc = new Date().toISOString().slice(0, 10);
 
     type Rejection = { symbol: string; reason: string };
-    let trades: ParsedTrade[] | ParsedStockTrade[];
     const rejections: Rejection[] = [];
+
+    // Classify each raw item as option vs stock. The Schwab options
+    // prompt now emits a mixed array discriminated by trade_type;
+    // legacy stock-only prompts (Robinhood position cards, etc.)
+    // emit pure stock items and skip trade_type entirely. Fall back
+    // to field-shape detection so older prompt versions still work.
+    const isStockItem = (raw: unknown): boolean => {
+      if (!raw || typeof raw !== "object") return false;
+      const r = raw as Record<string, unknown>;
+      const tt =
+        typeof r.trade_type === "string" ? r.trade_type.toLowerCase() : "";
+      if (tt === "stock") return true;
+      if (tt === "option") return false;
+      // Shape inference: stock items carry shares/price; option items
+      // carry strike/expiry/optionType. Missing all option fields
+      // and having shares-or-price → treat as stock.
+      const hasOptionShape =
+        r.strike !== undefined || r.expiry !== undefined || r.optionType !== undefined;
+      const hasStockShape = r.shares !== undefined || r.price !== undefined;
+      if (!hasOptionShape && hasStockShape) return true;
+      return false;
+    };
+
+    const optionItems: unknown[] = [];
+    const stockItems: unknown[] = [];
+    for (const item of parsed) {
+      if (isStockItem(item)) stockItems.push(item);
+      else optionItems.push(item);
+    }
+
+    let trades: ParsedTrade[];
+    let stockTrades: ParsedStockTrade[];
     if (tradeType === "stock") {
-      trades = parsed
+      // Legacy stock-only request — keep returning trades[] for callers
+      // that still rely on the prior shape.
+      trades = [];
+      stockTrades = parsed
         .map((r) => coerceStockTrade(r, broker))
         .filter((t): t is ParsedStockTrade => t !== null);
     } else {
       const accepted: ParsedTrade[] = [];
-      for (const r of parsed) {
+      for (const r of optionItems) {
         const t = coerceTrade(r, broker);
         if (!t) continue; // structural reject (missing fields, bad strike/contracts, etc.)
         if (t.timePlaced && t.timePlaced > todayUtc) {
@@ -577,20 +643,26 @@ export async function POST(req: NextRequest) {
         accepted.push(t);
       }
       trades = accepted;
+      stockTrades = stockItems
+        .map((r) => coerceStockTrade(r, broker))
+        .filter((t): t is ParsedStockTrade => t !== null);
     }
 
     // Per-trade log so we can compare what Gemini emitted vs what
     // the parser ended up with after normalization. Catches cases
     // where the raw response and the coerced result diverge.
-    if (tradeType !== "stock") {
-      for (const t of trades as ParsedTrade[]) {
-        console.log(
-          `[parse-screenshot] coerced: symbol=${t.symbol} action=${t.action} strike=${t.strike} expiry=${t.expiry} timePlaced=${t.timePlaced ?? "null"} contracts=${t.contracts} premium=${t.premium}`,
-        );
-      }
-      for (const r of rejections) {
-        console.log(`[parse-screenshot] rejected: ${r.symbol} — ${r.reason}`);
-      }
+    for (const t of trades) {
+      console.log(
+        `[parse-screenshot] coerced option: symbol=${t.symbol} action=${t.action} strike=${t.strike} expiry=${t.expiry} timePlaced=${t.timePlaced ?? "null"} contracts=${t.contracts} premium=${t.premium}`,
+      );
+    }
+    for (const s of stockTrades) {
+      console.log(
+        `[parse-screenshot] coerced stock: symbol=${s.symbol} action=${s.action} shares=${s.shares} price=${s.price} date=${s.date}`,
+      );
+    }
+    for (const r of rejections) {
+      console.log(`[parse-screenshot] rejected: ${r.symbol} — ${r.reason}`);
     }
 
     // NB: model_trades is the array parsed from the model's response, not the
@@ -598,9 +670,9 @@ export async function POST(req: NextRequest) {
     // with no trades — check the logged raw content to see what the model
     // actually produced.
     console.log(
-      `[parse-screenshot] broker=${broker} tradeType=${tradeType} model_trades=${parsed.length} accepted=${trades.length} rejected=${rejections.length}`,
+      `[parse-screenshot] broker=${broker} tradeType=${tradeType} model_trades=${parsed.length} option_accepted=${trades.length} stock_accepted=${stockTrades.length} rejected=${rejections.length}`,
     );
-    return NextResponse.json({ trades, rejections });
+    return NextResponse.json({ trades, stockTrades, rejections });
   } catch (e) {
     console.error("[parse-screenshot] failed:", e);
     return NextResponse.json(

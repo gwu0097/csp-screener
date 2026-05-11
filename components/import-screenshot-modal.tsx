@@ -26,6 +26,15 @@ type ParsedTrade = {
   timePlaced?: string; // YYYY-MM-DD
 };
 
+type ParsedStockTrade = {
+  symbol: string;
+  action: "buy" | "sell";
+  shares: number;
+  price: number;
+  date: string;
+  broker: string;
+};
+
 function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
 }
@@ -69,6 +78,7 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
   const [parsing, setParsing] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [parsed, setParsed] = useState<ParsedTrade[] | null>(null);
+  const [parsedStocks, setParsedStocks] = useState<ParsedStockTrade[] | null>(null);
   const [rejections, setRejections] = useState<Array<{ symbol: string; reason: string }>>([]);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -76,6 +86,7 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
   const reset = useCallback(() => {
     setDataUrl(null);
     setParsed(null);
+    setParsedStocks(null);
     setRejections([]);
     setError(null);
     setParsing(false);
@@ -111,6 +122,7 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
             console.log(`[paste] dataUrl ready length=${url.length} prefix=${url.slice(0, 32)}`);
             setDataUrl(url);
             setParsed(null);
+    setParsedStocks(null);
             setError(null);
             break;
           } else {
@@ -134,6 +146,7 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
     console.log(`[upload] dataUrl ready length=${url.length} prefix=${url.slice(0, 32)}`);
     setDataUrl(url);
     setParsed(null);
+    setParsedStocks(null);
     setError(null);
   }
 
@@ -157,6 +170,7 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
       });
       const json = (await res.json()) as {
         trades?: ParsedTrade[];
+        stockTrades?: ParsedStockTrade[];
         rejections?: Array<{ symbol: string; reason: string }>;
         error?: string;
       };
@@ -165,10 +179,15 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
         ...t,
         timePlaced: t.timePlaced && t.timePlaced.length >= 10 ? t.timePlaced : todayIso(),
       }));
+      const stocks = (json.stockTrades ?? []).map((s) => ({
+        ...s,
+        date: s.date && s.date.length >= 10 ? s.date : todayIso(),
+      }));
       setParsed(trades);
+      setParsedStocks(stocks);
       const rej = json.rejections ?? [];
       setRejections(rej);
-      if (trades.length === 0 && rej.length === 0) {
+      if (trades.length === 0 && stocks.length === 0 && rej.length === 0) {
         setError("No trades detected — try a sharper image or a different broker view");
       }
     } catch (e) {
@@ -179,29 +198,53 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
   }
 
   async function confirm() {
-    if (!parsed || parsed.length === 0) return;
+    const optionCount = parsed?.length ?? 0;
+    const stockCount = parsedStocks?.length ?? 0;
+    if (optionCount === 0 && stockCount === 0) return;
     setConfirming(true);
     setError(null);
     try {
       const res = await fetch("/api/trades/bulk-create", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ trades: parsed }),
+        body: JSON.stringify({
+          trades: parsed ?? [],
+          stockTrades: parsedStocks ?? [],
+        }),
       });
       const json = (await res.json()) as {
         positions_created?: number;
         positions_updated?: number;
         fills_inserted?: number;
+        stocks_closed?: number;
+        stocks_partial?: number;
         errors?: string[];
         error?: string;
       };
       if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
       const parts = [
-        `Logged ${json.fills_inserted ?? 0} fill${(json.fills_inserted ?? 0) === 1 ? "" : "s"}`,
-        (json.positions_created ?? 0) > 0 ? `${json.positions_created} new position${json.positions_created === 1 ? "" : "s"}` : null,
-        (json.positions_updated ?? 0) > 0 ? `${json.positions_updated} updated` : null,
+        (json.fills_inserted ?? 0) > 0
+          ? `Logged ${json.fills_inserted} fill${(json.fills_inserted ?? 0) === 1 ? "" : "s"}`
+          : null,
+        (json.positions_created ?? 0) > 0
+          ? `${json.positions_created} new position${json.positions_created === 1 ? "" : "s"}`
+          : null,
+        (json.positions_updated ?? 0) > 0
+          ? `${json.positions_updated} updated`
+          : null,
+        (json.stocks_closed ?? 0) > 0
+          ? `${json.stocks_closed} stock position${json.stocks_closed === 1 ? "" : "s"} closed`
+          : null,
+        (json.stocks_partial ?? 0) > 0
+          ? `${json.stocks_partial} stock partial sale${json.stocks_partial === 1 ? "" : "s"}`
+          : null,
       ].filter(Boolean);
-      onSuccess(parts.join(", "));
+      if (json.errors && json.errors.length > 0) {
+        setError(json.errors.join("; "));
+        setConfirming(false);
+        return;
+      }
+      onSuccess(parts.join(", ") || "Import complete");
       onOpenChange(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Logging failed");
@@ -215,6 +258,14 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
   }
   function removeRow(idx: number) {
     setParsed((prev) => (prev ? prev.filter((_, i) => i !== idx) : prev));
+  }
+  function updateStockRow(idx: number, patch: Partial<ParsedStockTrade>) {
+    setParsedStocks((prev) =>
+      prev && prev.map((t, i) => (i === idx ? { ...t, ...patch } : t)),
+    );
+  }
+  function removeStockRow(idx: number) {
+    setParsedStocks((prev) => (prev ? prev.filter((_, i) => i !== idx) : prev));
   }
 
   return (
@@ -274,7 +325,7 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
           </>
         )}
 
-        {dataUrl && !parsed && (
+        {dataUrl && parsed === null && parsedStocks === null && (
           <div className="mt-3 space-y-3">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
@@ -291,8 +342,8 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
 
         {parsed && parsed.length > 0 && (
           <div className="mt-3 space-y-2 text-xs">
-            <div className="text-sm text-muted-foreground">
-              Found {parsed.length} trade{parsed.length === 1 ? "" : "s"} — review and confirm
+            <div className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+              Options ({parsed.length})
             </div>
             <div className="max-h-96 overflow-auto rounded border border-border">
               <table className="w-full table-fixed">
@@ -415,6 +466,113 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
           </div>
         )}
 
+        {parsedStocks && parsedStocks.length > 0 && (
+          <div className="mt-3 space-y-2 text-xs">
+            <div className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+              Stocks ({parsedStocks.length})
+            </div>
+            <div className="max-h-80 overflow-auto rounded border border-border">
+              <table className="w-full table-fixed">
+                <colgroup>
+                  <col style={{ width: "130px" }} />{/* Date */}
+                  <col style={{ width: "85px" }} />{/* Symbol */}
+                  <col style={{ width: "85px" }} />{/* Action */}
+                  <col style={{ width: "90px" }} />{/* Shares */}
+                  <col style={{ width: "100px" }} />{/* Price */}
+                  <col style={{ width: "40px" }} />{/* Delete */}
+                </colgroup>
+                <thead className="sticky top-0 z-10 bg-muted/40 text-left">
+                  <tr>
+                    <th className="whitespace-nowrap px-2 py-1">Date</th>
+                    <th className="whitespace-nowrap px-2 py-1">Symbol</th>
+                    <th className="whitespace-nowrap px-2 py-1">Action</th>
+                    <th className="whitespace-nowrap px-2 py-1">Shares</th>
+                    <th className="whitespace-nowrap px-2 py-1">Price</th>
+                    <th className="px-2 py-1"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {parsedStocks.map((s, idx) => (
+                    <tr key={idx} className="border-t border-border">
+                      <td className="px-2 py-1">
+                        <input
+                          type="date"
+                          value={s.date}
+                          onChange={(e) => updateStockRow(idx, { date: e.target.value })}
+                          className="w-full rounded border border-border bg-background px-1 py-0.5"
+                        />
+                      </td>
+                      <td className="px-2 py-1">
+                        <input
+                          value={s.symbol}
+                          onChange={(e) =>
+                            updateStockRow(idx, { symbol: e.target.value.toUpperCase() })
+                          }
+                          className="w-20 rounded border border-border bg-background px-1 py-0.5 uppercase"
+                        />
+                      </td>
+                      <td className="px-2 py-1">
+                        <select
+                          value={s.action}
+                          onChange={(e) =>
+                            updateStockRow(idx, {
+                              action: e.target.value as "buy" | "sell",
+                            })
+                          }
+                          className="rounded border border-border bg-background px-1 py-0.5"
+                        >
+                          <option value="buy">buy</option>
+                          <option value="sell">sell</option>
+                        </select>
+                      </td>
+                      <td className="px-2 py-1">
+                        <input
+                          type="number"
+                          min="1"
+                          value={s.shares}
+                          onChange={(e) =>
+                            updateStockRow(idx, {
+                              shares: Math.max(1, Number(e.target.value) || 1),
+                            })
+                          }
+                          className="w-20 rounded border border-border bg-background px-1 py-0.5"
+                        />
+                      </td>
+                      <td className="px-2 py-1">
+                        <input
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          value={s.price}
+                          onChange={(e) =>
+                            updateStockRow(idx, { price: Number(e.target.value) })
+                          }
+                          className="w-24 rounded border border-border bg-background px-1 py-0.5"
+                        />
+                      </td>
+                      <td className="px-2 py-1 text-right">
+                        <button
+                          type="button"
+                          className="text-muted-foreground hover:text-rose-300"
+                          onClick={() => removeStockRow(idx)}
+                          aria-label="Remove"
+                        >
+                          <Trash2 className="h-3 w-3" />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="text-[11px] text-muted-foreground">
+              Stock sells match against open stock_long positions by (symbol, broker)
+              and post realized P&L = (price − cost basis) × shares. Buys are not
+              supported here — buy-side shares only enter via option assignment.
+            </div>
+          </div>
+        )}
+
         {rejections.length > 0 && (
           <div className="mt-2 space-y-1 rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-xs text-amber-100">
             <div className="font-semibold uppercase tracking-wide text-amber-200">
@@ -438,7 +596,8 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
           <Button variant="secondary" onClick={() => onOpenChange(false)} disabled={parsing || confirming}>
             Cancel
           </Button>
-          {parsed && parsed.length > 0 && (
+          {((parsed && parsed.length > 0) ||
+            (parsedStocks && parsedStocks.length > 0)) && (
             <Button onClick={confirm} disabled={confirming}>
               {confirming ? (
                 <>
@@ -446,7 +605,7 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
                   Logging…
                 </>
               ) : (
-                `Confirm & log all (${parsed.length})`
+                `Confirm & log all (${(parsed?.length ?? 0) + (parsedStocks?.length ?? 0)})`
               )}
             </Button>
           )}
