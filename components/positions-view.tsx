@@ -19,6 +19,10 @@ import {
 } from "@/components/expire-confirmation-modal";
 import { UndoImportPopover } from "@/components/undo-import-popover";
 import type { ConfirmItem } from "@/components/expire-confirmation-modal";
+import {
+  SellSharesModal,
+  type SellSharesTarget,
+} from "@/components/sell-shares-modal";
 
 type SortKey =
   | "strike"
@@ -644,6 +648,7 @@ export function PositionsView() {
   const [message, setMessage] = useState<string | null>(null);
   const [showScreenshot, setShowScreenshot] = useState(false);
   const [showManual, setShowManual] = useState(false);
+  const [sellTarget, setSellTarget] = useState<SellSharesTarget | null>(null);
   const [best, setBest] = useState<BestOpportunity>(null);
   const [closedPositions, setClosedPositions] = useState<ClosedPositionClientView[] | null>(null);
   const [closedOpen, setClosedOpen] = useState(false);
@@ -1338,7 +1343,10 @@ export function PositionsView() {
                   ))}
                 </div>
               ))}
-              <BrokerStockSubsection stocks={stocksByBrokerKey.get(group.key) ?? []} />
+              <BrokerStockSubsection
+                stocks={stocksByBrokerKey.get(group.key) ?? []}
+                onSellShares={setSellTarget}
+              />
             </div>
           </div>
         );
@@ -1397,7 +1405,10 @@ export function PositionsView() {
               </div>
             </div>
             <div className="space-y-0.5 px-2 pb-2">
-              <BrokerStockSubsection stocks={o.stocks} />
+              <BrokerStockSubsection
+                stocks={o.stocks}
+                onSellShares={setSellTarget}
+              />
             </div>
           </div>
         );
@@ -1491,6 +1502,15 @@ export function PositionsView() {
         onSuccess={onImportSuccess}
       />
       <ImportManualModal open={showManual} onOpenChange={setShowManual} onSuccess={onImportSuccess} />
+      <SellSharesModal
+        open={sellTarget !== null}
+        target={sellTarget}
+        onCancel={() => setSellTarget(null)}
+        onConfirm={async (res) => {
+          setSellTarget(null);
+          if (res.ok) onImportSuccess(res.message);
+        }}
+      />
       <ExpireConfirmationModal
         open={modalOpen && pendingConfirmation.length > 0}
         rows={pendingConfirmation}
@@ -1517,8 +1537,10 @@ export function PositionsView() {
 //   Status  → GAIN / HOLD / LOSS (always visible, center)
 function BrokerStockSubsection({
   stocks,
+  onSellShares,
 }: {
   stocks: StockPositionRow[];
+  onSellShares: (target: SellSharesTarget) => void;
 }) {
   if (stocks.length === 0) return null;
   // Group multiple lots of the same symbol into one ticker subheader,
@@ -1547,7 +1569,12 @@ function BrokerStockSubsection({
         <div className="h-px flex-1 bg-border/50" />
       </div>
       {tickerGroups.map(([symbol, lots]) => (
-        <StockTickerGroup key={symbol} symbol={symbol} lots={lots} />
+        <StockTickerGroup
+          key={symbol}
+          symbol={symbol}
+          lots={lots}
+          onSellShares={onSellShares}
+        />
       ))}
     </div>
   );
@@ -1559,9 +1586,11 @@ function BrokerStockSubsection({
 function StockTickerGroup({
   symbol,
   lots,
+  onSellShares,
 }: {
   symbol: string;
   lots: StockPositionRow[];
+  onSellShares: (target: SellSharesTarget) => void;
 }) {
   const totalShares = lots.reduce((s, r) => s + r.shares, 0);
   const liveLots = lots.filter((r) => r.pnlDollars !== null);
@@ -1603,13 +1632,19 @@ function StockTickerGroup({
         </span>
       </div>
       {lots.map((r) => (
-        <StockRow key={r.id} row={r} />
+        <StockRow key={r.id} row={r} onSellShares={onSellShares} />
       ))}
     </div>
   );
 }
 
-function StockRow({ row }: { row: StockPositionRow }) {
+function StockRow({
+  row,
+  onSellShares,
+}: {
+  row: StockPositionRow;
+  onSellShares: (target: SellSharesTarget) => void;
+}) {
   const pnl = row.pnlDollars;
   const pnlColor =
     pnl === null
@@ -1686,8 +1721,28 @@ function StockRow({ row }: { row: StockPositionRow }) {
       <div className="hidden sm:block" />
       {/* col 8 — empty (IV slot, sm only) */}
       <div className="hidden sm:block" />
-      {/* col 9 — empty (Grade slot) */}
-      <div />
+      {/* col 9 — Sell button (Grade slot). Stock_short rows can't be
+          closed via the sell-shares path yet (this builds the long
+          side only), so the button is gated. */}
+      <div className="flex items-center justify-center">
+        {row.positionType === "stock_long" && (
+          <button
+            type="button"
+            onClick={() =>
+              onSellShares({
+                positionId: row.id,
+                symbol: row.symbol,
+                broker: row.broker,
+                totalShares: row.shares,
+                costBasis: row.costBasis,
+              })
+            }
+            className="rounded border border-border/60 bg-background/60 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground hover:border-foreground/40 hover:text-foreground"
+          >
+            Sell
+          </button>
+        )}
+      </div>
       {/* col 10 — Status badge */}
       <div className="flex items-center justify-center">
         <span

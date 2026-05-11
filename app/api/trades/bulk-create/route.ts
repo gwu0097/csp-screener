@@ -28,7 +28,20 @@ export type TradeInput = {
   notes?: string | null;
 };
 
-type BulkBody = { trades?: TradeInput[] };
+// Stock-sell input — used to close (fully or partially) an existing
+// stock_long position that came in via the assignment flow. The buy
+// side has no bulk-create entry point because shares only arrive
+// through option assignment; this branch is sell-only.
+export type StockTradeInput = {
+  symbol: string;
+  action: "sell"; // buy not supported here — shares originate from assignment
+  shares: number;
+  price: number; // per-share sale price
+  date: string; // YYYY-MM-DD
+  broker?: string | null;
+};
+
+type BulkBody = { trades?: TradeInput[]; stockTrades?: StockTradeInput[] };
 
 function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
@@ -395,14 +408,146 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // ---------- Stock-sell branch ----------
+  // Match each sell against an open stock_long row for (symbol, broker),
+  // compute (price − cost_basis) × shares, record a close fill, and
+  // update the position. Partial sales decrement total_contracts and
+  // accumulate realized_pnl; the last share flips status to closed.
+  const stockInputs = Array.isArray(body.stockTrades) ? body.stockTrades : [];
+  let stocksClosed = 0;
+  let stocksPartial = 0;
+  for (const s of stockInputs) {
+    const symbol =
+      typeof s.symbol === "string" ? s.symbol.trim().toUpperCase() : "";
+    const broker = normalizeBroker(s.broker);
+    const shares = Number(s.shares);
+    const price = Number(s.price);
+    const date =
+      typeof s.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s.date)
+        ? s.date
+        : todayIso();
+    if (s.action !== "sell") {
+      errors.push(`stock ${symbol || "?"}: only action='sell' is supported`);
+      continue;
+    }
+    if (!symbol) {
+      errors.push(`stock ?: missing symbol`);
+      continue;
+    }
+    if (!Number.isFinite(shares) || shares <= 0) {
+      errors.push(`stock ${symbol}: shares must be > 0`);
+      continue;
+    }
+    if (!Number.isFinite(price) || price < 0) {
+      errors.push(`stock ${symbol}: price must be ≥ 0`);
+      continue;
+    }
+
+    try {
+      const lookup = await supabase
+        .from("positions")
+        .select(
+          "id,symbol,strike,expiry,option_type,broker,total_contracts,entry_stock_price,position_type,status,realized_pnl,notes",
+        )
+        .eq("symbol", symbol)
+        .eq("broker", broker)
+        .eq("position_type", "stock_long")
+        .eq("status", "open")
+        .limit(1);
+      if (lookup.error) {
+        errors.push(`stock ${symbol}: lookup failed — ${lookup.error.message}`);
+        continue;
+      }
+      const stockRow = ((lookup.data ?? []) as Array<{
+        id: string;
+        symbol: string;
+        total_contracts: number;
+        entry_stock_price: number | null;
+        status: string;
+        realized_pnl: number | null;
+        notes: string | null;
+      }>)[0];
+      if (!stockRow) {
+        errors.push(
+          `stock ${symbol}: no open stock_long position for broker=${broker}`,
+        );
+        continue;
+      }
+
+      const currentShares = Number(stockRow.total_contracts ?? 0);
+      if (shares > currentShares) {
+        errors.push(
+          `stock ${symbol}: tried to sell ${shares} shares but only ${currentShares} remaining`,
+        );
+        continue;
+      }
+      const costBasis =
+        stockRow.entry_stock_price !== null
+          ? Number(stockRow.entry_stock_price)
+          : 0;
+      const stockPnl = Math.round((price - costBasis) * shares * 100) / 100;
+      const prevRealized = Number(stockRow.realized_pnl ?? 0) || 0;
+      const newRealized = Math.round((prevRealized + stockPnl) * 100) / 100;
+      const remainingShares = currentShares - shares;
+      const isFullClose = remainingShares === 0;
+
+      const fillInsert = await supabase.from("fills").insert({
+        position_id: stockRow.id,
+        fill_type: "close",
+        contracts: shares,
+        premium: price,
+        fill_date: date,
+        fill_time: new Date().toISOString(),
+        import_batch_id: importBatchId,
+      });
+      if (fillInsert.error) {
+        errors.push(
+          `stock ${symbol}: fill insert failed — ${fillInsert.error.message}`,
+        );
+        continue;
+      }
+      fillsInserted += 1;
+
+      const noteAdd = `Sold ${shares} @ $${price.toFixed(2)} on ${date}. Stock P&L: ${stockPnl >= 0 ? "+" : ""}$${stockPnl.toFixed(2)}.`;
+      const notes = stockRow.notes ? `${stockRow.notes} | ${noteAdd}` : noteAdd;
+
+      const update = await supabase
+        .from("positions")
+        .update({
+          total_contracts: remainingShares,
+          realized_pnl: newRealized,
+          status: isFullClose ? "closed" : "open",
+          closed_date: isFullClose ? date : null,
+          notes,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", stockRow.id);
+      if (update.error) {
+        errors.push(
+          `stock ${symbol}: position update failed — ${update.error.message}`,
+        );
+        continue;
+      }
+      positionsTouched.add(stockRow.id);
+      if (isFullClose) stocksClosed += 1;
+      else stocksPartial += 1;
+    } catch (e) {
+      errors.push(
+        `stock ${symbol}: ${e instanceof Error ? e.message : "sell failed"}`,
+      );
+    }
+  }
+
   console.log(
-    `[bulk-create] items=${items.length} positions_created=${positionsCreated} positions_updated=${positionsTouched.size - positionsCreated} fills_inserted=${fillsInserted} errors=${errors.length}`,
+    `[bulk-create] items=${items.length} positions_created=${positionsCreated} positions_updated=${positionsTouched.size - positionsCreated} fills_inserted=${fillsInserted} stocks_closed=${stocksClosed} stocks_partial=${stocksPartial} errors=${errors.length}`,
   );
 
   return NextResponse.json({
     positions_created: positionsCreated,
     positions_updated: Math.max(0, positionsTouched.size - positionsCreated),
     fills_inserted: fillsInserted,
+    stocks_closed: stocksClosed,
+    stocks_partial: stocksPartial,
     errors,
   });
 }

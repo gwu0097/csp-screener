@@ -22,6 +22,9 @@ type PositionRow = {
   entry_vix: number | null;
   status: string;
   broker: string | null;
+  position_type: string | null;
+  assignment_source_id: string | null;
+  entry_stock_price: number | null;
 };
 
 type RecRow = {
@@ -143,7 +146,7 @@ export async function GET(req: NextRequest) {
   let query = sb
     .from("positions")
     .select(
-      "id,symbol,strike,expiry,total_contracts,avg_premium_sold,opened_date,closed_date,realized_pnl,entry_final_grade,entry_crush_grade,entry_opportunity_grade,entry_iv_edge,entry_em_pct,entry_vix,status,broker",
+      "id,symbol,strike,expiry,total_contracts,avg_premium_sold,opened_date,closed_date,realized_pnl,entry_final_grade,entry_crush_grade,entry_opportunity_grade,entry_iv_edge,entry_em_pct,entry_vix,status,broker,position_type,assignment_source_id,entry_stock_price",
     )
     .in("status", ["closed", "expired_worthless", "assigned"])
     .order("closed_date", { ascending: true });
@@ -152,7 +155,21 @@ export async function GET(req: NextRequest) {
   if (allClosedRes.error) {
     return NextResponse.json({ error: allClosedRes.error.message }, { status: 500 });
   }
-  const allClosed = (allClosedRes.data ?? []) as PositionRow[];
+  const allClosedRaw = (allClosedRes.data ?? []) as PositionRow[];
+  // Partition by position_type. Pre-migration NULL is treated as
+  // option. stock_long / stock_short rows have option-shaped columns
+  // populated as placeholders (strike=0, option_type='put') and would
+  // poison ROC / ticker rankings if included in the option aggregates
+  // — we surface them via paired_assignments[] instead.
+  const allClosed: PositionRow[] = [];
+  const closedStocks: PositionRow[] = [];
+  for (const r of allClosedRaw) {
+    if (r.position_type === "stock_long" || r.position_type === "stock_short") {
+      closedStocks.push(r);
+    } else {
+      allClosed.push(r);
+    }
+  }
 
   // In-range: filter by closed_date within [from, to] inclusive.
   const windowed = allClosed.filter((p) => {
@@ -521,6 +538,75 @@ export async function GET(req: NextRequest) {
     },
   };
 
+  // ---------- Section: paired assignments ----------
+  // For each closed stock_long that came from a put assignment,
+  // surface the linked put + stock pair as a combined trade
+  // summary. Driven by assignment_source_id. Open stocks are not
+  // included — the closing P&L only crystallizes on sale.
+  const putById = new Map<string, PositionRow>();
+  for (const r of allClosedRaw) {
+    if (r.position_type === "stock_long" || r.position_type === "stock_short") continue;
+    putById.set(r.id, r);
+  }
+  type PairedAssignment = {
+    symbol: string;
+    broker: string | null;
+    parent: {
+      positionId: string;
+      strike: number;
+      expiry: string;
+      contracts: number;
+      avgPremiumSold: number | null;
+      realizedPnl: number;
+      closedDate: string | null;
+    } | null;
+    stock: {
+      positionId: string;
+      shares: number;
+      costBasis: number | null;
+      realizedPnl: number;
+      closedDate: string | null;
+    };
+    totalPnl: number;
+  };
+  const paired_assignments: PairedAssignment[] = [];
+  for (const s of closedStocks) {
+    if (!s.assignment_source_id) continue;
+    const parent = putById.get(s.assignment_source_id) ?? null;
+    const stockPnl = Number(s.realized_pnl ?? 0);
+    const parentPnl = parent ? Number(parent.realized_pnl ?? 0) : 0;
+    paired_assignments.push({
+      symbol: s.symbol,
+      broker: s.broker,
+      parent: parent
+        ? {
+            positionId: parent.id,
+            strike: Number(parent.strike),
+            expiry: parent.expiry,
+            contracts: Number(parent.total_contracts ?? 0),
+            avgPremiumSold:
+              parent.avg_premium_sold !== null
+                ? Number(parent.avg_premium_sold)
+                : null,
+            realizedPnl: parentPnl,
+            closedDate: parent.closed_date,
+          }
+        : null,
+      stock: {
+        positionId: s.id,
+        shares: Number(s.total_contracts ?? 0),
+        costBasis:
+          s.entry_stock_price !== null ? Number(s.entry_stock_price) : null,
+        realizedPnl: stockPnl,
+        closedDate: s.closed_date,
+      },
+      totalPnl: Math.round((stockPnl + parentPnl) * 100) / 100,
+    });
+  }
+  paired_assignments.sort((a, b) =>
+    (b.stock.closedDate ?? "").localeCompare(a.stock.closedDate ?? ""),
+  );
+
   return NextResponse.json({
     date_range: { from, to },
     broker: broker ?? "all",
@@ -553,6 +639,7 @@ export async function GET(req: NextRequest) {
       },
       rec_accuracy,
     },
+    paired_assignments,
     export_payload,
   });
 }

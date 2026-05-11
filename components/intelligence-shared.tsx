@@ -91,6 +91,28 @@ export type PatternBucket = {
   avg_roc: number | null;
 };
 
+export type PairedAssignment = {
+  symbol: string;
+  broker: string | null;
+  parent: {
+    positionId: string;
+    strike: number;
+    expiry: string;
+    contracts: number;
+    avgPremiumSold: number | null;
+    realizedPnl: number;
+    closedDate: string | null;
+  } | null;
+  stock: {
+    positionId: string;
+    shares: number;
+    costBasis: number | null;
+    realizedPnl: number;
+    closedDate: string | null;
+  };
+  totalPnl: number;
+};
+
 export type IntelligenceResponse = {
   date_range: DateRange;
   broker: string;
@@ -106,6 +128,7 @@ export type IntelligenceResponse = {
     worst_trade: { symbol: string; pnl: number; roc: number | null } | null;
   };
   equity_curve: EquityPoint[];
+  paired_assignments: PairedAssignment[];
   ticker_rankings: TickerRanking[];
   patterns: {
     enabled: boolean;
@@ -660,7 +683,77 @@ export function PerformanceSection({
           </div>
         )}
       </div>
+
+      <PairedAssignmentsPanel pairs={data.paired_assignments ?? []} />
     </section>
+  );
+}
+
+// Lists each closed stock_long alongside its parent put — the linked
+// trade view. Renders nothing when there are no closed assignments
+// yet, so the panel only shows up when there's something to surface.
+function PairedAssignmentsPanel({ pairs }: { pairs: PairedAssignment[] }) {
+  if (pairs.length === 0) return null;
+  return (
+    <div className="rounded-md border border-border bg-background/40 p-3">
+      <div className="mb-2 text-sm font-medium">Paired assignments</div>
+      <div className="space-y-3">
+        {pairs.map((p) => {
+          const parentPnl = p.parent?.realizedPnl ?? 0;
+          const stockPnl = p.stock.realizedPnl;
+          const totalColor =
+            p.totalPnl >= 0 ? "text-emerald-300" : "text-rose-300";
+          const parentColor =
+            parentPnl >= 0 ? "text-emerald-300" : "text-rose-300";
+          const stockColor =
+            stockPnl >= 0 ? "text-emerald-300" : "text-rose-300";
+          return (
+            <div
+              key={p.stock.positionId}
+              className="rounded border border-border/60 bg-background/40 p-3 text-sm"
+            >
+              <div className="mb-1 flex items-baseline justify-between">
+                <span className="text-base font-semibold">{p.symbol}</span>
+                <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                  {p.broker ?? ""}
+                </span>
+              </div>
+              <div className="space-y-0.5 font-mono">
+                {p.parent ? (
+                  <div className="flex justify-between gap-3">
+                    <span className="text-muted-foreground">
+                      ${p.parent.strike} put × {p.parent.contracts} — premium collected:
+                    </span>
+                    <span className={parentColor}>
+                      {fmtMoney(parentPnl, true)}
+                    </span>
+                  </div>
+                ) : (
+                  <div className="flex justify-between gap-3 text-muted-foreground">
+                    <span>Parent put — not found</span>
+                    <span>—</span>
+                  </div>
+                )}
+                <div className="flex justify-between gap-3">
+                  <span className="text-muted-foreground">
+                    {p.stock.shares} shares
+                    {p.stock.costBasis !== null
+                      ? ` @ $${p.stock.costBasis.toFixed(2)} cost — stock P&L:`
+                      : " — stock P&L:"}
+                  </span>
+                  <span className={stockColor}>{fmtMoney(stockPnl, true)}</span>
+                </div>
+                <div className="my-1 border-t border-border/60" />
+                <div className="flex justify-between gap-3 text-sm font-semibold">
+                  <span>Total {p.symbol} P&L:</span>
+                  <span className={totalColor}>{fmtMoney(p.totalPnl, true)}</span>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
