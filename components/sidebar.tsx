@@ -255,23 +255,60 @@ export function Sidebar() {
           mode === "collapsed" ? "md:w-14" : "md:w-60",
         )}
       >
-        <div className="flex h-14 items-center justify-between border-b border-white/10 px-3">
-          <Link
-            href="/"
-            className="flex items-center gap-2 font-semibold text-white"
-            aria-label="CSP Screener"
-          >
-            <BarChart3 className="h-5 w-5 shrink-0 text-emerald-400" />
-            {mode === "expanded" && <span className="text-sm">CSP Screener</span>}
-          </Link>
-          <button
-            type="button"
-            onClick={() => setMobileOpen(false)}
-            className="rounded p-1 text-gray-400 hover:bg-white/10 hover:text-white md:hidden"
-            aria-label="Close navigation"
-          >
-            <X className="h-4 w-4" />
-          </button>
+        <div className="flex h-14 items-center border-b border-white/10 px-3">
+          {mode === "expanded" ? (
+            <>
+              <Link
+                href="/"
+                className="flex flex-1 items-center gap-2 font-semibold text-white"
+                aria-label="CSP Screener"
+              >
+                <BarChart3 className="h-5 w-5 shrink-0 text-emerald-400" />
+                <span className="text-sm">CSP Screener</span>
+              </Link>
+              {/* Desktop collapse toggle — sits in the header's right
+                  edge. Hidden on mobile since the drawer is always
+                  expanded; the X close handles the mobile dismissal. */}
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    onClick={toggleCollapsed}
+                    className="hidden rounded p-1 text-gray-400 hover:bg-white/10 hover:text-white md:inline-flex"
+                    aria-label="Collapse sidebar"
+                  >
+                    <ChevronLeft className="h-4 w-4" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="right">Collapse sidebar</TooltipContent>
+              </Tooltip>
+              <button
+                type="button"
+                onClick={() => setMobileOpen(false)}
+                className="ml-1 rounded p-1 text-gray-400 hover:bg-white/10 hover:text-white md:hidden"
+                aria-label="Close navigation"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </>
+          ) : (
+            // Collapsed mode is desktop-only (mobile drawer always
+            // renders expanded) — render just the centered expand
+            // chevron, replacing the logo/title.
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  onClick={toggleCollapsed}
+                  className="flex w-full items-center justify-center rounded p-1 text-gray-400 hover:bg-white/10 hover:text-white"
+                  aria-label="Expand sidebar"
+                >
+                  <ChevronRight className="h-4 w-4" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="right">Expand sidebar</TooltipContent>
+            </Tooltip>
+          )}
         </div>
 
         <nav className="flex flex-1 flex-col gap-0.5 overflow-y-auto p-2">
@@ -316,33 +353,6 @@ export function Sidebar() {
           <SidebarLink item={SETTINGS} pathname={pathname} mode={mode} />
         </nav>
 
-        {/* Desktop-only collapse toggle. Mobile drawer doesn't surface
-            it — the drawer is binary (open/closed) and never lives in
-            the collapsed-rail layout. */}
-        <div className="hidden border-t border-white/10 p-2 md:block">
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                type="button"
-                onClick={toggleCollapsed}
-                className={cn(
-                  "flex w-full items-center gap-2 rounded-md py-2 text-sm text-gray-400 hover:bg-white/5 hover:text-white",
-                  mode === "collapsed" ? "justify-center px-0" : "justify-end px-3",
-                )}
-                aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-              >
-                {collapsed ? (
-                  <ChevronRight className="h-4 w-4" />
-                ) : (
-                  <ChevronLeft className="h-4 w-4" />
-                )}
-              </button>
-            </TooltipTrigger>
-            <TooltipContent side="right">
-              {collapsed ? "Expand sidebar" : "Collapse sidebar"}
-            </TooltipContent>
-          </Tooltip>
-        </div>
       </aside>
     </TooltipProvider>
   );
