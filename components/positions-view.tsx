@@ -952,6 +952,21 @@ export function PositionsView() {
     0,
   );
   const unrealized = optionsUnrealized + stockUnrealized;
+  // "Estimate" indicator on the Unrealized total. The sum still uses
+  // the underlying pnlDollars values even when the per-row cell shows
+  // "—" outside the regular session — but the total prefixes with ~
+  // so the user knows it's an after-hours / intrinsic-fallback figure
+  // rather than a live mark.
+  const marketStateStr = data?.market?.marketState ?? null;
+  const optionsStale =
+    marketStateStr === "POST" ||
+    marketStateStr === "POSTPOST" ||
+    marketStateStr === "CLOSED";
+  const anyOptionEstimate = positions.some(
+    (p) => p.pnlSource === "intrinsic" || p.pnlSource === "maxProfitOtm",
+  );
+  const unrealizedIsEstimate = optionsStale || anyOptionEstimate;
+  const unrealizedPrefix = unrealizedIsEstimate ? "~" : "";
   // Max profit = total premium collected if every open position
   // expires worthless. Per position: avgPremiumSold × remainingContracts
   // × 100. Manually-added positions without fills carry avgPremiumSold=
@@ -1027,18 +1042,41 @@ export function PositionsView() {
               {positions.length > 0 && (
                 <div>
                   <span className="text-muted-foreground">Unrealized </span>
-                  {data?.live ? (
-                    <span
-                      className={cn(
-                        "font-mono text-base font-semibold",
-                        unrealized >= 0 ? "text-emerald-300" : "text-rose-300",
-                      )}
-                    >
-                      {fmtDollarsSigned(unrealized)}
-                    </span>
-                  ) : (
-                    <span className="font-mono text-base font-semibold text-muted-foreground/70">—</span>
-                  )}
+                  {(() => {
+                    // Show the sum whenever any contributing row has a
+                    // pnlDollars figure (live fetch OR cached from a
+                    // prior Live refresh). The ~ prefix flags AH /
+                    // intrinsic-estimate runs so the user knows the
+                    // total isn't from a live mark.
+                    const hasAnyPnl =
+                      positions.some((p) => p.pnlDollars !== null) ||
+                      (data?.stockPositions ?? []).some(
+                        (s) => s.pnlDollars !== null,
+                      );
+                    if (!hasAnyPnl) {
+                      return (
+                        <span className="font-mono text-base font-semibold text-muted-foreground/70">
+                          —
+                        </span>
+                      );
+                    }
+                    return (
+                      <span
+                        className={cn(
+                          "font-mono text-base font-semibold",
+                          unrealized >= 0 ? "text-emerald-300" : "text-rose-300",
+                        )}
+                        title={
+                          unrealizedIsEstimate
+                            ? "Unrealized total includes after-hours / intrinsic-value estimates — option marks aren't live outside the regular session"
+                            : undefined
+                        }
+                      >
+                        {unrealizedPrefix}
+                        {fmtDollarsSigned(unrealized)}
+                      </span>
+                    );
+                  })()}
                 </div>
               )}
               {market && (
@@ -1293,7 +1331,13 @@ export function PositionsView() {
                         "font-mono font-semibold",
                         stats.unrealized >= 0 ? "text-emerald-300" : "text-rose-300",
                       )}
+                      title={
+                        unrealizedIsEstimate
+                          ? "Unrealized total includes after-hours / intrinsic-value estimates — option marks aren't live outside the regular session"
+                          : undefined
+                      }
                     >
+                      {unrealizedPrefix}
                       {fmtDollarsSigned(stats.unrealized)}
                     </span>
                   ) : (
