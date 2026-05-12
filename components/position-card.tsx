@@ -180,20 +180,25 @@ type Props =
 //   sm–lg (tablet, 10 cols): adds Expiry · Mark · % OTM
 //   lg+   (desktop, 12 cols): adds Premium · IV
 //
-// Column widths use `minmax(0, Nfr)` so the grid distributes the
-// container's available width proportionally to each column's
-// weight — no fixed-pixel minimums forcing the row past viewport
-// width. The dot column stays at 24px because it's a non-content
-// fixed indicator. Status carries the largest weight (12fr) so
-// "MAX PROFIT" / "EMERGENCY_CUT" badges always have the most
-// elastic space. Responsive text size (text-xs on tablet/mobile,
-// text-sm on desktop) shrinks cell content the same proportion as
-// the grid shrinks the cells, so badges/values fit on iPad.
+// Column widths use minmax(min-px, Nfr) with tight per-column
+// minimums sized to fit the largest realistic content at the
+// shrunken text-xs (12px) baseline. STATUS minimum is 100px so
+// "MAX PROFIT" / "EMERGENCY_CUT" badges (whitespace-nowrap, no
+// truncation) always render in full; the surrounding cell never
+// clips overflow. fr weights distribute leftover space.
+//
+// Sum at tablet (10 cols): 544px columns + 72 gap + 24 pad = 640
+// → fits 768 iPad portrait with ~128px headroom.
+// Sum at desktop (12 cols): 634px + 88 gap + 24 pad = 746
+// → fits any laptop / desktop with room.
+// Sum at mobile (7 cols):  384 + 48 + 24 = 456
+// → slightly over a 375px iPhone; row scrolls horizontally if
+//   needed, but the visible cells aren't truncated.
 export const COLLAPSED_ROW_GRID =
   "grid w-full items-center gap-2 px-3 text-xs lg:text-sm " +
-  "grid-cols-[24px_minmax(0,8fr)_minmax(0,5fr)_minmax(0,9fr)_minmax(0,6fr)_minmax(0,7fr)_minmax(0,12fr)] " +
-  "sm:grid-cols-[24px_minmax(0,8fr)_minmax(0,7fr)_minmax(0,5fr)_minmax(0,6fr)_minmax(0,9fr)_minmax(0,6fr)_minmax(0,7fr)_minmax(0,7fr)_minmax(0,12fr)] " +
-  "lg:grid-cols-[24px_minmax(0,8fr)_minmax(0,7fr)_minmax(0,5fr)_minmax(0,6fr)_minmax(0,6fr)_minmax(0,9fr)_minmax(0,6fr)_minmax(0,7fr)_minmax(0,6fr)_minmax(0,7fr)_minmax(0,12fr)]";
+  "grid-cols-[24px_minmax(60px,8fr)_minmax(40px,5fr)_minmax(70px,9fr)_minmax(45px,6fr)_minmax(45px,7fr)_minmax(100px,12fr)] " +
+  "sm:grid-cols-[24px_minmax(60px,8fr)_minmax(55px,7fr)_minmax(40px,5fr)_minmax(50px,6fr)_minmax(70px,9fr)_minmax(45px,6fr)_minmax(55px,7fr)_minmax(45px,7fr)_minmax(100px,12fr)] " +
+  "lg:grid-cols-[24px_minmax(60px,8fr)_minmax(55px,7fr)_minmax(40px,5fr)_minmax(50px,6fr)_minmax(50px,6fr)_minmax(70px,9fr)_minmax(45px,6fr)_minmax(55px,7fr)_minmax(40px,5fr)_minmax(45px,7fr)_minmax(100px,12fr)]";
 
 // ---------- small helpers ----------
 

@@ -622,14 +622,24 @@ export async function POST(req: NextRequest) {
         .map((r) => coerceStockTrade(r, broker))
         .filter((t): t is ParsedStockTrade => t !== null);
     } else {
+      // Allow timePlaced up to 24h ahead of "now" so a user whose
+      // local calendar already rolled over (HK / Tokyo at midnight
+      // UTC = next day's morning local) doesn't get their imports
+      // rejected as "future". The same +24h buffer also handles
+      // the reverse case (server clock drift, daylight-saving
+      // jitter) without needing to encode any specific timezone.
+      const maxAllowedMs = Date.now() + 24 * 60 * 60 * 1000;
       const accepted: ParsedTrade[] = [];
       for (const r of optionItems) {
         const t = coerceTrade(r, broker);
         if (!t) continue; // structural reject (missing fields, bad strike/contracts, etc.)
-        if (t.timePlaced && t.timePlaced > todayUtc) {
+        const placedMs = t.timePlaced
+          ? new Date(`${t.timePlaced}T00:00:00Z`).getTime()
+          : null;
+        if (placedMs !== null && placedMs > maxAllowedMs) {
           rejections.push({
             symbol: t.symbol,
-            reason: `Trade rejected — date appears invalid (timePlaced: ${t.timePlaced} is in the future). Please edit the date before confirming.`,
+            reason: `Trade rejected — date appears invalid (timePlaced: ${t.timePlaced} is more than 24h in the future). Please edit the date before confirming.`,
           });
           continue;
         }
