@@ -102,6 +102,11 @@ type OpenPosition = {
   // Only populated when expiryStatus != "active".
   expiryPctFromStrike: number | null;
   expiryLastStockPrice: number | null;
+  // True when the stored expiry doesn't exist in Schwab's chain
+  // (drifted by more than the picker tolerance or rejected outright).
+  // Drives the ⚠️ badge on the row so the user can correct the
+  // strike/expiry — see the SE 2026-05-26 vs 2026-05-22 case.
+  expiryNotInChain: boolean;
   // Entry snapshot — populated at position-open time from the screener's
   // three-layer grade. Used by the expanded position card for the
   // left-column "what did we see at entry" panel.
@@ -120,22 +125,48 @@ function daysBetween(a: Date, b: Date): number {
   return Math.round((b.getTime() - a.getTime()) / (24 * 60 * 60 * 1000));
 }
 
-// Nearest-date fallback for off-by-a-few-day stored expiries (e.g. a
-// Robinhood import that wrote 2026-08-05 when the actual listed
-// weekly is 2026-08-07). Only kicks in when prefix-match fails AND
-// the closest listed expiration is within MAX_EXP_DRIFT_MS of the
-// requested date — beyond that the chain is genuinely the wrong
-// expiration and we'd rather return null than mis-mark the position.
-const MAX_EXP_DRIFT_MS = 14 * 86400000;
+// Picker tolerances. Both used to be generous (14d drift, unbounded
+// strike snap) which silently picked the wrong contract when an
+// expiry was misread on import — see the SE $64P 2026-05-26 case
+// where the date didn't exist (Tuesday, no listed weekly) and the
+// picker drifted to 2026-05-29 then snapped $64 → $65, returning a
+// completely different contract's mark and producing a -$1,290
+// phantom P&L. Tightened so a true miss returns null and the row
+// shows "—" with a warning badge instead.
+const MAX_EXP_DRIFT_MS = 7 * 86400000;
+const MAX_STRIKE_SNAP = 1.0;
+
+// `reason` flags the failure mode so the route can decide whether
+// to fall through to an intrinsic-value estimate (chain present but
+// uninformative — fine to estimate) or suppress P&L entirely
+// (chain mismatch — estimates would also be wrong).
+type PickReason =
+  | "ok"
+  | "no_chain"
+  | "drift_too_large"
+  | "snap_too_large"
+  | "drift_and_snap";
 
 function pickContractFromChain(
   chain: Awaited<ReturnType<typeof getOptionsChain>>,
   strike: number,
   expiry: string,
-): { contract: SchwabOptionContract | null; pickedExpKey: string | null; expDriftDays: number | null } {
+): {
+  contract: SchwabOptionContract | null;
+  pickedExpKey: string | null;
+  expDriftDays: number | null;
+  strikeSnap: number | null;
+  reason: PickReason;
+} {
   const keys = Object.keys(chain.putExpDateMap ?? {});
   if (keys.length === 0) {
-    return { contract: null, pickedExpKey: null, expDriftDays: null };
+    return {
+      contract: null,
+      pickedExpKey: null,
+      expDriftDays: null,
+      strikeSnap: null,
+      reason: "no_chain",
+    };
   }
   let expKey: string | undefined = keys.find((k) => k.startsWith(expiry));
   let driftDays = 0;
@@ -154,7 +185,14 @@ function pickContractFromChain(
       }
     }
     if (bestKey === null || bestDiff > MAX_EXP_DRIFT_MS) {
-      return { contract: null, pickedExpKey: null, expDriftDays: null };
+      return {
+        contract: null,
+        pickedExpKey: null,
+        expDriftDays:
+          bestKey !== null ? Math.round(bestDiff / 86400000) : null,
+        strikeSnap: null,
+        reason: "drift_too_large",
+      };
     }
     expKey = bestKey;
     driftDays = Math.round(bestDiff / 86400000);
@@ -163,7 +201,13 @@ function pickContractFromChain(
   const wanted = String(Number(strike));
   const direct = strikes[wanted] ?? strikes[strike.toFixed(2)] ?? null;
   if (direct && direct.length > 0) {
-    return { contract: direct[0], pickedExpKey: expKey, expDriftDays: driftDays };
+    return {
+      contract: direct[0],
+      pickedExpKey: expKey,
+      expDriftDays: driftDays,
+      strikeSnap: 0,
+      reason: "ok",
+    };
   }
   let best: SchwabOptionContract | null = null;
   let bestDiff = Infinity;
@@ -176,7 +220,43 @@ function pickContractFromChain(
       }
     }
   }
-  return { contract: best, pickedExpKey: expKey, expDriftDays: driftDays };
+  if (best === null) {
+    return {
+      contract: null,
+      pickedExpKey: expKey,
+      expDriftDays: driftDays,
+      strikeSnap: null,
+      reason: "snap_too_large",
+    };
+  }
+  if (bestDiff > MAX_STRIKE_SNAP) {
+    return {
+      contract: null,
+      pickedExpKey: expKey,
+      expDriftDays: driftDays,
+      strikeSnap: bestDiff,
+      reason: "snap_too_large",
+    };
+  }
+  if (driftDays > 0 && bestDiff > 0) {
+    // Both axes had to fudge — that's two layers of "best guess"
+    // stacked, which is the SE failure mode. Refuse rather than
+    // return a doubly-approximated contract.
+    return {
+      contract: null,
+      pickedExpKey: expKey,
+      expDriftDays: driftDays,
+      strikeSnap: bestDiff,
+      reason: "drift_and_snap",
+    };
+  }
+  return {
+    contract: best,
+    pickedExpKey: expKey,
+    expDriftDays: driftDays,
+    strikeSnap: bestDiff,
+    reason: "ok",
+  };
 }
 
 // Wraps an async upstream with a hard timeout; resolves to null on timeout
@@ -463,10 +543,38 @@ export async function GET(req: NextRequest) {
       barsPromise,
     ]);
 
-    const pickResult = chain
+    const pickResult: {
+      contract: SchwabOptionContract | null;
+      pickedExpKey: string | null;
+      expDriftDays: number | null;
+      strikeSnap?: number | null;
+      reason?: PickReason;
+    } = chain
       ? pickContractFromChain(chain, strike, expiry)
-      : { contract: null, pickedExpKey: null, expDriftDays: null };
+      : {
+          contract: null,
+          pickedExpKey: null,
+          expDriftDays: null,
+          strikeSnap: null,
+          reason: "no_chain",
+        };
     const contract = pickResult.contract;
+    // Picker rejected the chain on tolerance — neither the live
+    // mark nor a stock-price fallback estimate would line up with
+    // the actual position. Surface "—" instead, with a warning
+    // badge so the user can see the row needs verification.
+    const pickerRejected =
+      pickResult.reason === "drift_too_large" ||
+      pickResult.reason === "snap_too_large" ||
+      pickResult.reason === "drift_and_snap";
+    const expiryNotInChain =
+      chain !== null &&
+      (pickResult.reason === "drift_too_large" ||
+        pickResult.reason === "drift_and_snap" ||
+        // Expiry was found but strike couldn't be matched within
+        // tolerance — likely a wrong strike, but the expiry is fine.
+        // Not surfaced as an expiry warning.
+        false);
 
     // Stock-price source priority. Yahoo's extended-hours quote
     // (PRE/POST) takes precedence so % OTM reflects the latest
@@ -512,6 +620,7 @@ export async function GET(req: NextRequest) {
       pnlPct = ((premiumSold - mark) / premiumSold) * 100;
       pnlSource = "mark";
     } else if (
+      !pickerRejected &&
       currentStockPrice !== null &&
       currentStockPrice > 0 &&
       premiumSold > 0
@@ -521,6 +630,12 @@ export async function GET(req: NextRequest) {
       // option chains stop quoting. ITM puts: subtract intrinsic
       // from the entry premium. OTM puts: assume worthless and
       // credit full premium.
+      //
+      // Skipped when the picker rejected the chain on tolerance
+      // (drift > 7d, strike snap > $1, or both axes drifted). In
+      // that case the chain doesn't agree with the stored row and
+      // an estimate would also be wrong — better to show "—" with
+      // a warning badge.
       if (currentStockPrice < strike) {
         const intrinsic = strike - currentStockPrice;
         pnlDollars = (premiumSold - intrinsic) * remaining * 100;
@@ -531,6 +646,11 @@ export async function GET(req: NextRequest) {
         pnlPct = 100;
         pnlSource = "maxProfitOtm";
       }
+    }
+    if (pickerRejected) {
+      console.log(
+        `[positions] ${p.symbol} $${strike}P ${expiry}: no contract match within tolerance (${pickResult.reason}, drift=${pickResult.expDriftDays ?? "—"}d snap=${pickResult.strikeSnap ?? "—"}) — showing P&L as null`,
+      );
     }
 
     const distanceToStrikePct =
@@ -669,6 +789,7 @@ export async function GET(req: NextRequest) {
       expiryStatus: expiryByPosition.get(p.id)?.status ?? "active",
       expiryPctFromStrike: expiryByPosition.get(p.id)?.pctFromStrike ?? null,
       expiryLastStockPrice: expiryByPosition.get(p.id)?.stockPrice ?? null,
+      expiryNotInChain,
       fills: fills
         .slice()
         .sort((a, b) => a.fill_date.localeCompare(b.fill_date)),

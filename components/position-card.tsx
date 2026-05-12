@@ -83,6 +83,9 @@ export type OpenPositionClientView = {
   expiryStatus: "active" | "needs_verification" | "pending";
   expiryPctFromStrike: number | null;
   expiryLastStockPrice: number | null;
+  // True when the stored expiry doesn't exist in Schwab's chain
+  // within tolerance — drives the inline ⚠️ icon on the Expiry cell.
+  expiryNotInChain?: boolean;
   entryFinalGrade: string | null;
   entryCrushGrade: string | null;
   entryOpportunityGrade: string | null;
@@ -449,8 +452,19 @@ export function PositionCard(props: Props) {
           ${p.strike}
           <span className="text-muted-foreground">{p.optionType === "put" ? "P" : "C"}</span>
         </div>
-        {/* 3. Expiry — hidden on mobile */}
+        {/* 3. Expiry — hidden on mobile. ⚠️ when Schwab's chain
+              doesn't list this expiry within picker tolerance, so
+              the user knows P&L isn't computable until the date is
+              corrected. */}
         <div className="hidden truncate text-right font-mono text-base text-muted-foreground sm:block">
+          {props.kind === "open" && props.position.expiryNotInChain && (
+            <span
+              className="mr-1 cursor-help text-amber-300"
+              title="Expiry not found in chain — verify strike/expiry date"
+            >
+              ⚠
+            </span>
+          )}
           {shortExpiry(p.expiry)}
         </div>
         {/* 4. Qty */}
