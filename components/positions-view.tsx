@@ -801,14 +801,31 @@ export function PositionsView() {
   // the button captured marketStateStr from stale state and never
   // upgraded to a live Schwab call.
   const refreshSmart = useCallback(async () => {
+    console.log("[refresh] step1: firing live=false");
     const base = await load(false);
-    const ms = base?.market?.marketState ?? null;
-    const isRegular = ms === "REGULAR";
+    if (!base) {
+      console.warn(
+        "[refresh] step1 returned null (load(false) errored). Stopping — see error banner above.",
+      );
+      return;
+    }
     console.log(
-      `[refresh] server marketState=${ms ?? "null"} isRegular=${isRegular} → ${isRegular ? "follow-up live=true" : "stopping at live=false (AH)"}`,
+      "[refresh] step1 complete, marketState=",
+      base.market?.marketState,
     );
+    const isRegular = base.market?.marketState === "REGULAR";
+    console.log("[refresh] isRegular=", isRegular);
+    console.log("[refresh] firing live=true:", isRegular);
     if (isRegular) {
-      await load(true);
+      const live = await load(true);
+      console.log(
+        "[refresh] step2 complete, positions returned=",
+        live?.positions?.length ?? 0,
+        " first-position pnlDollars=",
+        live?.positions?.[0]?.pnlDollars ?? null,
+        " first-position mark=",
+        live?.positions?.[0]?.currentMark ?? null,
+      );
     }
   }, [load]);
 
@@ -1000,8 +1017,22 @@ export function PositionsView() {
   const marketIsRegular = marketStateStr === "REGULAR";
   // Any non-REGULAR state is treated as stale for option-derived
   // fields. null means "unknown" — leave fields visible (transient
-  // Yahoo failures shouldn't blank the page).
+  // Yahoo failures shouldn't blank the page). Sourced 100% from the
+  // server response — never from a client-side clock — so the same
+  // page renders identically in HK and ET.
   const optionsStale = marketStateStr !== null && !marketIsRegular;
+  useEffect(() => {
+    if (data) {
+      console.log(
+        "[render] marketStateStr=",
+        marketStateStr,
+        "marketIsRegular=",
+        marketIsRegular,
+        "optionsStale=",
+        optionsStale,
+      );
+    }
+  }, [data, marketStateStr, marketIsRegular, optionsStale]);
   const anyOptionEstimate = positions.some(
     (p) => p.pnlSource === "intrinsic" || p.pnlSource === "maxProfitOtm",
   );
