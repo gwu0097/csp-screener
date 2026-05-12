@@ -34,38 +34,44 @@ export function regimeWarning(regime: MarketRegime | null): string | null {
 }
 
 // True when the ET wall clock is inside the 9:30–16:00 regular
-// session on a Mon–Fri. Used as a ground-truth fallback when
-// Yahoo's marketState lags — e.g. before market open the SPY quote
-// reads "PRE" / "CLOSED", and on a slow Yahoo cache that state can
-// persist past 9:30 ET. The clock-based answer takes precedence
-// because options chains gate on real session boundaries.
+// session on a Mon–Fri. Uses Intl.DateTimeFormat with an explicit
+// America/New_York timeZone so the answer is the same on any
+// server runtime (Vercel UTC, local PT, container HK, etc.) — the
+// underlying Date is the same instant, only the display changes.
 //
 // Doesn't account for NYSE holidays — those would falsely report
 // REGULAR. Option marks on a holiday will be stale anyway and the
 // "Market closed" badge is informational, not blocking; the user
 // will notice marks at last-close prices and click away.
 export function isMarketHoursET(now: Date = new Date()): boolean {
-  // Day of week + hh:mm in America/New_York. en-GB locale gives
-  // 24-hour HH:mm in the time part for easy parsing.
-  const fmt = new Intl.DateTimeFormat("en-US", {
+  const etParts = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York",
-    weekday: "short",
-    hour: "2-digit",
-    minute: "2-digit",
+    hour: "numeric",
+    minute: "numeric",
     hour12: false,
-  });
-  const parts = fmt.formatToParts(now);
-  const weekday = parts.find((p) => p.type === "weekday")?.value ?? "";
-  const hourStr = parts.find((p) => p.type === "hour")?.value ?? "0";
-  const minStr = parts.find((p) => p.type === "minute")?.value ?? "0";
-  let hour = Number(hourStr);
-  if (hour === 24) hour = 0; // some locales render midnight as 24
-  const minute = Number(minStr);
-  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return false;
+    weekday: "short",
+  }).formatToParts(now);
+
+  const hour = parseInt(
+    etParts.find((p) => p.type === "hour")?.value ?? "0",
+    10,
+  );
+  const minute = parseInt(
+    etParts.find((p) => p.type === "minute")?.value ?? "0",
+    10,
+  );
+  const weekday = etParts.find((p) => p.type === "weekday")?.value ?? "";
+
+  // Some Node/ICU builds render midnight as "24" with hour12:false.
+  const normalizedHour = hour === 24 ? 0 : hour;
+
+  // Mon–Fri only.
   if (weekday === "Sat" || weekday === "Sun") return false;
-  const minutesSinceMidnight = hour * 60 + minute;
-  // 9:30 = 570, 16:00 = 960
-  return minutesSinceMidnight >= 570 && minutesSinceMidnight < 960;
+  if (!Number.isFinite(normalizedHour) || !Number.isFinite(minute)) return false;
+
+  // 9:30 AM ET (570 min) to 4:00 PM ET (960 min), half-open interval.
+  const timeInMinutes = normalizedHour * 60 + minute;
+  return timeInMinutes >= 570 && timeInMinutes < 960;
 }
 
 export async function getMarketContext(): Promise<MarketContext> {
@@ -82,8 +88,22 @@ export async function getMarketContext(): Promise<MarketContext> {
   // force marketState=REGULAR regardless of Yahoo. We only override
   // the "force open" direction; if Yahoo says REGULAR after hours
   // (which it doesn't tend to do), leave it alone.
+  // Log the raw ET clock + Yahoo reply on every fetch so the next
+  // misbehavior is visible in server logs without an ad-hoc deploy.
+  const etDebug = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    hour: "numeric",
+    minute: "numeric",
+    weekday: "short",
+    hour12: false,
+  }).format(new Date());
+  const inHours = isMarketHoursET();
+  console.log(
+    `[market] yahoo.marketState=${spyQuote.marketState ?? "null"}  ET=${etDebug}  isMarketHoursET=${inHours}`,
+  );
+
   let marketState = spyQuote.marketState;
-  if (isMarketHoursET() && marketState !== "REGULAR") {
+  if (inHours && marketState !== "REGULAR") {
     console.log(
       `[market] marketState override: yahoo=${marketState ?? "null"} → REGULAR (ET clock inside 9:30–16:00 Mon–Fri)`,
     );
