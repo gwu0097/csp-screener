@@ -1,10 +1,22 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import { Sidebar } from "@/components/sidebar";
 
 export const metadata: Metadata = {
   title: "CSP Screener",
   description: "Cash-Secured Put earnings screener",
+};
+
+// Without this, iPad Safari falls back to its 980px desktop viewport
+// and renders the page zoomed in. Forcing device-width keeps the
+// layout at the actual viewport pixel count so the iPad-portrait
+// (768px) / iPad-landscape (1024px) render matches a similarly sized
+// desktop window.
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  maximumScale: 1,
+  userScalable: false,
 };
 
 export default function RootLayout({
