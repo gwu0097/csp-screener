@@ -473,8 +473,9 @@ export function PositionCard(props: Props) {
         {/* 3. Expiry — hidden on mobile. ⚠️ when Schwab's chain
               doesn't list this expiry within picker tolerance, so
               the user knows P&L isn't computable until the date is
-              corrected. */}
-        <div className="hidden truncate text-right font-mono text-muted-foreground sm:block">
+              corrected. Center-aligned (label/text column, not
+              numeric). */}
+        <div className="hidden truncate text-center font-mono text-muted-foreground sm:block">
           {props.kind === "open" && props.position.expiryNotInChain && (
             <span
               className="mr-1 cursor-help text-amber-300"

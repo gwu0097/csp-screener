@@ -191,7 +191,7 @@ function PositionsTableHeader({
       {/* 2 Strike */}
       <SortHeader k="strike" label="Strike" align="right" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
       {/* 3 Expiry — hidden mobile */}
-      <SortHeader k="expiry" label="Expiry" align="right" sortKey={sortKey} sortDir={sortDir} onSort={onSort} className="hidden sm:flex" />
+      <SortHeader k="expiry" label="Expiry" align="center" sortKey={sortKey} sortDir={sortDir} onSort={onSort} className="hidden sm:flex" />
       {/* 4 Qty */}
       <SortHeader k="qty" label="Qty" align="right" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
       {/* 5 Premium (entry credit) — lg-only (hidden on tablet so
@@ -1815,8 +1815,10 @@ function StockRow({
       <div className="text-right font-mono text-foreground">
         {row.costBasis !== null ? `$${row.costBasis.toFixed(2)}` : "—"}
       </div>
-      {/* col 3 — Spot (Expiry slot, sm only) */}
-      <div className="hidden text-right font-mono text-foreground sm:block">
+      {/* col 3 — Spot (Expiry slot, sm only). Center-aligned to
+          match the option Expiry column's text alignment — keeps
+          the column visually consistent across option + stock rows. */}
+      <div className="hidden text-center font-mono text-foreground sm:block">
         {row.currentStockPrice !== null
           ? `$${row.currentStockPrice.toFixed(2)}`
           : "—"}
