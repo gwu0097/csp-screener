@@ -734,7 +734,7 @@ export function PositionsView() {
     }
   }, [pendingConfirmation, permanentlyDismissed]);
 
-  const load = useCallback(async (live: boolean) => {
+  const load = useCallback(async (live: boolean): Promise<PositionsResponse | null> => {
     if (live) setLiveLoading(true);
     else setLoading(true);
     setError(null);
@@ -784,13 +784,33 @@ export function PositionsView() {
       // yet — see the render block at the bottom.
       const pending = json.expireReport?.pending_confirmation ?? [];
       setPendingConfirmation(pending);
+      return json;
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load positions");
+      return null;
     } finally {
       if (live) setLiveLoading(false);
       else setLoading(false);
     }
   }, []);
+
+  // Smart refresh — always asks the server first with live=false so
+  // we can read the authoritative marketState (the server applies
+  // the isMarketHoursET override), and only follows up with live=true
+  // when the response says REGULAR. This avoids the prior bug where
+  // the button captured marketStateStr from stale state and never
+  // upgraded to a live Schwab call.
+  const refreshSmart = useCallback(async () => {
+    const base = await load(false);
+    const ms = base?.market?.marketState ?? null;
+    const isRegular = ms === "REGULAR";
+    console.log(
+      `[refresh] server marketState=${ms ?? "null"} isRegular=${isRegular} → ${isRegular ? "follow-up live=true" : "stopping at live=false (AH)"}`,
+    );
+    if (isRegular) {
+      await load(true);
+    }
+  }, [load]);
 
   useEffect(() => {
     void load(false);
@@ -1164,12 +1184,12 @@ export function PositionsView() {
                   spam the Schwab API. */}
               <Button
                 size="sm"
-                onClick={() => load(marketStateStr === "REGULAR")}
+                onClick={() => void refreshSmart()}
                 disabled={loading || liveLoading}
                 title={
                   marketStateStr === "REGULAR"
                     ? "Fetch live Schwab marks + Yahoo spots"
-                    : "Reload positions from DB (option chains are stale outside regular hours)"
+                    : "Reload positions from DB; auto-upgrades to live Schwab fetch during regular hours"
                 }
               >
                 {loading || liveLoading ? (
