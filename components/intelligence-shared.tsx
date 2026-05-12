@@ -452,13 +452,20 @@ export function PerformanceSection({
     setUnrealizedError(null);
     void (async () => {
       try {
-        // live=true so option marks are fresh; stocks always fetch
-        // spot regardless of the live flag (see open route).
-        const res = await fetch("/api/positions/open?live=true", {
+        // Smart fetch — only force live=true during the regular
+        // session. Outside regular hours the Schwab chain returns
+        // last-traded marks that are hours stale; pulling those
+        // would make Performance disagree with the Positions page
+        // (which already gates Schwab fetches on marketState).
+        // Step 1 fetches live=false to learn the current marketState
+        // cheaply (no Schwab calls); step 2 only refetches with
+        // live=true if we're inside regular hours.
+        const baseRes = await fetch("/api/positions/open?live=false", {
           cache: "no-store",
         });
-        const json = (await res.json()) as {
+        const baseJson = (await baseRes.json()) as {
           positions?: Array<{
+            id: string;
             symbol: string;
             strike: number;
             optionType: "put" | "call";
@@ -470,14 +477,71 @@ export function PerformanceSection({
             shares: number;
             pnlDollars: number | null;
           }>;
+          market?: { marketState?: string | null };
           error?: string;
         };
         if (cancelled) return;
-        if (!res.ok || json.error) {
-          throw new Error(json.error ?? `HTTP ${res.status}`);
+        if (!baseRes.ok || baseJson.error) {
+          throw new Error(baseJson.error ?? `HTTP ${baseRes.status}`);
         }
-        const opts = json.positions ?? [];
-        const stocks = json.stockPositions ?? [];
+        const marketState = baseJson.market?.marketState ?? null;
+        const isRegular = marketState === "REGULAR";
+
+        type Opt = {
+          id: string;
+          symbol: string;
+          strike: number;
+          optionType: "put" | "call";
+          remainingContracts: number;
+          pnlDollars: number | null;
+        };
+        type Stock = { symbol: string; shares: number; pnlDollars: number | null };
+        let opts: Opt[] = baseJson.positions ?? [];
+        let stocks: Stock[] = baseJson.stockPositions ?? [];
+
+        if (isRegular) {
+          const liveRes = await fetch("/api/positions/open?live=true", {
+            cache: "no-store",
+          });
+          const liveJson = (await liveRes.json()) as {
+            positions?: Opt[];
+            stockPositions?: Stock[];
+            error?: string;
+          };
+          if (!cancelled && liveRes.ok && !liveJson.error) {
+            opts = liveJson.positions ?? opts;
+            stocks = liveJson.stockPositions ?? stocks;
+          }
+        }
+
+        // Outside regular hours, fall back to the Positions page's
+        // localStorage live cache for any option pnlDollars the
+        // live=false response left null. This is the canonical
+        // "what is the Positions page showing right now" value —
+        // the cache is rewritten on every REGULAR-session live
+        // refresh and stays put outside regular hours. Matches the
+        // Positions page exactly when both are open.
+        if (!isRegular) {
+          try {
+            const raw = localStorage.getItem("positions_live_cache");
+            if (raw) {
+              const parsed = JSON.parse(raw) as {
+                byId?: Record<string, { pnlDollars?: number | null }>;
+              };
+              const byId = parsed?.byId ?? {};
+              opts = opts.map((o) => {
+                if (o.pnlDollars !== null) return o;
+                const cached = byId[o.id]?.pnlDollars;
+                return cached !== undefined && cached !== null
+                  ? { ...o, pnlDollars: cached }
+                  : o;
+              });
+            }
+          } catch {
+            /* cache unavailable — leave pnlDollars as the route returned */
+          }
+        }
+
         const positionLines: Array<{ label: string; pnl: number }> = [
           ...opts.map((o) => ({
             label: `${o.symbol} $${o.strike}${o.optionType === "put" ? "P" : "C"} ×${o.remainingContracts}`,
