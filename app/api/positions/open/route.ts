@@ -538,6 +538,25 @@ export async function GET(req: NextRequest) {
         ? ((currentStockPrice - strike) / currentStockPrice) * 100
         : null;
 
+    // Per-position mark/entry/pnl log — runs for every position on
+    // every live request so server logs surface the math for any
+    // reported anomaly. Format intentionally short so a 20-position
+    // refresh isn't visual spam. expDriftDays != 0 flags rows whose
+    // expiry was fuzzy-matched (a common silent-miss source).
+    if (live) {
+      const fmt2 = (v: number | null) => (v === null ? "—" : v.toFixed(2));
+      const drift = pickResult.expDriftDays;
+      const driftFlag = drift !== null && drift > 0 ? ` exp-drift=${drift}d` : "";
+      const pickedStrike = pickResult.contract?.strikePrice ?? null;
+      const strikeMismatch =
+        pickedStrike !== null && Math.abs(pickedStrike - strike) > 0.01
+          ? ` strike-snap=${strike}→${pickedStrike}`
+          : "";
+      console.log(
+        `[positions] ${p.symbol} $${strike}P ${expiry}: mark=${fmt2(mark)} entry=${fmt2(premiumSold > 0 ? premiumSold : null)} pnl=${fmt2(pnlDollars)}${driftFlag}${strikeMismatch}`,
+      );
+    }
+
     // Diagnostic: when Live refresh leaves a position without a P&L or
     // POP (delta) figure, log exactly which step dropped it. Includes
     // broker so we can correlate with Robinhood / Schwab2 patterns.

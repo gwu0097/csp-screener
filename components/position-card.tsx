@@ -170,10 +170,14 @@ type Props =
 // Mobile (< sm, 7 cols): drops EXPIRY / % OTM / IV. Those cells use
 // `hidden sm:block` so they're pulled out of the grid flow on mobile,
 // leaving only the 7 visible cells which match the mobile template.
+// Desktop grid (12 cols) after Premium + Mark were restored — the
+// row reads: dot · Strike · Expiry · Qty · Premium · Mark · P&L ·
+// POP · % OTM · IV · Grade · Status. Mobile (7 cols) drops the
+// 5 sm:-only cells: Expiry, Premium, Mark, % OTM, IV.
 export const COLLAPSED_ROW_GRID =
   "grid w-full items-center gap-2 px-3 text-base " +
   "grid-cols-[24px_minmax(80px,8fr)_minmax(50px,5fr)_minmax(80px,9fr)_minmax(60px,6fr)_minmax(70px,7fr)_minmax(130px,12fr)] " +
-  "sm:grid-cols-[24px_minmax(80px,8fr)_minmax(70px,7fr)_minmax(50px,5fr)_minmax(80px,9fr)_minmax(60px,6fr)_minmax(70px,7fr)_minmax(60px,6fr)_minmax(70px,7fr)_minmax(130px,12fr)]";
+  "sm:grid-cols-[24px_minmax(80px,8fr)_minmax(70px,7fr)_minmax(50px,5fr)_minmax(70px,6fr)_minmax(70px,6fr)_minmax(80px,9fr)_minmax(60px,6fr)_minmax(70px,7fr)_minmax(60px,6fr)_minmax(70px,7fr)_minmax(130px,12fr)]";
 
 // ---------- small helpers ----------
 
@@ -453,7 +457,35 @@ export function PositionCard(props: Props) {
         <div className="text-right font-mono text-base text-foreground/80">
           ×{p.remainingContracts}
         </div>
-        {/* 5. P&L — bold so it reads first when scanning the row.
+        {/* 5. Premium (entry credit) — sm-only. Static value from
+              avg_premium_sold, never suppressed AH since it's the
+              already-collected credit, not a live quote. */}
+        <div className="hidden text-right font-mono text-base text-muted-foreground sm:block">
+          {open && open.avgPremiumSold !== null
+            ? `$${open.avgPremiumSold.toFixed(2)}`
+            : "—"}
+        </div>
+        {/* 6. Mark (current option price) — sm-only. Suppressed AH
+              alongside P&L / POP / IV since the chain returns stale
+              last-traded marks outside the regular session. */}
+        <div
+          className={cn(
+            "hidden text-right font-mono text-base sm:block",
+            optionsStale ? "text-muted-foreground" : "text-foreground/80",
+          )}
+          title={
+            optionsStale
+              ? "Mark hidden outside regular session — Schwab returns stale last-traded marks after hours"
+              : undefined
+          }
+        >
+          {optionsStale
+            ? "—"
+            : open && open.currentMark !== null
+              ? `$${open.currentMark.toFixed(2)}`
+              : "—"}
+        </div>
+        {/* 7. P&L — bold so it reads first when scanning the row.
               Suppressed AH/closed when the figure would come from a
               stale option mark. */}
         <div

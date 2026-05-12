@@ -193,7 +193,15 @@ function PositionsTableHeader({
       <SortHeader k="expiry" label="Expiry" align="right" sortKey={sortKey} sortDir={sortDir} onSort={onSort} className="hidden sm:flex" />
       {/* 4 Qty */}
       <SortHeader k="qty" label="Qty" align="right" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
-      {/* 5 P&L */}
+      {/* 5 Premium (entry credit) — sm-only, non-sortable */}
+      <div className="hidden text-right text-sm font-semibold uppercase tracking-wide text-muted-foreground sm:block">
+        Prem
+      </div>
+      {/* 6 Mark (current option price) — sm-only, non-sortable */}
+      <div className="hidden text-right text-sm font-semibold uppercase tracking-wide text-muted-foreground sm:block">
+        Mark
+      </div>
+      {/* 7 P&L */}
       <SortHeader k="pnl" label="P&L" align="right" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
       {/* 6 POP */}
       <SortHeader k="pop" label="POP" align="right" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
@@ -1758,7 +1766,11 @@ function StockRow({
           </span>
         ) : null}
       </div>
-      {/* col 5 — P&L */}
+      {/* col 5 — Premium slot (stocks have no option premium) */}
+      <div className="hidden sm:block" />
+      {/* col 6 — Mark slot (stocks have no option mark) */}
+      <div className="hidden sm:block" />
+      {/* col 7 — P&L */}
       <div className={cn("text-right font-mono font-semibold", pnlColor)}>
         {pnl !== null ? fmtDollarsSigned(pnl) : "—"}
       </div>
