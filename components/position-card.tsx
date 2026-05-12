@@ -325,16 +325,16 @@ export function PositionCard(props: Props) {
   // guard on every field access.
   const open = props.kind === "open" ? props.position : null;
   const closed = props.kind === "closed" ? props.position : null;
-  // Outside the regular session, the option chain keeps quoting the
-  // last-traded mark — that's a stale price, not a real quote. Drop
-  // mark-derived fields (P&L, POP, IV) to "—" while leaving stock-
-  // price-derived fields (% OTM, status badge) intact. Intrinsic and
-  // maxProfitOtm estimates aren't from the live mark, so the `~`
-  // prefix continues to apply.
+  // Outside the regular session, every option-derived field is stale —
+  // the chain quotes last-traded marks, deltas / IVs are frozen, and
+  // intrinsic-fallback estimates suggest a final P&L that hasn't
+  // actually crystallized (the user said: "implies profit already
+  // captured" is misleading). Drop ALL P&L variants + POP + IV to "—"
+  // while leaving stock-price-derived fields (% OTM, status badge)
+  // intact — those still come from a live Yahoo extended quote.
   const marketState =
     props.kind === "open" ? (props.marketState ?? null) : null;
-  const optionsStale =
-    marketState === "POST" || marketState === "POSTPOST" || marketState === "CLOSED";
+  const optionsStale = marketState !== null && marketState !== "REGULAR";
   const p = props.position;
   const pop = open && open.currentDelta !== null ? 1 - Math.abs(open.currentDelta) : null;
   // Open rows use the priority-cascade badge from computePositionBadge
@@ -390,9 +390,11 @@ export function PositionCard(props: Props) {
   const pnlSource = open?.pnlSource ?? "mark";
   const pnlIsEstimate =
     pnlSource === "intrinsic" || pnlSource === "maxProfitOtm";
-  // Suppress only the live-mark variant — intrinsic / maxProfitOtm
-  // fall back to stock-price math, which is still valid AH.
-  const suppressMarkPnl = optionsStale && pnlSource === "mark";
+  // Suppress every per-row P&L variant outside the regular session.
+  // Intrinsic / maxProfitOtm fallbacks looked plausible AH but masked
+  // the fact that the position could still flip overnight — surfacing
+  // "—" makes the open-market dependency explicit.
+  const suppressMarkPnl = optionsStale;
   const pnlColor =
     pnlDollars === null
       ? "text-muted-foreground"

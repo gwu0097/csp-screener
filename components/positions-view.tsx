@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { AlertTriangle, ArrowDown, ArrowUp, Briefcase, Camera, Loader2, Plus, RefreshCcw, Undo2, Zap } from "lucide-react";
+import { AlertTriangle, ArrowDown, ArrowUp, Briefcase, Camera, Loader2, Plus, RefreshCcw, Undo2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ImportScreenshotModal } from "@/components/import-screenshot-modal";
 import { ImportManualModal } from "@/components/import-manual-modal";
@@ -958,10 +958,11 @@ export function PositionsView() {
   // so the user knows it's an after-hours / intrinsic-fallback figure
   // rather than a live mark.
   const marketStateStr = data?.market?.marketState ?? null;
-  const optionsStale =
-    marketStateStr === "POST" ||
-    marketStateStr === "POSTPOST" ||
-    marketStateStr === "CLOSED";
+  const marketIsRegular = marketStateStr === "REGULAR";
+  // Any non-REGULAR state is treated as stale for option-derived
+  // fields. null means "unknown" — leave fields visible (transient
+  // Yahoo failures shouldn't blank the page).
+  const optionsStale = marketStateStr !== null && !marketIsRegular;
   const anyOptionEstimate = positions.some(
     (p) => p.pnlSource === "intrinsic" || p.pnlSource === "maxProfitOtm",
   );
@@ -1136,46 +1137,51 @@ export function PositionsView() {
                 <Plus className="mr-1.5 h-3.5 w-3.5" />
                 Add
               </Button>
+              {/* Smart Refresh — fetches live Schwab marks during the
+                  regular session, otherwise reloads from DB only (no
+                  Schwab calls). marketState comes off the last
+                  response; until we have one the button defaults to
+                  the DB-only path so a first-open during AH doesn't
+                  spam the Schwab API. */}
               <Button
-                variant="secondary"
                 size="sm"
-                onClick={() => load(false)}
+                onClick={() => load(marketStateStr === "REGULAR")}
                 disabled={loading || liveLoading}
+                title={
+                  marketStateStr === "REGULAR"
+                    ? "Fetch live Schwab marks + Yahoo spots"
+                    : "Reload positions from DB (option chains are stale outside regular hours)"
+                }
               >
-                {loading ? (
+                {loading || liveLoading ? (
                   <Loader2 className="mr-1.5 h-3 w-3 animate-spin" />
                 ) : (
                   <RefreshCcw className="mr-1.5 h-3 w-3" />
                 )}
                 Refresh
               </Button>
-              <Button
-                size="sm"
-                onClick={() => load(true)}
-                disabled={loading || liveLoading || positions.length === 0}
-              >
-                {liveLoading ? (
-                  <Loader2 className="mr-1.5 h-3 w-3 animate-spin" />
-                ) : (
-                  <Zap className="mr-1.5 h-3 w-3" />
-                )}
-                Live
-              </Button>
             </div>
             {data && positions.length > 0 && (
-              <span className="text-[11px] text-muted-foreground">
-                {liveCacheFetchedAt
-                  ? `Live data as of ${fmtTimeShort(liveCacheFetchedAt)}`
-                  : "Live data not loaded"}
-                {liveSnapshotSummary && (
-                  <>
-                    {" · "}
-                    {liveSnapshotSummary.written > 0
-                      ? `${liveSnapshotSummary.written} snapshot${liveSnapshotSummary.written === 1 ? "" : "s"} saved`
-                      : "snapshots up to date"}
-                  </>
+              <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+                <span>
+                  {liveCacheFetchedAt
+                    ? `Live data as of ${fmtTimeShort(liveCacheFetchedAt)}`
+                    : "Live data not loaded"}
+                  {liveSnapshotSummary && (
+                    <>
+                      {" · "}
+                      {liveSnapshotSummary.written > 0
+                        ? `${liveSnapshotSummary.written} snapshot${liveSnapshotSummary.written === 1 ? "" : "s"} saved`
+                        : "snapshots up to date"}
+                    </>
+                  )}
+                </span>
+                {optionsStale && (
+                  <span className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 font-medium text-amber-200">
+                    Market closed — P&amp;L available at open
+                  </span>
                 )}
-              </span>
+              </div>
             )}
           </div>
         </div>
