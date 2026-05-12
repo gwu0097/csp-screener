@@ -19,6 +19,7 @@ import {
 } from "@/components/expire-confirmation-modal";
 import { UndoImportPopover } from "@/components/undo-import-popover";
 import type { ConfirmItem } from "@/components/expire-confirmation-modal";
+import { SchwabTokenBanner } from "@/components/schwab-token-banner";
 import {
   SellSharesModal,
   type SellSharesTarget,
@@ -1214,6 +1215,8 @@ export function PositionsView() {
           </Button>
         </div>
       )}
+
+      <SchwabTokenBanner />
 
       {market?.warning && (
         <div

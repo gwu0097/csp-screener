@@ -15,7 +15,13 @@
 import { useEffect, useState } from "react";
 import { AlertTriangle, RefreshCw } from "lucide-react";
 
-type Status = "missing" | "expired" | "warning" | "soft_warn" | "ok";
+type Status =
+  | "missing"
+  | "expired"
+  | "refresh_failed"
+  | "warning"
+  | "soft_warn"
+  | "ok";
 
 type TokenStatus = {
   valid: boolean;
@@ -23,6 +29,10 @@ type TokenStatus = {
   expiresAt: string | null;
   expiresInDays: number | null;
   ageHours: number | null;
+  accessExpiresAt?: string | null;
+  accessExpired?: boolean;
+  refreshAttempted?: boolean;
+  refreshError?: string | null;
 };
 
 function fmtDays(d: number | null): string {
@@ -66,13 +76,13 @@ export function SchwabTokenBanner() {
   // The banner is for the in-between cases where the user IS
   // connected but about to lose access.
 
-  const { status: kind, expiresInDays } = status;
+  const { status: kind, expiresInDays, refreshError } = status;
   const tone =
-    kind === "expired" || kind === "warning"
-      ? kind === "expired"
-        ? "red"
-        : "orange"
-      : "yellow";
+    kind === "expired" || kind === "refresh_failed"
+      ? "red"
+      : kind === "warning"
+        ? "orange"
+        : "yellow";
 
   const palette =
     tone === "red"
@@ -84,11 +94,13 @@ export function SchwabTokenBanner() {
   const title =
     kind === "expired"
       ? "Schwab token expired — reconnect to restore options data."
-      : kind === "warning" && expiresInDays !== null && expiresInDays < 1
-        ? "Schwab token expires within 24 hours. Reconnect now."
-        : kind === "warning"
-          ? `Schwab token expires in ~${fmtDays(expiresInDays)}. Reconnect now.`
-          : `Schwab token expires in ~${fmtDays(expiresInDays)}. Reconnect soon to avoid interruption.`;
+      : kind === "refresh_failed"
+        ? `Schwab auto-refresh failed${refreshError ? ` (${refreshError})` : ""}. Reconnect to restore live data.`
+        : kind === "warning" && expiresInDays !== null && expiresInDays < 1
+          ? "Schwab token expires within 24 hours. Reconnect now."
+          : kind === "warning"
+            ? `Schwab token expires in ~${fmtDays(expiresInDays)}. Reconnect now.`
+            : `Schwab token expires in ~${fmtDays(expiresInDays)}. Reconnect soon to avoid interruption.`;
 
   return (
     <div
