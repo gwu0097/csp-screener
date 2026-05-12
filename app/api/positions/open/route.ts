@@ -880,6 +880,9 @@ export async function GET(req: NextRequest) {
     marketPromise,
     Promise.all(positionPromises),
   ]);
+  console.log(
+    `[positions] marketState: ${market.marketState ?? "null"}  live=${live}  vix=${market.vix ?? "null"}`,
+  );
 
   // Tally snapshot outcomes so the UI can show "2 snapshots saved"
   // vs "snapshots up to date". Only written/skipped_rate are user-
