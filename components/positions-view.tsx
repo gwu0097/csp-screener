@@ -394,7 +394,17 @@ function mergeCacheIntoPositions(
 function fmtTimeShort(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "";
-  return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  // Always render in ET regardless of the browser's local timezone.
+  // The page is a US-market trading UI; "11:42 AM" in the user's HK
+  // browser is unhelpful — they need to know what session minute
+  // the data came from. Suffix "ET" so the timezone is explicit.
+  const formatted = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  }).format(d);
+  return `${formatted} ET`;
 }
 
 // Section label + ordering for the broker groups. Anything not in
