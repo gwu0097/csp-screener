@@ -179,18 +179,21 @@ type Props =
 //                            Grade · Status
 //   sm–lg (tablet, 10 cols): adds Expiry · Mark · % OTM
 //   lg+   (desktop, 12 cols): adds Premium · IV
-// iPad portrait (≈768px) was using the 12-col layout previously
-// and squeezed STATUS below its min, truncating "STATUS" → "STATU"
-// and clipping "MAX PROFIT" badges. Premium and IV are the two
-// cells the user flagged as least critical for the quick-scan row
-// (Premium is visible in the expanded card; IV is rarely a snap
-// decision input), so they fall off first at the tablet
-// breakpoint.
+//
+// Column widths use `minmax(0, Nfr)` so the grid distributes the
+// container's available width proportionally to each column's
+// weight — no fixed-pixel minimums forcing the row past viewport
+// width. The dot column stays at 24px because it's a non-content
+// fixed indicator. Status carries the largest weight (12fr) so
+// "MAX PROFIT" / "EMERGENCY_CUT" badges always have the most
+// elastic space. Responsive text size (text-xs on tablet/mobile,
+// text-sm on desktop) shrinks cell content the same proportion as
+// the grid shrinks the cells, so badges/values fit on iPad.
 export const COLLAPSED_ROW_GRID =
-  "grid w-full items-center gap-2 px-3 text-base " +
-  "grid-cols-[24px_minmax(80px,8fr)_minmax(50px,5fr)_minmax(80px,9fr)_minmax(60px,6fr)_minmax(70px,7fr)_minmax(130px,12fr)] " +
-  "sm:grid-cols-[24px_minmax(80px,8fr)_minmax(70px,7fr)_minmax(50px,5fr)_minmax(70px,6fr)_minmax(80px,9fr)_minmax(60px,6fr)_minmax(70px,7fr)_minmax(70px,7fr)_minmax(130px,12fr)] " +
-  "lg:grid-cols-[24px_minmax(80px,8fr)_minmax(70px,7fr)_minmax(50px,5fr)_minmax(70px,6fr)_minmax(70px,6fr)_minmax(80px,9fr)_minmax(60px,6fr)_minmax(70px,7fr)_minmax(60px,6fr)_minmax(70px,7fr)_minmax(130px,12fr)]";
+  "grid w-full items-center gap-2 px-3 text-xs lg:text-sm " +
+  "grid-cols-[24px_minmax(0,8fr)_minmax(0,5fr)_minmax(0,9fr)_minmax(0,6fr)_minmax(0,7fr)_minmax(0,12fr)] " +
+  "sm:grid-cols-[24px_minmax(0,8fr)_minmax(0,7fr)_minmax(0,5fr)_minmax(0,6fr)_minmax(0,9fr)_minmax(0,6fr)_minmax(0,7fr)_minmax(0,7fr)_minmax(0,12fr)] " +
+  "lg:grid-cols-[24px_minmax(0,8fr)_minmax(0,7fr)_minmax(0,5fr)_minmax(0,6fr)_minmax(0,6fr)_minmax(0,9fr)_minmax(0,6fr)_minmax(0,7fr)_minmax(0,6fr)_minmax(0,7fr)_minmax(0,12fr)]";
 
 // ---------- small helpers ----------
 
@@ -458,7 +461,7 @@ export function PositionCard(props: Props) {
           {p.postEarningsRec ? <RecDot rec={p.postEarningsRec} /> : null}
         </div>
         {/* 2. Strike */}
-        <div className="truncate text-right font-mono text-base text-foreground/90">
+        <div className="truncate text-right font-mono text-foreground/90">
           ${p.strike}
           <span className="text-muted-foreground">{p.optionType === "put" ? "P" : "C"}</span>
         </div>
@@ -466,7 +469,7 @@ export function PositionCard(props: Props) {
               doesn't list this expiry within picker tolerance, so
               the user knows P&L isn't computable until the date is
               corrected. */}
-        <div className="hidden truncate text-right font-mono text-base text-muted-foreground sm:block">
+        <div className="hidden truncate text-right font-mono text-muted-foreground sm:block">
           {props.kind === "open" && props.position.expiryNotInChain && (
             <span
               className="mr-1 cursor-help text-amber-300"
@@ -478,7 +481,7 @@ export function PositionCard(props: Props) {
           {shortExpiry(p.expiry)}
         </div>
         {/* 4. Qty */}
-        <div className="text-right font-mono text-base text-foreground/80">
+        <div className="text-right font-mono text-foreground/80">
           ×{p.remainingContracts}
         </div>
         {/* 5. Premium (entry credit) — lg-only. Hidden on tablet
@@ -486,7 +489,7 @@ export function PositionCard(props: Props) {
               on iPad portrait. Premium is visible in the expanded
               card on smaller viewports. Static value from
               avg_premium_sold; never suppressed AH. */}
-        <div className="hidden text-right font-mono text-base text-muted-foreground lg:block">
+        <div className="hidden text-right font-mono text-muted-foreground lg:block">
           {open && open.avgPremiumSold !== null
             ? `$${open.avgPremiumSold.toFixed(2)}`
             : "—"}
@@ -496,7 +499,7 @@ export function PositionCard(props: Props) {
               last-traded marks outside the regular session. */}
         <div
           className={cn(
-            "hidden text-right font-mono text-base sm:block",
+            "hidden text-right font-mono sm:block",
             optionsStale ? "text-muted-foreground" : "text-foreground/80",
           )}
           title={
@@ -516,7 +519,7 @@ export function PositionCard(props: Props) {
               stale option mark. */}
         <div
           className={cn(
-            "text-right font-mono text-base font-semibold",
+            "text-right font-mono font-semibold",
             suppressMarkPnl ? "text-muted-foreground" : pnlColor,
           )}
           title={
@@ -553,7 +556,7 @@ export function PositionCard(props: Props) {
               already ITM) flips amber/red regardless of sign. */}
         <div
           className={cn(
-            "hidden text-right font-mono text-base sm:block",
+            "hidden text-right font-mono sm:block",
             distancePct === null
               ? "text-muted-foreground"
               : distancePct < 0
@@ -569,7 +572,7 @@ export function PositionCard(props: Props) {
               reason as Premium — keeps STATUS readable on iPad
               portrait. Suppressed AH/closed (stale). */}
         <div
-          className="hidden text-right font-mono text-base text-muted-foreground lg:block"
+          className="hidden text-right font-mono text-muted-foreground lg:block"
           title={
             optionsStale
               ? "IV hidden outside regular session — last-traded value is stale after hours"
@@ -592,7 +595,7 @@ export function PositionCard(props: Props) {
               {p.entryFinalGrade}
             </span>
           ) : (
-            <span className="text-base text-muted-foreground">—</span>
+            <span className="text-muted-foreground">—</span>
           )}
         </div>
         {/* 10. Status — badge centered. Trash + chevron affordances absolute-
@@ -606,7 +609,7 @@ export function PositionCard(props: Props) {
                 <TooltipTrigger asChild>
                   <span
                     className={cn(
-                      "rounded border px-2 py-0.5 text-sm font-semibold whitespace-nowrap",
+                      "rounded border px-1.5 py-0.5 text-[10px] font-semibold whitespace-nowrap lg:px-2 lg:text-xs",
                       status.className,
                     )}
                   >
@@ -621,7 +624,7 @@ export function PositionCard(props: Props) {
           ) : (
             <span
               className={cn(
-                "rounded border px-2 py-0.5 text-sm font-semibold whitespace-nowrap",
+                "rounded border px-1.5 py-0.5 text-[10px] font-semibold whitespace-nowrap lg:px-2 lg:text-xs",
                 status.className,
               )}
             >

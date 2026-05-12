@@ -183,7 +183,7 @@ function PositionsTableHeader({
     <div
       className={cn(
         COLLAPSED_ROW_GRID,
-        "hidden py-1.5 text-sm font-semibold uppercase text-muted-foreground sm:grid",
+        "hidden py-1.5 text-[10px] font-semibold uppercase text-muted-foreground sm:grid lg:text-xs",
       )}
     >
       {/* 1 dot */}
@@ -196,11 +196,11 @@ function PositionsTableHeader({
       <SortHeader k="qty" label="Qty" align="right" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
       {/* 5 Premium (entry credit) — lg-only (hidden on tablet so
             STATUS keeps its min width on iPad portrait). */}
-      <div className="hidden text-right text-sm font-semibold uppercase tracking-wide text-muted-foreground lg:block">
+      <div className="hidden text-right font-semibold uppercase tracking-wide text-muted-foreground lg:block">
         Prem
       </div>
       {/* 6 Mark (current option price) — sm-only, non-sortable */}
-      <div className="hidden text-right text-sm font-semibold uppercase tracking-wide text-muted-foreground sm:block">
+      <div className="hidden text-right font-semibold uppercase tracking-wide text-muted-foreground sm:block">
         Mark
       </div>
       {/* 7 P&L */}
@@ -284,7 +284,7 @@ function SortHeader({
       type="button"
       onClick={() => onSort(k)}
       className={cn(
-        "flex items-center gap-0.5 text-sm font-semibold uppercase tracking-wide transition-colors",
+        "flex items-center gap-0.5 font-semibold uppercase tracking-wide transition-colors",
         align === "right"
           ? "justify-end"
           : align === "center"
