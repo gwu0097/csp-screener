@@ -176,6 +176,21 @@ export async function GET(req: NextRequest) {
     const cd = p.closed_date ?? "";
     return cd >= from && cd <= to;
   });
+  const windowedStocks = closedStocks.filter((p) => {
+    const cd = p.closed_date ?? "";
+    return cd >= from && cd <= to;
+  });
+  // Stock realized P&L from closed stock_long / stock_short rows in
+  // window. Kept separate from `totals` (option aggregates) so
+  // option-only metrics (win_rate, ROC, expectancy, best/worst,
+  // ticker rankings) stay pure — stocks have different shape and
+  // would distort those. Used to compute the combined headline +
+  // injected into the equity curve so the curve reflects actual
+  // book P&L instead of option-only.
+  const stockTotalPnl = windowedStocks.reduce(
+    (s, p) => s + Number(p.realized_pnl ?? 0),
+    0,
+  );
 
   // ---------- Section 1: stats + equity curve ----------
   const totals = windowed.reduce(
@@ -234,9 +249,12 @@ export async function GET(req: NextRequest) {
     trades: Array<{ symbol: string; pnl: number }>;
   };
   const bucketMap = new Map<string, BucketAcc>();
-  for (const p of windowed) {
-    if (!p.closed_date) continue;
-    const key = bucketKeyFor(p.closed_date, granularity);
+  const pushIntoBucket = (
+    closedDate: string,
+    pnl: number,
+    label: string,
+  ) => {
+    const key = bucketKeyFor(closedDate, granularity);
     let b = bucketMap.get(key);
     if (!b) {
       b = {
@@ -248,10 +266,25 @@ export async function GET(req: NextRequest) {
       };
       bucketMap.set(key, b);
     }
-    const pnl = Number(p.realized_pnl ?? 0);
     b.tradePnl += pnl;
     b.tradeCount += 1;
-    b.trades.push({ symbol: p.symbol, pnl });
+    b.trades.push({ symbol: label, pnl });
+  };
+  for (const p of windowed) {
+    if (!p.closed_date) continue;
+    pushIntoBucket(p.closed_date, Number(p.realized_pnl ?? 0), p.symbol);
+  }
+  // Closed stocks bucket on their closed_date too — the equity curve
+  // should reflect actual book P&L on the day the stock was sold. The
+  // trade label gets a "(stock)" suffix so the tooltip distinguishes
+  // option closes from share sales.
+  for (const p of windowedStocks) {
+    if (!p.closed_date) continue;
+    pushIntoBucket(
+      p.closed_date,
+      Number(p.realized_pnl ?? 0),
+      `${p.symbol} (stock)`,
+    );
   }
 
   // Zero-fill only on day granularity so the line stays continuous across
@@ -613,6 +646,14 @@ export async function GET(req: NextRequest) {
     granularity,
     stats: {
       total_pnl: totals.total_pnl,
+      // Combined headline includes closed stock_long realized so the
+      // Realized P&L card reflects actual book P&L. Option-only
+      // metrics (win_rate, avg_roc, expectancy, best/worst) stay
+      // option-only — stocks have a different shape and would skew
+      // them.
+      stock_total_pnl: stockTotalPnl,
+      combined_realized_pnl:
+        Math.round((totals.total_pnl + stockTotalPnl) * 100) / 100,
       win_rate,
       wins: totals.wins,
       total_trades: totalTrades,

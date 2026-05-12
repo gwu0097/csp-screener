@@ -119,6 +119,8 @@ export type IntelligenceResponse = {
   granularity: Granularity;
   stats: {
     total_pnl: number;
+    stock_total_pnl: number;
+    combined_realized_pnl: number;
     win_rate: number;
     wins: number;
     total_trades: number;
@@ -416,7 +418,16 @@ export function PerformanceSection({
   data: IntelligenceResponse;
 }) {
   const { stats, equity_curve } = data;
-  const pnlColor = stats.total_pnl >= 0 ? "text-emerald-300" : "text-rose-300";
+  // Combined headline = options + closed stocks; per-component
+  // colors track their own sign. The fallback handles older API
+  // responses that didn't carry the combined fields.
+  const combinedRealized =
+    stats.combined_realized_pnl ?? stats.total_pnl ?? 0;
+  const stockRealized = stats.stock_total_pnl ?? 0;
+  const optionRealized = stats.total_pnl ?? 0;
+  const pnlColor = combinedRealized >= 0 ? "text-emerald-300" : "text-rose-300";
+  const optionColor = optionRealized >= 0 ? "text-emerald-300" : "text-rose-300";
+  const stockColor = stockRealized >= 0 ? "text-emerald-300" : "text-rose-300";
 
   // Equity curve mode. 'realized' (default) plots cumulative
   // realized P&L exactly as before. 'total' fetches today's open
@@ -526,12 +537,12 @@ export function PerformanceSection({
             nowDetails: {
               lines: unrealized.positionLines,
               unrealized: totalUnrealized,
-              realized: stats.total_pnl,
+              realized: combinedRealized,
             },
           },
         ]
       : equity_curve;
-  const grandTotal = stats.total_pnl + (mode === "total" ? totalUnrealized : 0);
+  const grandTotal = combinedRealized + (mode === "total" ? totalUnrealized : 0);
   const grandTotalColor =
     grandTotal >= 0 ? "text-emerald-300" : "text-rose-300";
   const unrealizedColor =
@@ -543,7 +554,25 @@ export function PerformanceSection({
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
         <StatCard label="Realized P&L">
-          <span className={pnlColor}>{fmtMoney(stats.total_pnl, true)}</span>
+          <div className="space-y-0.5">
+            <span className={pnlColor}>{fmtMoney(combinedRealized, true)}</span>
+            {stockRealized !== 0 && (
+              <div className="space-y-0 text-[10px] leading-snug text-muted-foreground">
+                <div className="flex items-baseline justify-between gap-2">
+                  <span>Options</span>
+                  <span className={`font-mono ${optionColor}`}>
+                    {fmtMoney(optionRealized, true)}
+                  </span>
+                </div>
+                <div className="flex items-baseline justify-between gap-2">
+                  <span>Stock sales</span>
+                  <span className={`font-mono ${stockColor}`}>
+                    {fmtMoney(stockRealized, true)}
+                  </span>
+                </div>
+              </div>
+            )}
+          </div>
         </StatCard>
         <StatCard label="Win Rate">
           <span>
@@ -628,7 +657,7 @@ export function PerformanceSection({
                 <span>
                   <span className="text-muted-foreground">Realized: </span>
                   <span className={`font-mono ${pnlColor}`}>
-                    {fmtMoney(stats.total_pnl, true)}
+                    {fmtMoney(combinedRealized, true)}
                   </span>
                 </span>
                 <span>
