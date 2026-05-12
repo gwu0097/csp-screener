@@ -41,7 +41,87 @@ export type StockTradeInput = {
   broker?: string | null;
 };
 
-type BulkBody = { trades?: TradeInput[]; stockTrades?: StockTradeInput[] };
+type BulkBody = {
+  trades?: TradeInput[];
+  stockTrades?: StockTradeInput[];
+  // Code for the timezone the broker screenshot was displayed in.
+  // Drives toEtDate() conversion below so HK / Tokyo etc. users
+  // store ET calendar dates regardless of their broker's display
+  // timezone. Defaults to "ET" (no conversion).
+  sourceTimezone?: string;
+};
+
+// Code → IANA timezone identifier. Add new codes to both this map
+// and the import-screenshot-modal dropdown — the route silently
+// falls back to ET on an unknown code so a stale modal can't
+// corrupt the calendar date.
+const TZ_BY_CODE: Record<string, string> = {
+  ET: "America/New_York",
+  PT: "America/Los_Angeles",
+  HK: "Asia/Hong_Kong",
+  CN: "Asia/Shanghai",
+  JP: "Asia/Tokyo",
+  UTC: "UTC",
+};
+
+// Interpret yyyy-mm-dd as midnight in the source timezone, then
+// return the corresponding ET calendar date. HK 2026-05-13 →
+// midnight HK = 16:00 UTC 2026-05-12 = 12:00 ET 2026-05-12 →
+// "2026-05-12". DST-aware via Intl. Pass-through when source is ET.
+function toEtDate(yyyyMmDd: string, sourceTzCode?: string): string {
+  const sourceTz = TZ_BY_CODE[sourceTzCode ?? "ET"] ?? "America/New_York";
+  if (sourceTz === "America/New_York") return yyyyMmDd;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(yyyyMmDd);
+  if (!m) return yyyyMmDd;
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const d = Number(m[3]);
+
+  // First-pass UTC instant for the wall-clock date components.
+  let utcMs = Date.UTC(y, mo - 1, d, 0, 0, 0);
+  // Find what time the source TZ displays for that UTC instant —
+  // the gap is the source-TZ UTC offset at that date (DST-aware).
+  const dtf = new Intl.DateTimeFormat("en-US", {
+    timeZone: sourceTz,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+  const parts = dtf.formatToParts(new Date(utcMs));
+  const get = (t: string) => Number(parts.find((p) => p.type === t)?.value);
+  const tzTimeAsUtc = Date.UTC(
+    get("year"),
+    get("month") - 1,
+    get("day"),
+    get("hour") === 24 ? 0 : get("hour"),
+    get("minute"),
+    get("second"),
+  );
+  const offsetMs = tzTimeAsUtc - utcMs;
+  // Subtract the offset to get the real UTC instant of midnight in
+  // the source TZ.
+  utcMs -= offsetMs;
+  // Format that instant in ET and return the date portion.
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date(utcMs));
+}
+
+function todayEt(): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
 
 function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
@@ -83,9 +163,11 @@ export async function POST(req: NextRequest) {
   }
 
   const itemsRaw = Array.isArray(body.trades) ? body.trades : [];
-  if (itemsRaw.length === 0) {
+  const stockItemsRaw = Array.isArray(body.stockTrades) ? body.stockTrades : [];
+  if (itemsRaw.length === 0 && stockItemsRaw.length === 0) {
     return NextResponse.json({ error: "No trades provided" }, { status: 400 });
   }
+  const sourceTimezone = typeof body.sourceTimezone === "string" ? body.sourceTimezone : "ET";
 
   // Opens first within the batch — that way a position exists before any
   // close fill in the same batch tries to attach to it.
@@ -126,7 +208,13 @@ export async function POST(req: NextRequest) {
 
     const symbol = input.symbol.toUpperCase();
     const broker = normalizeBroker(input.broker);
-    const fillDate = input.timePlaced ?? input.trade_date ?? todayIso();
+    // Convert the user-supplied date from the source timezone to
+    // an ET calendar date so fill_date / opened_date / closed_date
+    // stay aligned with the US session boundary. Fallback to ET
+    // "today" when no date came through (manual-add path without
+    // a stamped date).
+    const rawFillDate = input.timePlaced ?? input.trade_date ?? null;
+    const fillDate = rawFillDate ? toEtDate(rawFillDate, sourceTimezone) : todayEt();
 
     const { normalized: expiry, wasWeekend } = normalizeExpiryToWeekday(input.expiry);
     if (wasWeekend) {
@@ -422,10 +510,11 @@ export async function POST(req: NextRequest) {
     const broker = normalizeBroker(s.broker);
     const shares = Number(s.shares);
     const price = Number(s.price);
-    const date =
+    const rawDate =
       typeof s.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s.date)
         ? s.date
-        : todayIso();
+        : null;
+    const date = rawDate ? toEtDate(rawDate, sourceTimezone) : todayEt();
     if (s.action !== "sell") {
       errors.push(`stock ${symbol || "?"}: only action='sell' is supported`);
       continue;

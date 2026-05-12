@@ -45,6 +45,16 @@ type Props = {
   onSuccess: (msg: string) => void;
 };
 
+const TIMEZONES = [
+  { value: "ET", label: "ET — Eastern Time" },
+  { value: "PT", label: "PT — Pacific Time" },
+  { value: "HK", label: "HK — Hong Kong" },
+  { value: "CN", label: "CN — China / Shanghai" },
+  { value: "JP", label: "JP — Japan" },
+  { value: "UTC", label: "UTC" },
+] as const;
+const LS_TIMEZONE_KEY = "import_timezone";
+
 const BROKERS = ["schwab", "schwab2", "robinhood"] as const;
 const BROKER_LABELS: Record<(typeof BROKERS)[number], string> = {
   schwab: "Schwab",
@@ -74,6 +84,29 @@ function readAsDataUrl(blob: Blob): Promise<string> {
 
 export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) {
   const [broker, setBroker] = useState<string>("schwab");
+  // Source timezone of the screenshot — drives ET-date conversion
+  // server-side in bulk-create. Default ET so US-domestic users
+  // don't need to interact. Persisted in localStorage so a HK
+  // user only sets it once per browser.
+  const [timezone, setTimezone] = useState<string>("ET");
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(LS_TIMEZONE_KEY);
+      if (stored && TIMEZONES.some((t) => t.value === stored)) {
+        setTimezone(stored);
+      }
+    } catch {
+      /* ignore — localStorage unavailable */
+    }
+  }, []);
+  function pickTimezone(tz: string) {
+    setTimezone(tz);
+    try {
+      localStorage.setItem(LS_TIMEZONE_KEY, tz);
+    } catch {
+      /* ignore */
+    }
+  }
   const [dataUrl, setDataUrl] = useState<string | null>(null);
   const [parsing, setParsing] = useState(false);
   const [confirming, setConfirming] = useState(false);
@@ -210,6 +243,7 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
         body: JSON.stringify({
           trades: parsed ?? [],
           stockTrades: parsedStocks ?? [],
+          sourceTimezone: timezone,
         }),
       });
       const json = (await res.json()) as {
@@ -275,7 +309,7 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
           <DialogTitle>Import from screenshot</DialogTitle>
         </DialogHeader>
 
-        <div className="flex items-center gap-3 text-sm">
+        <div className="flex flex-wrap items-center gap-3 text-sm">
           <label className="text-xs text-muted-foreground">Broker</label>
           <select
             value={broker}
@@ -285,6 +319,19 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
             {BROKERS.map((b) => (
               <option key={b} value={b}>
                 {BROKER_LABELS[b]}
+              </option>
+            ))}
+          </select>
+          <label className="text-xs text-muted-foreground">Timezone</label>
+          <select
+            value={timezone}
+            onChange={(e) => pickTimezone(e.target.value)}
+            className="rounded-md border border-border bg-background px-2 py-1"
+            title="Timezone the broker screenshot was displayed in. Server converts to ET before storing dates."
+          >
+            {TIMEZONES.map((tz) => (
+              <option key={tz.value} value={tz.value}>
+                {tz.label}
               </option>
             ))}
           </select>
