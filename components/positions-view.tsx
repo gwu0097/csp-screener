@@ -194,8 +194,9 @@ function PositionsTableHeader({
       <SortHeader k="expiry" label="Expiry" align="right" sortKey={sortKey} sortDir={sortDir} onSort={onSort} className="hidden sm:flex" />
       {/* 4 Qty */}
       <SortHeader k="qty" label="Qty" align="right" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
-      {/* 5 Premium (entry credit) — sm-only, non-sortable */}
-      <div className="hidden text-right text-sm font-semibold uppercase tracking-wide text-muted-foreground sm:block">
+      {/* 5 Premium (entry credit) — lg-only (hidden on tablet so
+            STATUS keeps its min width on iPad portrait). */}
+      <div className="hidden text-right text-sm font-semibold uppercase tracking-wide text-muted-foreground lg:block">
         Prem
       </div>
       {/* 6 Mark (current option price) — sm-only, non-sortable */}
@@ -209,7 +210,7 @@ function PositionsTableHeader({
       {/* 7 % OTM — hidden mobile */}
       <SortHeader k="otm" label="% OTM" align="right" sortKey={sortKey} sortDir={sortDir} onSort={onSort} className="hidden sm:flex" />
       {/* 8 IV — hidden mobile */}
-      <SortHeader k="iv" label="IV" align="right" sortKey={sortKey} sortDir={sortDir} onSort={onSort} className="hidden sm:flex" />
+      <SortHeader k="iv" label="IV" align="right" sortKey={sortKey} sortDir={sortDir} onSort={onSort} className="hidden lg:flex" />
       {/* 9 Grade — center-aligned (badge cell, not numeric). Carries inline
               theta in the row body so a separate column isn't needed. */}
       <SortHeader k="grade" label="Grade" align="center" sortKey={sortKey} sortDir={sortDir} onSort={onSort} />
@@ -1830,24 +1831,24 @@ function StockRow({
           </span>
         ) : null}
       </div>
-      {/* col 5 — Premium slot (stocks have no option premium) */}
-      <div className="hidden sm:block" />
-      {/* col 6 — Mark slot (stocks have no option mark) */}
+      {/* col 5 — Premium slot (stocks have no option premium) — lg only */}
+      <div className="hidden lg:block" />
+      {/* col 6 — Mark slot (stocks have no option mark) — sm+ */}
       <div className="hidden sm:block" />
       {/* col 7 — P&L */}
       <div className={cn("text-right font-mono font-semibold", pnlColor)}>
         {pnl !== null ? fmtDollarsSigned(pnl) : "—"}
       </div>
-      {/* col 6 — % change (POP slot) */}
+      {/* col 8 — % change (POP slot) */}
       <div className={cn("text-right font-mono", pctColor)}>
         {row.pnlPct !== null
           ? `${row.pnlPct >= 0 ? "+" : ""}${row.pnlPct.toFixed(2)}%`
           : "—"}
       </div>
-      {/* col 7 — empty (% OTM slot, sm only) */}
+      {/* col 9 — empty (% OTM slot, sm+) */}
       <div className="hidden sm:block" />
-      {/* col 8 — empty (IV slot, sm only) */}
-      <div className="hidden sm:block" />
+      {/* col 10 — empty (IV slot, lg only) */}
+      <div className="hidden lg:block" />
       {/* col 9 — Sell button (Grade slot). Stock_short rows can't be
           closed via the sell-shares path yet (this builds the long
           side only), so the button is gated. */}

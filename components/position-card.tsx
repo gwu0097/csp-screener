@@ -173,14 +173,24 @@ type Props =
 // Mobile (< sm, 7 cols): drops EXPIRY / % OTM / IV. Those cells use
 // `hidden sm:block` so they're pulled out of the grid flow on mobile,
 // leaving only the 7 visible cells which match the mobile template.
-// Desktop grid (12 cols) after Premium + Mark were restored — the
-// row reads: dot · Strike · Expiry · Qty · Premium · Mark · P&L ·
-// POP · % OTM · IV · Grade · Status. Mobile (7 cols) drops the
-// 5 sm:-only cells: Expiry, Premium, Mark, % OTM, IV.
+// Three breakpoints to keep STATUS / badge labels readable on
+// every viewport size:
+//   <sm  (mobile, 7 cols):  dot · Strike · Qty · P&L · POP ·
+//                            Grade · Status
+//   sm–lg (tablet, 10 cols): adds Expiry · Mark · % OTM
+//   lg+   (desktop, 12 cols): adds Premium · IV
+// iPad portrait (≈768px) was using the 12-col layout previously
+// and squeezed STATUS below its min, truncating "STATUS" → "STATU"
+// and clipping "MAX PROFIT" badges. Premium and IV are the two
+// cells the user flagged as least critical for the quick-scan row
+// (Premium is visible in the expanded card; IV is rarely a snap
+// decision input), so they fall off first at the tablet
+// breakpoint.
 export const COLLAPSED_ROW_GRID =
   "grid w-full items-center gap-2 px-3 text-base " +
   "grid-cols-[24px_minmax(80px,8fr)_minmax(50px,5fr)_minmax(80px,9fr)_minmax(60px,6fr)_minmax(70px,7fr)_minmax(130px,12fr)] " +
-  "sm:grid-cols-[24px_minmax(80px,8fr)_minmax(70px,7fr)_minmax(50px,5fr)_minmax(70px,6fr)_minmax(70px,6fr)_minmax(80px,9fr)_minmax(60px,6fr)_minmax(70px,7fr)_minmax(60px,6fr)_minmax(70px,7fr)_minmax(130px,12fr)]";
+  "sm:grid-cols-[24px_minmax(80px,8fr)_minmax(70px,7fr)_minmax(50px,5fr)_minmax(70px,6fr)_minmax(80px,9fr)_minmax(60px,6fr)_minmax(70px,7fr)_minmax(70px,7fr)_minmax(130px,12fr)] " +
+  "lg:grid-cols-[24px_minmax(80px,8fr)_minmax(70px,7fr)_minmax(50px,5fr)_minmax(70px,6fr)_minmax(70px,6fr)_minmax(80px,9fr)_minmax(60px,6fr)_minmax(70px,7fr)_minmax(60px,6fr)_minmax(70px,7fr)_minmax(130px,12fr)]";
 
 // ---------- small helpers ----------
 
@@ -471,10 +481,12 @@ export function PositionCard(props: Props) {
         <div className="text-right font-mono text-base text-foreground/80">
           ×{p.remainingContracts}
         </div>
-        {/* 5. Premium (entry credit) — sm-only. Static value from
-              avg_premium_sold, never suppressed AH since it's the
-              already-collected credit, not a live quote. */}
-        <div className="hidden text-right font-mono text-base text-muted-foreground sm:block">
+        {/* 5. Premium (entry credit) — lg-only. Hidden on tablet
+              (sm–lg) so the STATUS column keeps its full min width
+              on iPad portrait. Premium is visible in the expanded
+              card on smaller viewports. Static value from
+              avg_premium_sold; never suppressed AH. */}
+        <div className="hidden text-right font-mono text-base text-muted-foreground lg:block">
           {open && open.avgPremiumSold !== null
             ? `$${open.avgPremiumSold.toFixed(2)}`
             : "—"}
@@ -553,9 +565,11 @@ export function PositionCard(props: Props) {
         >
           {distancePct !== null ? `${distancePct.toFixed(1)}%` : "—"}
         </div>
-        {/* 8. IV — hidden on mobile. Suppressed AH/closed (stale). */}
+        {/* 8. IV — lg-only. Hidden on tablet (sm–lg) for the same
+              reason as Premium — keeps STATUS readable on iPad
+              portrait. Suppressed AH/closed (stale). */}
         <div
-          className="hidden text-right font-mono text-base text-muted-foreground sm:block"
+          className="hidden text-right font-mono text-base text-muted-foreground lg:block"
           title={
             optionsStale
               ? "IV hidden outside regular session — last-traded value is stale after hours"
