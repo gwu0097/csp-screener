@@ -286,7 +286,16 @@ export async function getOptionsChainWide(
   expiry: string,
   windowDays = 0,
 ): Promise<SchwabOptionsChain> {
-  const fromDate = windowDays > 0 ? addDaysIso(expiry, -windowDays) : expiry;
+  // Schwab /marketdata/v1/chains rejects fromDate < today with a
+  // generic 400 ("Check Param Values" / "Invalid Paramter/Value"
+  // — yes, with their typo). The windowDays fallback exists to
+  // tolerate broker-import expiry drift, but past-dated fromDates
+  // void every other position in the same batch as soon as ANY
+  // position drifts inside the window. Clamp to >= today so the
+  // window only grows forward.
+  const today = new Date().toISOString().slice(0, 10);
+  const rawFrom = windowDays > 0 ? addDaysIso(expiry, -windowDays) : expiry;
+  const fromDate = rawFrom < today ? today : rawFrom;
   const toDate = windowDays > 0 ? addDaysIso(expiry, windowDays) : expiry;
   return schwabGet<SchwabOptionsChain>(`${MARKETDATA_BASE}/chains`, {
     symbol,
