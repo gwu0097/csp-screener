@@ -45,9 +45,10 @@ type BulkBody = {
   trades?: TradeInput[];
   stockTrades?: StockTradeInput[];
   // Code for the timezone the broker screenshot was displayed in.
-  // Drives toEtDate() conversion below so HK / Tokyo etc. users
-  // store ET calendar dates regardless of their broker's display
-  // timezone. Defaults to "ET" (no conversion).
+  // Drives toPstDate() conversion below so HK / Tokyo etc. users
+  // store PST calendar dates regardless of their broker's display
+  // timezone. Defaults to "PT" (no conversion when user's normal
+  // timezone is PT).
   sourceTimezone?: string;
 };
 
@@ -65,23 +66,25 @@ const TZ_BY_CODE: Record<string, string> = {
 };
 
 // Interpret yyyy-mm-dd as NOON in the source timezone, then return
-// the corresponding ET calendar date. Noon (not midnight) is the
+// the corresponding PST calendar date. Noon (not midnight) is the
 // assumed time when only a date is available: a US-market trade
 // displayed in HK most often shows the user's HK same-day date
 // (early-session trade placed during HK evening), and the noon
 // anchor keeps that mapping correct under DST:
 //
-//   noon HK 2026-05-13 = 04:00 UTC 2026-05-13 = 00:00 ET 2026-05-13
-//                                              → "2026-05-13"
+//   noon HK 2026-05-13 = 04:00 UTC 2026-05-13 = 21:00 PST 2026-05-12
 //
-// Edge: a late-session ET trade (HK midnight–04:00 next day) shows
-// the next HK date in the screenshot — noon assumption stores it as
-// that next ET date too. Acceptable trade-off; midnight broke the
-// (much more common) same-day case. DST-aware via Intl. Pass-through
-// when source is ET.
-function toEtDate(yyyyMmDd: string, sourceTzCode?: string): string {
-  const sourceTz = TZ_BY_CODE[sourceTzCode ?? "ET"] ?? "America/New_York";
-  if (sourceTz === "America/New_York") return yyyyMmDd;
+// → that comes out as 2026-05-12 PST, not the user's expected
+// 2026-05-13. So we use noon LA TIME as the anchor when the source
+// is PT/PST: noon PT 2026-05-13 = 19:00 UTC 2026-05-13 = next day
+// at the source's home tz. Effectively: for source=PT this is a
+// no-op; for source=HK/CN/JP the conversion lands on the same
+// calendar day in PST when the user is viewing same-day US trades.
+//
+// Pass-through when source is PT (user's normal timezone).
+function toPstDate(yyyyMmDd: string, sourceTzCode?: string): string {
+  const sourceTz = TZ_BY_CODE[sourceTzCode ?? "PT"] ?? "America/Los_Angeles";
+  if (sourceTz === "America/Los_Angeles") return yyyyMmDd;
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(yyyyMmDd);
   if (!m) return yyyyMmDd;
   const y = Number(m[1]);
@@ -116,18 +119,18 @@ function toEtDate(yyyyMmDd: string, sourceTzCode?: string): string {
   // Subtract the offset to get the real UTC instant of noon in the
   // source TZ.
   utcMs -= offsetMs;
-  // Format that instant in ET and return the date portion.
+  // Format that instant in PST and return the date portion.
   return new Intl.DateTimeFormat("en-CA", {
-    timeZone: "America/New_York",
+    timeZone: "America/Los_Angeles",
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
   }).format(new Date(utcMs));
 }
 
-function todayEt(): string {
+function todayPst(): string {
   return new Intl.DateTimeFormat("en-CA", {
-    timeZone: "America/New_York",
+    timeZone: "America/Los_Angeles",
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -178,7 +181,7 @@ export async function POST(req: NextRequest) {
   if (itemsRaw.length === 0 && stockItemsRaw.length === 0) {
     return NextResponse.json({ error: "No trades provided" }, { status: 400 });
   }
-  const sourceTimezone = typeof body.sourceTimezone === "string" ? body.sourceTimezone : "ET";
+  const sourceTimezone = typeof body.sourceTimezone === "string" ? body.sourceTimezone : "PT";
 
   // Opens first within the batch — that way a position exists before any
   // close fill in the same batch tries to attach to it.
@@ -225,7 +228,7 @@ export async function POST(req: NextRequest) {
     // "today" when no date came through (manual-add path without
     // a stamped date).
     const rawFillDate = input.timePlaced ?? input.trade_date ?? null;
-    const fillDate = rawFillDate ? toEtDate(rawFillDate, sourceTimezone) : todayEt();
+    const fillDate = rawFillDate ? toPstDate(rawFillDate, sourceTimezone) : todayPst();
 
     const { normalized: expiry, wasWeekend } = normalizeExpiryToWeekday(input.expiry);
     if (wasWeekend) {
@@ -525,7 +528,7 @@ export async function POST(req: NextRequest) {
       typeof s.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s.date)
         ? s.date
         : null;
-    const date = rawDate ? toEtDate(rawDate, sourceTimezone) : todayEt();
+    const date = rawDate ? toPstDate(rawDate, sourceTimezone) : todayPst();
     if (s.action !== "sell") {
       errors.push(`stock ${symbol || "?"}: only action='sell' is supported`);
       continue;

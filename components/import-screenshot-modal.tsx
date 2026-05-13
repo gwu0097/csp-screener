@@ -88,7 +88,7 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
   // server-side in bulk-create. Default ET so US-domestic users
   // don't need to interact. Persisted in localStorage so a HK
   // user only sets it once per browser.
-  const [timezone, setTimezone] = useState<string>("ET");
+  const [timezone, setTimezone] = useState<string>("PT");
   // Refresh from localStorage every time the modal opens — not just
   // on first mount. Some Dialog implementations keep state across
   // closes, and we also want the latest value if the user changed it
