@@ -630,40 +630,91 @@ export function PerformanceSection({
       <h2 className="text-lg font-semibold">Performance</h2>
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
-        <StatCard label="Realized P&L">
+        <StatCard label={mode === "total" ? "Total P&L" : "Realized P&L"}>
           <div className="space-y-0.5">
-            <span className={pnlColor}>{fmtMoney(combinedRealized, true)}</span>
-            {stockRealized !== 0 && (
+            <span
+              className={
+                mode === "total"
+                  ? grandTotal >= 0
+                    ? "text-emerald-300"
+                    : "text-rose-300"
+                  : pnlColor
+              }
+            >
+              {fmtMoney(mode === "total" ? grandTotal : combinedRealized, true)}
+            </span>
+            {(stockRealized !== 0 || mode === "total") && (
               <div className="space-y-0 text-[10px] leading-snug text-muted-foreground">
+                {/* Realized breakdown — always shown when stocks
+                    have moved or when in Total mode (so the user
+                    can see how Total decomposes). */}
                 <div className="flex items-baseline justify-between gap-2">
                   <span>Options</span>
                   <span className={`font-mono ${optionColor}`}>
                     {fmtMoney(optionRealized, true)}
                   </span>
                 </div>
-                <div className="flex items-baseline justify-between gap-2">
-                  <span>Stock sales</span>
-                  <span className={`font-mono ${stockColor}`}>
-                    {fmtMoney(stockRealized, true)}
-                  </span>
-                </div>
+                {stockRealized !== 0 && (
+                  <div className="flex items-baseline justify-between gap-2">
+                    <span>Stock sales</span>
+                    <span className={`font-mono ${stockColor}`}>
+                      {fmtMoney(stockRealized, true)}
+                    </span>
+                  </div>
+                )}
+                {mode === "total" && (
+                  <div className="flex items-baseline justify-between gap-2">
+                    <span>Unrealized</span>
+                    <span
+                      className={`font-mono ${unrealizedColor}`}
+                      title={
+                        unrealizedLoading
+                          ? "Fetching open-position marks…"
+                          : unrealized
+                            ? `${unrealized.optionsCount} options + ${unrealized.stockCount} stocks`
+                            : undefined
+                      }
+                    >
+                      {unrealizedLoading && !unrealized
+                        ? "…"
+                        : fmtMoney(totalUnrealized, true)}
+                    </span>
+                  </div>
+                )}
               </div>
             )}
           </div>
         </StatCard>
         <StatCard label="Win Rate">
-          <span>
-            {stats.wins} / {stats.total_trades}{" "}
-            <span className="text-xs text-muted-foreground">
-              ({fmtPct(stats.win_rate, 0)})
+          <div className="space-y-0.5">
+            <span>
+              {stats.wins} / {stats.total_trades}{" "}
+              <span className="text-xs text-muted-foreground">
+                ({fmtPct(stats.win_rate, 0)})
+              </span>
             </span>
-          </span>
+            <div className="text-[10px] text-muted-foreground/70">
+              realized trades
+            </div>
+          </div>
         </StatCard>
-        <StatCard label="Avg ROC / trade">{fmtPct(stats.avg_roc, 2)}</StatCard>
+        <StatCard label="Avg ROC / trade">
+          <div className="space-y-0.5">
+            <span>{fmtPct(stats.avg_roc, 2)}</span>
+            <div className="text-[10px] text-muted-foreground/70">
+              realized trades
+            </div>
+          </div>
+        </StatCard>
         <StatCard label="Expectancy / trade">
-          <span className={stats.expectancy >= 0 ? "text-emerald-300" : "text-rose-300"}>
-            {fmtMoney(stats.expectancy, true)}
-          </span>
+          <div className="space-y-0.5">
+            <span className={stats.expectancy >= 0 ? "text-emerald-300" : "text-rose-300"}>
+              {fmtMoney(stats.expectancy, true)}
+            </span>
+            <div className="text-[10px] text-muted-foreground/70">
+              realized trades
+            </div>
+          </div>
         </StatCard>
         <StatCard label="Best / Worst">
           <div className="space-y-1 text-xs">
@@ -687,6 +738,9 @@ export function PerformanceSection({
             ) : (
               <div className="text-muted-foreground">Worst: —</div>
             )}
+            <div className="text-[10px] text-muted-foreground/70">
+              realized trades
+            </div>
           </div>
         </StatCard>
       </div>
