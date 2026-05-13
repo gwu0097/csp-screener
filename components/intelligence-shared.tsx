@@ -625,6 +625,19 @@ export function PerformanceSection({
   const grandTotal = combinedRealized + (mode === "total" ? totalUnrealized : 0);
   const grandTotalColor =
     grandTotal >= 0 ? "text-emerald-300" : "text-rose-300";
+  // Cap the chart's right edge at today (PST). The date-range
+  // picker can extend into the future (Quarter, YTD, All Time all
+  // do), but the chart shouldn't show empty/projected days — that
+  // reads as "no activity" instead of "future".
+  const todayPstIso = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Los_Angeles",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+  const chartCurve = displayCurve.filter(
+    (p) => p.bucketKey === "now" || p.bucketKey <= todayPstIso,
+  );
   const unrealizedColor =
     totalUnrealized >= 0 ? "text-emerald-300" : "text-rose-300";
 
@@ -847,7 +860,7 @@ export function PerformanceSection({
               </div>
             );
           }
-          if (displayCurve.length < 2) {
+          if (chartCurve.length < 2) {
             return (
               <div className="py-8 text-center text-sm text-muted-foreground">
                 Not enough trades in this range to display equity curve.
@@ -861,11 +874,11 @@ export function PerformanceSection({
             (p) => p.tradeCount > 0,
           );
           if (mode === "total" && !hasRealizedInWindow) return null;
-          if (displayCurve.length < 2) return null;
+          if (chartCurve.length < 2) return null;
           return (
           <div className="h-64 w-full">
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={displayCurve}>
+              <AreaChart data={chartCurve}>
                 <defs>
                   <linearGradient id="pnlGradient" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="0%" stopColor="#22c55e" stopOpacity={0.4} />
