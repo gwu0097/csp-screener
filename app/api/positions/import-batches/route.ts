@@ -103,40 +103,126 @@ export async function GET() {
     .sort(([, a], [, b]) => b.latest.localeCompare(a.latest))
     .slice(0, 5);
 
-  // For each batch, also peek at the fills to determine eligibility
-  // — we refuse to undo if any close fill is in the batch (it would
-  // leave an existing position with stale aggregates).
+  // ---- New undo-eligibility logic ----
+  //
+  // The old rules (any close fill OR any non-open status) were too
+  // aggressive: a fresh import that opens AND closes a position in
+  // the same batch (a roll, or a sell-shares from the stock side)
+  // would lock immediately even though every change in the batch is
+  // still fully reversible.
+  //
+  // The real question is: has anything happened to a touched
+  // position SINCE this batch ran? Specifically:
+  //   (a) A fill on a touched position with import_batch_id != this
+  //       batch AND created_at > the batch's earliest timestamp →
+  //       subsequent fill activity. Undo would leave that later
+  //       fill attached to a non-existent position.
+  //   (b) A position has status='expired_worthless' or 'assigned' →
+  //       auto-expire or assignment ran after the batch (bulk-create
+  //       never sets those statuses directly). Undo would leave the
+  //       expire/assign side-effects (close fills, snapshots,
+  //       stock_long rows from assignment) dangling.
+  //
+  // Anything else — including realized_pnl from this batch's own
+  // close fills, or status='closed' from this batch's same-batch
+  // open+close — is undoable.
   const batchIds = sorted.map(([id]) => id);
-  const closeFillBatches = new Set<string>();
+  type FillProbe = {
+    position_id: string;
+    import_batch_id: string | null;
+    created_at: string;
+  };
+  // Touched positions: created by the batch + attached via fills.
+  const fillsInBatches: FillProbe[] = [];
   if (batchIds.length > 0) {
     const fr = await sb
       .from("fills")
-      .select("import_batch_id,fill_type")
+      .select("position_id,import_batch_id,created_at")
       .in("import_batch_id", batchIds);
     if (!fr.error) {
-      for (const f of (fr.data ?? []) as Array<{
-        import_batch_id: string;
-        fill_type: string;
-      }>) {
-        if (f.fill_type === "close") closeFillBatches.add(f.import_batch_id);
+      fillsInBatches.push(...((fr.data ?? []) as FillProbe[]));
+    }
+  }
+  const touchedByBatch = new Map<string, Set<string>>();
+  const batchEarliest = new Map<string, string>();
+  for (const [batchId, g] of sorted) {
+    const touched = new Set<string>(g.positions.map((p) => p.id));
+    let earliest = g.latest;
+    // include earliest position created_at (currently g.latest is the
+    // newest; recompute the earliest by re-scanning rows).
+    for (const row of rows) {
+      if (row.import_batch_id === batchId && row.created_at < earliest) {
+        earliest = row.created_at;
+      }
+    }
+    for (const f of fillsInBatches) {
+      if (f.import_batch_id === batchId) {
+        touched.add(f.position_id);
+        if (f.created_at < earliest) earliest = f.created_at;
+      }
+    }
+    touchedByBatch.set(batchId, touched);
+    batchEarliest.set(batchId, earliest);
+  }
+
+  // Fetch every fill on every touched position (across all batches),
+  // and the current status of those positions, in two batched calls.
+  const allTouched = new Set<string>();
+  Array.from(touchedByBatch.values()).forEach((set) => {
+    set.forEach((id) => allTouched.add(id));
+  });
+  type FillSubRow = {
+    position_id: string;
+    import_batch_id: string | null;
+    created_at: string;
+  };
+  const fillsByPosition = new Map<string, FillSubRow[]>();
+  type PosStatusRow = { id: string; symbol: string; status: string };
+  const statusById = new Map<string, PosStatusRow>();
+  if (allTouched.size > 0) {
+    const ids = Array.from(allTouched);
+    const [fillsRes, posRes] = await Promise.all([
+      sb
+        .from("fills")
+        .select("position_id,import_batch_id,created_at")
+        .in("position_id", ids),
+      sb.from("positions").select("id,symbol,status").in("id", ids),
+    ]);
+    if (!fillsRes.error) {
+      for (const f of (fillsRes.data ?? []) as FillSubRow[]) {
+        const arr = fillsByPosition.get(f.position_id) ?? [];
+        arr.push(f);
+        fillsByPosition.set(f.position_id, arr);
+      }
+    }
+    if (!posRes.error) {
+      for (const p of (posRes.data ?? []) as PosStatusRow[]) {
+        statusById.set(p.id, p);
       }
     }
   }
 
   const batches: ImportBatchSummary[] = sorted.map(([id, g]) => {
-    const closedExists = g.positions.some(
-      (p) =>
-        p.status !== "open" ||
-        (p.realizedPnl !== null && Math.abs(p.realizedPnl) > 0.0001),
-    );
-    const hasCloseFills = closeFillBatches.has(id);
+    const touched = Array.from(touchedByBatch.get(id) ?? []);
+    const earliest = batchEarliest.get(id) ?? g.latest;
     let undoBlockedReason: string | null = null;
-    if (closedExists) {
-      undoBlockedReason =
-        "One or more positions in this batch are no longer open or have realized P&L — undo would corrupt history.";
-    } else if (hasCloseFills) {
-      undoBlockedReason =
-        "Batch contains close fills that attach to pre-existing positions — undo would leave those positions with stale aggregates.";
+    for (const positionId of touched) {
+      const subsequentFills = (fillsByPosition.get(positionId) ?? []).filter(
+        (f) => f.import_batch_id !== id && f.created_at > earliest,
+      );
+      const posInfo = statusById.get(positionId);
+      const sym = posInfo?.symbol ?? "Position";
+      if (subsequentFills.length > 0) {
+        undoBlockedReason = `${sym} was modified after this import — undo would corrupt subsequent fills.`;
+        break;
+      }
+      if (
+        posInfo?.status === "expired_worthless" ||
+        posInfo?.status === "assigned"
+      ) {
+        undoBlockedReason = `${sym} was ${posInfo.status === "assigned" ? "assigned" : "auto-expired"} after this import — undo would leave the ${posInfo.status === "assigned" ? "assignment" : "expire"} side-effects dangling.`;
+        break;
+      }
     }
     return {
       batchId: id,

@@ -89,16 +89,22 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
   // don't need to interact. Persisted in localStorage so a HK
   // user only sets it once per browser.
   const [timezone, setTimezone] = useState<string>("ET");
+  // Refresh from localStorage every time the modal opens — not just
+  // on first mount. Some Dialog implementations keep state across
+  // closes, and we also want the latest value if the user changed it
+  // in another tab/window between opens. Runs client-side only since
+  // useEffect doesn't fire during SSR / server render.
   useEffect(() => {
+    if (!open) return;
     try {
       const stored = localStorage.getItem(LS_TIMEZONE_KEY);
       if (stored && TIMEZONES.some((t) => t.value === stored)) {
         setTimezone(stored);
       }
     } catch {
-      /* ignore — localStorage unavailable */
+      /* ignore — localStorage unavailable (private mode, etc.) */
     }
-  }, []);
+  }, [open]);
   function pickTimezone(tz: string) {
     setTimezone(tz);
     try {
