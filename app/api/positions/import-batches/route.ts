@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
+import { checkUndoEligibility, type FillLite, type PositionStateLite } from "@/lib/undo-batch";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -103,44 +104,21 @@ export async function GET() {
     .sort(([, a], [, b]) => b.latest.localeCompare(a.latest))
     .slice(0, 5);
 
-  // ---- New undo-eligibility logic ----
-  //
-  // The old rules (any close fill OR any non-open status) were too
-  // aggressive: a fresh import that opens AND closes a position in
-  // the same batch (a roll, or a sell-shares from the stock side)
-  // would lock immediately even though every change in the batch is
-  // still fully reversible.
-  //
-  // The real question is: has anything happened to a touched
-  // position SINCE this batch ran? Specifically:
-  //   (a) A fill on a touched position with import_batch_id != this
-  //       batch AND created_at > the batch's earliest timestamp →
-  //       subsequent fill activity. Undo would leave that later
-  //       fill attached to a non-existent position.
-  //   (b) A position has status='expired_worthless' or 'assigned' →
-  //       auto-expire or assignment ran after the batch (bulk-create
-  //       never sets those statuses directly). Undo would leave the
-  //       expire/assign side-effects (close fills, snapshots,
-  //       stock_long rows from assignment) dangling.
-  //
-  // Anything else — including realized_pnl from this batch's own
-  // close fills, or status='closed' from this batch's same-batch
-  // open+close — is undoable.
+  // ---- Undo-eligibility ----
+  // Bulk-fetch the data needed to build an EligibilityContext per
+  // batch, then defer to the shared checkUndoEligibility() helper —
+  // identical logic to the DELETE handler so a UI "undoable" can
+  // never be rejected on confirm, and a server "allow" can never be
+  // blocked by stale UI state. Rules live in lib/undo-batch.ts.
   const batchIds = sorted.map(([id]) => id);
-  type FillProbe = {
-    position_id: string;
-    import_batch_id: string | null;
-    created_at: string;
-  };
-  // Touched positions: created by the batch + attached via fills.
-  const fillsInBatches: FillProbe[] = [];
+  const fillsInBatches: FillLite[] = [];
   if (batchIds.length > 0) {
     const fr = await sb
       .from("fills")
       .select("position_id,import_batch_id,created_at")
       .in("import_batch_id", batchIds);
     if (!fr.error) {
-      fillsInBatches.push(...((fr.data ?? []) as FillProbe[]));
+      fillsInBatches.push(...((fr.data ?? []) as FillLite[]));
     }
   }
   const touchedByBatch = new Map<string, Set<string>>();
@@ -148,8 +126,6 @@ export async function GET() {
   for (const [batchId, g] of sorted) {
     const touched = new Set<string>(g.positions.map((p) => p.id));
     let earliest = g.latest;
-    // include earliest position created_at (currently g.latest is the
-    // newest; recompute the earliest by re-scanning rows).
     for (const row of rows) {
       if (row.import_batch_id === batchId && row.created_at < earliest) {
         earliest = row.created_at;
@@ -165,20 +141,12 @@ export async function GET() {
     batchEarliest.set(batchId, earliest);
   }
 
-  // Fetch every fill on every touched position (across all batches),
-  // and the current status of those positions, in two batched calls.
   const allTouched = new Set<string>();
   Array.from(touchedByBatch.values()).forEach((set) => {
     set.forEach((id) => allTouched.add(id));
   });
-  type FillSubRow = {
-    position_id: string;
-    import_batch_id: string | null;
-    created_at: string;
-  };
-  const fillsByPosition = new Map<string, FillSubRow[]>();
-  type PosStatusRow = { id: string; symbol: string; status: string };
-  const statusById = new Map<string, PosStatusRow>();
+  const fillsByPosition = new Map<string, FillLite[]>();
+  const statusByPosition = new Map<string, PositionStateLite>();
   if (allTouched.size > 0) {
     const ids = Array.from(allTouched);
     const [fillsRes, posRes] = await Promise.all([
@@ -189,49 +157,35 @@ export async function GET() {
       sb.from("positions").select("id,symbol,status").in("id", ids),
     ]);
     if (!fillsRes.error) {
-      for (const f of (fillsRes.data ?? []) as FillSubRow[]) {
+      for (const f of (fillsRes.data ?? []) as FillLite[]) {
         const arr = fillsByPosition.get(f.position_id) ?? [];
         arr.push(f);
         fillsByPosition.set(f.position_id, arr);
       }
     }
     if (!posRes.error) {
-      for (const p of (posRes.data ?? []) as PosStatusRow[]) {
-        statusById.set(p.id, p);
+      for (const p of (posRes.data ?? []) as PositionStateLite[]) {
+        statusByPosition.set(p.id, p);
       }
     }
   }
 
   const batches: ImportBatchSummary[] = sorted.map(([id, g]) => {
-    const touched = Array.from(touchedByBatch.get(id) ?? []);
-    const earliest = batchEarliest.get(id) ?? g.latest;
-    let undoBlockedReason: string | null = null;
-    for (const positionId of touched) {
-      const subsequentFills = (fillsByPosition.get(positionId) ?? []).filter(
-        (f) => f.import_batch_id !== id && f.created_at > earliest,
-      );
-      const posInfo = statusById.get(positionId);
-      const sym = posInfo?.symbol ?? "Position";
-      if (subsequentFills.length > 0) {
-        undoBlockedReason = `${sym} was modified after this import — undo would corrupt subsequent fills.`;
-        break;
-      }
-      if (
-        posInfo?.status === "expired_worthless" ||
-        posInfo?.status === "assigned"
-      ) {
-        undoBlockedReason = `${sym} was ${posInfo.status === "assigned" ? "assigned" : "auto-expired"} after this import — undo would leave the ${posInfo.status === "assigned" ? "assignment" : "expire"} side-effects dangling.`;
-        break;
-      }
-    }
+    const verdict = checkUndoEligibility({
+      batchId: id,
+      batchEarliest: batchEarliest.get(id) ?? g.latest,
+      touchedPositionIds: Array.from(touchedByBatch.get(id) ?? []),
+      fillsByPosition,
+      statusByPosition,
+    });
     return {
       batchId: id,
       importedAt: g.latest,
       broker: g.broker,
       positionCount: g.positions.length,
       positions: g.positions,
-      undoable: undoBlockedReason === null,
-      undoBlockedReason,
+      undoable: verdict.undoable,
+      undoBlockedReason: verdict.reason,
     };
   });
 

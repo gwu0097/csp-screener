@@ -1,24 +1,31 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
+import { checkUndoEligibility, loadBatchEligibility } from "@/lib/undo-batch";
+import { recalculatePositionFromFills } from "@/lib/positions";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 // DELETE /api/positions/import-batches/[batch_id]
 //
-// Undoes a bulk-create import. Deletes every fill stamped with the
-// batch_id, then every position stamped with the batch_id. Snapshots
-// tied to those positions go too — they reference position_id, so we
-// remove them first to avoid an FK error.
+// Undoes a bulk-create import:
+//   • Deletes snapshots for positions CREATED by this batch.
+//   • Deletes every fill with import_batch_id = batch_id.
+//   • Deletes every position with import_batch_id = batch_id.
+//   • Recomputes aggregates on any pre-existing position that had a
+//     fill from this batch removed (so it doesn't end up with stale
+//     status / realized_pnl from a now-deleted close).
 //
-// Safety gate (mirrors the GET endpoint's eligibility check):
-//   1. All positions in the batch must still be status='open'.
-//   2. None can have non-zero realized_pnl.
-//   3. No fill in the batch can be fill_type='close' attached to a
-//      position outside the batch — that would leave that pre-
-//      existing position with stale aggregates.
-// Failing any of these returns 409 Conflict with a reason; nothing
-// is deleted.
+// Eligibility lives in lib/undo-batch.ts and is shared with the
+// GET endpoint so the UI's "undoable" flag and this guard can never
+// drift. A batch is undoable when:
+//   • No fills exist on any touched position with a different
+//     import_batch_id and created_at > the batch's earliest stamp.
+//   • No touched position has status='expired_worthless' or
+//     'assigned' (those imply auto-expire / assignment after the
+//     batch).
+// realized_pnl from this batch's OWN close fills and status='closed'
+// from this batch's same-batch open+close are explicitly OK.
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -32,88 +39,60 @@ export async function DELETE(
   }
   const sb = createServerClient();
 
-  // 1. Positions in the batch.
-  const pr = await sb
-    .from("positions")
-    .select("id,symbol,status,realized_pnl")
-    .eq("import_batch_id", batchId);
-  if (pr.error) {
-    return NextResponse.json({ error: pr.error.message }, { status: 500 });
-  }
-  const positions = (pr.data ?? []) as Array<{
-    id: string;
-    symbol: string;
-    status: string;
-    realized_pnl: number | null;
-  }>;
-  if (positions.length === 0) {
+  // 1. Build eligibility context + check.
+  const loaded = await loadBatchEligibility(batchId, sb);
+  if (!loaded.ok) {
     return NextResponse.json(
-      { error: "No positions found for this batch" },
-      { status: 404 },
+      { error: loaded.error },
+      { status: loaded.error.startsWith("No positions") ? 404 : 500 },
+    );
+  }
+  const verdict = checkUndoEligibility(loaded.ctx);
+  if (!verdict.undoable) {
+    return NextResponse.json(
+      {
+        error: verdict.reason,
+        offending_position_id: verdict.offendingPositionId,
+        offending_symbol: verdict.offendingSymbol,
+      },
+      { status: 409 },
     );
   }
 
-  // 2. Safety: every position must be open with zero realized P&L.
-  const dirty = positions.find(
-    (p) =>
-      p.status !== "open" ||
-      (p.realized_pnl !== null && Math.abs(Number(p.realized_pnl)) > 0.0001),
+  const batchPositionIds = loaded.batchPositionIds;
+  // Positions that the batch added fills to but didn't itself
+  // create (pre-existing). These need an aggregate recompute after
+  // the batch's fills are deleted.
+  const batchCreatedSet = new Set(batchPositionIds);
+  const externalPositionIds = loaded.batchFillPositionIds.filter(
+    (id) => !batchCreatedSet.has(id),
   );
-  if (dirty) {
-    return NextResponse.json(
-      {
-        error:
-          "Undo blocked: at least one position in this batch is no longer open or has realized P&L (corruption-of-history guard).",
-        offending_position_id: dirty.id,
-        offending_symbol: dirty.symbol,
-      },
-      { status: 409 },
-    );
+
+  // 2. Count snapshots up-front for the response. Then delete in FK
+  //    dependency order: snapshots → fills → positions.
+  let snapshotsCount = 0;
+  if (batchPositionIds.length > 0) {
+    const snapPre = await sb
+      .from("position_snapshots")
+      .select("id")
+      .in("position_id", batchPositionIds);
+    snapshotsCount = (snapPre.data ?? []).length;
+    const sn = await sb
+      .from("position_snapshots")
+      .delete()
+      .in("position_id", batchPositionIds);
+    if (sn.error) {
+      return NextResponse.json({ error: sn.error.message }, { status: 500 });
+    }
   }
 
-  // 3. Safety: no close-fill in the batch (those'd attach to
-  //    positions outside the batch and removal would leave them
-  //    with stale aggregates).
-  const fr = await sb
+  // Count batch fills before delete so the response can report them.
+  const fillsPre = await sb
     .from("fills")
-    .select("id,position_id,fill_type")
-    .eq("import_batch_id", batchId);
-  if (fr.error) {
-    return NextResponse.json({ error: fr.error.message }, { status: 500 });
-  }
-  const fills = (fr.data ?? []) as Array<{
-    id: string;
-    position_id: string;
-    fill_type: string;
-  }>;
-  const closeFill = fills.find((f) => f.fill_type === "close");
-  if (closeFill) {
-    return NextResponse.json(
-      {
-        error:
-          "Undo blocked: batch contains close fills. Closes can attach to pre-existing positions and undoing would corrupt their aggregates.",
-      },
-      { status: 409 },
-    );
-  }
-  const positionIds = positions.map((p) => p.id);
-
-  // 4. Snapshot count (so the response can report it). Then cascade-
-  //    delete in dependency order:
-  //    snapshots (FK → positions)  →  fills (FK → positions)  →  positions
-  const snapPre = await sb
-    .from("position_snapshots")
     .select("id")
-    .in("position_id", positionIds);
-  const snapshotsCount = (snapPre.data ?? []).length;
+    .eq("import_batch_id", batchId);
+  const fillsCount = (fillsPre.data ?? []).length;
 
-  const sn = await sb
-    .from("position_snapshots")
-    .delete()
-    .in("position_id", positionIds);
-  if (sn.error) {
-    return NextResponse.json({ error: sn.error.message }, { status: 500 });
-  }
   const flDel = await sb
     .from("fills")
     .delete()
@@ -121,18 +100,39 @@ export async function DELETE(
   if (flDel.error) {
     return NextResponse.json({ error: flDel.error.message }, { status: 500 });
   }
-  const ps = await sb
-    .from("positions")
-    .delete()
-    .eq("import_batch_id", batchId);
-  if (ps.error) {
-    return NextResponse.json({ error: ps.error.message }, { status: 500 });
+
+  // 3. Recompute aggregates on pre-existing positions that lost
+  //    fills. recalculatePositionFromFills handles total_contracts,
+  //    avg_premium_sold, status, closed_date, realized_pnl from the
+  //    remaining fill set.
+  const recomputeErrors: string[] = [];
+  for (const positionId of externalPositionIds) {
+    const r = await recalculatePositionFromFills(positionId, sb);
+    if (!r.ok) {
+      recomputeErrors.push(`${positionId}: ${r.error}`);
+    }
+  }
+
+  // 4. Delete batch-created positions last (FK refs from fills /
+  //    snapshots are already gone).
+  let positionsDeletedCount = 0;
+  if (batchPositionIds.length > 0) {
+    const ps = await sb
+      .from("positions")
+      .delete()
+      .eq("import_batch_id", batchId);
+    if (ps.error) {
+      return NextResponse.json({ error: ps.error.message }, { status: 500 });
+    }
+    positionsDeletedCount = batchPositionIds.length;
   }
 
   return NextResponse.json({
     batch_id: batchId,
     snapshots_deleted: snapshotsCount,
-    fills_deleted: fills.length,
-    positions_deleted: positions.length,
+    fills_deleted: fillsCount,
+    positions_deleted: positionsDeletedCount,
+    positions_recomputed: externalPositionIds.length,
+    recompute_errors: recomputeErrors.length > 0 ? recomputeErrors : undefined,
   });
 }
