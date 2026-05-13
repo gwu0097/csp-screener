@@ -224,8 +224,11 @@ export function presetToRange(key: PresetKey, today: Date = new Date()): DateRan
     return { from: iso(startOfMonth(lastMonth)), to: iso(endOfMonth(lastMonth)) };
   }
   if (key === "last_quarter") {
-    const lastQ = new Date(Date.UTC(t.getUTCFullYear(), t.getUTCMonth() - 3, 15));
-    return { from: iso(startOfQuarter(lastQ)), to: iso(endOfQuarter(lastQ)) };
+    // Despite the legacy key name "last_quarter", this preset now
+    // resolves to the CURRENT calendar quarter (label has always
+    // read "Quarter"). The old "previous quarter" behavior was
+    // misleading: clicking "Quarter" in May surfaced Jan–Mar.
+    return { from: iso(startOfQuarter(t)), to: iso(endOfQuarter(t)) };
   }
   if (key === "ytd") {
     return { from: `${t.getUTCFullYear()}-01-01`, to: todayStr };
@@ -813,11 +816,53 @@ export function PerformanceSection({
             ) : null}
           </div>
         )}
-        {displayCurve.length < 2 ? (
-          <div className="py-8 text-center text-sm text-muted-foreground">
-            Not enough trades in this range to display equity curve.
-          </div>
-        ) : (
+        {(() => {
+          // Day-granularity windows zero-fill every day in the range
+          // even when no trades closed, so equity_curve.length can be
+          // large while tradeCount across all buckets is zero. Show
+          // a tailored message in Total mode (since the user has
+          // unrealized to summarize) instead of a flat-line chart
+          // that drops to "Now" — which reads as a sudden loss.
+          const hasRealizedInWindow = equity_curve.some(
+            (p) => p.tradeCount > 0,
+          );
+          if (mode === "total" && !hasRealizedInWindow) {
+            const unrealizedSign =
+              totalUnrealized >= 0 ? "text-emerald-300" : "text-rose-300";
+            return (
+              <div className="py-8 text-center text-sm text-muted-foreground">
+                <div>No completed trades in this period.</div>
+                {unrealizedLoading && !unrealized ? (
+                  <div className="mt-1 text-xs">
+                    Fetching open-position marks…
+                  </div>
+                ) : unrealized ? (
+                  <div className="mt-1 text-xs">
+                    Current unrealized:{" "}
+                    <span className={`font-mono font-semibold ${unrealizedSign}`}>
+                      {fmtMoney(totalUnrealized, true)}
+                    </span>
+                  </div>
+                ) : null}
+              </div>
+            );
+          }
+          if (displayCurve.length < 2) {
+            return (
+              <div className="py-8 text-center text-sm text-muted-foreground">
+                Not enough trades in this range to display equity curve.
+              </div>
+            );
+          }
+          return null;
+        })()}
+        {(() => {
+          const hasRealizedInWindow = equity_curve.some(
+            (p) => p.tradeCount > 0,
+          );
+          if (mode === "total" && !hasRealizedInWindow) return null;
+          if (displayCurve.length < 2) return null;
+          return (
           <div className="h-64 w-full">
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart data={displayCurve}>
@@ -841,7 +886,8 @@ export function PerformanceSection({
               </AreaChart>
             </ResponsiveContainer>
           </div>
-        )}
+          );
+        })()}
       </div>
 
       <PartialClosesPanel
