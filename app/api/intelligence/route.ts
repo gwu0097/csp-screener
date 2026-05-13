@@ -640,6 +640,108 @@ export async function GET(req: NextRequest) {
     (b.stock.closedDate ?? "").localeCompare(a.stock.closedDate ?? ""),
   );
 
+  // ---------- Section: partial closes ----------
+  // Open positions that already have a non-zero realized_pnl —
+  // someone bought back / sold a portion but left the rest open.
+  // Surfaced separately (NOT rolled into total_pnl / win_rate /
+  // ROC) because the position hasn't fully resolved yet and the
+  // realized number is provisional. Broker filter respected.
+  let partialQuery = sb
+    .from("positions")
+    .select(
+      "id,symbol,strike,broker,position_type,realized_pnl,total_contracts,updated_at,closed_date",
+    )
+    .eq("status", "open");
+  if (broker) partialQuery = partialQuery.eq("broker", broker);
+  const partialRes = await partialQuery;
+  type PartialRow = {
+    id: string;
+    symbol: string;
+    strike: number | null;
+    broker: string | null;
+    position_type: string | null;
+    realized_pnl: number;
+    total_contracts: number | null;
+    updated_at: string;
+    closed_date: string | null;
+  };
+  // Filter in JS — the custom REST client doesn't expose .not() /
+  // .neq() for null + zero checks together. Match the SQL guard:
+  // realized_pnl IS NOT NULL AND realized_pnl != 0 AND closed_date
+  // IS NULL.
+  const partialRows = ((partialRes.data ?? []) as PartialRow[]).filter(
+    (p) =>
+      p.closed_date === null &&
+      p.realized_pnl !== null &&
+      Math.abs(Number(p.realized_pnl)) > 0.001,
+  );
+
+  // Compute remaining contracts (or shares) per position from fills.
+  const remainingByPosition = new Map<string, number>();
+  if (partialRows.length > 0) {
+    const ids = partialRows.map((p) => p.id);
+    const fillsRes = await sb
+      .from("fills")
+      .select("position_id,fill_type,contracts")
+      .in("position_id", ids);
+    type FillProbe = {
+      position_id: string;
+      fill_type: string;
+      contracts: number;
+    };
+    const byPos = new Map<string, FillProbe[]>();
+    for (const f of (fillsRes.data ?? []) as FillProbe[]) {
+      const arr = byPos.get(f.position_id) ?? [];
+      arr.push(f);
+      byPos.set(f.position_id, arr);
+    }
+    for (const id of ids) {
+      const fills = byPos.get(id) ?? [];
+      const opened = fills
+        .filter((f) => f.fill_type === "open")
+        .reduce((s, f) => s + Number(f.contracts), 0);
+      const closed = fills
+        .filter((f) => f.fill_type === "close")
+        .reduce((s, f) => s + Number(f.contracts), 0);
+      remainingByPosition.set(id, Math.max(0, opened - closed));
+    }
+  }
+
+  type PartialClose = {
+    positionId: string;
+    symbol: string;
+    strike: number;
+    broker: string | null;
+    positionType: "option" | "stock_long" | "stock_short";
+    realizedPnl: number;
+    remainingContracts: number;
+    updatedAt: string;
+  };
+  const partial_closes: PartialClose[] = partialRows
+    .map((p) => {
+      const remaining = remainingByPosition.get(p.id) ?? 0;
+      const pt =
+        p.position_type === "stock_long" || p.position_type === "stock_short"
+          ? (p.position_type as "stock_long" | "stock_short")
+          : ("option" as const);
+      return {
+        positionId: p.id,
+        symbol: p.symbol,
+        strike: Number(p.strike ?? 0),
+        broker: p.broker,
+        positionType: pt,
+        realizedPnl: Number(p.realized_pnl),
+        remainingContracts: remaining,
+        updatedAt: p.updated_at,
+      };
+    })
+    .filter((p) => p.remainingContracts > 0)
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  const total_partial_pnl =
+    Math.round(
+      partial_closes.reduce((s, p) => s + p.realizedPnl, 0) * 100,
+    ) / 100;
+
   return NextResponse.json({
     date_range: { from, to },
     broker: broker ?? "all",
@@ -681,6 +783,8 @@ export async function GET(req: NextRequest) {
       rec_accuracy,
     },
     paired_assignments,
+    partial_closes,
+    total_partial_pnl,
     export_payload,
   });
 }

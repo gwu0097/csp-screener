@@ -91,6 +91,17 @@ export type PatternBucket = {
   avg_roc: number | null;
 };
 
+export type PartialClose = {
+  positionId: string;
+  symbol: string;
+  strike: number;
+  broker: string | null;
+  positionType: "option" | "stock_long" | "stock_short";
+  realizedPnl: number;
+  remainingContracts: number;
+  updatedAt: string;
+};
+
 export type PairedAssignment = {
   symbol: string;
   broker: string | null;
@@ -131,6 +142,8 @@ export type IntelligenceResponse = {
   };
   equity_curve: EquityPoint[];
   paired_assignments: PairedAssignment[];
+  partial_closes?: PartialClose[];
+  total_partial_pnl?: number;
   ticker_rankings: TickerRanking[];
   patterns: {
     enabled: boolean;
@@ -777,8 +790,78 @@ export function PerformanceSection({
         )}
       </div>
 
+      <PartialClosesPanel
+        rows={data.partial_closes ?? []}
+        total={data.total_partial_pnl ?? 0}
+      />
       <PairedAssignmentsPanel pairs={data.paired_assignments ?? []} />
     </section>
+  );
+}
+
+// Open positions that have a non-zero realized_pnl from a partial
+// close (e.g. closed 1 of 3 contracts) — separate from the Realized
+// P&L headline since the position hasn't fully resolved. Hidden
+// when there are no partial-close rows.
+function PartialClosesPanel({
+  rows,
+  total,
+}: {
+  rows: PartialClose[];
+  total: number;
+}) {
+  if (rows.length === 0) return null;
+  const totalColor = total >= 0 ? "text-emerald-300" : "text-rose-300";
+  return (
+    <div className="rounded-md border border-border bg-background/40 p-3">
+      <div className="mb-2 text-sm font-medium">
+        Partial closes <span className="text-xs font-normal text-muted-foreground">(open positions)</span>
+      </div>
+      <div className="space-y-1.5">
+        {rows.map((r) => {
+          const isStock =
+            r.positionType === "stock_long" || r.positionType === "stock_short";
+          const label = isStock
+            ? `${r.symbol} stock`
+            : `${r.symbol} $${r.strike}P`;
+          const remainingUnit = isStock ? "shares" : "contracts";
+          const pnlColor =
+            r.realizedPnl >= 0 ? "text-emerald-300" : "text-rose-300";
+          return (
+            <div
+              key={r.positionId}
+              className="flex items-baseline justify-between gap-3 text-sm"
+            >
+              <div className="flex items-baseline gap-2">
+                <span className="font-mono font-semibold text-foreground">
+                  {label}
+                </span>
+                {r.broker && (
+                  <span className="text-[10px] uppercase tracking-wider text-muted-foreground/70">
+                    {r.broker}
+                  </span>
+                )}
+                <span className="text-xs text-muted-foreground">
+                  ({r.remainingContracts} {remainingUnit} remaining)
+                </span>
+              </div>
+              <span className={`font-mono font-semibold ${pnlColor}`}>
+                {fmtMoney(r.realizedPnl, true)}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+      <div className="mt-2 flex items-baseline justify-between border-t border-border/40 pt-2 text-sm">
+        <span className="text-muted-foreground">Total partial P&L:</span>
+        <span className={`font-mono font-semibold ${totalColor}`}>
+          {fmtMoney(total, true)}
+        </span>
+      </div>
+      <div className="mt-1 text-[10px] text-muted-foreground/70">
+        These positions are still open — P&L finalizes when fully closed. Not included in the Realized P&L headline above.
+      </div>
+    </div>
   );
 }
 
