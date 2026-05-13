@@ -64,10 +64,21 @@ const TZ_BY_CODE: Record<string, string> = {
   UTC: "UTC",
 };
 
-// Interpret yyyy-mm-dd as midnight in the source timezone, then
-// return the corresponding ET calendar date. HK 2026-05-13 →
-// midnight HK = 16:00 UTC 2026-05-12 = 12:00 ET 2026-05-12 →
-// "2026-05-12". DST-aware via Intl. Pass-through when source is ET.
+// Interpret yyyy-mm-dd as NOON in the source timezone, then return
+// the corresponding ET calendar date. Noon (not midnight) is the
+// assumed time when only a date is available: a US-market trade
+// displayed in HK most often shows the user's HK same-day date
+// (early-session trade placed during HK evening), and the noon
+// anchor keeps that mapping correct under DST:
+//
+//   noon HK 2026-05-13 = 04:00 UTC 2026-05-13 = 00:00 ET 2026-05-13
+//                                              → "2026-05-13"
+//
+// Edge: a late-session ET trade (HK midnight–04:00 next day) shows
+// the next HK date in the screenshot — noon assumption stores it as
+// that next ET date too. Acceptable trade-off; midnight broke the
+// (much more common) same-day case. DST-aware via Intl. Pass-through
+// when source is ET.
 function toEtDate(yyyyMmDd: string, sourceTzCode?: string): string {
   const sourceTz = TZ_BY_CODE[sourceTzCode ?? "ET"] ?? "America/New_York";
   if (sourceTz === "America/New_York") return yyyyMmDd;
@@ -77,8 +88,8 @@ function toEtDate(yyyyMmDd: string, sourceTzCode?: string): string {
   const mo = Number(m[2]);
   const d = Number(m[3]);
 
-  // First-pass UTC instant for the wall-clock date components.
-  let utcMs = Date.UTC(y, mo - 1, d, 0, 0, 0);
+  // First-pass UTC instant for the wall-clock date components at noon.
+  let utcMs = Date.UTC(y, mo - 1, d, 12, 0, 0);
   // Find what time the source TZ displays for that UTC instant —
   // the gap is the source-TZ UTC offset at that date (DST-aware).
   const dtf = new Intl.DateTimeFormat("en-US", {
@@ -102,8 +113,8 @@ function toEtDate(yyyyMmDd: string, sourceTzCode?: string): string {
     get("second"),
   );
   const offsetMs = tzTimeAsUtc - utcMs;
-  // Subtract the offset to get the real UTC instant of midnight in
-  // the source TZ.
+  // Subtract the offset to get the real UTC instant of noon in the
+  // source TZ.
   utcMs -= offsetMs;
   // Format that instant in ET and return the date portion.
   return new Intl.DateTimeFormat("en-CA", {
