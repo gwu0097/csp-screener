@@ -195,8 +195,15 @@ type Props =
 // → slightly over a 375px iPhone; row scrolls horizontally if
 //   needed, but the visible cells aren't truncated.
 export const COLLAPSED_ROW_GRID =
-  "grid w-full items-center gap-2 px-3 text-xs lg:text-sm " +
-  "grid-cols-[24px_minmax(60px,8fr)_minmax(40px,5fr)_minmax(70px,9fr)_minmax(45px,6fr)_minmax(45px,7fr)_minmax(100px,12fr)] " +
+  // gap-1.5 below sm (6 px) so the mobile row fits an iPhone 15
+  // viewport; gap-2 (8 px) restored at sm+ for the iPad / desktop
+  // layouts that have already been tuned to that spacing.
+  "grid w-full items-center gap-1.5 px-3 text-xs sm:gap-2 lg:text-sm " +
+  // Mobile (7 cols) minimums trimmed from earlier 60/40/70/45/45/100
+  // to 55/40/65/45/45/90 — saves 15 px of unavoidable width so the
+  // sum (24+55+40+65+45+45+90 + 6×6 gap + 24 padding = 414 px) fits
+  // an iPhone 15 (390 − 32 container = 358 px) much more closely.
+  "grid-cols-[24px_minmax(55px,8fr)_minmax(40px,5fr)_minmax(65px,9fr)_minmax(45px,6fr)_minmax(45px,7fr)_minmax(90px,12fr)] " +
   "sm:grid-cols-[24px_minmax(60px,8fr)_minmax(55px,7fr)_minmax(40px,5fr)_minmax(50px,6fr)_minmax(70px,9fr)_minmax(45px,6fr)_minmax(55px,7fr)_minmax(45px,7fr)_minmax(100px,12fr)] " +
   "lg:grid-cols-[24px_minmax(60px,8fr)_minmax(55px,7fr)_minmax(40px,5fr)_minmax(50px,6fr)_minmax(50px,6fr)_minmax(70px,9fr)_minmax(45px,6fr)_minmax(55px,7fr)_minmax(40px,5fr)_minmax(45px,7fr)_minmax(100px,12fr)]";
 

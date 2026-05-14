@@ -10,7 +10,11 @@ const config: Config = {
   theme: {
     container: {
       center: true,
-      padding: "2rem",
+      // 1rem (16 px) on mobile so the position-row grid fits inside
+      // an iPhone 15 viewport (~390 px). 2rem from sm+ to keep the
+      // existing iPad / desktop look — that breakpoint matches the
+      // COLLAPSED_ROW_GRID's own sm: variant.
+      padding: { DEFAULT: "1rem", sm: "2rem" },
       screens: {
         "2xl": "1400px",
       },
