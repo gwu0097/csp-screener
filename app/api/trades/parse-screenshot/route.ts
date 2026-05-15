@@ -113,6 +113,13 @@ For this format:
   • Strike and option type come from the trailing "{STRIKE} P" / "{STRIKE} C" in the header. "P" → put, "C" → call.
   • Quantity sign in the TRADE FILLS rows determines the action: -N → action='open' (the short leg at the far expiry); +N → action='close' (the long leg at the near expiry — which closes an existing CSP at the near expiry).
   • premium for each leg is the "@ X.XX" value on that fill row (NOT the spread net credit).
+  • timePlaced for BOTH legs comes from the order's fill timestamp. The Order Detail screen does NOT show a Time Placed column — instead, look for the timestamp in either of two places:
+        – the order status header: "FILLED 5/15/26, 10:43 PM" (top of the panel)
+        – or the timestamp on the TRADE FILLS section: "5/15/26, 10:43 PM"
+    Both legs of a CALENDAR get the SAME timePlaced. Convert 12-hour AM/PM to 24-hour:
+        "5/15/26, 10:43 PM" → "2026-05-15T22:43:00"
+        "5/15/26,  9:34 AM" → "2026-05-15T09:34:00"
+    If no seconds are visible, use "00". NEVER leave timePlaced empty for a CALENDAR row — the fill timestamp is always shown somewhere on this screen.
   • Both emitted trades share the SAME spread_group label (e.g. "ROLL_1") so the UI can render them as a linked pair. Increment the suffix ("ROLL_2", "ROLL_3", …) for additional calendar rolls in the same screenshot.
 Emits TWO trades for the NET example:
   { action: 'open',  symbol: 'NET', strike: 210, expiry: '2026-05-22', optionType: 'put', contracts: 2, premium: 13.88, timePlaced: '2026-05-15T22:43:00', spread_group: 'ROLL_1' }
