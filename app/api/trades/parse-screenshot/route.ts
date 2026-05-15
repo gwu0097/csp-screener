@@ -22,6 +22,11 @@ export type ParsedTrade = {
   optionType: "put" | "call";
   premium: number;
   broker: string;
+  // Group key set by the parser when a row belongs to a multi-leg
+  // spread (e.g. CALENDAR roll). Two trades sharing the same value
+  // are the two legs of one order — the modal renders a "ROLL" badge
+  // to show the link. Not persisted to DB; preview-only metadata.
+  spread_group?: string;
   // Actual moment the trade was placed (from the ToS "Time Placed" column).
   // Either "YYYY-MM-DD" (date-only, when the source UI shows no time) or
   // "YYYY-MM-DDTHH:MM:SS" (preferred — lets downstream toPstDate() do an
@@ -70,8 +75,10 @@ When the indicators conflict, prefer the OPTION interpretation only if BOTH a nu
 OUTPUT FORMAT:
 Return one mixed JSON array. Each element is either an OPTION fill or a STOCK fill — discriminate with a top-level "trade_type" field. Schemas:
 
-OPTION:  { "trade_type": "option", "action": "open"|"close", "contracts": N, "symbol": str, "strike": N, "expiry": "YYYY-MM-DD", "optionType": "put"|"call", "premium": N, "timePlaced": "YYYY-MM-DDTHH:MM:SS" }
+OPTION:  { "trade_type": "option", "action": "open"|"close", "contracts": N, "symbol": str, "strike": N, "expiry": "YYYY-MM-DD", "optionType": "put"|"call", "premium": N, "timePlaced": "YYYY-MM-DDTHH:MM:SS", "spread_group": str (optional) }
 STOCK:   { "trade_type": "stock",  "action": "buy"|"sell",    "shares":    N, "symbol": str, "price":  N, "date":   "YYYY-MM-DD" }
+
+spread_group: include ONLY for multi-leg spread rows (CALENDAR / DIAGONAL / VERTICAL / etc.). Use a short string label like "ROLL_1", "ROLL_2", "VERT_1" — both legs of the same order must share the SAME label so downstream can link them. For non-spread SINGLE rows, omit the field.
 
 If a row is unmistakably a stock fill, emit only the stock schema (no strike / expiry / optionType — leave those out entirely). If it's an option, emit only the option schema.
 
@@ -88,10 +95,28 @@ For multi-leg orders:
 Worked example (DIAGONAL row spans two lines, one Status applies to both):
   5/8/26 12:54:27  DIAGONAL  SELL  -3 TO OPEN   ANET  15 MAY 26 (Weeklys)  150 PUT  4.75 LMT  DAY  FILLED
                               BUY   +3 TO CLOSE  ANET   8 MAY 26 (Weeklys)  146 PUT  CREDIT
-Emits TWO trades:
-  { action: 'open',  symbol: 'ANET', strike: 150, expiry: '2026-05-15', optionType: 'put', contracts: 3, premium: 4.75, timePlaced: '2026-05-08' }
-  { action: 'close', symbol: 'ANET', strike: 146, expiry: '2026-05-08', optionType: 'put', contracts: 3, premium: 0,    timePlaced: '2026-05-08' }
+Emits TWO trades (note the shared spread_group):
+  { action: 'open',  symbol: 'ANET', strike: 150, expiry: '2026-05-15', optionType: 'put', contracts: 3, premium: 4.75, timePlaced: '2026-05-08', spread_group: 'DIAG_1' }
+  { action: 'close', symbol: 'ANET', strike: 146, expiry: '2026-05-08', optionType: 'put', contracts: 3, premium: 0,    timePlaced: '2026-05-08', spread_group: 'DIAG_1' }
 (The CREDIT leg gets premium=0 because the per-leg price isn't shown — the user will edit the close price manually.)
+
+CALENDAR (condensed display variant — different from the per-row layout above):
+Schwab sometimes shows a CALENDAR roll as ONE header row plus a "TRADE FILLS" detail block, instead of two physical rows. The header looks like:
+  CALENDAR  NET  100 (Weeklys)
+            22 MAY 26 / 15 MAY 26 (0)  210 P
+And the TRADE FILLS detail block beneath it shows two per-leg lines:
+  -2  @ 13.88     (the SHORT/far leg: SELL TO OPEN at the FIRST expiry, here 22 MAY 26)
+  +2  @ 11.28     (the LONG/near leg: BUY  TO CLOSE at the SECOND expiry, here 15 MAY 26)
+  Net: 2.60 CREDIT
+For this format:
+  • The two expiries are slash-separated in the header — read both. The FIRST date is the FAR leg, the SECOND is the NEAR leg (Schwab orders them far/near).
+  • Strike and option type come from the trailing "{STRIKE} P" / "{STRIKE} C" in the header. "P" → put, "C" → call.
+  • Quantity sign in the TRADE FILLS rows determines the action: -N → action='open' (the short leg at the far expiry); +N → action='close' (the long leg at the near expiry — which closes an existing CSP at the near expiry).
+  • premium for each leg is the "@ X.XX" value on that fill row (NOT the spread net credit).
+  • Both emitted trades share the SAME spread_group label (e.g. "ROLL_1") so the UI can render them as a linked pair. Increment the suffix ("ROLL_2", "ROLL_3", …) for additional calendar rolls in the same screenshot.
+Emits TWO trades for the NET example:
+  { action: 'open',  symbol: 'NET', strike: 210, expiry: '2026-05-22', optionType: 'put', contracts: 2, premium: 13.88, timePlaced: '2026-05-15T22:43:00', spread_group: 'ROLL_1' }
+  { action: 'close', symbol: 'NET', strike: 210, expiry: '2026-05-15', optionType: 'put', contracts: 2, premium: 11.28, timePlaced: '2026-05-15T22:43:00', spread_group: 'ROLL_1' }
 
 For each options row:
 - action: determine whether this row OPENS or CLOSES a position. Rule cascade — apply in order, first match wins:
@@ -408,6 +433,10 @@ function coerceTrade(raw: unknown, fallbackBroker: string): ParsedTrade | null {
   const timePlacedOut = /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2})?$/.test(timePlaced)
     ? timePlaced
     : undefined;
+  // Preview-only metadata for multi-leg spreads. Validate as a short
+  // alphanumeric label so an unexpected payload can't poison the UI.
+  const rawGroup = typeof r.spread_group === "string" ? r.spread_group.trim() : "";
+  const spread_group = /^[A-Za-z0-9_-]{1,32}$/.test(rawGroup) ? rawGroup : undefined;
   if (!symbol || !action || !optionType) return null;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(expiry)) return null;
   if (!Number.isFinite(contracts) || contracts <= 0) return null;
@@ -423,6 +452,7 @@ function coerceTrade(raw: unknown, fallbackBroker: string): ParsedTrade | null {
     premium,
     broker,
     timePlaced: timePlacedOut,
+    spread_group,
   };
 }
 

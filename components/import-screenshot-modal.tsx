@@ -23,7 +23,12 @@ type ParsedTrade = {
   // Actual trade date from the ToS "Time Placed" column. When the parser
   // can't recover it we default to today so the review table always has a
   // concrete date to show and edit.
-  timePlaced?: string; // YYYY-MM-DD
+  timePlaced?: string; // YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS
+  // Preview-only marker — two rows sharing a spread_group are the two
+  // legs of one order (CALENDAR roll, DIAGONAL, vertical, etc.). The
+  // table renders a small "ROLL" / "SPREAD" badge to make the link
+  // visible. Not sent to bulk-create (ignored server-side).
+  spread_group?: string;
 };
 
 type ParsedStockTrade = {
@@ -429,90 +434,119 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
                   </tr>
                 </thead>
                 <tbody>
-                  {parsed.map((t, idx) => (
-                    <tr key={idx} className="border-t border-border">
-                      <td className="px-2 py-1">
-                        <input
-                          type="date"
-                          value={t.timePlaced ?? todayIso()}
-                          onChange={(e) => updateRow(idx, { timePlaced: e.target.value })}
-                          className="w-full rounded border border-border bg-background px-1 py-0.5"
-                        />
-                      </td>
-                      <td className="px-2 py-1">
-                        <input
-                          value={t.symbol}
-                          onChange={(e) => updateRow(idx, { symbol: e.target.value.toUpperCase() })}
-                          className="w-20 rounded border border-border bg-background px-1 py-0.5 uppercase"
-                        />
-                      </td>
-                      <td className="px-2 py-1">
-                        <select
-                          value={t.action}
-                          onChange={(e) => updateRow(idx, { action: e.target.value as "open" | "close" })}
-                          className="rounded border border-border bg-background px-1 py-0.5"
-                        >
-                          <option value="open">open</option>
-                          <option value="close">close</option>
-                        </select>
-                      </td>
-                      <td className="px-2 py-1">
-                        <input
-                          type="number"
-                          min="1"
-                          value={t.contracts}
-                          onChange={(e) => updateRow(idx, { contracts: Math.max(1, Number(e.target.value) || 1) })}
-                          className="w-14 rounded border border-border bg-background px-1 py-0.5"
-                        />
-                      </td>
-                      <td className="px-2 py-1">
-                        <input
-                          type="number"
-                          step="0.5"
-                          value={t.strike}
-                          onChange={(e) => updateRow(idx, { strike: Number(e.target.value) })}
-                          className="w-20 rounded border border-border bg-background px-1 py-0.5"
-                        />
-                      </td>
-                      <td className="px-2 py-1">
-                        <input
-                          type="date"
-                          value={t.expiry}
-                          onChange={(e) => updateRow(idx, { expiry: e.target.value })}
-                          className="w-full rounded border border-border bg-background px-1 py-0.5"
-                        />
-                      </td>
-                      <td className="px-2 py-1">
-                        <select
-                          value={t.optionType}
-                          onChange={(e) => updateRow(idx, { optionType: e.target.value as "put" | "call" })}
-                          className="rounded border border-border bg-background px-1 py-0.5"
-                        >
-                          <option value="put">put</option>
-                          <option value="call">call</option>
-                        </select>
-                      </td>
-                      <td className="px-2 py-1">
-                        <input
-                          type="number"
-                          step="0.01"
-                          value={t.premium}
-                          onChange={(e) => updateRow(idx, { premium: Number(e.target.value) })}
-                          className="w-20 rounded border border-border bg-background px-1 py-0.5"
-                        />
-                      </td>
-                      <td className="px-2 py-1 text-right">
-                        <button
-                          type="button"
-                          className="text-muted-foreground hover:text-rose-300"
-                          onClick={() => removeRow(idx)}
-                          aria-label="Remove"
-                        >
-                          <Trash2 className="h-3 w-3" />
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
+                  {parsed.map((t, idx) => {
+                    // <input type="date"> only handles "YYYY-MM-DD" — slice
+                    // any "T HH:MM:SS" suffix off the parsed value before
+                    // rendering. When the user edits the date the value
+                    // round-trips back to date-only, which is fine: the
+                    // server's toPstDate() handles both forms.
+                    const dateValue = (t.timePlaced ?? todayIso()).slice(0, 10);
+                    const groupCount = t.spread_group
+                      ? parsed.filter((p) => p.spread_group === t.spread_group).length
+                      : 0;
+                    const inGroup = groupCount >= 2;
+                    return (
+                      <tr
+                        key={idx}
+                        className={
+                          inGroup
+                            ? "border-t border-border bg-amber-500/5"
+                            : "border-t border-border"
+                        }
+                      >
+                        <td className="px-2 py-1">
+                          <input
+                            type="date"
+                            value={dateValue}
+                            onChange={(e) => updateRow(idx, { timePlaced: e.target.value })}
+                            className="w-full rounded border border-border bg-background px-1 py-0.5"
+                          />
+                        </td>
+                        <td className="px-2 py-1">
+                          <div className="flex items-center gap-1">
+                            <input
+                              value={t.symbol}
+                              onChange={(e) => updateRow(idx, { symbol: e.target.value.toUpperCase() })}
+                              className="w-16 rounded border border-border bg-background px-1 py-0.5 uppercase"
+                            />
+                            {inGroup && (
+                              <span
+                                title={`Linked leg — same order as another row (${t.spread_group})`}
+                                className="rounded bg-amber-500/20 px-1 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-amber-300"
+                              >
+                                Roll
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                        <td className="px-2 py-1">
+                          <select
+                            value={t.action}
+                            onChange={(e) => updateRow(idx, { action: e.target.value as "open" | "close" })}
+                            className="rounded border border-border bg-background px-1 py-0.5"
+                          >
+                            <option value="open">open</option>
+                            <option value="close">close</option>
+                          </select>
+                        </td>
+                        <td className="px-2 py-1">
+                          <input
+                            type="number"
+                            min="1"
+                            value={t.contracts}
+                            onChange={(e) => updateRow(idx, { contracts: Math.max(1, Number(e.target.value) || 1) })}
+                            className="w-14 rounded border border-border bg-background px-1 py-0.5"
+                          />
+                        </td>
+                        <td className="px-2 py-1">
+                          <input
+                            type="number"
+                            step="0.5"
+                            value={t.strike}
+                            onChange={(e) => updateRow(idx, { strike: Number(e.target.value) })}
+                            className="w-20 rounded border border-border bg-background px-1 py-0.5"
+                          />
+                        </td>
+                        <td className="px-2 py-1">
+                          <input
+                            type="date"
+                            value={t.expiry}
+                            onChange={(e) => updateRow(idx, { expiry: e.target.value })}
+                            className="w-full rounded border border-border bg-background px-1 py-0.5"
+                          />
+                        </td>
+                        <td className="px-2 py-1">
+                          <select
+                            value={t.optionType}
+                            onChange={(e) => updateRow(idx, { optionType: e.target.value as "put" | "call" })}
+                            className="rounded border border-border bg-background px-1 py-0.5"
+                          >
+                            <option value="put">put</option>
+                            <option value="call">call</option>
+                          </select>
+                        </td>
+                        <td className="px-2 py-1">
+                          <input
+                            type="number"
+                            step="0.01"
+                            value={t.premium}
+                            onChange={(e) => updateRow(idx, { premium: Number(e.target.value) })}
+                            className="w-20 rounded border border-border bg-background px-1 py-0.5"
+                          />
+                        </td>
+                        <td className="px-2 py-1 text-right">
+                          <button
+                            type="button"
+                            className="text-muted-foreground hover:text-rose-300"
+                            onClick={() => removeRow(idx)}
+                            aria-label="Remove"
+                          >
+                            <Trash2 className="h-3 w-3" />
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
