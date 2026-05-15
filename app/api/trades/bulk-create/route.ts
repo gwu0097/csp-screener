@@ -23,7 +23,9 @@ export type TradeInput = {
   optionType?: "put" | "call";
   premium: number;
   broker?: string | null;
-  timePlaced?: string; // YYYY-MM-DD preferred from ToS "Time Placed"
+  // "YYYY-MM-DD" (date-only) or "YYYY-MM-DDTHH:MM:SS" (datetime, preferred).
+  // The datetime form lets toPstDate() do an exact source-tz → PT conversion.
+  timePlaced?: string;
   trade_date?: string;
   notes?: string | null;
 };
@@ -65,36 +67,46 @@ const TZ_BY_CODE: Record<string, string> = {
   UTC: "UTC",
 };
 
-// Interpret yyyy-mm-dd as NOON in the source timezone, then return
-// the corresponding PST calendar date. Noon (not midnight) is the
-// assumed time when only a date is available: a US-market trade
-// displayed in HK most often shows the user's HK same-day date
-// (early-session trade placed during HK evening), and the noon
-// anchor keeps that mapping correct under DST:
+// Convert a source-timezone moment (or date) to the matching PST/PDT
+// calendar date.
 //
-//   noon HK 2026-05-13 = 04:00 UTC 2026-05-13 = 21:00 PST 2026-05-12
+// Accepts two input forms:
+//   1. "YYYY-MM-DDTHH:MM:SS" — exact wall-clock time in the source TZ.
+//      Used for an exact conversion. This is the path Schwab takes when
+//      Gemini extracts the full "Time Placed" datetime from the ToS UI.
+//   2. "YYYY-MM-DD" — date only. Falls back to a 17:00 source-local
+//      anchor. 17:00 (rather than noon or midnight) lands cleanly on
+//      the same PT calendar day for every supported timezone:
+//        HK/CN 17:00 → PDT 02:00 same day
+//        JP    17:00 → PDT 01:00 same day
+//        ET    17:00 → PDT 14:00 same day
+//        UTC   17:00 → PDT 10:00 same day
+//      The earlier noon anchor was off by one full day for HK/CN/JP
+//      (noon HK → PDT 21:00 prev day), which corrupted historical
+//      imports — see scripts/fix-pst-dates.ts and the f983edf3
+//      cleanup script.
 //
-// → that comes out as 2026-05-12 PST, not the user's expected
-// 2026-05-13. So we use noon LA TIME as the anchor when the source
-// is PT/PST: noon PT 2026-05-13 = 19:00 UTC 2026-05-13 = next day
-// at the source's home tz. Effectively: for source=PT this is a
-// no-op; for source=HK/CN/JP the conversion lands on the same
-// calendar day in PST when the user is viewing same-day US trades.
-//
-// Pass-through when source is PT (user's normal timezone).
-function toPstDate(yyyyMmDd: string, sourceTzCode?: string): string {
+// When source is PT/PST the conversion is a no-op (just strip any
+// time suffix and return the date portion).
+function toPstDate(input: string, sourceTzCode?: string): string {
   const sourceTz = TZ_BY_CODE[sourceTzCode ?? "PT"] ?? "America/Los_Angeles";
-  if (sourceTz === "America/Los_Angeles") return yyyyMmDd;
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(yyyyMmDd);
-  if (!m) return yyyyMmDd;
+  const dt = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(input);
+  const dm = !dt ? /^(\d{4})-(\d{2})-(\d{2})$/.exec(input) : null;
+  const m = dt ?? dm;
+  if (!m) return input;
+  if (sourceTz === "America/Los_Angeles") return `${m[1]}-${m[2]}-${m[3]}`;
+
   const y = Number(m[1]);
   const mo = Number(m[2]);
   const d = Number(m[3]);
+  const h = dt ? Number(dt[4]) : 17;
+  const mi = dt ? Number(dt[5]) : 0;
+  const s = dt && dt[6] ? Number(dt[6]) : 0;
 
-  // First-pass UTC instant for the wall-clock date components at noon.
-  let utcMs = Date.UTC(y, mo - 1, d, 12, 0, 0);
-  // Find what time the source TZ displays for that UTC instant —
-  // the gap is the source-TZ UTC offset at that date (DST-aware).
+  // Treat the wall-clock components as if they were UTC, find the
+  // source-TZ DST-aware offset at that date, then subtract the offset
+  // to get the real UTC instant for that source-tz wall clock.
+  let utcMs = Date.UTC(y, mo - 1, d, h, mi, s);
   const dtf = new Intl.DateTimeFormat("en-US", {
     timeZone: sourceTz,
     hourCycle: "h23",
@@ -116,10 +128,7 @@ function toPstDate(yyyyMmDd: string, sourceTzCode?: string): string {
     get("second"),
   );
   const offsetMs = tzTimeAsUtc - utcMs;
-  // Subtract the offset to get the real UTC instant of noon in the
-  // source TZ.
   utcMs -= offsetMs;
-  // Format that instant in PST and return the date portion.
   return new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/Los_Angeles",
     year: "numeric",

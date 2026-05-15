@@ -22,9 +22,12 @@ export type ParsedTrade = {
   optionType: "put" | "call";
   premium: number;
   broker: string;
-  // Actual date the trade was placed (from the ToS "Time Placed" column).
+  // Actual moment the trade was placed (from the ToS "Time Placed" column).
+  // Either "YYYY-MM-DD" (date-only, when the source UI shows no time) or
+  // "YYYY-MM-DDTHH:MM:SS" (preferred — lets downstream toPstDate() do an
+  // exact source-tz → PT conversion instead of guessing an anchor hour).
   // Optional — if the model can't recover it, downstream falls back to today.
-  timePlaced?: string; // YYYY-MM-DD
+  timePlaced?: string;
 };
 
 // Stock trades are a distinct shape — no strike / expiry / optionType, and
@@ -67,7 +70,7 @@ When the indicators conflict, prefer the OPTION interpretation only if BOTH a nu
 OUTPUT FORMAT:
 Return one mixed JSON array. Each element is either an OPTION fill or a STOCK fill — discriminate with a top-level "trade_type" field. Schemas:
 
-OPTION:  { "trade_type": "option", "action": "open"|"close", "contracts": N, "symbol": str, "strike": N, "expiry": "YYYY-MM-DD", "optionType": "put"|"call", "premium": N, "timePlaced": "YYYY-MM-DD" }
+OPTION:  { "trade_type": "option", "action": "open"|"close", "contracts": N, "symbol": str, "strike": N, "expiry": "YYYY-MM-DD", "optionType": "put"|"call", "premium": N, "timePlaced": "YYYY-MM-DDTHH:MM:SS" }
 STOCK:   { "trade_type": "stock",  "action": "buy"|"sell",    "shares":    N, "symbol": str, "price":  N, "date":   "YYYY-MM-DD" }
 
 If a row is unmistakably a stock fill, emit only the stock schema (no strike / expiry / optionType — leave those out entirely). If it's an option, emit only the option schema.
@@ -117,7 +120,11 @@ For each options row:
       '26 MAY 26' → 2026-05-26  (May 26 2026, correct — both day and year happen to be 26)
     Return the result in strict YYYY-MM-DD format.
 - premium: the Price column value
-- timePlaced: YYYY-MM-DD from the Time Placed column (first column). Drop the time-of-day portion — date only.
+- timePlaced: full datetime as "YYYY-MM-DDTHH:MM:SS" (24-hour, seconds optional → use "00" if not shown). The Time Placed column shows date+time like "5/14/26, 9:34:12 PM" or "5/14/26 21:34:12" — combine them. Examples:
+    "5/14/26, 9:34:12 PM" → "2026-05-14T21:34:12"
+    "5/14/26  21:34:12"   → "2026-05-14T21:34:12"
+    "5/14/26  09:34"      → "2026-05-14T09:34:00"
+  If the row only shows a date (no time at all), emit "YYYY-MM-DD" with no T-prefix — downstream will fall back to an anchor time. Never invent a time.
 
 For each stock row:
 - action: 'sell' if the Side column is 'SOLD' or 'SELL' (or the quantity is negative); 'buy' if the Side column is 'BOT' or 'BUY' (or the quantity is positive).
@@ -207,13 +214,13 @@ For each FILLED stock row (StrikeType = 'STOCK' or 'ETF', not options):
   action: 'buy' if Side=BUY, 'sell' if Side=SELL
   shares: the absolute number before 'TO OPEN' / 'TO CLOSE' (or the Qty column)
   price: the numeric value in the Price column — strip ' LMT' / ' MKT' suffix. '.60 LMT' becomes 0.60.
-  date: YYYY-MM-DD from the Time Placed column (date only, drop the time)
+  date: full datetime as "YYYY-MM-DDTHH:MM:SS" (24-hour) from the Time Placed column. Combine the date and time-of-day cells. Example: "5/14/26, 9:34:12 PM" → "2026-05-14T21:34:12". If only a date is visible (no time), emit "YYYY-MM-DD" with no T-prefix.
 
 Ignore: options rows (any row with a strike price or expiry), CANCELED orders, WORKING orders.
 Only include rows with Status exactly FILLED and StrikeType STOCK/ETF.
 
 Return ONLY a JSON array, no explanation, no markdown:
-[{"symbol": "AMD", "action": "buy", "shares": 100, "price": 175.40, "date": "2026-04-22"}]
+[{"symbol": "AMD", "action": "buy", "shares": 100, "price": 175.40, "date": "2026-04-22T14:31:08"}]
 
 Extract EVERY stock row. Do not stop early.`;
 
@@ -342,6 +349,33 @@ function roundStrikeToHalf(v: number): number {
   return Math.round(v * 2) / 2;
 }
 
+// timePlaced may arrive as "YYYY-MM-DDTHH:MM[:SS]" (preferred, full
+// datetime — Schwab ToS "Time Placed" column) or as a date in either
+// YYYY-MM-DD or M/D[/YY] form. Preserve the datetime form when present
+// so toPstDate() can do an exact source-tz → PT conversion. Pad missing
+// seconds with "00".
+function normalizeTimePlaced(raw: string): string {
+  const trimmed = raw.trim();
+  const dt = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})(?::(\d{2}))?/.exec(trimmed);
+  if (dt) {
+    const sec = dt[3] ?? "00";
+    return `${dt[1]}T${dt[2]}:${sec}`;
+  }
+  if (/^\d{4}-\d{2}-\d{2}/.test(trimmed)) return trimmed.slice(0, 10);
+  const mdy = trimmed.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/);
+  if (mdy) {
+    const mm = mdy[1].padStart(2, "0");
+    const dd = mdy[2].padStart(2, "0");
+    let year = new Date().getUTCFullYear();
+    if (mdy[3]) {
+      const y = Number(mdy[3]);
+      year = y < 100 ? 2000 + y : y;
+    }
+    return `${year}-${mm}-${dd}`;
+  }
+  return "";
+}
+
 function coerceTrade(raw: unknown, fallbackBroker: string): ParsedTrade | null {
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
@@ -370,8 +404,10 @@ function coerceTrade(raw: unknown, fallbackBroker: string): ParsedTrade | null {
   const expiry =
     typeof r.expiry === "string" ? normalizeExpiry(r.expiry) : "";
   const rawTime = typeof r.timePlaced === "string" ? r.timePlaced.trim() : "";
-  const timePlaced = rawTime ? normalizeExpiry(rawTime) : "";
-  const timePlacedOut = /^\d{4}-\d{2}-\d{2}$/.test(timePlaced) ? timePlaced : undefined;
+  const timePlaced = rawTime ? normalizeTimePlaced(rawTime) : "";
+  const timePlacedOut = /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2})?$/.test(timePlaced)
+    ? timePlaced
+    : undefined;
   if (!symbol || !action || !optionType) return null;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(expiry)) return null;
   if (!Number.isFinite(contracts) || contracts <= 0) return null;
@@ -400,9 +436,12 @@ function coerceStockTrade(raw: unknown, fallbackBroker: string): ParsedStockTrad
   const price = Number(r.price);
   // User-picked broker wins — see coerceTrade comment.
   const broker = fallbackBroker.toLowerCase();
-  const date = typeof r.date === "string" ? normalizeExpiry(r.date) : "";
+  // Stock-trade dates may carry a datetime suffix (e.g. Schwab "Time
+  // Placed") so downstream toPstDate() can do an exact source-tz → PT
+  // conversion. Accept either form.
+  const date = typeof r.date === "string" ? normalizeTimePlaced(r.date) : "";
   if (!symbol || !action) return null;
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+  if (!/^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2})?$/.test(date)) return null;
   if (!Number.isFinite(shares) || shares <= 0) return null;
   if (!Number.isFinite(price) || price <= 0) return null;
   return { symbol, action, shares, price, date, broker };
@@ -633,8 +672,12 @@ export async function POST(req: NextRequest) {
       for (const r of optionItems) {
         const t = coerceTrade(r, broker);
         if (!t) continue; // structural reject (missing fields, bad strike/contracts, etc.)
+        // Use just the date portion of timePlaced for the +24h future
+        // guard — the guard is calendar-coarse and a datetime suffix
+        // (e.g. "2026-05-14T21:34:00") would break the `T00:00:00Z`
+        // concatenation.
         const placedMs = t.timePlaced
-          ? new Date(`${t.timePlaced}T00:00:00Z`).getTime()
+          ? new Date(`${t.timePlaced.slice(0, 10)}T00:00:00Z`).getTime()
           : null;
         if (placedMs !== null && placedMs > maxAllowedMs) {
           rejections.push({
