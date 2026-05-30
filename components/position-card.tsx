@@ -46,6 +46,9 @@ export type OpenPositionClientView = {
   strike: number;
   expiry: string;
   optionType: "put" | "call";
+  // 'short' = sold-to-open (CSP). 'long' = bought-to-open. Flips the
+  // realized-P&L sign + drives the "Long" badge in the row.
+  direction: "long" | "short";
   totalContracts: number;
   remainingContracts: number;
   avgPremiumSold: number | null;
@@ -104,6 +107,7 @@ export type ClosedPositionClientView = {
   strike: number;
   expiry: string;
   optionType: "put" | "call";
+  direction: "long" | "short";
   totalContracts: number;
   remainingContracts: number;
   avgPremiumSold: number | null;
@@ -477,10 +481,21 @@ export function PositionCard(props: Props) {
         <div className="flex h-4 w-4 items-center justify-center">
           {p.postEarningsRec ? <RecDot rec={p.postEarningsRec} /> : null}
         </div>
-        {/* 2. Strike */}
+        {/* 2. Strike — appends a small "LONG" pill for bought-to-open
+              positions. Short rows render unchanged (the historical
+              default). The pill sits inline with the strike so it
+              survives every breakpoint without grid surgery. */}
         <div className="truncate text-right font-mono text-foreground/90">
           ${p.strike}
           <span className="text-muted-foreground">{p.optionType === "put" ? "P" : "C"}</span>
+          {p.direction === "long" && (
+            <span
+              className="ml-1 rounded border border-emerald-500/40 bg-emerald-500/10 px-1 text-[9px] font-semibold uppercase tracking-wider text-emerald-300 align-middle"
+              title="Long position — bought to open"
+            >
+              L
+            </span>
+          )}
         </div>
         {/* 3. Expiry — hidden on mobile. ⚠️ when Schwab's chain
               doesn't list this expiry within picker tolerance, so
@@ -873,7 +888,10 @@ function PositionDetailsColumn({
       <div className="mb-1 text-xs font-semibold uppercase text-muted-foreground">
         Position
       </div>
-      <Row k="Avg premium sold" v={fmtDollars(p.avgPremiumSold)} />
+      <Row
+        k={p.direction === "long" ? "Avg paid" : "Avg premium sold"}
+        v={fmtDollars(p.avgPremiumSold)}
+      />
       <Row k="Opened" v={p.openedDate} />
       {kind === "closed" && (p as ClosedPositionClientView).closedDate && (
         <Row k="Closed" v={(p as ClosedPositionClientView).closedDate ?? "—"} />

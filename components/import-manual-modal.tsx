@@ -62,6 +62,8 @@ export function ImportManualModal({ open, onOpenChange, onSuccess, prefill }: Pr
   const [expiry, setExpiry] = useState(prefill?.expiry ?? "");
   const [premium, setPremium] = useState<number | "">(prefill?.premium ?? "");
   const [contracts, setContracts] = useState<number>(1);
+  const [direction, setDirection] = useState<"short" | "long">("short");
+  const [optionType, setOptionType] = useState<"put" | "call">("put");
 
   // Stock-only
   const [stockAction, setStockAction] = useState<StockAction>("sell");
@@ -121,7 +123,8 @@ export function ImportManualModal({ open, onOpenChange, onSuccess, prefill }: Pr
                   contracts,
                   strike: Number(strike),
                   expiry,
-                  optionType: "put",
+                  optionType,
+                  direction,
                   premium: Number(premium),
                   broker,
                   trade_date: date,
@@ -224,14 +227,42 @@ export function ImportManualModal({ open, onOpenChange, onSuccess, prefill }: Pr
                 placeholder="TSLA"
               />
             </Field>
+            <Field label="Direction">
+              <select
+                value={direction}
+                onChange={(e) =>
+                  setDirection(e.target.value as "short" | "long")
+                }
+                className="w-full rounded-md border border-border bg-background px-2 py-1"
+              >
+                <option value="short">Short (sell to open)</option>
+                <option value="long">Long (buy to open)</option>
+              </select>
+            </Field>
+            <Field label="Option type">
+              <select
+                value={optionType}
+                onChange={(e) =>
+                  setOptionType(e.target.value as "put" | "call")
+                }
+                className="w-full rounded-md border border-border bg-background px-2 py-1"
+              >
+                <option value="put">Put</option>
+                <option value="call">Call</option>
+              </select>
+            </Field>
             <Field label="Action">
               <select
                 value={action}
                 onChange={(e) => setAction(e.target.value as "open" | "close")}
                 className="w-full rounded-md border border-border bg-background px-2 py-1"
               >
-                <option value="open">Sell to open</option>
-                <option value="close">Buy to close</option>
+                <option value="open">
+                  {direction === "long" ? "Buy to open" : "Sell to open"}
+                </option>
+                <option value="close">
+                  {direction === "long" ? "Sell to close" : "Buy to close"}
+                </option>
               </select>
             </Field>
             <Field label="Strike">

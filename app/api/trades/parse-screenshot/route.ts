@@ -16,6 +16,11 @@ const GEMINI_KEY = process.env.GEMINI_API_KEY ?? "";
 export type ParsedTrade = {
   symbol: string;
   action: "open" | "close";
+  // 'short' (sold-to-open / CSP credit) or 'long' (bought-to-open).
+  // Used by bulk-create to flip the realized P&L sign on long calls
+  // and puts. Optional — pre-direction screenshots default to 'short'
+  // downstream.
+  direction?: "short" | "long";
   contracts: number;
   strike: number;
   expiry: string; // YYYY-MM-DD
@@ -126,6 +131,7 @@ Emits TWO trades for the NET example:
   { action: 'close', symbol: 'NET', strike: 210, expiry: '2026-05-15', optionType: 'put', contracts: 2, premium: 11.28, timePlaced: '2026-05-15T22:43:00', spread_group: 'ROLL_1' }
 
 For each options row:
+- side: 'buy' or 'sell' — read from the literal BOT/BOUGHT/BUY vs SOLD/SELL verb on the row (or from the +/- quantity sign when no verb is present: '-' = sell, '+' = buy). Combined with action this disambiguates short vs long positions. STO (sell + open) is the typical CSP; BTO (buy + open) is a long call/put. Emit side on EVERY row.
 - action: determine whether this row OPENS or CLOSES a position. Rule cascade — apply in order, first match wins:
     1. If the row text explicitly contains 'TO OPEN'  → action = 'open'
     2. If the row text explicitly contains 'TO CLOSE' → action = 'close'
@@ -490,6 +496,22 @@ function coerceTrade(raw: unknown, fallbackBroker: string): ParsedTrade | null {
   // alphanumeric label so an unexpected payload can't poison the UI.
   const rawGroup = typeof r.spread_group === "string" ? r.spread_group.trim() : "";
   const spread_group = /^[A-Za-z0-9_-]{1,32}$/.test(rawGroup) ? rawGroup : undefined;
+  // Direction inference. Two signals from the model:
+  //   - explicit `direction: 'long'|'short'`
+  //   - implicit via a `side: 'buy'|'sell'` field on action='open' rows
+  //     (Sell to Open ⇒ short, Buy to Open ⇒ long)
+  // Only emit a non-undefined value when the signal is unambiguous —
+  // bulk-create defaults to 'short' when the field is absent, so we
+  // preserve historical behavior for prompts that don't return it.
+  const rawDirection = typeof r.direction === "string" ? r.direction.toLowerCase() : "";
+  const rawSide = typeof r.side === "string" ? r.side.toLowerCase() : "";
+  let direction: "long" | "short" | undefined;
+  if (rawDirection === "long" || rawDirection === "short") {
+    direction = rawDirection;
+  } else if (action === "open") {
+    if (rawSide === "buy") direction = "long";
+    else if (rawSide === "sell") direction = "short";
+  }
   if (!symbol || !action || !optionType) return null;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(expiry)) return null;
   if (!Number.isFinite(contracts) || contracts <= 0) return null;
@@ -498,6 +520,7 @@ function coerceTrade(raw: unknown, fallbackBroker: string): ParsedTrade | null {
   return {
     symbol,
     action,
+    direction,
     contracts: Math.round(contracts),
     strike,
     expiry,

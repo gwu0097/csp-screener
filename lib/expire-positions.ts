@@ -243,11 +243,13 @@ export async function autoExpirePosition(
   const sb = createServerClient();
   const posRes = await sb
     .from("positions")
-    .select("id,symbol,strike,expiry,total_contracts,avg_premium_sold,notes")
+    .select("id,symbol,strike,expiry,total_contracts,avg_premium_sold,notes,direction")
     .eq("id", positionId)
     .limit(1);
-  const pos = ((posRes.data ?? []) as ExpiredOpenPosition[])[0];
+  const pos = ((posRes.data ?? []) as Array<ExpiredOpenPosition & { direction?: string | null }>)[0];
   if (!pos) return { ok: false, realized_pnl: 0, contracts_closed: 0, reason: "not_found" };
+  const direction: "long" | "short" =
+    pos.direction === "long" ? "long" : "short";
 
   // Compute REMAINING contracts off the fill set rather than reading
   // total_contracts (which is the historical "ever opened" count and
@@ -278,8 +280,8 @@ export async function autoExpirePosition(
 
   // Compute total realized P&L by augmenting fills with a synthetic
   // close at premium=0 for the expiring remainder. realizedPnl()
-  // already handles the (sold − bought) × closedContracts × 100
-  // math correctly across mixed-premium close fills.
+  // handles the sign by direction — short ⇒ +premium retained, long
+  // ⇒ -premium paid (the long lapsed worthless).
   const augmentedFills: Fill[] = [
     ...priorFills,
     {
@@ -289,7 +291,8 @@ export async function autoExpirePosition(
       fill_date: pos.expiry,
     },
   ];
-  const realized_pnl = Math.round(realizedPnl(augmentedFills) * 100) / 100;
+  const realized_pnl =
+    Math.round(realizedPnl(augmentedFills, direction) * 100) / 100;
 
   // Pull pct-from-strike from the latest snapshot so the note has the
   // number that justified the auto-close (useful for later audit).
@@ -332,11 +335,13 @@ export async function recordAssignment(
   const sb = createServerClient();
   const posRes = await sb
     .from("positions")
-    .select("id,symbol,strike,expiry,total_contracts,avg_premium_sold,notes")
+    .select("id,symbol,strike,expiry,total_contracts,avg_premium_sold,notes,direction")
     .eq("id", positionId)
     .limit(1);
-  const pos = ((posRes.data ?? []) as ExpiredOpenPosition[])[0];
+  const pos = ((posRes.data ?? []) as Array<ExpiredOpenPosition & { direction?: string | null }>)[0];
   if (!pos) return { ok: false, realized_pnl: 0, contracts_closed: 0, reason: "not_found" };
+  const direction: "long" | "short" =
+    pos.direction === "long" ? "long" : "short";
 
   // Same remaining-from-fills logic as autoExpirePosition.
   const fillsRes = await sb
@@ -378,7 +383,8 @@ export async function recordAssignment(
       fill_date: pos.expiry,
     },
   ];
-  const realized_pnl = Math.round(realizedPnl(augmentedFills) * 100) / 100;
+  const realized_pnl =
+    Math.round(realizedPnl(augmentedFills, direction) * 100) / 100;
 
   const noteAdd = `Assigned (${remaining} contract${remaining === 1 ? "" : "s"}). Stock at $${stockPrice.toFixed(2)} vs $${strike.toFixed(2)} strike. Shares received at assignment.`;
   const notes = pos.notes ? `${pos.notes} | ${noteAdd}` : noteAdd;

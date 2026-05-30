@@ -21,6 +21,12 @@ export type TradeInput = {
   strike: number;
   expiry: string; // YYYY-MM-DD
   optionType?: "put" | "call";
+  // Position direction. Defaults to 'short' (CSP/credit) which is the
+  // historical assumption. 'long' is needed for bought-to-open calls
+  // and puts so realized_pnl gets the right sign downstream.
+  // Only meaningful on action='open'; close fills inherit from the
+  // existing position's stored direction.
+  direction?: "short" | "long";
   premium: number;
   broker?: string | null;
   // "YYYY-MM-DD" (date-only) or "YYYY-MM-DDTHH:MM:SS" (datetime, preferred).
@@ -581,6 +587,15 @@ export async function POST(req: NextRequest) {
     //    pre-batch state.
     for (const id of Array.from(touchedPreExistingIds)) {
       try {
+        const { data: dirRow } = await supabase
+          .from("positions")
+          .select("direction")
+          .eq("id", id)
+          .single();
+        const dir =
+          (dirRow as { direction?: string | null } | null)?.direction === "long"
+            ? "long"
+            : "short";
         const { data: remainingRaw } = await supabase
           .from("fills")
           .select("fill_type, contracts, premium, fill_date")
@@ -601,7 +616,7 @@ export async function POST(req: NextRequest) {
                 .sort()
                 .pop() ?? null
             : null;
-        const pnl = realizedPnl(remainingFills);
+        const pnl = realizedPnl(remainingFills, dir);
         await supabase
           .from("positions")
           .update({
@@ -643,21 +658,27 @@ export async function POST(req: NextRequest) {
       } else if (newPosIdByKey.has(keyForBatch)) {
         positionId = newPosIdByKey.get(keyForBatch) as string;
       } else if (plan.createsNewPosition) {
+        // Only stamp `direction` when the caller explicitly asked for
+        // 'long' — omitting the column lets the Postgres DEFAULT
+        // 'short' apply for legacy callers and keeps the insert safe
+        // to run before the column migration has landed.
+        const positionInsert: Record<string, unknown> = {
+          symbol,
+          strike: input.strike,
+          expiry,
+          option_type: input.optionType ?? "put",
+          broker,
+          total_contracts: 0,
+          avg_premium_sold: null,
+          status: "open",
+          opened_date: fillDate,
+          notes: input.notes ?? null,
+          import_batch_id: importBatchId,
+        };
+        if (input.direction === "long") positionInsert.direction = "long";
         const { data: insertedRaw, error: iErr } = await supabase
           .from("positions")
-          .insert({
-            symbol,
-            strike: input.strike,
-            expiry,
-            option_type: input.optionType ?? "put",
-            broker,
-            total_contracts: 0,
-            avg_premium_sold: null,
-            status: "open",
-            opened_date: fillDate,
-            notes: input.notes ?? null,
-            import_batch_id: importBatchId,
-          })
+          .insert(positionInsert)
           .select()
           .single();
         const inserted = insertedRaw as PositionRow | null;
@@ -695,6 +716,18 @@ export async function POST(req: NextRequest) {
       optionFillRecords.push({ plan, positionId });
 
       // Recompute aggregates from the full fill set on this position.
+      // Refetch direction too — a new position from this batch may
+      // have been stamped 'long' a few lines up, or a pre-existing
+      // position the close fill is attaching to may already be 'long'.
+      const { data: dirRow } = await supabase
+        .from("positions")
+        .select("direction")
+        .eq("id", positionId)
+        .single();
+      const dir =
+        (dirRow as { direction?: string | null } | null)?.direction === "long"
+          ? "long"
+          : "short";
       const { data: allFillsRaw, error: afErr } = await supabase
         .from("fills")
         .select("fill_type, contracts, premium, fill_date")
@@ -718,7 +751,7 @@ export async function POST(req: NextRequest) {
               .sort()
               .pop() ?? null
           : null;
-      const pnl = realizedPnl(fills);
+      const pnl = realizedPnl(fills, dir);
 
       const { error: uErr } = await supabase
         .from("positions")

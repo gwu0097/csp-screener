@@ -20,6 +20,7 @@ type ClosedPositionView = {
   strike: number;
   expiry: string;
   optionType: "put" | "call";
+  direction: "long" | "short";
   totalContracts: number;
   remainingContracts: number;
   avgPremiumSold: number | null;
@@ -55,6 +56,7 @@ type ClosedPositionView = {
 
 type PositionRowFull = PositionRow & {
   option_type?: "put" | "call";
+  direction?: "long" | "short" | null;
   entry_final_grade: string | null;
   entry_crush_grade: string | null;
   entry_opportunity_grade: string | null;
@@ -179,6 +181,7 @@ export async function GET() {
       strike: Number(p.strike),
       expiry: p.expiry,
       optionType: (p.option_type ?? "put") as "put" | "call",
+      direction: (p.direction ?? "short") as "long" | "short",
       totalContracts: p.total_contracts,
       remainingContracts: remainingContracts(fills),
       avgPremiumSold: p.avg_premium_sold !== null ? Number(p.avg_premium_sold) : null,

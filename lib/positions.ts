@@ -25,6 +25,11 @@ export type Fill = {
   fill_date: string;
 };
 
+// 'short' = sold-to-open (CSP credit, the historical default).
+// 'long'  = bought-to-open (long calls/puts). Inverts the realized
+// P&L sign — see realizedPnl() below.
+export type PositionDirection = "short" | "long";
+
 export type PositionRow = {
   id: string;
   symbol: string;
@@ -37,6 +42,11 @@ export type PositionRow = {
   opened_date: string;
   closed_date: string | null;
   realized_pnl: number | null;
+  // Optional so legacy reads (and pre-migration deploys) compile —
+  // every consumer falls back to 'short' when missing. The column has
+  // DEFAULT 'short' so every existing row materializes correctly once
+  // the migration lands.
+  direction?: PositionDirection | null;
   fills?: Fill[];
 };
 
@@ -70,15 +80,28 @@ export function avgPremiumBought(fills: Fill[]): number {
   return totalPremium / totalContracts;
 }
 
-// Realized P&L in dollars: (avg sold − avg bought) × contracts_closed × 100.
-// Positive when the short closed for less credit than received.
-export function realizedPnl(fills: Fill[]): number {
-  const sold = avgPremiumSold(fills);
-  const bought = avgPremiumBought(fills);
+// Realized P&L in dollars.
+//   short: (avg_open_credit − avg_close_debit) × contracts × 100
+//          positive when the short was bought back for less than sold.
+//   long:  (avg_close_credit − avg_open_debit) × contracts × 100
+//          positive when the long was sold for more than paid.
+// The `avgPremiumSold` / `avgPremiumBought` helper names reflect the
+// CSP-default semantics — on a long position they're really
+// "open paid" / "close received". The function names are stable for
+// readability; only the sign flips.
+export function realizedPnl(
+  fills: Fill[],
+  direction: PositionDirection = "short",
+): number {
+  const openAvg = avgPremiumSold(fills);
+  const closeAvg = avgPremiumBought(fills);
   const closedContracts = fills
     .filter((f) => f.fill_type === "close")
     .reduce((s, f) => s + f.contracts, 0);
-  return (sold - bought) * closedContracts * 100;
+  if (direction === "long") {
+    return (closeAvg - openAvg) * closedContracts * 100;
+  }
+  return (openAvg - closeAvg) * closedContracts * 100;
 }
 
 // Refetch fills, recompute aggregates, and write them back onto the
@@ -101,6 +124,21 @@ export async function recalculatePositionFromFills(
   | { ok: true; status: "open" | "closed"; totalOpened: number; remaining: number }
   | { ok: false; error: string }
 > {
+  // Fetch direction first so the realized-P&L formula picks the right
+  // sign for long vs short positions. Pre-migration rows return the
+  // column as undefined (or the whole select errors with "column
+  // missing") — falling back to 'short' keeps existing CSP math intact.
+  let direction: PositionDirection = "short";
+  const posRes = await sb
+    .from("positions")
+    .select("direction")
+    .eq("id", positionId)
+    .limit(1);
+  if (!posRes.error) {
+    const row = (posRes.data ?? [])[0] as { direction?: string | null } | undefined;
+    if (row?.direction === "long") direction = "long";
+  }
+
   const fetched = await sb
     .from("fills")
     .select("fill_type, contracts, premium, fill_date")
@@ -124,7 +162,7 @@ export async function recalculatePositionFromFills(
           .sort()
           .pop() ?? null
       : null;
-  const pnl = realizedPnl(fills);
+  const pnl = realizedPnl(fills, direction);
   const upd = await sb
     .from("positions")
     .update({

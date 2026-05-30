@@ -52,6 +52,7 @@ type OpenPosition = {
   strike: number;
   expiry: string;
   optionType: "put" | "call";
+  direction: "long" | "short";
   totalContracts: number;      // contracts originally opened
   remainingContracts: number;  // contracts still open
   avgPremiumSold: number | null;
@@ -763,6 +764,10 @@ export async function GET(req: NextRequest) {
       // table also stores covered calls and similar. Fallback to 'put'
       // only when the column is null (legacy pre-migration rows).
       optionType: ((p as PositionRow & { option_type?: "put" | "call" | null }).option_type ?? "put") as "put" | "call",
+      // Direction column was added 2026-05-30 to fix realized P&L sign
+      // on long calls/puts. Missing column or null → 'short' (every
+      // pre-migration row was an implicitly-short CSP).
+      direction: ((p as PositionRow & { direction?: "long" | "short" | null }).direction ?? "short") as "long" | "short",
       totalContracts: p.total_contracts,
       remainingContracts: remaining,
       avgPremiumSold: p.avg_premium_sold !== null ? Number(p.avg_premium_sold) : null,
