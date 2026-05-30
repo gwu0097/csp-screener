@@ -650,12 +650,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Today (UTC date) is used to validate that timePlaced is not in
-    // the future and that expiry is not already in the past — both
-    // are signals that Gemini misread a Schwab "DD MMM YY" cell
-    // (typically reading the year-suffix as the day).
-    const todayUtc = new Date().toISOString().slice(0, 10);
-
     type Rejection = { symbol: string; reason: string };
     const rejections: Rejection[] = [];
 
@@ -723,10 +717,17 @@ export async function POST(req: NextRequest) {
           });
           continue;
         }
-        if (t.expiry < todayUtc) {
+        // Sanity check: you can't open or close a trade AFTER its
+        // expiry. We do NOT reject simply because the expiry is in
+        // the past — users routinely import historical trades after
+        // the fact (catching up from travel, backfilling from old
+        // screenshots, etc.). The only real failure mode is a
+        // mis-parsed expiry that lands BEFORE the fill date.
+        const placedDate = t.timePlaced ? t.timePlaced.slice(0, 10) : null;
+        if (placedDate && placedDate > t.expiry) {
           rejections.push({
             symbol: t.symbol,
-            reason: `Trade rejected — expiry ${t.expiry} is in the past. Already-expired options shouldn't import.`,
+            reason: `Trade rejected — fill date ${placedDate} is after expiry ${t.expiry}. A trade can't be placed after the option expired.`,
           });
           continue;
         }
