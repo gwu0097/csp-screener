@@ -177,6 +177,20 @@ function normalizeExpiryToWeekday(expiry: string): {
 // For each incoming fill, find (or create) the matching position, then
 // insert a fills row and rebuild the position's aggregates from scratch
 // off its full fill set.
+// Atomic two-phase import:
+//   Phase 1 — validate the entire payload READ-ONLY. Collect every
+//             error across all trades. If any error fires, return
+//             422 with the full list and ZERO writes happen.
+//   Phase 2 — once Phase 1 is clean, execute every insert/update.
+//             If anything blows up mid-batch, delete every fill and
+//             position we stamped with this import_batch_id and
+//             recompute aggregates on any pre-existing position we
+//             touched, restoring its pre-batch state.
+//
+// Best-effort side effects (close snapshots, tracked-ticker grade
+// merge, post-earnings outcome) run AFTER the core inserts succeed.
+// Failures there log but don't roll the whole batch back — they're
+// observational records, not the trades themselves.
 export async function POST(req: NextRequest) {
   let body: BulkBody;
   try {
@@ -199,21 +213,61 @@ export async function POST(req: NextRequest) {
     const bw = b.action === "open" ? 0 : b.action === "close" ? 1 : 2;
     return aw - bw;
   });
+  const stockInputs = stockItemsRaw;
 
   const supabase = createServerClient();
   const errors: string[] = [];
-  let positionsCreated = 0;
-  const positionsTouched = new Set<string>();
-  let fillsInserted = 0;
 
   // One batch_id per bulk-create call. Stamped on every NEW position
   // and EVERY fill we insert below so the "Undo last import" flow on
-  // the Positions page can identify and roll back this exact import.
-  // Pre-existing positions are not stamped — undo only deletes rows
-  // that were freshly created in this call.
+  // the Positions page can identify and roll back this exact import,
+  // AND so Phase 2 rollback can wipe just this batch's rows on a
+  // mid-batch failure. Pre-existing positions are not stamped — undo
+  // only deletes rows that were freshly created in this call.
   const importBatchId = randomUUID();
 
   const required = ["symbol", "action", "contracts", "strike", "expiry", "premium"] as const;
+
+  // Resolved plan rows from Phase 1 — Phase 2 consumes these to write.
+  type OptionPlan = {
+    input: TradeInput;
+    symbol: string;
+    broker: string;
+    fillDate: string;
+    expiry: string;
+    // Resolved position id when one already exists (exact or fuzzy
+    // match), or when an earlier item in this batch will create it.
+    existingPositionId: string | null;
+    // True when this row is the FIRST OPEN for a new (symbol, strike,
+    // expiry, broker) in this batch — Phase 2 will create the position.
+    createsNewPosition: boolean;
+    // Key for in-batch dedup so later items can reuse a position
+    // created earlier in the same batch.
+    keyForBatch: string;
+  };
+  type StockPlan = {
+    input: StockTradeInput;
+    symbol: string;
+    broker: string;
+    date: string;
+    stockRowId: string;
+    currentShares: number;
+    shares: number;
+    price: number;
+    costBasis: number;
+    stockPnl: number;
+    prevRealized: number;
+    newRealized: number;
+    remainingShares: number;
+    isFullClose: boolean;
+    prevNotes: string | null;
+  };
+
+  // ============================================================
+  // PHASE 1 — validate all trades. No writes.
+  // ============================================================
+  const optionPlans: OptionPlan[] = [];
+  const inBatchNewPositionKeys = new Set<string>();
 
   for (const input of items) {
     const missing = required.find((k) => {
@@ -231,11 +285,6 @@ export async function POST(req: NextRequest) {
 
     const symbol = input.symbol.toUpperCase();
     const broker = normalizeBroker(input.broker);
-    // Convert the user-supplied date from the source timezone to
-    // an ET calendar date so fill_date / opened_date / closed_date
-    // stay aligned with the US session boundary. Fallback to ET
-    // "today" when no date came through (manual-add path without
-    // a stamped date).
     const rawFillDate = input.timePlaced ?? input.trade_date ?? null;
     const fillDate = rawFillDate ? toPstDate(rawFillDate, sourceTimezone) : todayPst();
 
@@ -246,77 +295,321 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    try {
-      // 1. Find or create the position.
-      // Exact match on (symbol, strike, expiry, broker) is the happy
-      // path. For close fills, fall back to a fuzzy match on
-      // (symbol, strike, broker, status='open') and pick the nearest
-      // expiry — the parser may have read the date a day or two off
-      // (e.g. "1 MAY 26" vs "26 MAY 26"), and a brand-new "open"
-      // position from a close fill would create a phantom row with
-      // negative remaining contracts.
-      const { data: findData, error: fErr } = await supabase
+    // Exact match on (symbol, strike, expiry, broker) is the happy path.
+    // For close fills, fall back to a fuzzy match on (symbol, strike,
+    // broker, status='open') and pick the nearest expiry — the parser
+    // may have read the date a day or two off and a brand-new "open"
+    // position from a close fill would mint a phantom row with negative
+    // remaining contracts.
+    const { data: findData, error: fErr } = await supabase
+      .from("positions")
+      .select("id,expiry")
+      .eq("symbol", symbol)
+      .eq("strike", input.strike)
+      .eq("expiry", expiry)
+      .eq("broker", broker)
+      .limit(1);
+    if (fErr) {
+      errors.push(`${input.symbol}: find failed — ${fErr.message}`);
+      continue;
+    }
+    let existing = (findData ?? []) as Array<{ id: string; expiry: string }>;
+
+    if (existing.length === 0 && input.action === "close") {
+      const { data: openCandidatesRaw, error: cErr } = await supabase
         .from("positions")
-        .select("*")
+        .select("id,expiry")
         .eq("symbol", symbol)
         .eq("strike", input.strike)
-        .eq("expiry", expiry)
         .eq("broker", broker)
-        .limit(1);
-      if (fErr) {
-        errors.push(`${input.symbol}: find failed — ${fErr.message}`);
+        .eq("status", "open");
+      if (cErr) {
+        errors.push(`${input.symbol}: close-match find failed — ${cErr.message}`);
         continue;
       }
-      let existing = (findData ?? []) as PositionRow[];
+      const candidates = (openCandidatesRaw ?? []) as Array<{ id: string; expiry: string }>;
+      if (candidates.length > 0) {
+        const targetMs = new Date(expiry + "T00:00:00Z").getTime();
+        const nearest = candidates.reduce((best, c) => {
+          const cMs = new Date(c.expiry + "T00:00:00Z").getTime();
+          const bMs = new Date(best.expiry + "T00:00:00Z").getTime();
+          return Math.abs(cMs - targetMs) < Math.abs(bMs - targetMs) ? c : best;
+        });
+        if (nearest.expiry !== expiry) {
+          console.warn(
+            `[bulk-create] ${symbol} close fill expiry ${expiry} routed to open position with expiry ${nearest.expiry}`,
+          );
+        }
+        existing = [nearest];
+      }
+    }
 
-      // Close-fill fuzzy fallback. Same-symbol-and-strike-and-broker
-      // open positions, ranked by |expiry diff|, smallest wins. We
-      // only do this for closes — opens never collapse onto a
-      // mismatched expiry, the trader could be opening a new tenor.
-      if (existing.length === 0 && input.action === "close") {
-        const { data: openCandidatesRaw, error: cErr } = await supabase
+    const keyForBatch = `${symbol}|${input.strike}|${expiry}|${broker}|${input.optionType ?? "put"}`;
+    let existingPositionId: string | null = null;
+    let createsNewPosition = false;
+
+    if (existing.length > 0) {
+      existingPositionId = existing[0].id;
+    } else if (input.action === "close") {
+      errors.push(
+        `${symbol}: close fill found no matching open position (strike=${input.strike}, broker=${broker}, expiry=${expiry})`,
+      );
+      continue;
+    } else if (inBatchNewPositionKeys.has(keyForBatch)) {
+      // An earlier OPEN in this same batch will create the position;
+      // this row will reuse it in Phase 2.
+      existingPositionId = null;
+      createsNewPosition = false;
+    } else {
+      // First OPEN for this key in this batch — Phase 2 will create.
+      inBatchNewPositionKeys.add(keyForBatch);
+      createsNewPosition = true;
+    }
+
+    optionPlans.push({
+      input,
+      symbol,
+      broker,
+      fillDate,
+      expiry,
+      existingPositionId,
+      createsNewPosition,
+      keyForBatch,
+    });
+  }
+
+  // ---- Phase 1 stock validation ----
+  const stockPlans: StockPlan[] = [];
+  for (const s of stockInputs) {
+    const symbol =
+      typeof s.symbol === "string" ? s.symbol.trim().toUpperCase() : "";
+    const broker = normalizeBroker(s.broker);
+    const shares = Number(s.shares);
+    const price = Number(s.price);
+    const rawDate =
+      typeof s.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s.date)
+        ? s.date
+        : null;
+    const date = rawDate ? toPstDate(rawDate, sourceTimezone) : todayPst();
+
+    if (s.action !== "sell") {
+      errors.push(`stock ${symbol || "?"}: only action='sell' is supported`);
+      continue;
+    }
+    if (!symbol) {
+      errors.push(`stock ?: missing symbol`);
+      continue;
+    }
+    if (!Number.isFinite(shares) || shares <= 0) {
+      errors.push(`stock ${symbol}: shares must be > 0`);
+      continue;
+    }
+    if (!Number.isFinite(price) || price < 0) {
+      errors.push(`stock ${symbol}: price must be ≥ 0`);
+      continue;
+    }
+
+    const lookup = await supabase
+      .from("positions")
+      .select(
+        "id,symbol,total_contracts,entry_stock_price,position_type,status,realized_pnl,notes",
+      )
+      .eq("symbol", symbol)
+      .eq("broker", broker)
+      .eq("position_type", "stock_long")
+      .eq("status", "open")
+      .limit(1);
+    if (lookup.error) {
+      errors.push(`stock ${symbol}: lookup failed — ${lookup.error.message}`);
+      continue;
+    }
+    const stockRow = ((lookup.data ?? []) as Array<{
+      id: string;
+      symbol: string;
+      total_contracts: number;
+      entry_stock_price: number | null;
+      status: string;
+      realized_pnl: number | null;
+      notes: string | null;
+    }>)[0];
+    if (!stockRow) {
+      errors.push(
+        `stock ${symbol}: no open stock_long position for broker=${broker}`,
+      );
+      continue;
+    }
+
+    const currentShares = Number(stockRow.total_contracts ?? 0);
+    if (shares > currentShares) {
+      errors.push(
+        `stock ${symbol}: tried to sell ${shares} shares but only ${currentShares} remaining`,
+      );
+      continue;
+    }
+    const costBasis =
+      stockRow.entry_stock_price !== null
+        ? Number(stockRow.entry_stock_price)
+        : 0;
+    const stockPnl = Math.round((price - costBasis) * shares * 100) / 100;
+    const prevRealized = Number(stockRow.realized_pnl ?? 0) || 0;
+    const newRealized = Math.round((prevRealized + stockPnl) * 100) / 100;
+    const remainingShares = currentShares - shares;
+    const isFullClose = remainingShares === 0;
+
+    stockPlans.push({
+      input: s,
+      symbol,
+      broker,
+      date,
+      stockRowId: stockRow.id,
+      currentShares,
+      shares,
+      price,
+      costBasis,
+      stockPnl,
+      prevRealized,
+      newRealized,
+      remainingShares,
+      isFullClose,
+      prevNotes: stockRow.notes,
+    });
+  }
+
+  // Phase 1 gate — any error means zero writes happen.
+  if (errors.length > 0) {
+    console.log(
+      `[bulk-create] PHASE 1 REJECTED — ${errors.length} validation error(s), no writes performed`,
+    );
+    return NextResponse.json(
+      {
+        positions_created: 0,
+        positions_updated: 0,
+        fills_inserted: 0,
+        stocks_closed: 0,
+        stocks_partial: 0,
+        errors,
+      },
+      { status: 422 },
+    );
+  }
+
+  // ============================================================
+  // PHASE 2 — execute all inserts. On any failure, roll back this
+  // batch and recompute aggregates on pre-existing positions we
+  // touched so the DB ends up exactly where it started.
+  // ============================================================
+
+  // Track the writes so the rollback path knows what to delete /
+  // recompute. New positions are stamped with importBatchId, so the
+  // rollback can wipe them with a single .eq() — but we also keep
+  // the in-memory id list for the success-path response counts.
+  const positionsCreatedIds: string[] = [];
+  // pos id → key, for in-batch dedup so subsequent opens of the same
+  // (symbol, strike, expiry, broker) reuse the newly-created id.
+  const newPosIdByKey = new Map<string, string>();
+  const touchedPreExistingIds = new Set<string>();
+  // For Phase 2b side-effect resolution (the close-snapshot path
+  // needs to know which fills are actually new closes today).
+  const optionFillRecords: Array<{
+    plan: OptionPlan;
+    positionId: string;
+  }> = [];
+  let fillsInserted = 0;
+  let stocksClosed = 0;
+  let stocksPartial = 0;
+
+  async function rollback(reason: string): Promise<NextResponse> {
+    console.error(
+      `[bulk-create] PHASE 2 ROLLBACK (batch ${importBatchId}): ${reason}`,
+    );
+    // 1. Delete every fill stamped with this batch (FK before positions).
+    const fDel = await supabase
+      .from("fills")
+      .delete()
+      .eq("import_batch_id", importBatchId);
+    if (fDel.error) {
+      console.error(
+        `[bulk-create] rollback: fills delete failed — ${fDel.error.message}`,
+      );
+    }
+    // 2. Delete every position freshly created by this batch.
+    const pDel = await supabase
+      .from("positions")
+      .delete()
+      .eq("import_batch_id", importBatchId);
+    if (pDel.error) {
+      console.error(
+        `[bulk-create] rollback: positions delete failed — ${pDel.error.message}`,
+      );
+    }
+    // 3. Recompute aggregates for any pre-existing positions we
+    //    updated during Phase 2. Their pre-batch fill set is exactly
+    //    what remains after step 1, so recomputing yields the
+    //    pre-batch state.
+    for (const id of Array.from(touchedPreExistingIds)) {
+      try {
+        const { data: remainingRaw } = await supabase
+          .from("fills")
+          .select("fill_type, contracts, premium, fill_date")
+          .eq("position_id", id);
+        const remainingFills = (remainingRaw ?? []) as Fill[];
+        const remaining = remainingContracts(remainingFills);
+        const totalOpened = remainingFills
+          .filter((f) => f.fill_type === "open")
+          .reduce((s, f) => s + f.contracts, 0);
+        const sold = avgPremiumSold(remainingFills);
+        const status: "open" | "closed" =
+          remaining === 0 && totalOpened > 0 ? "closed" : "open";
+        const closedDate =
+          status === "closed"
+            ? remainingFills
+                .filter((f) => f.fill_type === "close")
+                .map((f) => f.fill_date)
+                .sort()
+                .pop() ?? null
+            : null;
+        const pnl = realizedPnl(remainingFills);
+        await supabase
           .from("positions")
-          .select("*")
-          .eq("symbol", symbol)
-          .eq("strike", input.strike)
-          .eq("broker", broker)
-          .eq("status", "open");
-        if (cErr) {
-          errors.push(`${input.symbol}: close-match find failed — ${cErr.message}`);
-          continue;
-        }
-        const candidates = (openCandidatesRaw ?? []) as PositionRow[];
-        if (candidates.length > 0) {
-          const targetMs = new Date(expiry + "T00:00:00Z").getTime();
-          const nearest = candidates.reduce((best, c) => {
-            const cMs = new Date(c.expiry + "T00:00:00Z").getTime();
-            const bMs = new Date(best.expiry + "T00:00:00Z").getTime();
-            return Math.abs(cMs - targetMs) < Math.abs(bMs - targetMs) ? c : best;
-          });
-          if (nearest.expiry !== expiry) {
-            console.warn(
-              `[bulk-create] ${symbol} close fill expiry ${expiry} routed to open position with expiry ${nearest.expiry}`,
-            );
-          }
-          existing = [nearest];
-        }
-      }
-
-      let positionId: string;
-      if (existing.length > 0) {
-        positionId = existing[0].id;
-      } else if (input.action === "close") {
-        // Orphan close fill — no matching open position at all. Don't
-        // mint a phantom row; surface the error and let the user
-        // re-import or manually open the position first.
-        errors.push(
-          `${symbol}: close fill found no matching open position (strike=${input.strike}, broker=${broker}, expiry=${expiry})`,
+          .update({
+            total_contracts: totalOpened,
+            avg_premium_sold: totalOpened > 0 ? sold : null,
+            status,
+            closed_date: closedDate,
+            realized_pnl: pnl,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", id);
+      } catch (e) {
+        console.error(
+          `[bulk-create] rollback: recompute failed for ${id}: ${e instanceof Error ? e.message : e}`,
         );
-        continue;
-      } else {
-        // New position from an OPEN fill. total_contracts /
-        // avg_premium_sold get set to real values by the recompute
-        // step below — we just need valid defaults.
+      }
+    }
+    return NextResponse.json(
+      {
+        positions_created: 0,
+        positions_updated: 0,
+        fills_inserted: 0,
+        stocks_closed: 0,
+        stocks_partial: 0,
+        errors: [`Import rolled back — ${reason}`],
+      },
+      { status: 500 },
+    );
+  }
+
+  // ---- Phase 2a — options: create positions, insert fills, recompute ----
+  try {
+    for (const plan of optionPlans) {
+      const { input, symbol, broker, fillDate, expiry, keyForBatch } = plan;
+      let positionId: string;
+      if (plan.existingPositionId) {
+        positionId = plan.existingPositionId;
+        touchedPreExistingIds.add(positionId);
+      } else if (newPosIdByKey.has(keyForBatch)) {
+        positionId = newPosIdByKey.get(keyForBatch) as string;
+      } else if (plan.createsNewPosition) {
         const { data: insertedRaw, error: iErr } = await supabase
           .from("positions")
           .insert({
@@ -336,14 +629,23 @@ export async function POST(req: NextRequest) {
           .single();
         const inserted = insertedRaw as PositionRow | null;
         if (iErr || !inserted) {
-          errors.push(`${input.symbol}: create position failed — ${iErr?.message ?? "unknown"}`);
-          continue;
+          throw new Error(
+            `${input.symbol}: create position failed — ${iErr?.message ?? "unknown"}`,
+          );
         }
         positionId = inserted.id;
-        positionsCreated += 1;
+        positionsCreatedIds.push(positionId);
+        newPosIdByKey.set(keyForBatch, positionId);
+      } else {
+        // Shouldn't reach here — Phase 1 marks the first open of a new
+        // (symbol, strike, expiry, broker) as createsNewPosition. A
+        // later one in the same batch reuses the id from newPosIdByKey.
+        throw new Error(
+          `${symbol}: internal — could not resolve position id in Phase 2`,
+        );
       }
 
-      // 2. Insert the fill.
+      // Insert the fill.
       const { error: fillErr } = await supabase.from("fills").insert({
         position_id: positionId,
         fill_type: input.action,
@@ -354,119 +656,18 @@ export async function POST(req: NextRequest) {
         import_batch_id: importBatchId,
       });
       if (fillErr) {
-        errors.push(`${input.symbol}: fill insert failed — ${fillErr.message}`);
-        continue;
+        throw new Error(`${input.symbol}: fill insert failed — ${fillErr.message}`);
       }
       fillsInserted += 1;
-      positionsTouched.add(positionId);
+      optionFillRecords.push({ plan, positionId });
 
-      // 2a. Close-time snapshot. Fires when a close fill is dated today,
-      // regardless of entry point (position-card Close button OR same-day
-      // screenshot upload). Captures live market conditions — IV/delta/
-      // theta from the chain, move-since-entry, pct-premium-remaining —
-      // tagged close_snapshot=true so analytics can separate final
-      // readings from intraday ones. Historical backfills (fill_date in
-      // the past) skip this to avoid writing "now" Greeks onto old
-      // trades. Failures are logged but don't block the close fill.
-      if (input.action === "close" && fillDate === todayIso()) {
-        try {
-          const { data: posRow } = await supabase
-            .from("positions")
-            .select(
-              "id, symbol, strike, expiry, avg_premium_sold, opened_date, entry_stock_price, entry_em_pct",
-            )
-            .eq("id", positionId)
-            .single();
-          const position = posRow as {
-            id: string;
-            symbol: string;
-            strike: number;
-            expiry: string;
-            avg_premium_sold: number | null;
-            opened_date: string | null;
-            entry_stock_price: number | null;
-            entry_em_pct: number | null;
-          } | null;
-          if (position) {
-            const { data: preFillsRaw } = await supabase
-              .from("fills")
-              .select("fill_type, contracts, premium, fill_date")
-              .eq("position_id", positionId);
-            const preFills = (preFillsRaw ?? []) as Fill[];
-            const chain = await fetchChainWideSafe(position.symbol, position.expiry);
-            const snapshotRow = buildSnapshotRow(position, chain, preFills, {
-              nowIso: new Date().toISOString(),
-              closeSnapshot: true,
-            });
-            const { error: sErr } = await supabase
-              .from("position_snapshots")
-              .insert(snapshotRow);
-            if (sErr) {
-              console.warn(
-                `[bulk-create] close snapshot insert failed for ${input.symbol}: ${sErr.message}`,
-              );
-            }
-          }
-        } catch (e) {
-          console.warn(
-            `[bulk-create] close snapshot capture failed for ${input.symbol}: ${e instanceof Error ? e.message : e}`,
-          );
-        }
-      }
-
-      // 2b. If this is an OPEN fill and the position doesn't yet have
-      // entry grades, try to find a tracked_tickers row captured during
-      // a prior Run Analysis and merge its entry_* fields in. Checks the
-      // same day as the fill OR the previous day (BMO trades are filed
-      // under their entry morning but were tracked the night before).
-      if (input.action === "open") {
-        const { data: posData } = await supabase
-          .from("positions")
-          .select("entry_crush_grade")
-          .eq("id", positionId)
-          .single();
-        const already = (posData as { entry_crush_grade?: string | null } | null)?.entry_crush_grade;
-        if (!already) {
-          const fillMs = new Date(fillDate + "T00:00:00Z").getTime();
-          const prevDay = new Date(fillMs - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-          const { data: trackedRaw } = await supabase
-            .from("tracked_tickers")
-            .select("*")
-            .eq("symbol", symbol)
-            .eq("expiry", expiry)
-            .in("screened_date", [fillDate, prevDay])
-            .order("screened_date", { ascending: false })
-            .limit(1);
-          const match = ((trackedRaw ?? []) as Array<Record<string, unknown>>)[0];
-          if (match) {
-            const { error: mErr } = await supabase
-              .from("positions")
-              .update({
-                entry_crush_grade: match.entry_crush_grade ?? null,
-                entry_opportunity_grade: match.entry_opportunity_grade ?? null,
-                entry_final_grade: match.entry_final_grade ?? null,
-                entry_iv_edge: match.entry_iv_edge ?? null,
-                entry_em_pct: match.entry_em_pct ?? null,
-                entry_vix: match.entry_vix ?? null,
-                entry_news_summary: match.entry_news_summary ?? null,
-                entry_stock_price: match.entry_stock_price ?? null,
-              })
-              .eq("id", positionId);
-            if (mErr) {
-              errors.push(`${input.symbol}: merge tracked grades failed — ${mErr.message}`);
-            }
-          }
-        }
-      }
-
-      // 3. Recompute position aggregates from the full fill set.
+      // Recompute aggregates from the full fill set on this position.
       const { data: allFillsRaw, error: afErr } = await supabase
         .from("fills")
         .select("fill_type, contracts, premium, fill_date")
         .eq("position_id", positionId);
       if (afErr) {
-        errors.push(`${input.symbol}: refetch fills failed — ${afErr.message}`);
-        continue;
+        throw new Error(`${input.symbol}: refetch fills failed — ${afErr.message}`);
       }
       const fills = (allFillsRaw ?? []) as Fill[];
       const remaining = remainingContracts(fills);
@@ -474,7 +675,8 @@ export async function POST(req: NextRequest) {
         .filter((f) => f.fill_type === "open")
         .reduce((s, f) => s + f.contracts, 0);
       const sold = avgPremiumSold(fills);
-      const status: "open" | "closed" = remaining === 0 && totalOpened > 0 ? "closed" : "open";
+      const status: "open" | "closed" =
+        remaining === 0 && totalOpened > 0 ? "closed" : "open";
       const closedDate =
         status === "closed"
           ? fills
@@ -497,169 +699,197 @@ export async function POST(req: NextRequest) {
         })
         .eq("id", positionId);
       if (uErr) {
-        errors.push(`${input.symbol}: position update failed — ${uErr.message}`);
+        throw new Error(`${input.symbol}: position update failed — ${uErr.message}`);
       }
-
-      // If this fill flipped the position to closed, record the outcome
-      // against the most recent post-earnings recommendation. Silent
-      // no-op when no rec exists for this position.
-      if (status === "closed") {
-        try {
-          await recordPositionOutcome(positionId);
-        } catch (e) {
-          console.warn(
-            `[bulk-create] recordPositionOutcome(${positionId}) failed: ${e instanceof Error ? e.message : e}`,
-          );
-        }
-      }
-    } catch (e) {
-      errors.push(
-        `${input.symbol}: ${e instanceof Error ? e.message : "insert failed"}`,
-      );
-    }
-  }
-
-  // ---------- Stock-sell branch ----------
-  // Match each sell against an open stock_long row for (symbol, broker),
-  // compute (price − cost_basis) × shares, record a close fill, and
-  // update the position. Partial sales decrement total_contracts and
-  // accumulate realized_pnl; the last share flips status to closed.
-  const stockInputs = Array.isArray(body.stockTrades) ? body.stockTrades : [];
-  let stocksClosed = 0;
-  let stocksPartial = 0;
-  for (const s of stockInputs) {
-    const symbol =
-      typeof s.symbol === "string" ? s.symbol.trim().toUpperCase() : "";
-    const broker = normalizeBroker(s.broker);
-    const shares = Number(s.shares);
-    const price = Number(s.price);
-    const rawDate =
-      typeof s.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s.date)
-        ? s.date
-        : null;
-    const date = rawDate ? toPstDate(rawDate, sourceTimezone) : todayPst();
-    if (s.action !== "sell") {
-      errors.push(`stock ${symbol || "?"}: only action='sell' is supported`);
-      continue;
-    }
-    if (!symbol) {
-      errors.push(`stock ?: missing symbol`);
-      continue;
-    }
-    if (!Number.isFinite(shares) || shares <= 0) {
-      errors.push(`stock ${symbol}: shares must be > 0`);
-      continue;
-    }
-    if (!Number.isFinite(price) || price < 0) {
-      errors.push(`stock ${symbol}: price must be ≥ 0`);
-      continue;
     }
 
-    try {
-      const lookup = await supabase
-        .from("positions")
-        .select(
-          "id,symbol,strike,expiry,option_type,broker,total_contracts,entry_stock_price,position_type,status,realized_pnl,notes",
-        )
-        .eq("symbol", symbol)
-        .eq("broker", broker)
-        .eq("position_type", "stock_long")
-        .eq("status", "open")
-        .limit(1);
-      if (lookup.error) {
-        errors.push(`stock ${symbol}: lookup failed — ${lookup.error.message}`);
-        continue;
-      }
-      const stockRow = ((lookup.data ?? []) as Array<{
-        id: string;
-        symbol: string;
-        total_contracts: number;
-        entry_stock_price: number | null;
-        status: string;
-        realized_pnl: number | null;
-        notes: string | null;
-      }>)[0];
-      if (!stockRow) {
-        errors.push(
-          `stock ${symbol}: no open stock_long position for broker=${broker}`,
-        );
-        continue;
-      }
-
-      const currentShares = Number(stockRow.total_contracts ?? 0);
-      if (shares > currentShares) {
-        errors.push(
-          `stock ${symbol}: tried to sell ${shares} shares but only ${currentShares} remaining`,
-        );
-        continue;
-      }
-      const costBasis =
-        stockRow.entry_stock_price !== null
-          ? Number(stockRow.entry_stock_price)
-          : 0;
-      const stockPnl = Math.round((price - costBasis) * shares * 100) / 100;
-      const prevRealized = Number(stockRow.realized_pnl ?? 0) || 0;
-      const newRealized = Math.round((prevRealized + stockPnl) * 100) / 100;
-      const remainingShares = currentShares - shares;
-      const isFullClose = remainingShares === 0;
-
+    // ---- Phase 2a — stocks: insert fills, update positions ----
+    for (const sp of stockPlans) {
       const fillInsert = await supabase.from("fills").insert({
-        position_id: stockRow.id,
+        position_id: sp.stockRowId,
         fill_type: "close",
-        contracts: shares,
-        premium: price,
-        fill_date: date,
+        contracts: sp.shares,
+        premium: sp.price,
+        fill_date: sp.date,
         fill_time: new Date().toISOString(),
         import_batch_id: importBatchId,
       });
       if (fillInsert.error) {
-        errors.push(
-          `stock ${symbol}: fill insert failed — ${fillInsert.error.message}`,
+        throw new Error(
+          `stock ${sp.symbol}: fill insert failed — ${fillInsert.error.message}`,
         );
-        continue;
       }
       fillsInserted += 1;
+      touchedPreExistingIds.add(sp.stockRowId);
 
-      const noteAdd = `Sold ${shares} @ $${price.toFixed(2)} on ${date}. Stock P&L: ${stockPnl >= 0 ? "+" : ""}$${stockPnl.toFixed(2)}.`;
-      const notes = stockRow.notes ? `${stockRow.notes} | ${noteAdd}` : noteAdd;
-
+      const noteAdd = `Sold ${sp.shares} @ $${sp.price.toFixed(2)} on ${sp.date}. Stock P&L: ${sp.stockPnl >= 0 ? "+" : ""}$${sp.stockPnl.toFixed(2)}.`;
+      const notes = sp.prevNotes ? `${sp.prevNotes} | ${noteAdd}` : noteAdd;
       const update = await supabase
         .from("positions")
         .update({
-          total_contracts: remainingShares,
-          realized_pnl: newRealized,
-          status: isFullClose ? "closed" : "open",
-          closed_date: isFullClose ? date : null,
+          total_contracts: sp.remainingShares,
+          realized_pnl: sp.newRealized,
+          status: sp.isFullClose ? "closed" : "open",
+          closed_date: sp.isFullClose ? sp.date : null,
           notes,
           updated_at: new Date().toISOString(),
         })
-        .eq("id", stockRow.id);
+        .eq("id", sp.stockRowId);
       if (update.error) {
-        errors.push(
-          `stock ${symbol}: position update failed — ${update.error.message}`,
+        throw new Error(
+          `stock ${sp.symbol}: position update failed — ${update.error.message}`,
         );
-        continue;
       }
-      positionsTouched.add(stockRow.id);
-      if (isFullClose) stocksClosed += 1;
+      if (sp.isFullClose) stocksClosed += 1;
       else stocksPartial += 1;
-    } catch (e) {
-      errors.push(
-        `stock ${symbol}: ${e instanceof Error ? e.message : "sell failed"}`,
-      );
+    }
+  } catch (e) {
+    return rollback(e instanceof Error ? e.message : "unknown insert failure");
+  }
+
+  // ============================================================
+  // PHASE 2b — best-effort side effects. Failures here are logged
+  // but don't roll back the import. These are observational records
+  // (snapshots, analytics grades, post-earnings outcomes), not the
+  // trades themselves.
+  // ============================================================
+  for (const rec of optionFillRecords) {
+    const { plan, positionId } = rec;
+    const { input, symbol, fillDate } = plan;
+
+    // Close-time snapshot — only when the close fill is dated today
+    // (live IV/delta/theta from the chain). Historical backfills skip.
+    if (input.action === "close" && fillDate === todayIso()) {
+      try {
+        const { data: posRow } = await supabase
+          .from("positions")
+          .select(
+            "id, symbol, strike, expiry, avg_premium_sold, opened_date, entry_stock_price, entry_em_pct",
+          )
+          .eq("id", positionId)
+          .single();
+        const position = posRow as {
+          id: string;
+          symbol: string;
+          strike: number;
+          expiry: string;
+          avg_premium_sold: number | null;
+          opened_date: string | null;
+          entry_stock_price: number | null;
+          entry_em_pct: number | null;
+        } | null;
+        if (position) {
+          const { data: preFillsRaw } = await supabase
+            .from("fills")
+            .select("fill_type, contracts, premium, fill_date")
+            .eq("position_id", positionId);
+          const preFills = (preFillsRaw ?? []) as Fill[];
+          const chain = await fetchChainWideSafe(position.symbol, position.expiry);
+          const snapshotRow = buildSnapshotRow(position, chain, preFills, {
+            nowIso: new Date().toISOString(),
+            closeSnapshot: true,
+          });
+          const { error: sErr } = await supabase
+            .from("position_snapshots")
+            .insert(snapshotRow);
+          if (sErr) {
+            console.warn(
+              `[bulk-create] close snapshot insert failed for ${input.symbol}: ${sErr.message}`,
+            );
+          }
+        }
+      } catch (e) {
+        console.warn(
+          `[bulk-create] close snapshot capture failed for ${input.symbol}: ${e instanceof Error ? e.message : e}`,
+        );
+      }
+    }
+
+    // Entry-grades merge from tracked_tickers — only on OPEN fills,
+    // only when the position doesn't already carry grades.
+    if (input.action === "open") {
+      try {
+        const { data: posData } = await supabase
+          .from("positions")
+          .select("entry_crush_grade")
+          .eq("id", positionId)
+          .single();
+        const already = (posData as { entry_crush_grade?: string | null } | null)?.entry_crush_grade;
+        if (!already) {
+          const fillMs = new Date(fillDate + "T00:00:00Z").getTime();
+          const prevDay = new Date(fillMs - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+          const { data: trackedRaw } = await supabase
+            .from("tracked_tickers")
+            .select("*")
+            .eq("symbol", symbol)
+            .eq("expiry", plan.expiry)
+            .in("screened_date", [fillDate, prevDay])
+            .order("screened_date", { ascending: false })
+            .limit(1);
+          const match = ((trackedRaw ?? []) as Array<Record<string, unknown>>)[0];
+          if (match) {
+            const { error: mErr } = await supabase
+              .from("positions")
+              .update({
+                entry_crush_grade: match.entry_crush_grade ?? null,
+                entry_opportunity_grade: match.entry_opportunity_grade ?? null,
+                entry_final_grade: match.entry_final_grade ?? null,
+                entry_iv_edge: match.entry_iv_edge ?? null,
+                entry_em_pct: match.entry_em_pct ?? null,
+                entry_vix: match.entry_vix ?? null,
+                entry_news_summary: match.entry_news_summary ?? null,
+                entry_stock_price: match.entry_stock_price ?? null,
+              })
+              .eq("id", positionId);
+            if (mErr) {
+              console.warn(
+                `[bulk-create] merge tracked grades failed for ${input.symbol}: ${mErr.message}`,
+              );
+            }
+          }
+        }
+      } catch (e) {
+        console.warn(
+          `[bulk-create] tracked-ticker merge failed for ${input.symbol}: ${e instanceof Error ? e.message : e}`,
+        );
+      }
+    }
+
+    // recordPositionOutcome — fires when this fill flipped the position
+    // to closed. Refetch the live status rather than threading it out
+    // of Phase 2a, which keeps Phase 2a's logic linear.
+    if (input.action === "close") {
+      try {
+        const { data: pRow } = await supabase
+          .from("positions")
+          .select("status")
+          .eq("id", positionId)
+          .single();
+        const status = (pRow as { status?: string } | null)?.status;
+        if (status === "closed") {
+          await recordPositionOutcome(positionId);
+        }
+      } catch (e) {
+        console.warn(
+          `[bulk-create] recordPositionOutcome(${positionId}) failed: ${e instanceof Error ? e.message : e}`,
+        );
+      }
     }
   }
 
+  const positionsCreated = positionsCreatedIds.length;
+  const positionsUpdated = touchedPreExistingIds.size;
+
   console.log(
-    `[bulk-create] items=${items.length} positions_created=${positionsCreated} positions_updated=${positionsTouched.size - positionsCreated} fills_inserted=${fillsInserted} stocks_closed=${stocksClosed} stocks_partial=${stocksPartial} errors=${errors.length}`,
+    `[bulk-create] OK batch=${importBatchId} options=${optionPlans.length} stocks=${stockPlans.length} positions_created=${positionsCreated} positions_updated=${positionsUpdated} fills_inserted=${fillsInserted} stocks_closed=${stocksClosed} stocks_partial=${stocksPartial}`,
   );
 
   return NextResponse.json({
     positions_created: positionsCreated,
-    positions_updated: Math.max(0, positionsTouched.size - positionsCreated),
+    positions_updated: positionsUpdated,
     fills_inserted: fillsInserted,
     stocks_closed: stocksClosed,
     stocks_partial: stocksPartial,
-    errors,
+    errors: [],
   });
 }
