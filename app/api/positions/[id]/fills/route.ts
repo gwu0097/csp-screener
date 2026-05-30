@@ -5,6 +5,15 @@ import { recalculatePositionFromFills } from "@/lib/positions";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
+function todayPst(): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Los_Angeles",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
+
 // Add a single fill to an existing position. Mirrors the per-fill
 // path inside /api/trades/bulk-create — same insert columns, same
 // recalc-from-full-fills helper. Used by the position-card "Edit
@@ -47,6 +56,16 @@ export async function POST(
   }
   if (!Number.isFinite(premium) || premium < 0) {
     return NextResponse.json({ error: "premium must be ≥ 0" }, { status: 400 });
+  }
+  // Reject future fill_date. A wrong "today" derails closed_date and
+  // the journal calendar — the position-card UI already clamps the
+  // picker, this is the API-level backstop for direct callers.
+  const todayP = todayPst();
+  if (fill_date > todayP) {
+    return NextResponse.json(
+      { error: `Fill date ${fill_date} is in the future — check the date entered` },
+      { status: 422 },
+    );
   }
 
   const sb = createServerClient();

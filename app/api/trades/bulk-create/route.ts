@@ -288,6 +288,18 @@ export async function POST(req: NextRequest) {
     const rawFillDate = input.timePlaced ?? input.trade_date ?? null;
     const fillDate = rawFillDate ? toPstDate(rawFillDate, sourceTimezone) : todayPst();
 
+    // Reject future fill dates. closed_date is derived from
+    // max(close fill_date) downstream, so a stray future date here
+    // permanently corrupts the position's closed_date — see the
+    // SHOP/PLTR/DUOL 2026-05-26 incident.
+    const todayP = todayPst();
+    if (fillDate > todayP) {
+      errors.push(
+        `${symbol}: fill date ${fillDate} is in the future — check the date entered`,
+      );
+      continue;
+    }
+
     const { normalized: expiry, wasWeekend } = normalizeExpiryToWeekday(input.expiry);
     if (wasWeekend) {
       console.warn(
@@ -406,6 +418,13 @@ export async function POST(req: NextRequest) {
     }
     if (!Number.isFinite(price) || price < 0) {
       errors.push(`stock ${symbol}: price must be ≥ 0`);
+      continue;
+    }
+    const todayPForStock = todayPst();
+    if (date > todayPForStock) {
+      errors.push(
+        `stock ${symbol}: fill date ${date} is in the future — check the date entered`,
+      );
       continue;
     }
 

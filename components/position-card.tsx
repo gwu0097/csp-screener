@@ -1265,9 +1265,16 @@ function EditFillsPanel({
   const [addSide, setAddSide] = useState<"open" | "close">("open");
   const [addQty, setAddQty] = useState("");
   const [addPrice, setAddPrice] = useState("");
-  const [addDate, setAddDate] = useState(() =>
-    new Date().toISOString().slice(0, 10),
-  );
+  // Fill dates are PT-anchored on the server (toPstDate / todayPst);
+  // mirror that here so the picker's max and the server's check agree
+  // regardless of the user's browser timezone.
+  const todayPstIso = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Los_Angeles",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+  const [addDate, setAddDate] = useState(todayPstIso);
 
   // Optimistic local copy of the fills array. We mutate this immediately
   // on a successful API call so the panel updates without waiting for
@@ -1368,6 +1375,10 @@ function EditFillsPanel({
       setError("Price must be ≥ 0");
       return;
     }
+    if (addDate > todayPstIso) {
+      setError("Fill date cannot be in the future");
+      return;
+    }
     setBusy("add");
     setError(null);
     try {
@@ -1389,7 +1400,7 @@ function EditFillsPanel({
       setAddSide("open");
       setAddQty("");
       setAddPrice("");
-      setAddDate(new Date().toISOString().slice(0, 10));
+      setAddDate(todayPstIso);
       setAddOpen(false);
       onChanged("Fill added");
     } catch (e) {
@@ -1528,9 +1539,15 @@ function EditFillsPanel({
           <input
             type="date"
             value={addDate}
+            max={todayPstIso}
             onChange={(e) => setAddDate(e.target.value)}
             className="rounded border border-border bg-background px-2 py-1 text-xs"
           />
+          {addDate > todayPstIso && (
+            <span className="text-[11px] text-rose-300">
+              Fill date cannot be in the future
+            </span>
+          )}
           <select
             value={addSide}
             onChange={(e) => setAddSide(e.target.value as "open" | "close")}
@@ -1558,7 +1575,7 @@ function EditFillsPanel({
           <button
             type="button"
             onClick={() => void handleAdd()}
-            disabled={busy === "add"}
+            disabled={busy === "add" || addDate > todayPstIso}
             className="inline-flex items-center gap-1 rounded border border-border bg-background px-2 py-1 text-xs hover:bg-background/80 disabled:opacity-50"
           >
             {busy === "add" ? (
