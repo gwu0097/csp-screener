@@ -431,28 +431,118 @@ export function PositionCard(props: Props) {
   const pnlSource = open?.pnlSource ?? "mark";
   const pnlIsEstimate =
     pnlSource === "intrinsic" || pnlSource === "maxProfitOtm";
+
+  // ---- Manual after-hours mark ----
+  // When the row is open + optionsStale, the user can type the mark
+  // they're seeing on their broker into the Mark cell. We persist it
+  // to localStorage keyed by position id so it survives reloads, and
+  // recompute pnl from (avg − manual) × qty × 100 (sign flipped on
+  // long rows). Once a live Schwab mark lands, the cached value is
+  // wiped and the live number takes over.
+  const positionId = open?.id ?? null;
+  const [manualMark, setManualMark] = useState<string>("");
+  const [manualMarkDraft, setManualMarkDraft] = useState<string>("");
+  useEffect(() => {
+    if (!positionId || typeof window === "undefined") return;
+    try {
+      const v = window.localStorage.getItem(`manual_mark_${positionId}`);
+      if (v) {
+        setManualMark(v);
+        setManualMarkDraft(v);
+      } else {
+        setManualMark("");
+        setManualMarkDraft("");
+      }
+    } catch {
+      /* SSR / quota — ignore */
+    }
+  }, [positionId]);
+  // Wipe the override the moment a real live mark is available — the
+  // route only populates currentMark when marketState === REGULAR and
+  // the chain returned a quote, so this is the authoritative signal.
+  useEffect(() => {
+    if (!positionId || typeof window === "undefined") return;
+    if (!optionsStale && open?.currentMark !== null && open?.currentMark !== undefined) {
+      try {
+        window.localStorage.removeItem(`manual_mark_${positionId}`);
+      } catch {
+        /* ignore */
+      }
+      setManualMark("");
+      setManualMarkDraft("");
+    }
+  }, [positionId, optionsStale, open?.currentMark]);
+
+  const manualMarkNum = manualMark ? Number(manualMark) : NaN;
+  const manualOverrideActive =
+    open !== null &&
+    optionsStale &&
+    Number.isFinite(manualMarkNum) &&
+    manualMarkNum >= 0 &&
+    open.avgPremiumSold !== null;
+  const manualOverridePnl =
+    manualOverrideActive && open && open.avgPremiumSold !== null
+      ? (open.direction === "long"
+          ? manualMarkNum - open.avgPremiumSold
+          : open.avgPremiumSold - manualMarkNum) *
+        open.remainingContracts *
+        100
+      : null;
+
+  function commitManualMark(raw: string) {
+    const trimmed = raw.trim();
+    if (!positionId || typeof window === "undefined") return;
+    if (!trimmed) {
+      try {
+        window.localStorage.removeItem(`manual_mark_${positionId}`);
+      } catch {
+        /* ignore */
+      }
+      setManualMark("");
+      setManualMarkDraft("");
+      return;
+    }
+    const num = Number(trimmed);
+    if (!Number.isFinite(num) || num < 0) return;
+    try {
+      window.localStorage.setItem(`manual_mark_${positionId}`, trimmed);
+    } catch {
+      /* quota — silently skip persistence */
+    }
+    setManualMark(trimmed);
+  }
+
   // Suppress every per-row P&L variant outside the regular session.
   // Intrinsic / maxProfitOtm fallbacks looked plausible AH but masked
   // the fact that the position could still flip overnight — surfacing
-  // "—" makes the open-market dependency explicit.
-  const suppressMarkPnl = optionsStale;
+  // "—" makes the open-market dependency explicit. The manual-mark
+  // override re-enables the cell with a "~" estimate prefix.
+  const suppressMarkPnl = optionsStale && !manualOverrideActive;
+  const effectivePnlDollars = manualOverrideActive
+    ? manualOverridePnl
+    : pnlDollars;
   const pnlColor =
-    pnlDollars === null
+    effectivePnlDollars === null
       ? "text-muted-foreground"
-      : pnlSource === "intrinsic"
-        ? // ITM estimate is amber regardless of sign — it's an
-          // approximation of a likely-loss scenario.
+      : manualOverrideActive
+        ? // Manual after-hours estimate — amber to flag that it's a
+          // user-typed mark, not a live quote.
           "text-amber-300"
-        : pnlSource === "maxProfitOtm"
-          ? // OTM estimate uses a softer green — it's the best-case
-            // assumption (full premium kept) and we're not 100% sure.
-            "text-emerald-200/80"
-          : pnlDollars >= 0
-            ? "text-emerald-300"
-            : "text-rose-300";
-  const pnlPrefix = pnlIsEstimate ? "~" : "";
-  const pnlTooltip =
-    pnlSource === "intrinsic"
+        : pnlSource === "intrinsic"
+          ? // ITM estimate is amber regardless of sign — it's an
+            // approximation of a likely-loss scenario.
+            "text-amber-300"
+          : pnlSource === "maxProfitOtm"
+            ? // OTM estimate uses a softer green — it's the best-case
+              // assumption (full premium kept) and we're not 100% sure.
+              "text-emerald-200/80"
+            : effectivePnlDollars >= 0
+              ? "text-emerald-300"
+              : "text-rose-300";
+  const pnlPrefix = manualOverrideActive || pnlIsEstimate ? "~" : "";
+  const pnlTooltip = manualOverrideActive
+    ? `After-hours estimate based on your manually-entered mark ($${manualMarkNum.toFixed(2)}). Clears automatically when a live Schwab mark is available.`
+    : pnlSource === "intrinsic"
       ? `Estimated P&L based on intrinsic value (strike − stock price). Actual closing price may differ.`
       : pnlSource === "maxProfitOtm"
         ? `Estimated P&L assuming OTM at expiry (full premium kept). Actual closing price may differ.`
@@ -527,25 +617,61 @@ export function PositionCard(props: Props) {
             ? `$${open.avgPremiumSold.toFixed(2)}`
             : "—"}
         </div>
-        {/* 6. Mark (current option price) — sm-only. Suppressed AH
-              alongside P&L / POP / IV since the chain returns stale
-              last-traded marks outside the regular session. */}
+        {/* 6. Mark (current option price) — sm-only. After hours the
+              chain returns stale last-traded marks, so for open rows
+              we swap "—" for a small editable input. The user types
+              the mark they're seeing on their broker; we persist it
+              per-position in localStorage and recompute the P&L cell.
+              Once a live regular-session mark is available, the
+              effects above clear the cache and we render the live
+              value instead. */}
         <div
           className={cn(
             "hidden text-right font-mono sm:block",
-            optionsStale ? "text-muted-foreground" : "text-foreground/80",
+            optionsStale && !manualOverrideActive
+              ? "text-muted-foreground"
+              : manualOverrideActive
+                ? "text-amber-300"
+                : "text-foreground/80",
           )}
           title={
-            optionsStale
-              ? "Mark hidden outside regular session — Schwab returns stale last-traded marks after hours"
-              : undefined
+            manualOverrideActive
+              ? "Manual after-hours mark — clears automatically when a live Schwab mark is available"
+              : optionsStale
+                ? "Type the mark you're seeing on your broker to estimate P&L after hours"
+                : undefined
           }
         >
-          {optionsStale
-            ? "—"
-            : open && open.currentMark !== null
-              ? `$${open.currentMark.toFixed(2)}`
-              : "—"}
+          {open && optionsStale ? (
+            <input
+              type="number"
+              step="0.01"
+              min="0"
+              inputMode="decimal"
+              value={manualMarkDraft}
+              onChange={(e) => setManualMarkDraft(e.target.value)}
+              onBlur={(e) => commitManualMark(e.currentTarget.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === "Tab") {
+                  commitManualMark((e.currentTarget as HTMLInputElement).value);
+                  if (e.key === "Enter") (e.currentTarget as HTMLInputElement).blur();
+                }
+                e.stopPropagation();
+              }}
+              onClick={(e) => e.stopPropagation()}
+              placeholder="—"
+              className={cn(
+                "w-14 rounded border bg-background/60 px-1 py-0.5 text-right font-mono text-xs lg:w-16",
+                manualOverrideActive
+                  ? "border-amber-500/40 text-amber-300"
+                  : "border-border/60 text-foreground/80",
+              )}
+            />
+          ) : open && open.currentMark !== null ? (
+            `$${open.currentMark.toFixed(2)}`
+          ) : (
+            "—"
+          )}
         </div>
         {/* 7. P&L — bold so it reads first when scanning the row.
               Suppressed AH/closed when the figure would come from a
@@ -566,7 +692,7 @@ export function PositionCard(props: Props) {
           ) : (
             <>
               {pnlPrefix}
-              {fmtDollarsSigned(pnlDollars)}
+              {fmtDollarsSigned(effectivePnlDollars)}
             </>
           )}
         </div>
