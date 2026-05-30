@@ -363,10 +363,21 @@ export async function POST(req: NextRequest) {
     if (existing.length > 0) {
       existingPositionId = existing[0].id;
     } else if (input.action === "close") {
-      errors.push(
-        `${symbol}: close fill found no matching open position (strike=${input.strike}, broker=${broker}, expiry=${expiry})`,
-      );
-      continue;
+      // Close with no DB match. Items are sorted opens-first, so any
+      // open of the same (symbol, strike, expiry, broker, optionType)
+      // earlier in this batch has already added its keyForBatch to
+      // inBatchNewPositionKeys. If present, the close is valid — it
+      // will attach to the position Phase 2 creates from that open.
+      // Otherwise we have a true orphan close.
+      if (inBatchNewPositionKeys.has(keyForBatch)) {
+        existingPositionId = null;
+        createsNewPosition = false;
+      } else {
+        errors.push(
+          `${symbol}: close fill found no matching open position (strike=${input.strike}, broker=${broker}, expiry=${expiry})`,
+        );
+        continue;
+      }
     } else if (inBatchNewPositionKeys.has(keyForBatch)) {
       // An earlier OPEN in this same batch will create the position;
       // this row will reuse it in Phase 2.
