@@ -499,6 +499,9 @@ export async function POST(req: NextRequest) {
     console.log(
       `[bulk-create] PHASE 1 REJECTED — ${errors.length} validation error(s), no writes performed`,
     );
+    for (const err of errors) {
+      console.log(`[bulk-create] PHASE 1 ERROR: ${err}`);
+    }
     return NextResponse.json(
       {
         positions_created: 0,

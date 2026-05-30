@@ -125,6 +125,10 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
   const [parsedStocks, setParsedStocks] = useState<ParsedStockTrade[] | null>(null);
   const [rejections, setRejections] = useState<Array<{ symbol: string; reason: string }>>([]);
   const [error, setError] = useState<string | null>(null);
+  // Populated alongside `error` when the bulk-create route returns
+  // 422 with structured per-row errors. The render path turns each
+  // entry into a bullet so the user sees which trade(s) need fixing.
+  const [errorList, setErrorList] = useState<string[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const reset = useCallback(() => {
@@ -247,6 +251,7 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
     if (optionCount === 0 && stockCount === 0) return;
     setConfirming(true);
     setError(null);
+    setErrorList([]);
     try {
       const res = await fetch("/api/trades/bulk-create", {
         method: "POST",
@@ -266,6 +271,18 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
         errors?: string[];
         error?: string;
       };
+      // Phase 1 (422) returns { errors: [...] } — surface every row's
+      // reason so the user can fix the screenshot before retrying. Only
+      // fall back to a generic "HTTP N" when the body carries no
+      // structured error info.
+      if (json.errors && json.errors.length > 0) {
+        setErrorList(json.errors);
+        setError(
+          `${json.errors.length} trade${json.errors.length === 1 ? "" : "s"} failed validation`,
+        );
+        setConfirming(false);
+        return;
+      }
       if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
       const parts = [
         (json.fills_inserted ?? 0) > 0
@@ -284,11 +301,6 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
           ? `${json.stocks_partial} stock partial sale${json.stocks_partial === 1 ? "" : "s"}`
           : null,
       ].filter(Boolean);
-      if (json.errors && json.errors.length > 0) {
-        setError(json.errors.join("; "));
-        setConfirming(false);
-        return;
-      }
       onSuccess(parts.join(", ") || "Import complete");
       onOpenChange(false);
     } catch (e) {
@@ -675,7 +687,16 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
 
         {error && (
           <div className="mt-2 rounded border border-rose-500/40 bg-rose-500/10 px-2 py-1 text-xs text-rose-200">
-            {error}
+            <div className="font-semibold">{error}</div>
+            {errorList.length > 0 && (
+              <ul className="mt-1 list-disc space-y-0.5 pl-5">
+                {errorList.map((e, i) => (
+                  <li key={i} className="font-mono text-[11px]">
+                    {e}
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         )}
 
