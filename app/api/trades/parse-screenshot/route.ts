@@ -256,25 +256,71 @@ Return ONLY a JSON array, no explanation, no markdown:
 
 Extract EVERY stock row. Do not stop early.`;
 
-const PROMPT_STOCK_ROBINHOOD = `Extract the stock position(s) from this Robinhood position card screenshot.
+const PROMPT_STOCK_ROBINHOOD = `Extract the stock trade(s) from this Robinhood screenshot. Two formats are supported — decide which one the image shows, then parse accordingly.
 
-Each card shows:
-- 'Current {SYMBOL} price' label — the ticker appears here
-- 'Date bought' or 'Date sold' — the trade date
-- 'Shares' — position size (may be negative for short sells; take absolute value)
-- 'Average cost' (for buys) or 'Average sell price' (for sells) — the per-share price
+FORMAT A — Position Detail card.
+  Identifying fields: 'Current {SYMBOL} price', 'Date bought' or 'Date sold', 'Shares', 'Average cost' or 'Average sell price'.
 
-For each card:
-  symbol: from the 'Current {SYMBOL} price' label (e.g. "Current AMD price" → "AMD")
-  action: 'buy' if the card shows 'Date bought', 'sell' if it shows 'Date sold'
-  shares: absolute value of the Shares field (e.g. "-10" → 10)
-  price: 'Average cost' for buys, 'Average sell price' for sells. Strip '$' prefix.
-  date: 'Date bought' or 'Date sold', converted to YYYY-MM-DD. If year is missing (e.g. "4/23"), use current year ${currentYear}.
+  For each card:
+    symbol: from the 'Current {SYMBOL} price' label (e.g. "Current AMD price" → "AMD")
+    action: 'buy' if the card shows 'Date bought', 'sell' if it shows 'Date sold'
+    shares: absolute value of the Shares field (e.g. "-10" → 10)
+    price: 'Average cost' for buys, 'Average sell price' for sells. Strip '$' prefix.
+    date: 'Date bought' or 'Date sold', converted to YYYY-MM-DD. If year is missing (e.g. "4/23"), use current year ${currentYear}.
+
+FORMAT B — Recent Activity feed row.
+  Identifying layout (4 lines per row):
+
+    {Company name} market {buy|sell}
+    \${total proceeds}
+    Individual · {Month Day}                 ← may also read "Roth IRA · ..." or another account label
+    {N} shares at \${per-share price}
+
+  Concrete example:
+
+    Zscaler market sell
+    \$68,543.53
+    Individual · May 29
+    500 shares at \$137.09
+
+  For each such row, emit one object:
+    symbol: the US stock ticker for the company name on line 1. Resolve the company name to its ticker symbol — DO NOT echo the company name into the symbol field. Examples:
+      "Zscaler"      → "ZS"
+      "Snowflake"    → "SNOW"
+      "Palantir"     → "PLTR"
+      "Datadog"      → "DDOG"
+      "CrowdStrike"  → "CRWD"
+      "Cloudflare"   → "NET"
+      "MongoDB"      → "MDB"
+      "Shopify"      → "SHOP"
+      "Duolingo"     → "DUOL"
+      "Confluent"    → "CFLT"
+      "MercadoLibre" → "MELI"
+      "Coinbase"     → "COIN"
+      "Robinhood"    → "HOOD"
+      "Roblox"       → "RBLX"
+      "Affirm"       → "AFRM"
+      "Block"        → "SQ"
+      "PayPal"       → "PYPL"
+      "Microsoft"    → "MSFT"
+      "Apple"        → "AAPL"
+      "Alphabet"     → "GOOGL"
+      "Meta"         → "META"
+      "NVIDIA"       → "NVDA"
+      "Tesla"        → "TSLA"
+      "Amazon"       → "AMZN"
+      "Netflix"      → "NFLX"
+      "AMD"          → "AMD"
+    For any name not listed, infer the standard US ticker — if the company is dual-listed, prefer the class commonly traded on Robinhood. If you can't resolve the ticker with confidence, skip that row entirely (do not emit a guess).
+    action: 'buy' if line 1 ends in "market buy", 'sell' if it ends in "market sell".
+    shares: integer from "{N} shares at ..." (e.g. "500 shares at $137.09" → 500).
+    price: per-share value from "at \$Y" (e.g. "\$137.09" → 137.09). NOT the total proceeds on line 2.
+    date: "{Month Day}" from the "Individual · ..." subtitle, converted to YYYY-MM-DD using current year ${currentYear} when no explicit year is shown ("May 29" → "${currentYear}-05-29").
 
 Return ONLY a JSON array, no explanation, no markdown:
-[{"symbol": "AMD", "action": "buy", "shares": 100, "price": 175.40, "date": "${currentYear}-04-22"}]
+[{"symbol": "ZS", "action": "sell", "shares": 500, "price": 137.09, "date": "${currentYear}-05-29"}]
 
-Include every visible card as a separate entry.`;
+Include every visible card or activity row as a separate entry. If the image clearly fits neither format, return [].`;
 
 // Try to pull structured data out of an LLM response. Models wrap their
 // output inconsistently — plain JSON, ```json fences, generic ``` fences,
