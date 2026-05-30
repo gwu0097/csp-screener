@@ -492,7 +492,10 @@ export function PerformanceSection({
             strike: number;
             optionType: "put" | "call";
             broker: string;
+            direction?: "long" | "short";
             remainingContracts: number;
+            avgPremiumSold: number | null;
+            currentMark: number | null;
             pnlDollars: number | null;
           }>;
           stockPositions?: Array<{
@@ -517,7 +520,10 @@ export function PerformanceSection({
           strike: number;
           optionType: "put" | "call";
           broker: string;
+          direction?: "long" | "short";
           remainingContracts: number;
+          avgPremiumSold: number | null;
+          currentMark: number | null;
           pnlDollars: number | null;
         };
         type Stock = {
@@ -580,6 +586,37 @@ export function PerformanceSection({
             }
           } catch {
             /* cache unavailable — leave pnlDollars as the route returned */
+          }
+        }
+
+        // After-hours manual-mark overrides — written by the position
+        // card's inline Mark input. When the route returned a null
+        // currentMark (chain stale), pull the user's typed mark from
+        // localStorage and recompute unrealized exactly the same way
+        // the row does: short ⇒ (avg − manual) × N × 100, long ⇒ the
+        // sign-flipped equivalent. Wins over any intrinsic/maxProfit
+        // fallback pnlDollars the route may have returned, because the
+        // typed mark is the freshest signal the user has.
+        if (!isRegular) {
+          try {
+            opts = opts.map((o) => {
+              if (o.currentMark !== null) return o;
+              if (o.avgPremiumSold === null) return o;
+              const raw = localStorage.getItem(`manual_mark_${o.id}`);
+              if (!raw) return o;
+              const manual = Number(raw);
+              if (!Number.isFinite(manual) || manual < 0) return o;
+              const dir = o.direction === "long" ? "long" : "short";
+              const pnl =
+                (dir === "long"
+                  ? manual - o.avgPremiumSold
+                  : o.avgPremiumSold - manual) *
+                o.remainingContracts *
+                100;
+              return { ...o, pnlDollars: pnl };
+            });
+          } catch {
+            /* localStorage unavailable — fall through to existing pnl */
           }
         }
 
