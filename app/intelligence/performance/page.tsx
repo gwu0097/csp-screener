@@ -49,7 +49,7 @@ export default function PerformancePage() {
     >
       {data && (
         <>
-          <PerformanceSection data={data} />
+          <PerformanceSection data={data} broker={broker} />
           <ExportSection onCopy={copyExport} copyStatus={copyStatus} />
         </>
       )}

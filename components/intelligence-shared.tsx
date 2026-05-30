@@ -430,8 +430,14 @@ export function DateRangeControls({
 
 export function PerformanceSection({
   data,
+  broker = "all",
 }: {
   data: IntelligenceResponse;
+  // Mirrors the realized-side broker filter so the Total mode's
+  // unrealized sub-line and headline only count open positions that
+  // match the active tab. Defaults to 'all' for back-compat with any
+  // caller that hasn't been updated yet.
+  broker?: BrokerFilter;
 }) {
   const { stats, equity_curve } = data;
   // Combined headline = options + closed stocks; per-component
@@ -485,11 +491,13 @@ export function PerformanceSection({
             symbol: string;
             strike: number;
             optionType: "put" | "call";
+            broker: string;
             remainingContracts: number;
             pnlDollars: number | null;
           }>;
           stockPositions?: Array<{
             symbol: string;
+            broker: string;
             shares: number;
             pnlDollars: number | null;
           }>;
@@ -508,10 +516,16 @@ export function PerformanceSection({
           symbol: string;
           strike: number;
           optionType: "put" | "call";
+          broker: string;
           remainingContracts: number;
           pnlDollars: number | null;
         };
-        type Stock = { symbol: string; shares: number; pnlDollars: number | null };
+        type Stock = {
+          symbol: string;
+          broker: string;
+          shares: number;
+          pnlDollars: number | null;
+        };
         let opts: Opt[] = baseJson.positions ?? [];
         let stocks: Stock[] = baseJson.stockPositions ?? [];
 
@@ -528,6 +542,17 @@ export function PerformanceSection({
             opts = liveJson.positions ?? opts;
             stocks = liveJson.stockPositions ?? stocks;
           }
+        }
+
+        // Apply the broker filter client-side. The route doesn't take
+        // a ?broker= param (it always returns every account so the
+        // Positions page can render the broker subsections), so we
+        // narrow here to match the realized-side broker tab.
+        if (broker !== "all") {
+          opts = opts.filter((o) => (o.broker ?? "").toLowerCase() === broker);
+          stocks = stocks.filter(
+            (s) => (s.broker ?? "").toLowerCase() === broker,
+          );
         }
 
         // Outside regular hours, fall back to the Positions page's
@@ -594,7 +619,14 @@ export function PerformanceSection({
     return () => {
       cancelled = true;
     };
-  }, [mode, unrealized]);
+  }, [mode, unrealized, broker]);
+
+  // Reset the cached unrealized sum whenever the broker tab flips so
+  // the effect above re-runs against the new filter rather than
+  // re-using the previous broker's totals.
+  useEffect(() => {
+    setUnrealized(null);
+  }, [broker]);
 
   const totalUnrealized = unrealized
     ? unrealized.optionsUnrealized + unrealized.stockUnrealized
