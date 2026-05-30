@@ -24,6 +24,10 @@ import {
   SellSharesModal,
   type SellSharesTarget,
 } from "@/components/sell-shares-modal";
+import {
+  CloseOptionModal,
+  type CloseOptionTarget,
+} from "@/components/close-option-modal";
 
 type SortKey =
   | "strike"
@@ -669,6 +673,8 @@ export function PositionsView() {
   const [showScreenshot, setShowScreenshot] = useState(false);
   const [showManual, setShowManual] = useState(false);
   const [sellTarget, setSellTarget] = useState<SellSharesTarget | null>(null);
+  const [closeOptionTarget, setCloseOptionTarget] =
+    useState<CloseOptionTarget | null>(null);
   const [best, setBest] = useState<BestOpportunity>(null);
   const [closedPositions, setClosedPositions] = useState<ClosedPositionClientView[] | null>(null);
   const [closedOpen, setClosedOpen] = useState(false);
@@ -1450,6 +1456,7 @@ export function PositionsView() {
                       position={p}
                       marketState={data?.market?.marketState ?? null}
                       onCloseSubmitted={onImportSuccess}
+                      onCloseOption={setCloseOptionTarget}
                       onPositionRemoved={(id) => {
                         // Optimistic remove — drop the row from local state so
                         // the UI updates instantly. We don't refetch; the next
@@ -1632,6 +1639,15 @@ export function PositionsView() {
         onCancel={() => setSellTarget(null)}
         onConfirm={async (res) => {
           setSellTarget(null);
+          if (res.ok) onImportSuccess(res.message);
+        }}
+      />
+      <CloseOptionModal
+        open={closeOptionTarget !== null}
+        target={closeOptionTarget}
+        onCancel={() => setCloseOptionTarget(null)}
+        onConfirm={async (res) => {
+          setCloseOptionTarget(null);
           if (res.ok) onImportSuccess(res.message);
         }}
       />

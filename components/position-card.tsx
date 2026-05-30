@@ -141,6 +141,11 @@ type Props =
       // the row can suppress option-mark-derived fields outside the
       // regular session. null means "unknown" — fields render normally.
       marketState?: string | null;
+      // Fires when the Grade-column "Close" button is clicked — the
+      // parent owns the modal state so the row stays cheap to render
+      // and the modal survives row re-renders from /api/positions/open
+      // refreshes. Optional so the closed-list path can omit it.
+      onCloseOption?: (target: import("./close-option-modal").CloseOptionTarget) => void;
     }
   | {
       kind: "closed";
@@ -594,11 +599,38 @@ export function PositionCard(props: Props) {
         >
           {optionsStale ? "—" : iv !== null ? `${(iv * 100).toFixed(0)}%` : "—"}
         </div>
-        {/* 9. Grade — center-aligned. Theta used to live inline here but
-              was noise for overnight CSP positions; the badge alone is
-              the signal. */}
+        {/* 9. Grade — center-aligned. On open option rows we use this
+              slot for the quick-close "Close" button (parallel to the
+              stock_long "Sell" button in positions-view). Entry grade
+              stays visible in the expanded detail view. Closed rows
+              still render the grade letter here. */}
         <div className="flex items-center justify-center">
-          {p.entryFinalGrade ? (
+          {props.kind === "open" && props.onCloseOption ? (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                props.onCloseOption!({
+                  positionId: props.position.id,
+                  symbol: props.position.symbol,
+                  strike: props.position.strike,
+                  expiry: props.position.expiry,
+                  optionType: props.position.optionType,
+                  remainingContracts: props.position.remainingContracts,
+                  avgPremiumSold: props.position.avgPremiumSold,
+                  broker: props.position.broker,
+                });
+              }}
+              title={
+                p.entryFinalGrade
+                  ? `Entry grade ${p.entryFinalGrade} — click to close`
+                  : "Close position"
+              }
+              className="rounded border border-border/60 bg-background/60 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground hover:border-foreground/40 hover:text-foreground"
+            >
+              Close
+            </button>
+          ) : p.entryFinalGrade ? (
             <span
               className={cn(
                 "inline-block rounded border px-1.5 py-0.5 text-sm font-semibold",
