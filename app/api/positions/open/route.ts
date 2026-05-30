@@ -758,7 +758,11 @@ export async function GET(req: NextRequest) {
       broker: p.broker,
       strike,
       expiry,
-      optionType: "put",
+      // Read the stored option_type instead of hardcoding 'put' — the
+      // open route previously assumed every row was a CSP, but the
+      // table also stores covered calls and similar. Fallback to 'put'
+      // only when the column is null (legacy pre-migration rows).
+      optionType: ((p as PositionRow & { option_type?: "put" | "call" | null }).option_type ?? "put") as "put" | "call",
       totalContracts: p.total_contracts,
       remainingContracts: remaining,
       avgPremiumSold: p.avg_premium_sold !== null ? Number(p.avg_premium_sold) : null,
