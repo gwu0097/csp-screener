@@ -25,6 +25,7 @@ type PositionRow = {
   position_type: string | null;
   assignment_source_id: string | null;
   entry_stock_price: number | null;
+  direction: "short" | "long" | null;
 };
 
 type RecRow = {
@@ -146,7 +147,7 @@ export async function GET(req: NextRequest) {
   let query = sb
     .from("positions")
     .select(
-      "id,symbol,strike,expiry,total_contracts,avg_premium_sold,opened_date,closed_date,realized_pnl,entry_final_grade,entry_crush_grade,entry_opportunity_grade,entry_iv_edge,entry_em_pct,entry_vix,status,broker,position_type,assignment_source_id,entry_stock_price",
+      "id,symbol,strike,expiry,total_contracts,avg_premium_sold,opened_date,closed_date,realized_pnl,entry_final_grade,entry_crush_grade,entry_opportunity_grade,entry_iv_edge,entry_em_pct,entry_vix,status,broker,position_type,assignment_source_id,entry_stock_price,direction",
     )
     .in("status", ["closed", "expired_worthless", "assigned"])
     .order("closed_date", { ascending: true });
@@ -270,22 +271,102 @@ export async function GET(req: NextRequest) {
     b.tradeCount += 1;
     b.trades.push({ symbol: label, pnl });
   };
-  for (const p of windowed) {
-    if (!p.closed_date) continue;
-    pushIntoBucket(p.closed_date, Number(p.realized_pnl ?? 0), p.symbol);
+  // Fill-level bucketing for fully-closed option positions + stock
+  // sales. Partial closes inside the window land on their OWN
+  // fill_date rather than getting lumped onto the position's final
+  // closed_date. expired_worthless + assigned positions stay
+  // position-level because the expire / assign flows never insert
+  // close fills — their P&L lives on the row, not in the fills
+  // table.
+  //
+  // Old vs new total can diverge ONLY when a fully-closed position
+  // has partial-close fills straddling the window boundary. The
+  // log line below prints both so it's visible.
+  const fillLevelOptionPositions = allClosed.filter((p) => p.status === "closed");
+  const rowLevelOptionPositions = allClosed.filter((p) => p.status !== "closed");
+  const parentById = new Map<string, PositionRow>();
+  for (const p of fillLevelOptionPositions) parentById.set(p.id, p);
+  for (const p of closedStocks) parentById.set(p.id, p);
+
+  let fillLevelOptionsTotal = 0;
+  let fillLevelStocksTotal = 0;
+  const fillLevelIds = [
+    ...fillLevelOptionPositions.map((p) => p.id),
+    ...closedStocks.map((p) => p.id),
+  ];
+  if (fillLevelIds.length > 0) {
+    const fillsRes = await sb
+      .from("fills")
+      .select("position_id,fill_date,contracts,premium")
+      .eq("fill_type", "close")
+      .in("position_id", fillLevelIds)
+      .gte("fill_date", from)
+      .lte("fill_date", to);
+    if (fillsRes.error) {
+      console.warn(
+        `[intelligence] close fills fetch failed — falling back to row-level: ${fillsRes.error.message}`,
+      );
+    } else {
+      const fillRows = (fillsRes.data ?? []) as Array<{
+        position_id: string;
+        fill_date: string;
+        contracts: number;
+        premium: number;
+      }>;
+      for (const f of fillRows) {
+        const parent = parentById.get(f.position_id);
+        if (!parent) continue;
+        const isStock =
+          parent.position_type === "stock_long" ||
+          parent.position_type === "stock_short";
+        let pnl: number;
+        if (isStock) {
+          // Stock per-share: (sale price − cost basis) × shares. No
+          // × 100 multiplier here — premium IS the per-share dollar
+          // value and contracts is the share count.
+          const basis = Number(parent.entry_stock_price ?? 0);
+          pnl = (Number(f.premium) - basis) * Number(f.contracts);
+          fillLevelStocksTotal += pnl;
+        } else {
+          // Options: avg open premium against this close fill's
+          // premium, sign-flipped for longs. Uses the row's stored
+          // avg_premium_sold so this matches the existing
+          // realizedPnl(fills, direction) math (recomputed on the
+          // server every recalc).
+          const avg = Number(parent.avg_premium_sold ?? 0);
+          const direction = parent.direction === "long" ? "long" : "short";
+          const diff =
+            direction === "long"
+              ? Number(f.premium) - avg
+              : avg - Number(f.premium);
+          pnl = diff * Number(f.contracts) * 100;
+          fillLevelOptionsTotal += pnl;
+        }
+        pushIntoBucket(f.fill_date, pnl, isStock ? `${parent.symbol} (stock)` : parent.symbol);
+      }
+    }
   }
-  // Closed stocks bucket on their closed_date too — the equity curve
-  // should reflect actual book P&L on the day the stock was sold. The
-  // trade label gets a "(stock)" suffix so the tooltip distinguishes
-  // option closes from share sales.
-  for (const p of windowedStocks) {
+
+  // expired_worthless + assigned (no fills) — bucket on closed_date.
+  let rowLevelTotal = 0;
+  for (const p of rowLevelOptionPositions) {
     if (!p.closed_date) continue;
-    pushIntoBucket(
-      p.closed_date,
-      Number(p.realized_pnl ?? 0),
-      `${p.symbol} (stock)`,
-    );
+    if (p.closed_date < from || p.closed_date > to) continue;
+    const pnl = Number(p.realized_pnl ?? 0);
+    rowLevelTotal += pnl;
+    pushIntoBucket(p.closed_date, pnl, p.symbol);
   }
+
+  const oldEquityTotal =
+    windowed.reduce((s, p) => s + Number(p.realized_pnl ?? 0), 0) +
+    windowedStocks.reduce((s, p) => s + Number(p.realized_pnl ?? 0), 0);
+  const newEquityTotal =
+    fillLevelOptionsTotal + fillLevelStocksTotal + rowLevelTotal;
+  const equityDelta =
+    Math.round((newEquityTotal - oldEquityTotal) * 100) / 100;
+  console.log(
+    `[intelligence] equity_curve totals: old=${oldEquityTotal.toFixed(2)} new=${newEquityTotal.toFixed(2)} delta=${equityDelta.toFixed(2)} (delta != 0 ⇒ partial closes straddling window boundary)`,
+  );
 
   // Zero-fill only on day granularity so the line stays continuous across
   // weekends / no-trade days. Week + month buckets skip the fill — empty
