@@ -285,6 +285,7 @@ export async function getOptionsChainWide(
   symbol: string,
   expiry: string,
   windowDays = 0,
+  contractType: "PUT" | "CALL" = "PUT",
 ): Promise<SchwabOptionsChain> {
   // Schwab /marketdata/v1/chains rejects fromDate < today with a
   // generic 400 ("Check Param Values" / "Invalid Paramter/Value"
@@ -293,13 +294,17 @@ export async function getOptionsChainWide(
   // void every other position in the same batch as soon as ANY
   // position drifts inside the window. Clamp to >= today so the
   // window only grows forward.
+  //
+  // contractType defaults to PUT (the CSP-era assumption); callers
+  // with a known long call/short call position must pass "CALL" so
+  // the response includes callExpDateMap with the right strike row.
   const today = new Date().toISOString().slice(0, 10);
   const rawFrom = windowDays > 0 ? addDaysIso(expiry, -windowDays) : expiry;
   const fromDate = rawFrom < today ? today : rawFrom;
   const toDate = windowDays > 0 ? addDaysIso(expiry, windowDays) : expiry;
   return schwabGet<SchwabOptionsChain>(`${MARKETDATA_BASE}/chains`, {
     symbol,
-    contractType: "PUT",
+    contractType,
     strikeCount: 200,
     fromDate,
     toDate,

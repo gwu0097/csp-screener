@@ -152,6 +152,7 @@ function pickContractFromChain(
   chain: Awaited<ReturnType<typeof getOptionsChain>>,
   strike: number,
   expiry: string,
+  optionType: "put" | "call" = "put",
 ): {
   contract: SchwabOptionContract | null;
   pickedExpKey: string | null;
@@ -159,7 +160,13 @@ function pickContractFromChain(
   strikeSnap: number | null;
   reason: PickReason;
 } {
-  const keys = Object.keys(chain.putExpDateMap ?? {});
+  // Read the right side of the chain. PUT positions key off
+  // putExpDateMap; CALL positions key off callExpDateMap. Pre-fix
+  // this was hardcoded to puts, which silently fuzzy-snapped a long
+  // call to whatever put happened to live at the same strike.
+  const sideMap =
+    optionType === "call" ? chain.callExpDateMap : chain.putExpDateMap;
+  const keys = Object.keys(sideMap ?? {});
   if (keys.length === 0) {
     return {
       contract: null,
@@ -198,7 +205,7 @@ function pickContractFromChain(
     expKey = bestKey;
     driftDays = Math.round(bestDiff / 86400000);
   }
-  const strikes = chain.putExpDateMap[expKey];
+  const strikes = sideMap[expKey];
   const wanted = String(Number(strike));
   const direct = strikes[wanted] ?? strikes[strike.toFixed(2)] ?? null;
   if (direct && direct.length > 0) {
@@ -519,9 +526,22 @@ export async function GET(req: NextRequest) {
     // strike chain centers on ATM and silently fuzzy-snaps a far-OTM
     // strike to the nearest in-window contract, producing the wrong
     // mark + a wildly wrong P&L on the position card.
+    // Pick the right side of the chain. Pre-fix this was hardcoded
+    // PUT, so a long call would pull the put chain and pickContract-
+    // FromChain would fuzzy-snap to whatever put happened to live at
+    // the same strike — wrong mark, wildly wrong P&L.
+    const positionOptionType: "put" | "call" =
+      ((p as PositionRow & { option_type?: "put" | "call" | null }).option_type ?? "put") === "call"
+        ? "call"
+        : "put";
     const chainPromise = live
       ? withTimeout(
-          getOptionsChainWide(p.symbol, expiry, 7),
+          getOptionsChainWide(
+            p.symbol,
+            expiry,
+            7,
+            positionOptionType === "call" ? "CALL" : "PUT",
+          ),
           15000,
           `chain(${p.symbol})`,
         )
@@ -551,7 +571,7 @@ export async function GET(req: NextRequest) {
       strikeSnap?: number | null;
       reason?: PickReason;
     } = chain
-      ? pickContractFromChain(chain, strike, expiry)
+      ? pickContractFromChain(chain, strike, expiry, positionOptionType)
       : {
           contract: null,
           pickedExpKey: null,
