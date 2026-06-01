@@ -49,6 +49,10 @@ export type SnapshotPosition = {
   opened_date: string | null;
   entry_stock_price: number | null;
   entry_em_pct: number | null;
+  // Both optional for back-compat — every caller that hasn't been
+  // updated will default to put/short (the historical CSP shape).
+  option_type?: "put" | "call" | null;
+  direction?: "short" | "long" | null;
 };
 
 export type SnapshotRow = {
@@ -97,8 +101,14 @@ export function pickPutContract(
   chain: SchwabOptionsChain,
   strike: number,
   expiry: string,
+  optionType: "put" | "call" = "put",
 ): SchwabOptionContract | null {
-  const keys = Object.keys(chain.putExpDateMap ?? {});
+  // Name is historical (this lib was put-only originally). Reads the
+  // matching side of the chain when optionType is overridden. Default
+  // 'put' keeps every existing caller intact.
+  const sideMap =
+    optionType === "call" ? chain.callExpDateMap : chain.putExpDateMap;
+  const keys = Object.keys(sideMap ?? {});
   if (keys.length === 0) return null;
 
   // 1. Expiry match. Order:
@@ -176,7 +186,7 @@ export function pickPutContract(
     expKey = bestKey;
   }
 
-  const strikes = chain.putExpDateMap[expKey];
+  const strikes = sideMap[expKey];
 
   // 2. Strike match — try several string formats before falling back to
   // a numeric scan. Schwab uses "345.0" / "347.5" for half-strikes, and
@@ -242,12 +252,18 @@ export async function fetchChainSafe(
 export async function fetchChainWideSafe(
   symbol: string,
   expiry: string,
+  optionType: "put" | "call" = "put",
 ): Promise<SchwabOptionsChain | null> {
   try {
-    return await getOptionsChainWide(symbol, expiry);
+    return await getOptionsChainWide(
+      symbol,
+      expiry,
+      0,
+      optionType === "call" ? "CALL" : "PUT",
+    );
   } catch (e) {
     console.warn(
-      `[snapshots] chainWide(${symbol},${expiry}) failed: ${e instanceof Error ? e.message : e}`,
+      `[snapshots] chainWide(${symbol},${expiry},${optionType}) failed: ${e instanceof Error ? e.message : e}`,
     );
     return null;
   }
@@ -264,7 +280,13 @@ export function buildSnapshotRow(
   fills: Fill[],
   opts: { nowIso: string; closeSnapshot: boolean },
 ): SnapshotRow {
-  const contract = chain ? pickPutContract(chain, Number(position.strike), position.expiry) : null;
+  const optionType: "put" | "call" =
+    position.option_type === "call" ? "call" : "put";
+  const direction: "short" | "long" =
+    position.direction === "long" ? "long" : "short";
+  const contract = chain
+    ? pickPutContract(chain, Number(position.strike), position.expiry, optionType)
+    : null;
   const optionPrice = contract?.mark ?? null;
   const stockPrice =
     chain?.underlying?.mark ??
@@ -277,8 +299,12 @@ export function buildSnapshotRow(
   let pnlDollars: number | null = null;
   let pnlPct: number | null = null;
   if (optionPrice !== null && soldPremium > 0 && remaining > 0) {
-    pnlDollars = (soldPremium - optionPrice) * remaining * 100;
-    pnlPct = (soldPremium - optionPrice) / soldPremium;
+    // short: profit when buy-back is cheaper than what was sold.
+    // long:  profit when mark exceeds the premium paid.
+    const diff =
+      direction === "long" ? optionPrice - soldPremium : soldPremium - optionPrice;
+    pnlDollars = diff * remaining * 100;
+    pnlPct = diff / soldPremium;
   }
 
   // Schwab returns volatility as a percent (193.2 = 193.2% IV). Store as

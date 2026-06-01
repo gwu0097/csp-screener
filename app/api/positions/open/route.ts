@@ -888,6 +888,8 @@ export async function GET(req: NextRequest) {
                   .entry_stock_price ?? null,
               entry_em_pct:
                 (p as unknown as { entry_em_pct?: number | null }).entry_em_pct ?? null,
+              option_type: positionOptionType,
+              direction: directionForPnl,
             },
             chain,
             fills,

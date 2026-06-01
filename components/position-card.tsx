@@ -757,6 +757,7 @@ export function PositionCard(props: Props) {
                   strike: props.position.strike,
                   expiry: props.position.expiry,
                   optionType: props.position.optionType,
+                  direction: props.position.direction,
                   remainingContracts: props.position.remainingContracts,
                   avgPremiumSold: props.position.avgPremiumSold,
                   broker: props.position.broker,

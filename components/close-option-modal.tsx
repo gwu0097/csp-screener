@@ -22,6 +22,10 @@ export type CloseOptionTarget = {
   strike: number;
   expiry: string;
   optionType: "put" | "call";
+  // Flips the P&L preview sign: short profits when buy-back is cheap;
+  // long profits when sell price exceeds entry. Defaults handled by the
+  // caller (position-card threads OpenPositionClientView.direction).
+  direction: "short" | "long";
   remainingContracts: number;
   avgPremiumSold: number | null;
   broker: string;
@@ -85,10 +89,18 @@ export function CloseOptionModal({ open, target, onCancel, onConfirm }: Props) {
   // by the qty closing here. Avg sold is null on legacy rows that
   // never had open fills attached — we skip the preview rather than
   // show a misleading number.
+  // Direction-aware P&L preview. Short = sold-to-open, profit when we
+  // buy back cheaper than what we sold for. Long = bought-to-open,
+  // profit when we sell for more than we paid.
   const previewPnl =
     qtyValid && priceValid && target.avgPremiumSold !== null
       ? Math.round(
-          (target.avgPremiumSold - priceNum) * qtyNum * 100 * 100,
+          (target.direction === "long"
+            ? priceNum - target.avgPremiumSold
+            : target.avgPremiumSold - priceNum) *
+            qtyNum *
+            100 *
+            100,
         ) / 100
       : null;
   const previewColor =
@@ -224,7 +236,10 @@ export function CloseOptionModal({ open, target, onCancel, onConfirm }: Props) {
                   </span>
                 </div>
                 <div className="font-mono text-[11px] text-muted-foreground/80">
-                  (${target.avgPremiumSold.toFixed(2)} − ${priceNum.toFixed(2)}) × {qtyNum} × 100
+                  {target.direction === "long"
+                    ? `($${priceNum.toFixed(2)} − $${target.avgPremiumSold.toFixed(2)})`
+                    : `($${target.avgPremiumSold.toFixed(2)} − $${priceNum.toFixed(2)})`}{" "}
+                  × {qtyNum} × 100
                 </div>
                 {remainingAfter !== null && remainingAfter > 0 && (
                   <div className="mt-1 text-[11px] text-muted-foreground">

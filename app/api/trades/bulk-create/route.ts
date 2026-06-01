@@ -830,7 +830,7 @@ export async function POST(req: NextRequest) {
         const { data: posRow } = await supabase
           .from("positions")
           .select(
-            "id, symbol, strike, expiry, avg_premium_sold, opened_date, entry_stock_price, entry_em_pct",
+            "id, symbol, strike, expiry, avg_premium_sold, opened_date, entry_stock_price, entry_em_pct, option_type, direction",
           )
           .eq("id", positionId)
           .single();
@@ -843,6 +843,8 @@ export async function POST(req: NextRequest) {
           opened_date: string | null;
           entry_stock_price: number | null;
           entry_em_pct: number | null;
+          option_type: "put" | "call" | null;
+          direction: "short" | "long" | null;
         } | null;
         if (position) {
           const { data: preFillsRaw } = await supabase
@@ -850,7 +852,11 @@ export async function POST(req: NextRequest) {
             .select("fill_type, contracts, premium, fill_date")
             .eq("position_id", positionId);
           const preFills = (preFillsRaw ?? []) as Fill[];
-          const chain = await fetchChainWideSafe(position.symbol, position.expiry);
+          const chain = await fetchChainWideSafe(
+            position.symbol,
+            position.expiry,
+            position.option_type === "call" ? "call" : "put",
+          );
           const snapshotRow = buildSnapshotRow(position, chain, preFills, {
             nowIso: new Date().toISOString(),
             closeSnapshot: true,
