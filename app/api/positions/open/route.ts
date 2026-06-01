@@ -633,14 +633,27 @@ export async function GET(req: NextRequest) {
     const iv = rawIv !== null ? (rawIv > 1 ? rawIv / 100 : rawIv) : null;
 
     const premiumSold = Number(p.avg_premium_sold ?? 0);
+    // 'short' = sold-to-open / CSP credit; 'long' = bought-to-open.
+    // Pre-fix every pnl branch assumed short, so long calls/puts
+    // came back with the sign inverted. Read the column with a 'short'
+    // fallback so legacy rows keep the historical math.
+    const directionForPnl: "long" | "short" =
+      ((p as PositionRow & { direction?: "long" | "short" | null }).direction ?? "short") === "long"
+        ? "long"
+        : "short";
     let pnlDollars: number | null = null;
     let pnlPct: number | null = null;
     let pnlSource: "mark" | "intrinsic" | "maxProfitOtm" | null = null;
     if (mark !== null && premiumSold > 0) {
-      pnlDollars = (premiumSold - mark) * remaining * 100;
-      pnlPct = ((premiumSold - mark) / premiumSold) * 100;
+      // short: profit when buy-back is cheaper than what was sold.
+      // long:  profit when mark exceeds the premium paid.
+      const diff =
+        directionForPnl === "long" ? mark - premiumSold : premiumSold - mark;
+      pnlDollars = diff * remaining * 100;
+      pnlPct = (diff / premiumSold) * 100;
       pnlSource = "mark";
     } else if (
+      directionForPnl === "short" &&
       !pickerRejected &&
       currentStockPrice !== null &&
       currentStockPrice > 0 &&
@@ -651,6 +664,13 @@ export async function GET(req: NextRequest) {
       // option chains stop quoting. ITM puts: subtract intrinsic
       // from the entry premium. OTM puts: assume worthless and
       // credit full premium.
+      //
+      // Long-direction fallback intentionally NOT implemented — the
+      // CSP-specific "credit full premium when OTM" rule doesn't
+      // apply to longs (an OTM long is a TOTAL LOSS, not max profit).
+      // Long rows without a live mark stay null and the position
+      // card falls through to the manual-mark input the user wrote
+      // earlier this session.
       //
       // Skipped when the picker rejected the chain on tolerance
       // (drift > 7d, strike snap > $1, or both axes drifted). In
