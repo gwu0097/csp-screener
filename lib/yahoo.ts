@@ -153,6 +153,7 @@ export type QuoteEnrichment = {
   regularMarketPrice: number | null;
   fiftyTwoWeekLow: number | null;
   fiftyTwoWeekHigh: number | null;
+  trailingPE: number | null;
   forwardPE: number | null;
   targetMeanPrice: number | null;
   regularMarketChangePercent: number | null;
@@ -175,6 +176,7 @@ export async function getQuoteEnrichment(
     regularMarketPrice: pickNumber(record, "regularMarketPrice"),
     fiftyTwoWeekLow: pickNumber(record, "fiftyTwoWeekLow"),
     fiftyTwoWeekHigh: pickNumber(record, "fiftyTwoWeekHigh"),
+    trailingPE: pickNumber(record, "trailingPE"),
     forwardPE: pickNumber(record, "forwardPE"),
     targetMeanPrice: pickNumber(record, "targetMeanPrice"),
     regularMarketChangePercent: pickNumber(record, "regularMarketChangePercent"),
