@@ -30,9 +30,12 @@ type Row = {
   marketCap: number | null;
   trailingPE: number | null;
   forwardPE: number | null;
+  pegRatio: number | null;
   twoHundredDayAverage: number | null;
   pctVs200dSma: number | null;
-  analystTargetMean: number | null;
+  aiSignal: "Bull" | "Neutral" | "Bear";
+  aiScore: number;
+  hasEncyclopedia: boolean;
 };
 
 function fmtMoney(n: number | null): string {
@@ -66,6 +69,24 @@ function allocationBadge(a: Allocation): string {
     case "Medium":
       return "border-amber-500/40 bg-amber-500/10 text-amber-300";
     case "Small":
+      return "border-muted-foreground/30 bg-muted-foreground/10 text-muted-foreground";
+  }
+}
+
+function pegColor(peg: number | null): string {
+  if (peg === null || !Number.isFinite(peg)) return "text-muted-foreground";
+  if (peg < 1.5) return "text-emerald-300";
+  if (peg <= 2) return "text-amber-300";
+  return "text-rose-300";
+}
+
+function aiSignalBadge(signal: "Bull" | "Neutral" | "Bear"): string {
+  switch (signal) {
+    case "Bull":
+      return "border-emerald-500/40 bg-emerald-500/10 text-emerald-300";
+    case "Bear":
+      return "border-rose-500/40 bg-rose-500/10 text-rose-300";
+    case "Neutral":
       return "border-muted-foreground/30 bg-muted-foreground/10 text-muted-foreground";
   }
 }
@@ -209,24 +230,25 @@ export function LongTermWatchlistView() {
               <th className="px-2 py-2 text-right">vs 200d</th>
               <th className="px-2 py-2 text-right">P/E</th>
               <th className="px-2 py-2 text-right">Fwd P/E</th>
+              <th className="px-2 py-2 text-right">PEG</th>
               <th className="px-2 py-2 text-right">52w Range</th>
               <th className="px-2 py-2 text-right">% off 52wH</th>
               <th className="px-2 py-2 text-right">Mkt Cap</th>
-              <th className="px-2 py-2 text-right">Analyst Tgt</th>
+              <th className="px-2 py-2 text-center">AI Signal</th>
               <th className="px-2 py-2"></th>
             </tr>
           </thead>
           <tbody>
             {loading && rows === null && (
               <tr>
-                <td colSpan={13} className="px-2 py-8 text-center">
+                <td colSpan={14} className="px-2 py-8 text-center">
                   <Loader2 className="mx-auto h-4 w-4 animate-spin text-muted-foreground" />
                 </td>
               </tr>
             )}
             {!loading && rows && rows.length === 0 && (
               <tr>
-                <td colSpan={13} className="px-2 py-8 text-center text-muted-foreground">
+                <td colSpan={14} className="px-2 py-8 text-center text-muted-foreground">
                   No symbols yet. Use Add Stock to start.
                 </td>
               </tr>
@@ -318,6 +340,11 @@ function WatchRow({
         </td>
         <td className="px-2 py-1.5 text-right font-mono">{fmtRatio(row.trailingPE)}</td>
         <td className="px-2 py-1.5 text-right font-mono">{fmtRatio(row.forwardPE)}</td>
+        <td className={cn("px-2 py-1.5 text-right font-mono", pegColor(row.pegRatio))}>
+          {row.pegRatio !== null && Number.isFinite(row.pegRatio)
+            ? row.pegRatio.toFixed(2)
+            : "—"}
+        </td>
         <td className="px-2 py-1.5 text-right font-mono text-muted-foreground">
           {row.fiftyTwoWeekLow !== null && row.fiftyTwoWeekHigh !== null
             ? `${row.fiftyTwoWeekLow.toFixed(0)}–${row.fiftyTwoWeekHigh.toFixed(0)}`
@@ -329,7 +356,18 @@ function WatchRow({
         <td className="px-2 py-1.5 text-right font-mono text-muted-foreground">
           {fmtMarketCap(row.marketCap)}
         </td>
-        <td className="px-2 py-1.5 text-right font-mono">{fmtMoney(row.analystTargetMean)}</td>
+        <td className="px-2 py-1.5 text-center">
+          <span
+            className={cn(
+              "inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider",
+              aiSignalBadge(row.aiSignal),
+            )}
+            title={`Score ${row.aiScore >= 0 ? "+" : ""}${row.aiScore} — see route.ts computeAiSignal for the rule cascade${row.hasEncyclopedia ? "\nEncyclopedia research available — click the symbol header." : ""}`}
+          >
+            {row.aiSignal}
+            {row.hasEncyclopedia && <span className="ml-0.5">📚</span>}
+          </span>
+        </td>
         <td className="px-2 py-1.5 text-right">
           <button
             type="button"
@@ -346,7 +384,7 @@ function WatchRow({
       </tr>
       {expanded && (
         <tr className="border-b border-border/40 bg-background/30">
-          <td colSpan={13} className="px-3 py-3">
+          <td colSpan={14} className="px-3 py-3">
             <div className="grid grid-cols-1 gap-3 md:grid-cols-[1fr_auto]">
               <label className="block">
                 <span className="text-[11px] uppercase tracking-wider text-muted-foreground">

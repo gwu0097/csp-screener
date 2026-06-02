@@ -155,6 +155,7 @@ export type QuoteEnrichment = {
   fiftyTwoWeekHigh: number | null;
   trailingPE: number | null;
   forwardPE: number | null;
+  pegRatio: number | null;
   targetMeanPrice: number | null;
   regularMarketChangePercent: number | null;
   fiftyDayAverage: number | null;
@@ -178,6 +179,12 @@ export async function getQuoteEnrichment(
     fiftyTwoWeekHigh: pickNumber(record, "fiftyTwoWeekHigh"),
     trailingPE: pickNumber(record, "trailingPE"),
     forwardPE: pickNumber(record, "forwardPE"),
+    // Yahoo's lightweight quote payload sometimes carries pegRatio
+    // directly; trailingPegRatio is the newer-style field. Take
+    // whichever is present, preferring the trailing variant since it
+    // matches the Yahoo Finance website's headline figure.
+    pegRatio:
+      pickNumber(record, "trailingPegRatio") ?? pickNumber(record, "pegRatio"),
     targetMeanPrice: pickNumber(record, "targetMeanPrice"),
     regularMarketChangePercent: pickNumber(record, "regularMarketChangePercent"),
     fiftyDayAverage: pickNumber(record, "fiftyDayAverage"),

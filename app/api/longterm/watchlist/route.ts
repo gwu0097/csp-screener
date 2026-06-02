@@ -24,6 +24,8 @@ type WatchlistRow = {
   updated_at: string;
 };
 
+type AiSignal = "Bull" | "Neutral" | "Bear";
+
 type EnrichedRow = WatchlistRow & {
   companyName: string | null;
   price: number | null;
@@ -34,10 +36,61 @@ type EnrichedRow = WatchlistRow & {
   marketCap: number | null;
   trailingPE: number | null;
   forwardPE: number | null;
+  pegRatio: number | null;
   twoHundredDayAverage: number | null;
   pctVs200dSma: number | null;
-  analystTargetMean: number | null;
+  aiSignal: AiSignal;
+  aiScore: number;
+  hasEncyclopedia: boolean;
 };
+
+// Pure scorer — server-computed so the badge is stable across browser
+// reloads and so the rule cascade is auditable in one place. Returns
+// the final signal plus the underlying integer score for debugging.
+function computeAiSignal(input: {
+  pegRatio: number | null;
+  trailingPE: number | null;
+  forwardPE: number | null;
+  pctVs200dSma: number | null;
+  pctFromFiftyTwoWeekHigh: number | null;
+}): { aiSignal: AiSignal; aiScore: number } {
+  let score = 0;
+
+  // Valuation
+  const peg = input.pegRatio;
+  if (peg !== null) {
+    if (peg < 1.0) score += 2;
+    else if (peg < 1.5) score += 1;
+    else if (peg < 2.0) score += 0;
+    else score -= 1;
+  }
+  const pe = input.trailingPE;
+  if (pe !== null) {
+    if (pe < 15) score += 1;
+    else if (pe > 40) score -= 1;
+  }
+  const fwd = input.forwardPE;
+  if (pe !== null && fwd !== null) {
+    if (fwd < pe) score += 1;
+    else if (fwd > pe) score -= 1;
+  }
+
+  // Momentum
+  const sma = input.pctVs200dSma;
+  if (sma !== null) {
+    if (sma > 5) score += 1;
+    else if (sma < -10) score -= 1;
+  }
+  const off52 = input.pctFromFiftyTwoWeekHigh;
+  if (off52 !== null) {
+    if (off52 < -50) score -= 1;
+    else if (off52 > -10) score += 1;
+  }
+
+  const aiSignal: AiSignal =
+    score >= 2 ? "Bull" : score <= -1 ? "Bear" : "Neutral";
+  return { aiSignal, aiScore: score };
+}
 
 const ALLOCATION_ORDER: Record<Allocation, number> = {
   Large: 0,
@@ -47,7 +100,10 @@ const ALLOCATION_ORDER: Record<Allocation, number> = {
 
 // Live-enrich one row from Yahoo. Failures fall back to null fields
 // so a single dead symbol doesn't blank the entire watchlist.
-async function enrich(row: WatchlistRow): Promise<EnrichedRow> {
+async function enrich(
+  row: WatchlistRow,
+  encyclopediaSet: Set<string>,
+): Promise<EnrichedRow> {
   let quote: Awaited<ReturnType<typeof getQuoteEnrichment>> = null;
   try {
     quote = await getQuoteEnrichment(row.symbol);
@@ -59,6 +115,24 @@ async function enrich(row: WatchlistRow): Promise<EnrichedRow> {
   const price = quote?.regularMarketPrice ?? null;
   const sma200 = quote?.twoHundredDayAverage ?? null;
   const fiftyTwoWeekHigh = quote?.fiftyTwoWeekHigh ?? null;
+  const pctFromFiftyTwoWeekHigh =
+    price !== null && fiftyTwoWeekHigh !== null && fiftyTwoWeekHigh > 0
+      ? ((price - fiftyTwoWeekHigh) / fiftyTwoWeekHigh) * 100
+      : null;
+  const pctVs200dSma =
+    price !== null && sma200 !== null && sma200 > 0
+      ? ((price - sma200) / sma200) * 100
+      : null;
+  const trailingPE = quote?.trailingPE ?? null;
+  const forwardPE = quote?.forwardPE ?? null;
+  const pegRatio = quote?.pegRatio ?? null;
+  const { aiSignal, aiScore } = computeAiSignal({
+    pegRatio,
+    trailingPE,
+    forwardPE,
+    pctVs200dSma,
+    pctFromFiftyTwoWeekHigh,
+  });
   return {
     ...row,
     companyName: quote?.companyName ?? null,
@@ -66,19 +140,16 @@ async function enrich(row: WatchlistRow): Promise<EnrichedRow> {
     changePct: quote?.regularMarketChangePercent ?? null,
     fiftyTwoWeekLow: quote?.fiftyTwoWeekLow ?? null,
     fiftyTwoWeekHigh,
-    pctFromFiftyTwoWeekHigh:
-      price !== null && fiftyTwoWeekHigh !== null && fiftyTwoWeekHigh > 0
-        ? ((price - fiftyTwoWeekHigh) / fiftyTwoWeekHigh) * 100
-        : null,
+    pctFromFiftyTwoWeekHigh,
     marketCap: quote?.marketCap ?? null,
-    trailingPE: quote?.trailingPE ?? null,
-    forwardPE: quote?.forwardPE ?? null,
+    trailingPE,
+    forwardPE,
+    pegRatio,
     twoHundredDayAverage: sma200,
-    pctVs200dSma:
-      price !== null && sma200 !== null && sma200 > 0
-        ? ((price - sma200) / sma200) * 100
-        : null,
-    analystTargetMean: quote?.targetMeanPrice ?? null,
+    pctVs200dSma,
+    aiSignal,
+    aiScore,
+    hasEncyclopedia: encyclopediaSet.has(row.symbol),
   };
 }
 
@@ -98,9 +169,30 @@ export async function GET() {
     if (ao !== bo) return ao - bo;
     return a.symbol.localeCompare(b.symbol);
   });
-  // Parallel enrichment — Yahoo handles ~30 simultaneous quote calls
-  // fine, and the list stays well under that.
-  const enriched = await Promise.all(rows.map(enrich));
+  // Pull the set of symbols that have an encyclopedia row so we can
+  // flag the AI Signal badge with 📚. Cheap single-query lookup; runs
+  // before the Yahoo pulls because the Set is needed inside enrich().
+  const symbols = rows.map((r) => r.symbol);
+  const encyclopediaSet = new Set<string>();
+  if (symbols.length > 0) {
+    const encRes = await sb
+      .from("stock_encyclopedia")
+      .select("symbol")
+      .in("symbol", symbols);
+    if (!encRes.error) {
+      for (const r of (encRes.data ?? []) as Array<{ symbol: string }>) {
+        encyclopediaSet.add(r.symbol);
+      }
+    } else {
+      console.warn(
+        `[watchlist] stock_encyclopedia lookup failed: ${encRes.error.message}`,
+      );
+    }
+  }
+  // Parallel Yahoo enrichment — keeps the cold-load under ~3s.
+  const enriched = await Promise.all(
+    rows.map((r) => enrich(r, encyclopediaSet)),
+  );
   return NextResponse.json({ watchlist: enriched });
 }
 
