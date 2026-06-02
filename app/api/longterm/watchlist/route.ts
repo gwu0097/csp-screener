@@ -24,8 +24,24 @@ type WatchlistRow = {
   updated_at: string;
 };
 
-type AiSignal = "Bull" | "Neutral" | "Bear";
 type Action = "TAKE_PROFIT" | "DCA" | "CUT" | "HOLD";
+
+// Multi-flag system replaces the prior Bull/Neutral/Bear classifier.
+// Multiple flags can fire on a single row; the UI shows up to two and
+// stuffs the rest into a tooltip.
+type FlagKind =
+  | "COMPOUNDER"
+  | "TURNAROUND"
+  | "VALUE_TRAP"
+  | "STRETCHED"
+  | "DEAD_WEIGHT"
+  | "FALLING_KNIFE";
+
+type Flag = {
+  kind: FlagKind;
+  label: string;
+  description: string;
+};
 
 type EnrichedRow = WatchlistRow & {
   companyName: string | null;
@@ -41,8 +57,11 @@ type EnrichedRow = WatchlistRow & {
   twoHundredDayAverage: number | null;
   pctVs200dSma: number | null;
   momentum3mPct: number | null;
-  aiSignal: AiSignal;
-  aiScore: number;
+  return3yPct: number | null;
+  vsSpy3yPct: number | null;
+  buyZone: { low: number; high: number } | null;
+  sellZone: { low: number; high: number } | null;
+  flags: Flag[];
   action: Action;
   hasEncyclopedia: boolean;
 };
@@ -51,54 +70,107 @@ type Alert = {
   kind: "big_move" | "falling_knife" | "extended";
   symbol: string;
   message: string;
+  changePct: number | null;
+  timeframeForCatalyst: "1d" | "1w" | "1m";
 };
 
-// Pure scorer — server-computed so the badge is stable across browser
-// reloads and so the rule cascade is auditable in one place. Returns
-// the final signal plus the underlying integer score for debugging.
-function computeAiSignal(input: {
-  pegRatio: number | null;
-  trailingPE: number | null;
-  forwardPE: number | null;
-  pctVs200dSma: number | null;
+// Multi-flag classifier. Each rule checks for a specific
+// long-horizon pattern and the combination of flags on a row tells the
+// story. Severity-ordered so DEAD_WEIGHT and FALLING_KNIFE land first
+// when both are visible (only 2 fit on the row).
+function computeFlags(input: {
   pctFromFiftyTwoWeekHigh: number | null;
-}): { aiSignal: AiSignal; aiScore: number } {
-  let score = 0;
-
-  // Valuation
-  const peg = input.pegRatio;
-  if (peg !== null) {
-    if (peg < 1.0) score += 2;
-    else if (peg < 1.5) score += 1;
-    else if (peg < 2.0) score += 0;
-    else score -= 1;
-  }
-  const pe = input.trailingPE;
-  if (pe !== null) {
-    if (pe < 15) score += 1;
-    else if (pe > 40) score -= 1;
-  }
-  const fwd = input.forwardPE;
-  if (pe !== null && fwd !== null) {
-    if (fwd < pe) score += 1;
-    else if (fwd > pe) score -= 1;
-  }
-
-  // Momentum
+  pctVs200dSma: number | null;
+  momentum3mPct: number | null;
+  return3yPct: number | null;
+  vsSpy3yPct: number | null;
+  trailingPE: number | null;
+  pegRatio: number | null;
+}): Flag[] {
+  const out: Flag[] = [];
+  const offHigh = input.pctFromFiftyTwoWeekHigh;
   const sma = input.pctVs200dSma;
-  if (sma !== null) {
-    if (sma > 5) score += 1;
-    else if (sma < -10) score -= 1;
+  const mom = input.momentum3mPct;
+  const r3y = input.return3yPct;
+  const vsSpy = input.vsSpy3yPct;
+  const pe = input.trailingPE;
+  const peg = input.pegRatio;
+
+  // Severity-ordered. Visible slot 1+2 belong to the top two flags on
+  // the row; everything else falls into the tooltip.
+
+  // DEAD_WEIGHT — chronic underperformer, no recovery signal.
+  if (
+    vsSpy !== null && vsSpy < -30 &&
+    mom !== null && mom < -5 &&
+    sma !== null && sma < -10
+  ) {
+    out.push({
+      kind: "DEAD_WEIGHT",
+      label: "Dead Weight",
+      description: "Chronically underperforming SPY with no recovery signal.",
+    });
   }
-  const off52 = input.pctFromFiftyTwoWeekHigh;
-  if (off52 !== null) {
-    if (off52 < -50) score -= 1;
-    else if (off52 > -10) score += 1;
+  // FALLING_KNIFE — deep drawdown, vs200d weak, momentum negative.
+  if (
+    offHigh !== null && offHigh < -50 &&
+    sma !== null && sma < -20 &&
+    mom !== null && mom < -20
+  ) {
+    out.push({
+      kind: "FALLING_KNIFE",
+      label: "Falling Knife",
+      description: "Down 50%+ from highs and still falling — review position.",
+    });
+  }
+  // VALUE_TRAP — cheap on PEG but the market disagrees.
+  if (
+    peg !== null && peg < 2 &&
+    r3y !== null && r3y < 0 &&
+    vsSpy !== null && vsSpy < -20
+  ) {
+    out.push({
+      kind: "VALUE_TRAP",
+      label: "Value Trap",
+      description: "Low valuation but the market disagrees — multi-year underperformance.",
+    });
+  }
+  // STRETCHED — at highs and expensive.
+  if (
+    offHigh !== null && offHigh > -5 &&
+    pe !== null && pe > 35
+  ) {
+    out.push({
+      kind: "STRETCHED",
+      label: "Stretched",
+      description: "Within 5% of 52w high and trading at >35× earnings — consider trimming.",
+    });
+  }
+  // TURNAROUND — beaten down long-term, recent recovery.
+  if (
+    r3y !== null && r3y < -20 &&
+    mom !== null && mom > 15
+  ) {
+    out.push({
+      kind: "TURNAROUND",
+      label: "Turnaround",
+      description: "Down >20% over 3 years, but the last quarter has flipped positive.",
+    });
+  }
+  // COMPOUNDER — consistently beating the market.
+  if (
+    vsSpy !== null && vsSpy > 20 &&
+    sma !== null && sma > 0 &&
+    mom !== null && mom > 0
+  ) {
+    out.push({
+      kind: "COMPOUNDER",
+      label: "Compounder",
+      description: "Beats SPY by >20% over 3 years, above 200d, positive momentum.",
+    });
   }
 
-  const aiSignal: AiSignal =
-    score >= 2 ? "Bull" : score <= -1 ? "Bear" : "Neutral";
-  return { aiSignal, aiScore: score };
+  return out;
 }
 
 // Action signal — order of evaluation matches severity. CUT first
@@ -173,6 +245,74 @@ async function getMomentum3m(symbol: string): Promise<number | null> {
   }
 }
 
+function threeYearsAgo(): Date {
+  return new Date(Date.now() - 3 * 365 * 24 * 60 * 60 * 1000);
+}
+
+async function get3YReturn(symbol: string): Promise<number | null> {
+  try {
+    const bars = await getHistoricalPrices(symbol, threeYearsAgo(), new Date());
+    if (bars.length === 0) return null;
+    const sorted = [...bars].sort(
+      (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime(),
+    );
+    const earliest = sorted[0]?.close;
+    const latest = sorted[sorted.length - 1]?.close;
+    if (
+      typeof earliest !== "number" ||
+      typeof latest !== "number" ||
+      earliest <= 0
+    ) {
+      return null;
+    }
+    return ((latest - earliest) / earliest) * 100;
+  } catch {
+    return null;
+  }
+}
+
+// V1 buy/sell zones. Conservative bands tied to 52w + 200d landmarks.
+// Only surface when the current price is within 15% of the zone so the
+// row doesn't show stale guidance for stocks deep in the middle of
+// their range.
+function computeZones(input: {
+  price: number | null;
+  low52: number | null;
+  high52: number | null;
+  sma200: number | null;
+}): {
+  buyZone: { low: number; high: number } | null;
+  sellZone: { low: number; high: number } | null;
+} {
+  const price = input.price;
+  const low = input.low52;
+  const high = input.high52;
+  const sma = input.sma200;
+  if (price === null) return { buyZone: null, sellZone: null };
+
+  let buyZone: { low: number; high: number } | null = null;
+  if (low !== null && sma !== null) {
+    const bLow = low * 1.05;
+    const bHigh = sma * 0.98;
+    if (bHigh > bLow) {
+      // Within 15% of the band (above the high end of the band still
+      // counts when the price hasn't quite dropped in yet).
+      const dist = price < bLow ? (bLow - price) / bLow : price > bHigh ? (price - bHigh) / bHigh : 0;
+      if (dist <= 0.15) buyZone = { low: bLow, high: bHigh };
+    }
+  }
+  let sellZone: { low: number; high: number } | null = null;
+  if (sma !== null && high !== null) {
+    const sLow = sma * 1.15;
+    const sHigh = high * 0.98;
+    if (sHigh > sLow) {
+      const dist = price < sLow ? (sLow - price) / sLow : price > sHigh ? (price - sHigh) / sHigh : 0;
+      if (dist <= 0.15) sellZone = { low: sLow, high: sHigh };
+    }
+  }
+  return { buyZone, sellZone };
+}
+
 const ALLOCATION_ORDER: Record<Allocation, number> = {
   Large: 0,
   Medium: 1,
@@ -184,10 +324,12 @@ const ALLOCATION_ORDER: Record<Allocation, number> = {
 async function enrich(
   row: WatchlistRow,
   encyclopediaSet: Set<string>,
+  spy3yPct: number | null,
 ): Promise<EnrichedRow> {
-  // Quote + 3-month historical run in parallel — saves ~half the
-  // cold-load time per row (2-call symbols).
-  const [quote, momentum3mPct] = await Promise.all([
+  // Quote + 3-month + 3-year histories run in parallel — each row is
+  // ~3 Yahoo calls. With Promise.all per row + Promise.all across the
+  // list, the bottleneck is the slowest single symbol.
+  const [quote, momentum3mPct, return3yPct] = await Promise.all([
     getQuoteEnrichment(row.symbol).catch((e) => {
       console.warn(
         `[watchlist] getQuoteEnrichment(${row.symbol}) threw: ${e instanceof Error ? e.message : e}`,
@@ -195,10 +337,12 @@ async function enrich(
       return null;
     }),
     getMomentum3m(row.symbol),
+    get3YReturn(row.symbol),
   ]);
 
   const price = quote?.regularMarketPrice ?? null;
   const sma200 = quote?.twoHundredDayAverage ?? null;
+  const fiftyTwoWeekLow = quote?.fiftyTwoWeekLow ?? null;
   const fiftyTwoWeekHigh = quote?.fiftyTwoWeekHigh ?? null;
   const pctFromFiftyTwoWeekHigh =
     price !== null && fiftyTwoWeekHigh !== null && fiftyTwoWeekHigh > 0
@@ -211,13 +355,8 @@ async function enrich(
   const trailingPE = quote?.trailingPE ?? null;
   const forwardPE = quote?.forwardPE ?? null;
   const pegRatio = quote?.pegRatio ?? null;
-  const { aiSignal, aiScore } = computeAiSignal({
-    pegRatio,
-    trailingPE,
-    forwardPE,
-    pctVs200dSma,
-    pctFromFiftyTwoWeekHigh,
-  });
+  const vsSpy3yPct =
+    return3yPct !== null && spy3yPct !== null ? return3yPct - spy3yPct : null;
   const action = computeAction({
     pctFromFiftyTwoWeekHigh,
     pctVs200dSma,
@@ -225,12 +364,31 @@ async function enrich(
     trailingPE,
     pegRatio,
   });
+  const flags = computeFlags({
+    pctFromFiftyTwoWeekHigh,
+    pctVs200dSma,
+    momentum3mPct,
+    return3yPct,
+    vsSpy3yPct,
+    trailingPE,
+    pegRatio,
+  });
+  const { buyZone, sellZone } = computeZones({
+    price,
+    low52: fiftyTwoWeekLow,
+    high52: fiftyTwoWeekHigh,
+    sma200,
+  });
+  // Forward PE is consumed by the legacy AI scorer that no longer
+  // drives the UI, but we keep it on the wire so the response shape
+  // stays useful for debugging.
+  void forwardPE;
   return {
     ...row,
     companyName: quote?.companyName ?? null,
     price,
     changePct: quote?.regularMarketChangePercent ?? null,
-    fiftyTwoWeekLow: quote?.fiftyTwoWeekLow ?? null,
+    fiftyTwoWeekLow,
     fiftyTwoWeekHigh,
     pctFromFiftyTwoWeekHigh,
     marketCap: quote?.marketCap ?? null,
@@ -240,8 +398,11 @@ async function enrich(
     twoHundredDayAverage: sma200,
     pctVs200dSma,
     momentum3mPct,
-    aiSignal,
-    aiScore,
+    return3yPct,
+    vsSpy3yPct,
+    buyZone,
+    sellZone,
+    flags,
     action,
     hasEncyclopedia: encyclopediaSet.has(row.symbol),
   };
@@ -249,16 +410,18 @@ async function enrich(
 
 // Pure alert builder — runs over the enriched list and returns the
 // rows that match each rule. Same severity ordering as computeAction.
+// timeframeForCatalyst hints the catalyst route at the right window:
+// 1d for today's moves, 1m for chronic drawdowns.
 function buildAlerts(rows: EnrichedRow[]): Alert[] {
   const alerts: Alert[] = [];
   for (const r of rows) {
-    // Big moves first so they sit at the top of the panel — they're
-    // the most time-sensitive signal.
     if (r.changePct !== null && Math.abs(r.changePct) > 5) {
       const sign = r.changePct >= 0 ? "+" : "";
       alerts.push({
         kind: "big_move",
         symbol: r.symbol,
+        changePct: r.changePct,
+        timeframeForCatalyst: "1d",
         message: `${r.symbol} moved ${sign}${r.changePct.toFixed(2)}% today.`,
       });
     }
@@ -271,6 +434,8 @@ function buildAlerts(rows: EnrichedRow[]): Alert[] {
       alerts.push({
         kind: "falling_knife",
         symbol: r.symbol,
+        changePct: r.momentum3mPct,
+        timeframeForCatalyst: "1m",
         message: `${r.symbol} down ${Math.abs(r.pctFromFiftyTwoWeekHigh).toFixed(1)}% from highs and still falling (3M ${r.momentum3mPct.toFixed(1)}%) — review position.`,
       });
     }
@@ -283,6 +448,8 @@ function buildAlerts(rows: EnrichedRow[]): Alert[] {
       alerts.push({
         kind: "extended",
         symbol: r.symbol,
+        changePct: r.changePct,
+        timeframeForCatalyst: "1w",
         message: `${r.symbol} near highs and expensive (P/E ${r.trailingPE.toFixed(1)}) — consider taking profits.`,
       });
     }
@@ -326,12 +493,18 @@ export async function GET() {
       );
     }
   }
-  // Parallel Yahoo enrichment — keeps the cold-load under ~3s.
+  // SPY 3Y benchmark — fetched once and reused as the "market" leg of
+  // the vsSpy3yPct computation. Failure falls through to null which
+  // suppresses the vs-SPY column entry on each row.
+  const spy3yPct = await get3YReturn("SPY");
+
+  // Parallel Yahoo enrichment — keeps the cold-load under ~4s with the
+  // added 3Y fetch per symbol.
   const enriched = await Promise.all(
-    rows.map((r) => enrich(r, encyclopediaSet)),
+    rows.map((r) => enrich(r, encyclopediaSet, spy3yPct)),
   );
   const alerts = buildAlerts(enriched);
-  return NextResponse.json({ watchlist: enriched, alerts });
+  return NextResponse.json({ watchlist: enriched, alerts, spy3yPct });
 }
 
 type CreateBody = { symbol?: unknown; allocation?: unknown; notes?: unknown };
