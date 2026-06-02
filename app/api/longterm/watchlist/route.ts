@@ -7,7 +7,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
-import { getQuoteEnrichment } from "@/lib/yahoo";
+import { getHistoricalPrices, getQuoteEnrichment } from "@/lib/yahoo";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -25,6 +25,7 @@ type WatchlistRow = {
 };
 
 type AiSignal = "Bull" | "Neutral" | "Bear";
+type Action = "TAKE_PROFIT" | "DCA" | "CUT" | "HOLD";
 
 type EnrichedRow = WatchlistRow & {
   companyName: string | null;
@@ -39,9 +40,17 @@ type EnrichedRow = WatchlistRow & {
   pegRatio: number | null;
   twoHundredDayAverage: number | null;
   pctVs200dSma: number | null;
+  momentum3mPct: number | null;
   aiSignal: AiSignal;
   aiScore: number;
+  action: Action;
   hasEncyclopedia: boolean;
+};
+
+type Alert = {
+  kind: "big_move" | "falling_knife" | "extended";
+  symbol: string;
+  message: string;
 };
 
 // Pure scorer — server-computed so the badge is stable across browser
@@ -92,6 +101,78 @@ function computeAiSignal(input: {
   return { aiSignal, aiScore: score };
 }
 
+// Action signal — order of evaluation matches severity. CUT first
+// (most actionable warning), then DCA (opportunity), then TAKE_PROFIT
+// (extended), else HOLD. Each rule needs every input non-null to fire
+// — a missing fundamentals signal collapses to HOLD instead of false
+// positives.
+function computeAction(input: {
+  pctFromFiftyTwoWeekHigh: number | null;
+  pctVs200dSma: number | null;
+  momentum3mPct: number | null;
+  trailingPE: number | null;
+  pegRatio: number | null;
+}): Action {
+  const offHigh = input.pctFromFiftyTwoWeekHigh;
+  const sma = input.pctVs200dSma;
+  const mom = input.momentum3mPct;
+  const pe = input.trailingPE;
+  const peg = input.pegRatio;
+
+  // CUT — falling knife: deep drawdown, below 200d, still decaying.
+  if (
+    offHigh !== null && offHigh < -50 &&
+    sma !== null && sma < -20 &&
+    mom !== null && mom < -20
+  ) {
+    return "CUT";
+  }
+  // DCA — 30%+ off highs, fundamentals intact, not in freefall.
+  if (
+    offHigh !== null && offHigh < -30 &&
+    peg !== null && peg < 2.5 &&
+    sma !== null && sma > -25
+  ) {
+    return "DCA";
+  }
+  // TAKE_PROFIT — near 52w high AND (expensive OR very extended trend).
+  if (
+    offHigh !== null && offHigh > -10 &&
+    ((pe !== null && pe > 35) || (sma !== null && sma > 20))
+  ) {
+    return "TAKE_PROFIT";
+  }
+  return "HOLD";
+}
+
+// Approx 90 calendar days back. Yahoo bars only land on trading days,
+// so we ask for a slightly wider window and use the earliest close.
+function ninetyDaysAgo(): Date {
+  return new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+}
+
+async function getMomentum3m(symbol: string): Promise<number | null> {
+  try {
+    const bars = await getHistoricalPrices(symbol, ninetyDaysAgo(), new Date());
+    if (bars.length === 0) return null;
+    const sorted = [...bars].sort(
+      (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime(),
+    );
+    const earliest = sorted[0]?.close;
+    const latest = sorted[sorted.length - 1]?.close;
+    if (
+      typeof earliest !== "number" ||
+      typeof latest !== "number" ||
+      earliest <= 0
+    ) {
+      return null;
+    }
+    return ((latest - earliest) / earliest) * 100;
+  } catch {
+    return null;
+  }
+}
+
 const ALLOCATION_ORDER: Record<Allocation, number> = {
   Large: 0,
   Medium: 1,
@@ -104,14 +185,18 @@ async function enrich(
   row: WatchlistRow,
   encyclopediaSet: Set<string>,
 ): Promise<EnrichedRow> {
-  let quote: Awaited<ReturnType<typeof getQuoteEnrichment>> = null;
-  try {
-    quote = await getQuoteEnrichment(row.symbol);
-  } catch (e) {
-    console.warn(
-      `[watchlist] getQuoteEnrichment(${row.symbol}) threw: ${e instanceof Error ? e.message : e}`,
-    );
-  }
+  // Quote + 3-month historical run in parallel — saves ~half the
+  // cold-load time per row (2-call symbols).
+  const [quote, momentum3mPct] = await Promise.all([
+    getQuoteEnrichment(row.symbol).catch((e) => {
+      console.warn(
+        `[watchlist] getQuoteEnrichment(${row.symbol}) threw: ${e instanceof Error ? e.message : e}`,
+      );
+      return null;
+    }),
+    getMomentum3m(row.symbol),
+  ]);
+
   const price = quote?.regularMarketPrice ?? null;
   const sma200 = quote?.twoHundredDayAverage ?? null;
   const fiftyTwoWeekHigh = quote?.fiftyTwoWeekHigh ?? null;
@@ -133,6 +218,13 @@ async function enrich(
     pctVs200dSma,
     pctFromFiftyTwoWeekHigh,
   });
+  const action = computeAction({
+    pctFromFiftyTwoWeekHigh,
+    pctVs200dSma,
+    momentum3mPct,
+    trailingPE,
+    pegRatio,
+  });
   return {
     ...row,
     companyName: quote?.companyName ?? null,
@@ -147,10 +239,55 @@ async function enrich(
     pegRatio,
     twoHundredDayAverage: sma200,
     pctVs200dSma,
+    momentum3mPct,
     aiSignal,
     aiScore,
+    action,
     hasEncyclopedia: encyclopediaSet.has(row.symbol),
   };
+}
+
+// Pure alert builder — runs over the enriched list and returns the
+// rows that match each rule. Same severity ordering as computeAction.
+function buildAlerts(rows: EnrichedRow[]): Alert[] {
+  const alerts: Alert[] = [];
+  for (const r of rows) {
+    // Big moves first so they sit at the top of the panel — they're
+    // the most time-sensitive signal.
+    if (r.changePct !== null && Math.abs(r.changePct) > 5) {
+      const sign = r.changePct >= 0 ? "+" : "";
+      alerts.push({
+        kind: "big_move",
+        symbol: r.symbol,
+        message: `${r.symbol} moved ${sign}${r.changePct.toFixed(2)}% today.`,
+      });
+    }
+    if (
+      r.pctFromFiftyTwoWeekHigh !== null &&
+      r.pctFromFiftyTwoWeekHigh < -50 &&
+      r.momentum3mPct !== null &&
+      r.momentum3mPct < 0
+    ) {
+      alerts.push({
+        kind: "falling_knife",
+        symbol: r.symbol,
+        message: `${r.symbol} down ${Math.abs(r.pctFromFiftyTwoWeekHigh).toFixed(1)}% from highs and still falling (3M ${r.momentum3mPct.toFixed(1)}%) — review position.`,
+      });
+    }
+    if (
+      r.pctFromFiftyTwoWeekHigh !== null &&
+      r.pctFromFiftyTwoWeekHigh > -5 &&
+      r.trailingPE !== null &&
+      r.trailingPE > 30
+    ) {
+      alerts.push({
+        kind: "extended",
+        symbol: r.symbol,
+        message: `${r.symbol} near highs and expensive (P/E ${r.trailingPE.toFixed(1)}) — consider taking profits.`,
+      });
+    }
+  }
+  return alerts;
 }
 
 export async function GET() {
@@ -193,7 +330,8 @@ export async function GET() {
   const enriched = await Promise.all(
     rows.map((r) => enrich(r, encyclopediaSet)),
   );
-  return NextResponse.json({ watchlist: enriched });
+  const alerts = buildAlerts(enriched);
+  return NextResponse.json({ watchlist: enriched, alerts });
 }
 
 type CreateBody = { symbol?: unknown; allocation?: unknown; notes?: unknown };

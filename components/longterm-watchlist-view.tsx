@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { Loader2, Plus, Trash2, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
+import { ChevronDown, ChevronUp, Loader2, Plus, Trash2, X } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -13,6 +14,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 type Allocation = "Large" | "Medium" | "Small";
+type Action = "TAKE_PROFIT" | "DCA" | "CUT" | "HOLD";
 
 type Row = {
   id: string;
@@ -33,9 +35,17 @@ type Row = {
   pegRatio: number | null;
   twoHundredDayAverage: number | null;
   pctVs200dSma: number | null;
+  momentum3mPct: number | null;
   aiSignal: "Bull" | "Neutral" | "Bear";
   aiScore: number;
+  action: Action;
   hasEncyclopedia: boolean;
+};
+
+type Alert = {
+  kind: "big_move" | "falling_knife" | "extended";
+  symbol: string;
+  message: string;
 };
 
 function fmtMoney(n: number | null): string {
@@ -52,14 +62,6 @@ function fmtPct(n: number | null): string {
 function fmtRatio(n: number | null): string {
   if (n === null || !Number.isFinite(n)) return "—";
   return n.toFixed(1);
-}
-
-function fmtMarketCap(n: number | null): string {
-  if (n === null || !Number.isFinite(n)) return "—";
-  if (n >= 1e12) return `$${(n / 1e12).toFixed(2)}T`;
-  if (n >= 1e9) return `$${(n / 1e9).toFixed(2)}B`;
-  if (n >= 1e6) return `$${(n / 1e6).toFixed(2)}M`;
-  return `$${n.toLocaleString()}`;
 }
 
 function allocationBadge(a: Allocation): string {
@@ -91,8 +93,95 @@ function aiSignalBadge(signal: "Bull" | "Neutral" | "Bear"): string {
   }
 }
 
+function actionLabel(a: Action): string {
+  switch (a) {
+    case "TAKE_PROFIT":
+      return "🟡 Take Profit";
+    case "DCA":
+      return "🟢 DCA";
+    case "CUT":
+      return "🔴 Cut";
+    case "HOLD":
+      return "⚪ Hold";
+  }
+}
+
+function actionBadge(a: Action): string {
+  switch (a) {
+    case "TAKE_PROFIT":
+      return "border-amber-500/40 bg-amber-500/10 text-amber-300";
+    case "DCA":
+      return "border-emerald-500/40 bg-emerald-500/10 text-emerald-300";
+    case "CUT":
+      return "border-rose-500/40 bg-rose-500/10 text-rose-300";
+    case "HOLD":
+      return "border-muted-foreground/30 bg-muted-foreground/10 text-muted-foreground";
+  }
+}
+
+function alertBadgeClass(kind: Alert["kind"]): string {
+  switch (kind) {
+    case "big_move":
+      return "border-sky-500/40 bg-sky-500/10 text-sky-200";
+    case "falling_knife":
+      return "border-rose-500/40 bg-rose-500/10 text-rose-200";
+    case "extended":
+      return "border-amber-500/40 bg-amber-500/10 text-amber-200";
+  }
+}
+
+function alertKindLabel(kind: Alert["kind"]): string {
+  switch (kind) {
+    case "big_move":
+      return "BIG MOVE";
+    case "falling_knife":
+      return "FALLING KNIFE";
+    case "extended":
+      return "EXTENDED";
+  }
+}
+
+// Visual 52-week range bar. Left portion (low → current) tinted to
+// flag headroom-already-consumed; right portion (current → high)
+// stays neutral. Dot marks current price. Used inline in the row.
+function FiftyTwoWeekBar({
+  price,
+  low,
+  high,
+}: {
+  price: number | null;
+  low: number | null;
+  high: number | null;
+}) {
+  if (price === null || low === null || high === null || high <= low) {
+    return <span className="text-muted-foreground">—</span>;
+  }
+  const fraction = Math.max(0, Math.min(1, (price - low) / (high - low)));
+  const pctLeft = fraction * 100;
+  return (
+    <div className="flex flex-col items-stretch gap-0.5">
+      <div className="relative h-2 w-24 overflow-hidden rounded bg-muted/30">
+        <div
+          className="absolute inset-y-0 left-0 bg-amber-500/50"
+          style={{ width: `${pctLeft}%` }}
+        />
+        <div
+          className="absolute top-1/2 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border border-background bg-foreground"
+          style={{ left: `${pctLeft}%` }}
+        />
+      </div>
+      <div className="flex justify-between text-[9px] font-mono text-muted-foreground/70">
+        <span>{low.toFixed(0)}</span>
+        <span>{high.toFixed(0)}</span>
+      </div>
+    </div>
+  );
+}
+
 export function LongTermWatchlistView() {
   const [rows, setRows] = useState<Row[] | null>(null);
+  const [alerts, setAlerts] = useState<Alert[]>([]);
+  const [alertsOpen, setAlertsOpen] = useState(true);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
@@ -103,18 +192,34 @@ export function LongTermWatchlistView() {
     setError(null);
     try {
       const res = await fetch("/api/longterm/watchlist", { cache: "no-store" });
-      const json = (await res.json()) as { watchlist?: Row[]; error?: string };
+      const json = (await res.json()) as {
+        watchlist?: Row[];
+        alerts?: Alert[];
+        error?: string;
+      };
       if (!res.ok || json.error) {
         throw new Error(json.error ?? `HTTP ${res.status}`);
       }
       setRows(json.watchlist ?? []);
+      setAlerts(json.alerts ?? []);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load");
       setRows([]);
+      setAlerts([]);
     } finally {
       setLoading(false);
     }
   }, []);
+
+  const alertGroups = useMemo(() => {
+    const byKind: Record<Alert["kind"], Alert[]> = {
+      big_move: [],
+      falling_knife: [],
+      extended: [],
+    };
+    for (const a of alerts) byKind[a.kind].push(a);
+    return byKind;
+  }, [alerts]);
 
   useEffect(() => {
     void refetch();
@@ -218,8 +323,15 @@ export function LongTermWatchlistView() {
         </div>
       )}
 
+      <AlertsPanel
+        alerts={alerts}
+        groups={alertGroups}
+        open={alertsOpen}
+        onToggle={() => setAlertsOpen((s) => !s)}
+      />
+
       <div className="overflow-x-auto rounded-md border border-border bg-background/40">
-        <table className="w-full text-xs">
+        <table className="w-full min-w-[1100px] text-xs">
           <thead className="border-b border-border bg-background/60 text-[11px] uppercase tracking-wider text-muted-foreground">
             <tr>
               <th className="px-2 py-2 text-left">Symbol</th>
@@ -227,28 +339,27 @@ export function LongTermWatchlistView() {
               <th className="px-2 py-2 text-left">Allocation</th>
               <th className="px-2 py-2 text-right">Price</th>
               <th className="px-2 py-2 text-right">Change%</th>
-              <th className="px-2 py-2 text-right">vs 200d</th>
+              <th className="px-2 py-2 text-center">52W Range</th>
+              <th className="px-2 py-2 text-right">Trend (200d)</th>
+              <th className="px-2 py-2 text-right">3M Mom</th>
               <th className="px-2 py-2 text-right">P/E</th>
-              <th className="px-2 py-2 text-right">Fwd P/E</th>
               <th className="px-2 py-2 text-right">PEG</th>
-              <th className="px-2 py-2 text-right">52w Range</th>
-              <th className="px-2 py-2 text-right">% off 52wH</th>
-              <th className="px-2 py-2 text-right">Mkt Cap</th>
               <th className="px-2 py-2 text-center">AI Signal</th>
+              <th className="px-2 py-2 text-center">Action</th>
               <th className="px-2 py-2"></th>
             </tr>
           </thead>
           <tbody>
             {loading && rows === null && (
               <tr>
-                <td colSpan={14} className="px-2 py-8 text-center">
+                <td colSpan={13} className="px-2 py-8 text-center">
                   <Loader2 className="mx-auto h-4 w-4 animate-spin text-muted-foreground" />
                 </td>
               </tr>
             )}
             {!loading && rows && rows.length === 0 && (
               <tr>
-                <td colSpan={14} className="px-2 py-8 text-center text-muted-foreground">
+                <td colSpan={13} className="px-2 py-8 text-center text-muted-foreground">
                   No symbols yet. Use Add Stock to start.
                 </td>
               </tr>
@@ -275,6 +386,86 @@ export function LongTermWatchlistView() {
           void refetch();
         }}
       />
+    </div>
+  );
+}
+
+function AlertsPanel({
+  alerts,
+  groups,
+  open,
+  onToggle,
+}: {
+  alerts: Alert[];
+  groups: Record<Alert["kind"], Alert[]>;
+  open: boolean;
+  onToggle: () => void;
+}) {
+  if (alerts.length === 0) return null;
+  const ordered = (
+    [
+      { kind: "falling_knife", items: groups.falling_knife },
+      { kind: "extended", items: groups.extended },
+      { kind: "big_move", items: groups.big_move },
+    ] as Array<{ kind: Alert["kind"]; items: Alert[] }>
+  ).filter((g) => g.items.length > 0);
+  const total = alerts.length;
+  return (
+    <div className="rounded-md border border-border bg-background/40">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left hover:bg-background/60"
+      >
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-semibold">Signals & Alerts</span>
+          <span className="rounded border border-border bg-background px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            {total} active
+          </span>
+        </div>
+        {open ? (
+          <ChevronUp className="h-4 w-4 text-muted-foreground" />
+        ) : (
+          <ChevronDown className="h-4 w-4 text-muted-foreground" />
+        )}
+      </button>
+      {open && (
+        <div className="space-y-2 border-t border-border px-3 py-3 text-xs">
+          {ordered.map(({ kind, items }) => (
+            <div key={kind} className="space-y-1">
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                {alertKindLabel(kind)} · {items.length}
+              </div>
+              <ul className="space-y-1">
+                {items.map((a, i) => (
+                  <li
+                    key={`${a.kind}-${a.symbol}-${i}`}
+                    className="flex items-center justify-between gap-3 rounded border border-border/60 bg-background/40 px-2 py-1.5"
+                  >
+                    <span className="flex items-center gap-2">
+                      <span
+                        className={cn(
+                          "rounded border px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wider",
+                          alertBadgeClass(a.kind),
+                        )}
+                      >
+                        {alertKindLabel(a.kind)}
+                      </span>
+                      <span>{a.message}</span>
+                    </span>
+                    <Link
+                      href={`/longterm/research?symbol=${encodeURIComponent(a.symbol)}`}
+                      className="rounded border border-border bg-background px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground hover:border-foreground/40 hover:text-foreground"
+                    >
+                      Deep Research →
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -313,6 +504,13 @@ function WatchRow({
           ? "text-amber-300"
           : "text-rose-300";
 
+  const momentumColor =
+    row.momentum3mPct === null
+      ? "text-muted-foreground"
+      : row.momentum3mPct >= 0
+        ? "text-emerald-300"
+        : "text-rose-300";
+
   return (
     <>
       <tr
@@ -335,26 +533,33 @@ function WatchRow({
         <td className={cn("px-2 py-1.5 text-right font-mono", changeColor)}>
           {fmtPct(row.changePct)}
         </td>
+        <td
+          className={cn("px-2 py-1.5 align-middle", high52Color)}
+          title={
+            row.pctFromFiftyTwoWeekHigh !== null
+              ? `${row.pctFromFiftyTwoWeekHigh.toFixed(1)}% from 52w high`
+              : undefined
+          }
+        >
+          <div className="flex items-center justify-center">
+            <FiftyTwoWeekBar
+              price={row.price}
+              low={row.fiftyTwoWeekLow}
+              high={row.fiftyTwoWeekHigh}
+            />
+          </div>
+        </td>
         <td className={cn("px-2 py-1.5 text-right font-mono", smaColor)}>
           {fmtPct(row.pctVs200dSma)}
         </td>
+        <td className={cn("px-2 py-1.5 text-right font-mono", momentumColor)}>
+          {fmtPct(row.momentum3mPct)}
+        </td>
         <td className="px-2 py-1.5 text-right font-mono">{fmtRatio(row.trailingPE)}</td>
-        <td className="px-2 py-1.5 text-right font-mono">{fmtRatio(row.forwardPE)}</td>
         <td className={cn("px-2 py-1.5 text-right font-mono", pegColor(row.pegRatio))}>
           {row.pegRatio !== null && Number.isFinite(row.pegRatio)
             ? row.pegRatio.toFixed(2)
             : "—"}
-        </td>
-        <td className="px-2 py-1.5 text-right font-mono text-muted-foreground">
-          {row.fiftyTwoWeekLow !== null && row.fiftyTwoWeekHigh !== null
-            ? `${row.fiftyTwoWeekLow.toFixed(0)}–${row.fiftyTwoWeekHigh.toFixed(0)}`
-            : "—"}
-        </td>
-        <td className={cn("px-2 py-1.5 text-right font-mono", high52Color)}>
-          {fmtPct(row.pctFromFiftyTwoWeekHigh)}
-        </td>
-        <td className="px-2 py-1.5 text-right font-mono text-muted-foreground">
-          {fmtMarketCap(row.marketCap)}
         </td>
         <td className="px-2 py-1.5 text-center">
           <span
@@ -362,10 +567,21 @@ function WatchRow({
               "inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider",
               aiSignalBadge(row.aiSignal),
             )}
-            title={`Score ${row.aiScore >= 0 ? "+" : ""}${row.aiScore} — see route.ts computeAiSignal for the rule cascade${row.hasEncyclopedia ? "\nEncyclopedia research available — click the symbol header." : ""}`}
+            title={`Score ${row.aiScore >= 0 ? "+" : ""}${row.aiScore} — see route.ts computeAiSignal for the rule cascade${row.hasEncyclopedia ? "\nEncyclopedia research available." : ""}`}
           >
             {row.aiSignal}
             {row.hasEncyclopedia && <span className="ml-0.5">📚</span>}
+          </span>
+        </td>
+        <td className="px-2 py-1.5 text-center">
+          <span
+            className={cn(
+              "inline-block rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider whitespace-nowrap",
+              actionBadge(row.action),
+            )}
+            title="Action signal — see route.ts computeAction"
+          >
+            {actionLabel(row.action)}
           </span>
         </td>
         <td className="px-2 py-1.5 text-right">
@@ -384,7 +600,7 @@ function WatchRow({
       </tr>
       {expanded && (
         <tr className="border-b border-border/40 bg-background/30">
-          <td colSpan={14} className="px-3 py-3">
+          <td colSpan={13} className="px-3 py-3">
             <div className="grid grid-cols-1 gap-3 md:grid-cols-[1fr_auto]">
               <label className="block">
                 <span className="text-[11px] uppercase tracking-wider text-muted-foreground">
