@@ -147,3 +147,16 @@ export async function GET() {
 
   return NextResponse.json(payload);
 }
+
+export async function DELETE() {
+  const sb = createServerClient();
+  const cacheKey = `weekly-${thisIsoWeekKey()}`;
+  const res = await sb
+    .from("longterm_digest_cache")
+    .delete()
+    .eq("cache_key", cacheKey);
+  if (res.error) {
+    return NextResponse.json({ error: res.error.message }, { status: 500 });
+  }
+  return NextResponse.json({ cleared: cacheKey });
+}

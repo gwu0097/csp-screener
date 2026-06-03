@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import Link from "next/link";
 import {
   ArrowDown,
@@ -10,6 +10,7 @@ import {
   Loader2,
   Newspaper,
   Plus,
+  RefreshCw,
   Trash2,
   X,
 } from "lucide-react";
@@ -1013,6 +1014,29 @@ function AddStockDialog({
   );
 }
 
+// Strip Perplexity citation markers like [1], [2][3] from analysis text.
+function stripCitations(text: string): string {
+  return text.replace(/\[\d+\]/g, "").replace(/[ \t]{2,}/g, " ").trim();
+}
+
+// Render text with **bold** markdown segments as real <strong> elements,
+// after stripping citation markers.
+function renderRichText(text: string): ReactNode {
+  const cleaned = stripCitations(text);
+  const parts = cleaned.split(/(\*\*[^*]+\*\*)/g);
+  return parts.map((part, i) => {
+    const m = /^\*\*([^*]+)\*\*$/.exec(part);
+    if (m) {
+      return (
+        <strong key={i} className="font-semibold">
+          {m[1]}
+        </strong>
+      );
+    }
+    return <span key={i}>{part}</span>;
+  });
+}
+
 function WeeklyDigestDialog({
   open,
   onClose,
@@ -1038,23 +1062,36 @@ function WeeklyDigestDialog({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!open) return;
+  const loadDigest = useCallback(async () => {
     setLoading(true);
     setError(null);
-    void (async () => {
-      try {
-        const res = await fetch("/api/longterm/digest", { cache: "no-store" });
-        const json = (await res.json()) as Payload & { error?: string };
-        if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
-        setData(json);
-      } catch (e) {
-        setError(e instanceof Error ? e.message : "Failed to load digest");
-      } finally {
-        setLoading(false);
-      }
-    })();
-  }, [open]);
+    try {
+      const res = await fetch("/api/longterm/digest", { cache: "no-store" });
+      const json = (await res.json()) as Payload & { error?: string };
+      if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
+      setData(json);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load digest");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const forceRefresh = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      await fetch("/api/longterm/digest", { method: "DELETE", cache: "no-store" });
+    } catch {
+      // Best-effort cache clear; re-fetch below regardless.
+    }
+    await loadDigest();
+  }, [loadDigest]);
+
+  useEffect(() => {
+    if (!open) return;
+    void loadDigest();
+  }, [open, loadDigest]);
 
   function renderMover(m: Mover) {
     const color = m.changePct >= 0 ? "text-emerald-300" : "text-rose-300";
@@ -1070,7 +1107,7 @@ function WeeklyDigestDialog({
           <div className="text-muted-foreground">{m.companyName}</div>
         )}
         {m.catalyst && (
-          <p className="mt-1 text-[11px] text-foreground/80">{m.catalyst}</p>
+          <p className="mt-1 text-[11px] text-foreground/80">{renderRichText(m.catalyst)}</p>
         )}
         <Link
           href={`/longterm/research?symbol=${encodeURIComponent(m.symbol)}`}
@@ -1088,6 +1125,23 @@ function WeeklyDigestDialog({
         <DialogHeader>
           <DialogTitle>Weekly Digest</DialogTitle>
         </DialogHeader>
+        {data?.cached && (
+          <div className="flex items-center gap-2">
+            <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+              Cached
+            </span>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-6 gap-1 px-2 text-[10px] font-semibold uppercase tracking-wider"
+              onClick={() => void forceRefresh()}
+              disabled={loading}
+            >
+              <RefreshCw className={cn("h-3 w-3", loading && "animate-spin")} />
+              Refresh
+            </Button>
+          </div>
+        )}
         {loading && (
           <div className="py-8 text-center">
             <Loader2 className="mx-auto h-5 w-5 animate-spin text-muted-foreground" />
