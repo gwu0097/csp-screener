@@ -193,7 +193,10 @@ export async function POST() {
           let cls = await getIndustryClassification(upper, {
             yahooAllowed: false,
           });
-          if (row.isWhitelisted && cls.source === "unknown") {
+          // Yahoo fallback for ANY symbol whose static map + cache miss —
+          // not just whitelisted names. Stamping "industry: unknown" on a
+          // legit common stock was purely an artifact of the old gate.
+          if (cls.source === "unknown") {
             cls = await getIndustryClassification(upper, { yahooAllowed: true });
           }
           const industryStatus: "pass" | "fail" | "unknown" = row.isWhitelisted

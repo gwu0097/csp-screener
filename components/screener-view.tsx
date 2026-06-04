@@ -1453,6 +1453,10 @@ export function ScreenerView({ connected }: Props) {
       pendingNewsKeys.has(`${r.symbol}|${r.earningsDate}`),
     );
     const ctx = buildStreamCtx({ resumeFrom: results });
+    // News (pass3a) is Perplexity-bound and does NOT depend on the
+    // Schwab chain, so re-running pass3a alone is the correct retry —
+    // re-running pass2 here would clobber any three-layer grade already
+    // computed for these rows.
     await runNewsStream(remaining, ctx);
     finishStreamsIfDone(ctx);
   }
@@ -1465,9 +1469,61 @@ export function ScreenerView({ connected }: Props) {
       pendingGradeKeys.has(`${r.symbol}|${r.earningsDate}`),
     );
     const ctx = buildStreamCtx({ resumeFrom: results });
+    // Re-run pass2 first so the Schwab chain + stages 3/4 are
+    // re-fetched. The original failure is almost always a transient
+    // chain miss (expired token / timeout), and pass3b alone can never
+    // recover a row whose stageThree/four are null — it just returns the
+    // gradeless row every time. rerunPass2 falls back to the stale rows
+    // if pass2 itself fails.
+    const refreshed = await rerunPass2(remaining, ctx);
     const token = { key: "intermediate" };
-    await runGradeStream(remaining, ctx, token);
+    await runGradeStream(refreshed, ctx, token);
     finishStreamsIfDone(ctx);
+  }
+
+  // Replay pass2 (Schwab chain + stages 3/4) for a subset of candidates,
+  // merging the fresh rows into ctx.workingResults and the visible
+  // table. Returns the refreshed subset (or the input rows unchanged if
+  // pass2 fails) so the caller can drive the grade stream off fresh
+  // stage-3/4 data.
+  async function rerunPass2(
+    subset: ScreenerResult[],
+    ctx: StreamCtx,
+  ): Promise<ScreenerResult[]> {
+    try {
+      const r2 = await fetch("/api/screener/analyze/pass2", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ candidates: subset }),
+        cache: "no-store",
+      });
+      if (!r2.ok) throw new Error(`HTTP ${r2.status}`);
+      const p2 = (await r2.json()) as {
+        results: ScreenerResult[];
+        prices: Record<string, number>;
+        vix: number | null;
+      };
+      const byKey = new Map(
+        (p2.results ?? []).map((r) => [`${r.symbol}|${r.earningsDate}`, r]),
+      );
+      ctx.workingResults = ctx.workingResults.map(
+        (r) => byKey.get(`${r.symbol}|${r.earningsDate}`) ?? r,
+      );
+      if (p2.prices) {
+        ctx.pricesForPersist = { ...ctx.pricesForPersist, ...p2.prices };
+        setPrices((prev) => ({ ...prev, ...p2.prices }));
+      }
+      if (typeof p2.vix === "number") ctx.vix = p2.vix;
+      setResults([...ctx.workingResults]);
+      return subset.map(
+        (r) => byKey.get(`${r.symbol}|${r.earningsDate}`) ?? r,
+      );
+    } catch (e) {
+      console.warn(
+        `[screener] resume pass2 re-run failed (${e instanceof Error ? e.message : e}) — proceeding with stale rows`,
+      );
+      return subset;
+    }
   }
 
   // Helper: build a fresh StreamCtx using the current page state.

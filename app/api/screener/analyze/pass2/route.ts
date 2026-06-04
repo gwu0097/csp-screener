@@ -134,11 +134,12 @@ export async function POST(req: NextRequest) {
           let cls = await getIndustryClassification(upper, {
             yahooAllowed: false,
           });
-          // Whitelisted symbols get the Yahoo fallback when the static
-          // map + cache miss. The user vouched for the name, so
-          // spending ~1-2s on a sector lookup beats stamping
-          // "industry: unknown" on the Stage 2 detail card.
-          if (base.isWhitelisted && cls.source === "unknown") {
+          // Yahoo fallback for ANY symbol when the static map + cache
+          // miss — spending ~1-2s on a sector lookup beats stamping
+          // "industry: unknown" on the Stage 2 detail card. Previously
+          // gated behind isWhitelisted, which left non-whitelisted names
+          // like RBRK perpetually "unknown".
+          if (cls.source === "unknown") {
             cls = await getIndustryClassification(upper, { yahooAllowed: true });
           }
           const industryStatus: "pass" | "fail" | "unknown" = base.isWhitelisted

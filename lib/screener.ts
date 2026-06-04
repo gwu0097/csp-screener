@@ -1117,7 +1117,10 @@ export async function safeGetChain(
     const chain = await getOptionsChain(symbol, fromDate);
     void toDate;
     return chain;
-  } catch {
+  } catch (e) {
+    console.log(
+      `[screener] safeGetChain ${symbol} ${fromDate}: ${e instanceof Error ? e.message : e}`,
+    );
     return null;
   }
 }
@@ -1278,6 +1281,17 @@ export async function runStagesThreeFour(base: ScreenerResult): Promise<Screener
   }
 
   if (!chain || !chainHasWeeklyExpiry(chain, candidate.expiry)) {
+    if (!chain) {
+      console.log(
+        `[screener] ${candidate.symbol} soft-fail: chain unavailable (null) for expiry ${candidate.expiry}`,
+      );
+    } else {
+      const availableKeys = Object.keys(chain.putExpDateMap ?? {});
+      console.log(
+        `[screener] ${candidate.symbol} soft-fail: weekly ${candidate.expiry} not in chain. ` +
+          `Available expiry keys: ${availableKeys.join(", ") || "(none)"}`,
+      );
+    }
     return {
       ...base,
       stoppedAt: 3,
