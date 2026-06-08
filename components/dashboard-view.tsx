@@ -416,8 +416,10 @@ export function DashboardView() {
 
   // ---------- Market tiles ----------
   const m = market.data;
+  // Yahoo returns ^TNX already as the yield percentage (e.g. 4.54), not
+  // basis points — display the raw value.
   const tnxYield =
-    m?.tnx.price !== null && m?.tnx.price !== undefined ? m.tnx.price / 10 : null;
+    m?.tnx.price !== null && m?.tnx.price !== undefined ? m.tnx.price : null;
 
   return (
     <div className="space-y-4">
