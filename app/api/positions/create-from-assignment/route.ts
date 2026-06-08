@@ -197,6 +197,26 @@ export async function POST(req: NextRequest) {
       });
       continue;
     }
+    // Record the assignment as an `open` fill (shares @ cost basis) so
+    // recalculatePositionFromFills can derive remaining shares / status /
+    // realized P&L purely from the open-close fill ledger — the same
+    // model every other position uses. Without this the stock_long row
+    // has only close fills and recalc can't tell how many shares it
+    // started with.
+    const openFill = await sb.from("fills").insert({
+      position_id: inserted.id,
+      fill_type: "open",
+      contracts: shares,
+      premium: costBasis,
+      fill_date: today,
+    });
+    if (openFill.error) {
+      skipped.push({
+        parentId: p.id,
+        reason: `open-fill insert failed: ${openFill.error.message}`,
+      });
+      continue;
+    }
     created.push({
       parentId: p.id,
       stockPositionId: inserted.id,

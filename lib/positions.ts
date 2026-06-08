@@ -128,15 +128,25 @@ export async function recalculatePositionFromFills(
   // sign for long vs short positions. Pre-migration rows return the
   // column as undefined (or the whole select errors with "column
   // missing") — falling back to 'short' keeps existing CSP math intact.
+  // position_type drives the share-vs-contract math below; entry_stock_price
+  // is the cost-basis fallback for stock positions whose `open` fill predates
+  // the open-fill-on-assignment fix.
   let direction: PositionDirection = "short";
+  let positionType: string | null = null;
+  let entryStockPrice: number | null = null;
   const posRes = await sb
     .from("positions")
-    .select("direction")
+    .select("direction, position_type, entry_stock_price")
     .eq("id", positionId)
     .limit(1);
   if (!posRes.error) {
-    const row = (posRes.data ?? [])[0] as { direction?: string | null } | undefined;
+    const row = (posRes.data ?? [])[0] as
+      | { direction?: string | null; position_type?: string | null; entry_stock_price?: number | null }
+      | undefined;
     if (row?.direction === "long") direction = "long";
+    positionType = row?.position_type ?? null;
+    entryStockPrice =
+      typeof row?.entry_stock_price === "number" ? row.entry_stock_price : null;
   }
 
   const fetched = await sb
@@ -151,17 +161,50 @@ export async function recalculatePositionFromFills(
   const totalOpened = fills
     .filter((f) => f.fill_type === "open")
     .reduce((s, f) => s + f.contracts, 0);
+  const lastCloseDate =
+    fills
+      .filter((f) => f.fill_type === "close")
+      .map((f) => f.fill_date)
+      .sort()
+      .pop() ?? null;
+
+  // Stock positions: `contracts` are shares, the `open` fill is the
+  // assignment (entry) and `close` fills are sales. total_contracts
+  // tracks REMAINING shares (so a fully-sold lot reads 0), and realized
+  // P&L is (sale − cost basis) × shares with NO ×100 options multiplier.
+  if (positionType === "stock_long") {
+    const opens = fills.filter((f) => f.fill_type === "open");
+    const openShares = opens.reduce((s, f) => s + f.contracts, 0);
+    const openValue = opens.reduce((s, f) => s + f.premium * f.contracts, 0);
+    const costBasis =
+      openShares > 0 ? openValue / openShares : entryStockPrice ?? 0;
+    const stockPnl = fills
+      .filter((f) => f.fill_type === "close")
+      .reduce((s, f) => s + (f.premium - costBasis) * f.contracts, 0);
+    const remainingShares = remaining; // open − close shares
+    const stockStatus: "open" | "closed" =
+      remainingShares <= 0 && openShares > 0 ? "closed" : "open";
+    const upd = await sb
+      .from("positions")
+      .update({
+        total_contracts: Math.max(0, remainingShares),
+        avg_premium_sold: null,
+        status: stockStatus,
+        closed_date: stockStatus === "closed" ? lastCloseDate : null,
+        realized_pnl: Math.round(stockPnl * 100) / 100,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", positionId);
+    if (upd.error) {
+      return { ok: false, error: `position update failed — ${upd.error.message}` };
+    }
+    return { ok: true, status: stockStatus, totalOpened: openShares, remaining: remainingShares };
+  }
+
   const sold = avgPremiumSold(fills);
   const status: "open" | "closed" =
     remaining === 0 && totalOpened > 0 ? "closed" : "open";
-  const closedDate =
-    status === "closed"
-      ? fills
-          .filter((f) => f.fill_type === "close")
-          .map((f) => f.fill_date)
-          .sort()
-          .pop() ?? null
-      : null;
+  const closedDate = status === "closed" ? lastCloseDate : null;
   const pnl = realizedPnl(fills, direction);
   const upd = await sb
     .from("positions")

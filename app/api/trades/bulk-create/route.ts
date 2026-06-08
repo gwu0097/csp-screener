@@ -5,6 +5,7 @@ import {
   remainingContracts,
   avgPremiumSold,
   realizedPnl,
+  recalculatePositionFromFills,
   type Fill,
   type PositionRow,
 } from "@/lib/positions";
@@ -409,6 +410,10 @@ export async function POST(req: NextRequest) {
 
   // ---- Phase 1 stock validation ----
   const stockPlans: StockPlan[] = [];
+  // Running tally of shares already earmarked for sale per position in
+  // THIS batch, so multiple sales of the same lot validate against the
+  // shrinking balance instead of each seeing the full opening quantity.
+  const plannedSharesByPos = new Map<string, number>();
   for (const s of stockInputs) {
     const symbol =
       typeof s.symbol === "string" ? s.symbol.trim().toUpperCase() : "";
@@ -475,13 +480,18 @@ export async function POST(req: NextRequest) {
       continue;
     }
 
-    const currentShares = Number(stockRow.total_contracts ?? 0);
-    if (shares > currentShares) {
+    const openingShares = Number(stockRow.total_contracts ?? 0);
+    const alreadyPlanned = plannedSharesByPos.get(stockRow.id) ?? 0;
+    const availableShares = openingShares - alreadyPlanned;
+    if (shares > availableShares) {
       errors.push(
-        `stock ${symbol}: tried to sell ${shares} shares but only ${currentShares} remaining`,
+        `stock ${symbol}: tried to sell ${shares} shares but only ${availableShares} remaining` +
+          (alreadyPlanned > 0 ? ` (${alreadyPlanned} already pending in this batch)` : ""),
       );
       continue;
     }
+    plannedSharesByPos.set(stockRow.id, alreadyPlanned + shares);
+    const currentShares = openingShares;
     const costBasis =
       stockRow.entry_stock_price !== null
         ? Number(stockRow.entry_stock_price)
@@ -489,7 +499,7 @@ export async function POST(req: NextRequest) {
     const stockPnl = Math.round((price - costBasis) * shares * 100) / 100;
     const prevRealized = Number(stockRow.realized_pnl ?? 0) || 0;
     const newRealized = Math.round((prevRealized + stockPnl) * 100) / 100;
-    const remainingShares = currentShares - shares;
+    const remainingShares = availableShares - shares;
     const isFullClose = remainingShares === 0;
 
     stockPlans.push({
@@ -769,7 +779,15 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // ---- Phase 2a — stocks: insert fills, update positions ----
+    // ---- Phase 2a — stocks: insert fills, then recalc once per lot ----
+    // Insert every sale fill first, accumulating the human-readable
+    // note per position, THEN recompute each touched lot from its full
+    // fill ledger via recalculatePositionFromFills. Doing the aggregate
+    // write per-fill (the old path) made sibling sales of the same lot
+    // race — each read the same opening balance and the last write won,
+    // leaving total_contracts / realized_pnl / status reflecting only
+    // one sale.
+    const stockNotesByPos = new Map<string, string>();
     for (const sp of stockPlans) {
       const fillInsert = await supabase.from("fills").insert({
         position_id: sp.stockRowId,
@@ -789,24 +807,25 @@ export async function POST(req: NextRequest) {
       touchedPreExistingIds.add(sp.stockRowId);
 
       const noteAdd = `Sold ${sp.shares} @ $${sp.price.toFixed(2)} on ${sp.date}. Stock P&L: ${sp.stockPnl >= 0 ? "+" : ""}$${sp.stockPnl.toFixed(2)}.`;
-      const notes = sp.prevNotes ? `${sp.prevNotes} | ${noteAdd}` : noteAdd;
-      const update = await supabase
+      const base = stockNotesByPos.get(sp.stockRowId) ?? sp.prevNotes ?? "";
+      stockNotesByPos.set(sp.stockRowId, base ? `${base} | ${noteAdd}` : noteAdd);
+    }
+    // One notes write + one recalc per distinct lot.
+    for (const [stockRowId, notes] of Array.from(stockNotesByPos.entries())) {
+      const noteUpd = await supabase
         .from("positions")
-        .update({
-          total_contracts: sp.remainingShares,
-          realized_pnl: sp.newRealized,
-          status: sp.isFullClose ? "closed" : "open",
-          closed_date: sp.isFullClose ? sp.date : null,
-          notes,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", sp.stockRowId);
-      if (update.error) {
+        .update({ notes, updated_at: new Date().toISOString() })
+        .eq("id", stockRowId);
+      if (noteUpd.error) {
         throw new Error(
-          `stock ${sp.symbol}: position update failed — ${update.error.message}`,
+          `stock note update failed — ${noteUpd.error.message}`,
         );
       }
-      if (sp.isFullClose) stocksClosed += 1;
+      const recalc = await recalculatePositionFromFills(stockRowId, supabase);
+      if (!recalc.ok) {
+        throw new Error(`stock recalc failed — ${recalc.error}`);
+      }
+      if (recalc.status === "closed") stocksClosed += 1;
       else stocksPartial += 1;
     }
   } catch (e) {
