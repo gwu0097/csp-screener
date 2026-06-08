@@ -87,8 +87,6 @@ export async function POST() {
     .from("morning_brief_cache")
     .upsert({ cache_date: today, brief, fetched_at }, { onConflict: "cache_date" });
   if (up.error) {
-    // Still return the brief even if caching failed — the user gets
-    // their summary, we just couldn't persist it.
     console.warn(`[morning-brief] cache upsert failed: ${up.error.message}`);
   }
   return NextResponse.json({ brief, fetched_at, cached: false });
