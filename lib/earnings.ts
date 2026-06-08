@@ -95,6 +95,47 @@ export async function getTodayEarnings(): Promise<EarningsCalendarItem[]> {
   }
 }
 
+// Earnings across the next `days` calendar days (today inclusive),
+// BMO/AMC only (DMH dropped — a mid-session print isn't a clean
+// before/after-the-bell event). Dates compared in US Eastern. Powers
+// the morning dashboard's earnings card + upcoming panel.
+export async function getUpcomingEarnings(
+  days = 3,
+): Promise<EarningsCalendarItem[]> {
+  const from = todayInEastern();
+  let to = from;
+  for (let i = 0; i < days; i += 1) to = addOneDayIso(to);
+
+  try {
+    const data = await finnhubGet<{ earningsCalendar: FinnhubCalendarEntry[] }>(
+      "/calendar/earnings",
+      { from, to },
+    );
+    const rows = data.earningsCalendar ?? [];
+    const out: EarningsCalendarItem[] = [];
+    for (const r of rows) {
+      const hour = (r.hour ?? "").toLowerCase();
+      const timing: EarningsCalendarItem["timing"] | null =
+        hour === "bmo" ? "BMO" : hour === "amc" ? "AMC" : null;
+      if (!timing) continue; // drops DMH + unknown
+      out.push({
+        symbol: r.symbol,
+        date: r.date,
+        timing,
+        estimatedEPS: r.epsEstimate ?? null,
+        actualEPS: r.epsActual ?? null,
+      });
+    }
+    return out;
+  } catch (e) {
+    console.error(
+      "[earnings] getUpcomingEarnings failed:",
+      e instanceof Error ? e.message : e,
+    );
+    return [];
+  }
+}
+
 export type AnalystEstimate = {
   consensus: number | null;
   high: number | null;

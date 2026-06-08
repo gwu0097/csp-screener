@@ -10,6 +10,7 @@ import {
   BookOpen,
   BookSearch,
   Briefcase,
+  LayoutDashboard,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -55,6 +56,13 @@ type Mode = "expanded" | "collapsed";
 
 // localStorage key for the persisted desktop collapse state.
 const LS_COLLAPSED = "sidebar_collapsed";
+
+// ------------ TOP ------------
+const DASHBOARD: NavItem = {
+  href: "/dashboard",
+  label: "Dashboard",
+  icon: LayoutDashboard,
+};
 
 // ------------ OPTIONS ------------
 const SCREENER_GROUP: NavGroup = {
@@ -312,6 +320,8 @@ export function Sidebar() {
         </div>
 
         <nav className="flex flex-1 flex-col gap-0.5 overflow-y-auto p-2">
+          <SidebarLink item={DASHBOARD} pathname={pathname} mode={mode} />
+
           <SectionHeader label="Options" mode={mode} />
           <CollapsibleGroup
             group={SCREENER_GROUP}
