@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
+import { batchRefreshSnapshots } from "@/lib/market-snapshot";
+import { computeEntrySignal, computeSwingScore } from "@/lib/entry-signal";
 
 export const dynamic = "force-dynamic";
 
@@ -94,10 +96,37 @@ export async function GET() {
     }
   }
 
-  const enriched = ideas.map((idea) => ({
-    ...idea,
-    active_trade: tradesById.get(idea.id) ?? null,
-  }));
+  // Market-snapshot enrichment (Phase 2): one batched, cached refresh
+  // for every idea symbol, then per-idea entry signal + swing score.
+  const symbols = Array.from(new Set(ideas.map((i) => i.symbol.toUpperCase())));
+  const snapBySymbol = new Map<string, Awaited<ReturnType<typeof batchRefreshSnapshots>>[number]>();
+  if (symbols.length > 0) {
+    const snaps = await batchRefreshSnapshots(symbols, 15);
+    for (const s of snaps) snapBySymbol.set(s.symbol.toUpperCase(), s);
+  }
+
+  const now = Date.now();
+  const enriched = ideas.map((idea) => {
+    const snapshot = snapBySymbol.get(idea.symbol.toUpperCase()) ?? null;
+    const direction: "bullish" | "bearish" =
+      idea.analyst_sentiment === "bearish" ? "bearish" : "bullish";
+    const ageDays = idea.created_at
+      ? Math.max(0, Math.round((now - Date.parse(idea.created_at)) / 86400000))
+      : undefined;
+    const entry_signal = snapshot
+      ? computeEntrySignal(snapshot, direction)
+      : null;
+    const swing_score = snapshot
+      ? computeSwingScore(snapshot, { stage: idea.status, direction, ageDays })
+      : null;
+    return {
+      ...idea,
+      active_trade: tradesById.get(idea.id) ?? null,
+      snapshot,
+      entry_signal,
+      swing_score,
+    };
+  });
 
   return NextResponse.json({ ideas: enriched });
 }

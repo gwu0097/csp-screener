@@ -309,21 +309,89 @@ function IdeaCard(props: {
   );
 }
 
-// Shared header: symbol + sentiment pill.
+// Entry-signal pill styling + label.
+const ENTRY_SIGNAL_META: Record<
+  string,
+  { label: string; cls: string }
+> = {
+  OVERSOLD: { label: "Oversold zone", cls: "bg-emerald-500/20 text-emerald-300 border-emerald-500/40" },
+  PULLBACK_ENTRY: { label: "Entry window", cls: "bg-sky-500/20 text-sky-300 border-sky-500/40" },
+  WAIT_PULLBACK: { label: "Wait — pullback", cls: "bg-amber-500/20 text-amber-300 border-amber-500/40" },
+  EXTENDED: { label: "Extended", cls: "bg-rose-500/20 text-rose-300 border-rose-500/40" },
+  NO_SIGNAL: { label: "No signal", cls: "bg-muted/40 text-muted-foreground border-border" },
+};
+
+export function EntrySignalBadge({
+  signal,
+  title,
+}: {
+  signal: string;
+  title?: string;
+}) {
+  const meta = ENTRY_SIGNAL_META[signal] ?? ENTRY_SIGNAL_META.NO_SIGNAL;
+  return (
+    <span
+      title={title}
+      className={`rounded border px-1.5 py-0.5 text-[10px] font-medium ${meta.cls}`}
+    >
+      {meta.label}
+    </span>
+  );
+}
+
+// Live snapshot strip: price + today's change, entry signal, RSI, vs-200d.
+function SnapshotRow({ idea }: { idea: SwingIdea }) {
+  const snap = idea.snapshot;
+  const sig = idea.entry_signal;
+  if (!snap) return null;
+  const chg = snap.change_pct;
+  const chgColor =
+    chg === null ? "text-muted-foreground" : chg >= 0 ? "text-emerald-300" : "text-rose-300";
+  return (
+    <div className="mb-1.5 space-y-1">
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-mono text-[11px] text-foreground">
+          {snap.price !== null ? `$${snap.price.toFixed(2)}` : "—"}
+          {chg !== null && (
+            <span className={`ml-1 ${chgColor}`}>
+              {chg >= 0 ? "+" : ""}
+              {chg.toFixed(2)}%
+            </span>
+          )}
+        </span>
+        {sig && <EntrySignalBadge signal={sig.signal} title={sig.reason} />}
+      </div>
+      <div className="flex gap-3 text-[10px] text-muted-foreground">
+        <span>RSI {snap.rsi14 !== null ? snap.rsi14.toFixed(0) : "—"}</span>
+        <span>
+          vs200d{" "}
+          {snap.vs_sma200_pct !== null
+            ? `${snap.vs_sma200_pct >= 0 ? "+" : ""}${snap.vs_sma200_pct.toFixed(1)}%`
+            : "—"}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// Shared header: symbol + sentiment pill, then the live snapshot strip.
 function CardHeader({ idea }: { idea: SwingIdea }) {
   return (
-    <div className="mb-1 flex items-center justify-between gap-2">
-      <span className="font-mono text-base font-semibold text-foreground">
-        {idea.symbol}
-      </span>
-      {idea.analyst_sentiment && (
-        <span
-          className={`rounded border px-1.5 py-0.5 text-[10px] font-medium capitalize ${sentimentColor(idea.analyst_sentiment)}`}
-        >
-          {idea.analyst_sentiment}
+    <>
+      <div className="mb-1 flex items-center justify-between gap-2">
+        <span className="font-mono text-base font-semibold text-foreground">
+          {idea.symbol}
         </span>
-      )}
-    </div>
+        {idea.analyst_sentiment && (
+          <span
+            className={`rounded border px-1.5 py-0.5 text-[10px] font-medium capitalize ${sentimentColor(idea.analyst_sentiment)}`}
+          >
+            {idea.analyst_sentiment}
+          </span>
+        )}
+      </div>
+      <SnapshotRow idea={idea} />
+    </>
   );
 }
 

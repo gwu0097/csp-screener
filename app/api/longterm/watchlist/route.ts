@@ -7,7 +7,10 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
-import { getHistoricalPrices, getQuoteEnrichment } from "@/lib/yahoo";
+import {
+  batchRefreshSnapshots,
+  type SymbolSnapshot,
+} from "@/lib/market-snapshot";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -59,6 +62,7 @@ type EnrichedRow = WatchlistRow & {
   momentum3mPct: number | null;
   return3yPct: number | null;
   vsSpy3yPct: number | null;
+  rsi14: number | null;
   buyZone: { low: number; high: number } | null;
   sellZone: { low: number; high: number } | null;
   flags: Flag[];
@@ -217,60 +221,6 @@ function computeAction(input: {
   return "HOLD";
 }
 
-// Approx 90 calendar days back. Yahoo bars only land on trading days,
-// so we ask for a slightly wider window and use the earliest close.
-function ninetyDaysAgo(): Date {
-  return new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
-}
-
-async function getMomentum3m(symbol: string): Promise<number | null> {
-  try {
-    const bars = await getHistoricalPrices(symbol, ninetyDaysAgo(), new Date());
-    if (bars.length === 0) return null;
-    const sorted = [...bars].sort(
-      (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime(),
-    );
-    const earliest = sorted[0]?.close;
-    const latest = sorted[sorted.length - 1]?.close;
-    if (
-      typeof earliest !== "number" ||
-      typeof latest !== "number" ||
-      earliest <= 0
-    ) {
-      return null;
-    }
-    return ((latest - earliest) / earliest) * 100;
-  } catch {
-    return null;
-  }
-}
-
-function threeYearsAgo(): Date {
-  return new Date(Date.now() - 3 * 365 * 24 * 60 * 60 * 1000);
-}
-
-async function get3YReturn(symbol: string): Promise<number | null> {
-  try {
-    const bars = await getHistoricalPrices(symbol, threeYearsAgo(), new Date());
-    if (bars.length === 0) return null;
-    const sorted = [...bars].sort(
-      (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime(),
-    );
-    const earliest = sorted[0]?.close;
-    const latest = sorted[sorted.length - 1]?.close;
-    if (
-      typeof earliest !== "number" ||
-      typeof latest !== "number" ||
-      earliest <= 0
-    ) {
-      return null;
-    }
-    return ((latest - earliest) / earliest) * 100;
-  } catch {
-    return null;
-  }
-}
-
 // V1 buy/sell zones. Conservative bands tied to 52w + 200d landmarks.
 // Only surface when the current price is within 15% of the zone so the
 // row doesn't show stale guidance for stocks deep in the middle of
@@ -319,44 +269,28 @@ const ALLOCATION_ORDER: Record<Allocation, number> = {
   Small: 2,
 };
 
-// Live-enrich one row from Yahoo. Failures fall back to null fields
-// so a single dead symbol doesn't blank the entire watchlist.
-async function enrich(
+// Map a cached snapshot onto the EnrichedRow shape the UI already
+// expects. All market data now comes from symbol_market_snapshot (one
+// batched refresh per load) instead of per-row Yahoo calls — the
+// downstream computations (flags / action / zones / alerts) are
+// unchanged, they just read these mapped fields.
+function enrichFromSnapshot(
   row: WatchlistRow,
+  snapshot: SymbolSnapshot | null,
   encyclopediaSet: Set<string>,
-  spy3yPct: number | null,
-): Promise<EnrichedRow> {
-  // Quote + 3-month + 3-year histories run in parallel — each row is
-  // ~3 Yahoo calls. With Promise.all per row + Promise.all across the
-  // list, the bottleneck is the slowest single symbol.
-  const [quote, momentum3mPct, return3yPct] = await Promise.all([
-    getQuoteEnrichment(row.symbol).catch((e) => {
-      console.warn(
-        `[watchlist] getQuoteEnrichment(${row.symbol}) threw: ${e instanceof Error ? e.message : e}`,
-      );
-      return null;
-    }),
-    getMomentum3m(row.symbol),
-    get3YReturn(row.symbol),
-  ]);
-
-  const price = quote?.regularMarketPrice ?? null;
-  const sma200 = quote?.twoHundredDayAverage ?? null;
-  const fiftyTwoWeekLow = quote?.fiftyTwoWeekLow ?? null;
-  const fiftyTwoWeekHigh = quote?.fiftyTwoWeekHigh ?? null;
-  const pctFromFiftyTwoWeekHigh =
-    price !== null && fiftyTwoWeekHigh !== null && fiftyTwoWeekHigh > 0
-      ? ((price - fiftyTwoWeekHigh) / fiftyTwoWeekHigh) * 100
-      : null;
-  const pctVs200dSma =
-    price !== null && sma200 !== null && sma200 > 0
-      ? ((price - sma200) / sma200) * 100
-      : null;
-  const trailingPE = quote?.trailingPE ?? null;
-  const forwardPE = quote?.forwardPE ?? null;
-  const pegRatio = quote?.pegRatio ?? null;
-  const vsSpy3yPct =
-    return3yPct !== null && spy3yPct !== null ? return3yPct - spy3yPct : null;
+): EnrichedRow {
+  const price = snapshot?.price ?? null;
+  const sma200 = snapshot?.sma200 ?? null;
+  const fiftyTwoWeekLow = snapshot?.week52_low ?? null;
+  const fiftyTwoWeekHigh = snapshot?.week52_high ?? null;
+  const pctFromFiftyTwoWeekHigh = snapshot?.pct_from_52w_high ?? null;
+  const pctVs200dSma = snapshot?.vs_sma200_pct ?? null;
+  const trailingPE = snapshot?.trailing_pe ?? null;
+  const forwardPE = snapshot?.forward_pe ?? null;
+  const pegRatio = snapshot?.peg_ratio ?? null;
+  const momentum3mPct = snapshot?.return_3m ?? null;
+  const return3yPct = snapshot?.return_3y ?? null;
+  const vsSpy3yPct = snapshot?.vs_spy_3y ?? null;
   const action = computeAction({
     pctFromFiftyTwoWeekHigh,
     pctVs200dSma,
@@ -379,19 +313,15 @@ async function enrich(
     high52: fiftyTwoWeekHigh,
     sma200,
   });
-  // Forward PE is consumed by the legacy AI scorer that no longer
-  // drives the UI, but we keep it on the wire so the response shape
-  // stays useful for debugging.
-  void forwardPE;
   return {
     ...row,
-    companyName: quote?.companyName ?? null,
+    companyName: snapshot?.company_name ?? null,
     price,
-    changePct: quote?.regularMarketChangePercent ?? null,
+    changePct: snapshot?.change_pct ?? null,
     fiftyTwoWeekLow,
     fiftyTwoWeekHigh,
     pctFromFiftyTwoWeekHigh,
-    marketCap: quote?.marketCap ?? null,
+    marketCap: snapshot?.market_cap ?? null,
     trailingPE,
     forwardPE,
     pegRatio,
@@ -400,6 +330,7 @@ async function enrich(
     momentum3mPct,
     return3yPct,
     vsSpy3yPct,
+    rsi14: snapshot?.rsi14 ?? null,
     buyZone,
     sellZone,
     flags,
@@ -474,8 +405,7 @@ export async function GET() {
     return a.symbol.localeCompare(b.symbol);
   });
   // Pull the set of symbols that have an encyclopedia row so we can
-  // flag the AI Signal badge with 📚. Cheap single-query lookup; runs
-  // before the Yahoo pulls because the Set is needed inside enrich().
+  // flag the AI Signal badge with 📚. Cheap single-query lookup.
   const symbols = rows.map((r) => r.symbol);
   const encyclopediaSet = new Set<string>();
   if (symbols.length > 0) {
@@ -493,18 +423,22 @@ export async function GET() {
       );
     }
   }
-  // SPY 3Y benchmark — fetched once and reused as the "market" leg of
-  // the vsSpy3yPct computation. Failure falls through to null which
-  // suppresses the vs-SPY column entry on each row.
-  const spy3yPct = await get3YReturn("SPY");
 
-  // Parallel Yahoo enrichment — keeps the cold-load under ~4s with the
-  // added 3Y fetch per symbol.
-  const enriched = await Promise.all(
-    rows.map((r) => enrich(r, encyclopediaSet, spy3yPct)),
+  // Single batched snapshot refresh for the whole watchlist (Phase 2):
+  // cached rows return instantly, only stale/missing symbols hit Yahoo,
+  // and SPY's 3Y benchmark is fetched once inside the batch. This
+  // replaces the old ~3-Yahoo-calls-per-symbol fan-out.
+  const snapshots = await batchRefreshSnapshots(symbols, 15);
+  const snapBySymbol = new Map<string, SymbolSnapshot>();
+  for (const s of snapshots) snapBySymbol.set(s.symbol.toUpperCase(), s);
+
+  const enriched = rows.map((r) =>
+    enrichFromSnapshot(r, snapBySymbol.get(r.symbol.toUpperCase()) ?? null, encyclopediaSet),
   );
   const alerts = buildAlerts(enriched);
-  return NextResponse.json({ watchlist: enriched, alerts, spy3yPct });
+  // spy3yPct is now baked into each row's vsSpy3yPct via the snapshot;
+  // kept in the response (null) for backward-compatible shape.
+  return NextResponse.json({ watchlist: enriched, alerts, spy3yPct: null });
 }
 
 type CreateBody = { symbol?: unknown; allocation?: unknown; notes?: unknown };

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import {
+  Activity,
   AlertTriangle,
   ArrowRight,
   Brain,
@@ -13,6 +14,7 @@ import {
   TriangleAlert,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { EntrySignalBadge } from "@/components/swing-ideas-board";
 
 // ---------- Response shapes (minimal subsets) ----------
 type Position = {
@@ -41,6 +43,20 @@ type MarketResp = {
   iwf: Tile;
   tnx: Tile;
 };
+
+type SwingIdeaLite = {
+  id: string;
+  symbol: string;
+  status: string;
+  catalyst: string | null;
+  user_thesis: string | null;
+  thesis: string | null;
+  ai_summary: string | null;
+  snapshot: { price: number | null; change_pct: number | null } | null;
+  entry_signal: { signal: string; reason: string; score: number } | null;
+  swing_score: number | null;
+};
+type SwingsResp = { ideas: SwingIdeaLite[] };
 
 type Slot<T> = { status: "loading" | "ok" | "error"; data: T | null };
 const LOADING: Slot<never> = { status: "loading", data: null };
@@ -197,6 +213,7 @@ export function DashboardView() {
   const [watch, setWatch] = useState<Slot<WatchResp>>(LOADING);
   const [vix, setVix] = useState<Slot<number | null>>(LOADING);
   const [market, setMarket] = useState<Slot<MarketResp>>(LOADING);
+  const [swings, setSwings] = useState<Slot<SwingsResp>>(LOADING);
 
   const [brief, setBrief] = useState<string | null>(null);
   const [briefAt, setBriefAt] = useState<string | null>(null);
@@ -238,6 +255,11 @@ export function DashboardView() {
       "/api/dashboard/market-context",
       setMarket,
       (j) => j as MarketResp,
+    );
+    void load<SwingsResp>(
+      "/api/swings/ideas",
+      setSwings,
+      (j) => j as SwingsResp,
     );
     void (async () => {
       try {
@@ -368,6 +390,28 @@ export function DashboardView() {
         </span>
       </div>
     );
+  }
+
+  // ---------- Swing watch ----------
+  const swingIdeas = swings.data?.ideas ?? [];
+  const swingCandidates = swingIdeas.filter(
+    (i) => i.status === "setup_ready" || i.status === "entered",
+  );
+  const byScore = (a: SwingIdeaLite, b: SwingIdeaLite) =>
+    (b.swing_score ?? -1) - (a.swing_score ?? -1);
+  // Top 10 by score, but always include every Entered idea.
+  const swingShownMap = new Map<string, SwingIdeaLite>();
+  for (const i of [...swingCandidates].sort(byScore).slice(0, 10)) {
+    swingShownMap.set(i.id, i);
+  }
+  for (const i of swingCandidates) {
+    if (i.status === "entered") swingShownMap.set(i.id, i);
+  }
+  const swingShown = Array.from(swingShownMap.values()).sort(byScore);
+
+  function swingThesis(i: SwingIdeaLite): string {
+    const t = (i.catalyst || i.user_thesis || i.thesis || i.ai_summary || "").trim();
+    return t.length > 40 ? `${t.slice(0, 40)}…` : t;
   }
 
   // ---------- Market tiles ----------
@@ -609,6 +653,94 @@ export function DashboardView() {
               </table>
             </div>
           </>
+        )}
+      </Panel>
+
+      {/* ---------- Swing watch ---------- */}
+      <Panel>
+        <SectionHeader
+          icon={<Activity className="h-4 w-4" />}
+          right={
+            <Link
+              href="/swings/ideas"
+              className="text-[11px] font-medium text-muted-foreground hover:text-foreground"
+            >
+              View all →
+            </Link>
+          }
+        >
+          Swing watch
+          {swingCandidates.length > 0 && (
+            <span className="ml-1 rounded bg-muted px-1.5 py-0.5 text-[10px] text-foreground">
+              {swingCandidates.length}
+            </span>
+          )}
+        </SectionHeader>
+        {swings.status === "loading" ? (
+          <SkeletonLines n={3} />
+        ) : swings.status === "error" ? (
+          <p className="text-sm text-muted-foreground">—</p>
+        ) : swingShown.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            No swing ideas yet — add ideas in Swings → Ideas
+          </p>
+        ) : (
+          <div className="space-y-1">
+            {swingShown.map((i) => {
+              const chg = i.snapshot?.change_pct ?? null;
+              const stageBlue = i.status === "entered";
+              return (
+                <div
+                  key={i.id}
+                  className="flex items-center gap-2 border-t border-border/60 py-1.5 text-sm first:border-t-0"
+                >
+                  <span className="w-14 shrink-0 font-mono font-semibold">
+                    {i.symbol}
+                  </span>
+                  <span
+                    className={cn(
+                      "shrink-0 rounded border px-1.5 py-0.5 text-[10px] font-medium",
+                      stageBlue
+                        ? "border-sky-500/40 bg-sky-500/15 text-sky-300"
+                        : "border-border bg-muted text-muted-foreground",
+                    )}
+                  >
+                    {stageBlue ? "Entered" : "Setup Ready"}
+                  </span>
+                  <span className="w-16 shrink-0 text-right font-mono text-xs">
+                    {i.snapshot?.price !== null && i.snapshot?.price !== undefined
+                      ? `$${i.snapshot.price.toFixed(2)}`
+                      : "—"}
+                  </span>
+                  <span
+                    className={cn(
+                      "w-16 shrink-0 text-right font-mono text-xs",
+                      pnlColor(chg),
+                    )}
+                  >
+                    {fmtPct(chg)}
+                  </span>
+                  <span className="shrink-0">
+                    {i.entry_signal && (
+                      <EntrySignalBadge
+                        signal={i.entry_signal.signal}
+                        title={i.entry_signal.reason}
+                      />
+                    )}
+                  </span>
+                  <span className="flex-1 truncate text-xs text-muted-foreground">
+                    {swingThesis(i)}
+                  </span>
+                  <Link
+                    href="/swings/ideas"
+                    className="shrink-0 text-xs font-semibold text-muted-foreground hover:text-foreground"
+                  >
+                    View →
+                  </Link>
+                </div>
+              );
+            })}
+          </div>
         )}
       </Panel>
 

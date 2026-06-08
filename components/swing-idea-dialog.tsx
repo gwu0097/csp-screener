@@ -50,6 +50,24 @@ export type SwingIdea = {
   // (ENTERED → latest open trade, EXITED → latest closed trade). null for
   // WATCHING / CONVICTION and when no linked trade exists.
   active_trade?: SwingIdeaTrade | null;
+  // Market-snapshot enrichment from /api/swings/ideas (Phase 2).
+  snapshot?: {
+    price: number | null;
+    change_pct: number | null;
+    rsi14: number | null;
+    vs_sma200_pct: number | null;
+  } | null;
+  entry_signal?: {
+    signal:
+      | "OVERSOLD"
+      | "PULLBACK_ENTRY"
+      | "WAIT_PULLBACK"
+      | "EXTENDED"
+      | "NO_SIGNAL";
+    reason: string;
+    score: number;
+  } | null;
+  swing_score?: number | null;
 };
 
 type Mode =

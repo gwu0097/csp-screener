@@ -62,6 +62,7 @@ type Row = {
   momentum3mPct: number | null;
   return3yPct: number | null;
   vsSpy3yPct: number | null;
+  rsi14: number | null;
   buyZone: { low: number; high: number } | null;
   sellZone: { low: number; high: number } | null;
   flags: Flag[];
@@ -141,6 +142,15 @@ function allocationBadge(a: Allocation): string {
     case "Small":
       return "border-muted-foreground/30 bg-muted-foreground/10 text-muted-foreground";
   }
+}
+
+// RSI bands: oversold (green, opportunity) / neutral (amber) /
+// overbought (red, caution).
+function rsiColor(rsi: number | null): string {
+  if (rsi === null || !Number.isFinite(rsi)) return "text-muted-foreground";
+  if (rsi < 40) return "text-emerald-300";
+  if (rsi > 70) return "text-rose-300";
+  return "text-amber-300";
 }
 
 function pegColor(peg: number | null): string {
@@ -395,6 +405,7 @@ export function LongTermWatchlistView() {
               <SortHeader label="Trend (200d)" k="pctVs200dSma" sort={sort} onSort={toggleSort} align="right" />
               <SortHeader label="P/E" k="trailingPE" sort={sort} onSort={toggleSort} align="right" />
               <SortHeader label="PEG" k="pegRatio" sort={sort} onSort={toggleSort} align="right" />
+              <th className="px-2 py-2 text-right">RSI</th>
               <th className="px-2 py-2 text-center">Flags</th>
               <SortHeader label="Action" k="action" sort={sort} onSort={toggleSort} align="center" />
               <th className="px-2 py-2"></th>
@@ -403,14 +414,14 @@ export function LongTermWatchlistView() {
           <tbody>
             {loading && rows === null && (
               <tr>
-                <td colSpan={15} className="px-2 py-8 text-center">
+                <td colSpan={16} className="px-2 py-8 text-center">
                   <Loader2 className="mx-auto h-4 w-4 animate-spin text-muted-foreground" />
                 </td>
               </tr>
             )}
             {!loading && rows && rows.length === 0 && (
               <tr>
-                <td colSpan={15} className="px-2 py-8 text-center text-muted-foreground">
+                <td colSpan={16} className="px-2 py-8 text-center text-muted-foreground">
                   No symbols yet. Use Add Stock to start.
                 </td>
               </tr>
@@ -782,6 +793,11 @@ function WatchRow({
             ? row.pegRatio.toFixed(2)
             : "—"}
         </td>
+        <td className={cn("px-2 py-1.5 text-right font-mono", rsiColor(row.rsi14))}>
+          {row.rsi14 !== null && Number.isFinite(row.rsi14)
+            ? row.rsi14.toFixed(0)
+            : "—"}
+        </td>
         <td className="px-2 py-1.5 text-center" title={flagsTooltip || undefined}>
           {visibleFlags.length === 0 ? (
             <span className="text-muted-foreground">—</span>
@@ -833,7 +849,7 @@ function WatchRow({
       </tr>
       {expanded && (
         <tr className="border-b border-border/40 bg-background/30">
-          <td colSpan={15} className="px-3 py-3">
+          <td colSpan={16} className="px-3 py-3">
             <div className="grid grid-cols-1 gap-3 md:grid-cols-[1fr_auto]">
               <label className="block">
                 <span className="text-[11px] uppercase tracking-wider text-muted-foreground">

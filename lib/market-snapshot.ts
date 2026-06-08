@@ -12,6 +12,7 @@ export type Price5d = { date: string; close: number; change_pct: number | null }
 // callers as-is and upserted without remapping).
 export type SymbolSnapshot = {
   symbol: string;
+  company_name: string | null;
   price: number | null;
   change_pct: number | null;
   change_amt: number | null;
@@ -177,6 +178,7 @@ export async function refreshSymbolSnapshot(
 
   const snapshot: SymbolSnapshot = {
     symbol: sym,
+    company_name: quote.companyName,
     price: round(price),
     change_pct: round(change_pct, 2),
     change_amt,
@@ -205,9 +207,18 @@ export async function refreshSymbolSnapshot(
   // still return the computed snapshot so callers degrade gracefully.
   try {
     const sb = createServerClient();
-    const { error } = await sb
+    let { error } = await sb
       .from("symbol_market_snapshot")
       .upsert(snapshot, { onConflict: "symbol" });
+    // Tolerate the company_name column not being migrated yet — persist
+    // everything else so the cache still works before the ALTER runs.
+    if (error && /company_name/i.test(error.message)) {
+      const { company_name: _omit, ...rest } = snapshot;
+      void _omit;
+      ({ error } = await sb
+        .from("symbol_market_snapshot")
+        .upsert(rest, { onConflict: "symbol" }));
+    }
     if (error) {
       console.warn(`[snapshot] ${sym}: upsert failed — ${error.message}`);
     }
