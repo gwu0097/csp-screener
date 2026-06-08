@@ -347,7 +347,7 @@ export function LongTermWatchlistView() {
           <h1 className="text-2xl font-semibold tracking-tight">
             Long-Term Portfolio
           </h1>
-          <p className="text-sm text-muted-foreground">
+          <p className="text-base text-muted-foreground">
             Allocation buckets + live valuation. Click any column header to sort.
           </p>
         </div>
@@ -362,12 +362,12 @@ export function LongTermWatchlistView() {
       </div>
 
       {toast && (
-        <div className="rounded border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-200">
+        <div className="rounded border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200">
           {toast}
         </div>
       )}
       {error && (
-        <div className="rounded border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
+        <div className="rounded border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-sm text-rose-200">
           {error}
         </div>
       )}
@@ -380,7 +380,7 @@ export function LongTermWatchlistView() {
       />
 
       <div className="overflow-x-auto rounded-md border border-border bg-background/40">
-        <table className="w-full min-w-[1400px] text-xs">
+        <table className="w-full min-w-[1400px] text-sm">
           <thead className="border-b border-border bg-background/60 text-[11px] uppercase tracking-wider text-muted-foreground">
             <tr>
               <th className="px-2 py-2 text-left">Symbol</th>
@@ -558,7 +558,7 @@ function AlertsPanel({
         className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left hover:bg-background/60"
       >
         <div className="flex items-center gap-2">
-          <span className="text-sm font-semibold">Signals & Alerts</span>
+          <span className="text-base font-semibold">Signals & Alerts</span>
           <span className="rounded border border-border bg-background px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
             {alerts.length} active
           </span>
@@ -570,7 +570,7 @@ function AlertsPanel({
         )}
       </button>
       {open && (
-        <div className="space-y-3 border-t border-border px-3 py-3 text-xs">
+        <div className="space-y-3 border-t border-border px-3 py-3 text-sm">
           {ordered.map(({ kind, items }) => (
             <div key={kind} className="space-y-1">
               <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
@@ -843,7 +843,7 @@ function WatchRow({
                   value={draftNotes}
                   onChange={(e) => setDraftNotes(e.target.value)}
                   rows={3}
-                  className="mt-1 w-full rounded border border-border bg-background px-2 py-1 text-xs"
+                  className="mt-1 w-full rounded border border-border bg-background px-2 py-1 text-sm"
                   placeholder="Thesis, watch levels, exit triggers…"
                 />
                 <div className="mt-2 flex items-center gap-2">
@@ -957,9 +957,9 @@ function AddStockDialog({
         <DialogHeader>
           <DialogTitle>Add stock to watchlist</DialogTitle>
         </DialogHeader>
-        <div className="space-y-3 text-sm">
+        <div className="space-y-3 text-base">
           <label className="block">
-            <span className="text-xs text-muted-foreground">Symbol</span>
+            <span className="text-sm text-muted-foreground">Symbol</span>
             <input
               value={symbol}
               onChange={(e) => setSymbol(e.target.value.toUpperCase())}
@@ -968,7 +968,7 @@ function AddStockDialog({
             />
           </label>
           <label className="block">
-            <span className="text-xs text-muted-foreground">Allocation</span>
+            <span className="text-sm text-muted-foreground">Allocation</span>
             <select
               value={allocation}
               onChange={(e) => setAllocation(e.target.value as Allocation)}
@@ -980,7 +980,7 @@ function AddStockDialog({
             </select>
           </label>
           <label className="block">
-            <span className="text-xs text-muted-foreground">Notes (optional)</span>
+            <span className="text-sm text-muted-foreground">Notes (optional)</span>
             <textarea
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
@@ -990,7 +990,7 @@ function AddStockDialog({
             />
           </label>
           {error && (
-            <div className="rounded border border-rose-500/40 bg-rose-500/10 px-2 py-1 text-xs text-rose-200">
+            <div className="rounded border border-rose-500/40 bg-rose-500/10 px-2 py-1 text-sm text-rose-200">
               {error}
             </div>
           )}
@@ -1096,7 +1096,7 @@ function WeeklyDigestDialog({
   function renderMover(m: Mover) {
     const color = m.changePct >= 0 ? "text-emerald-300" : "text-rose-300";
     return (
-      <li key={m.symbol} className="rounded border border-border bg-background/40 px-3 py-2 text-xs">
+      <li key={m.symbol} className="rounded border border-border bg-background/40 px-3 py-2 text-sm">
         <div className="flex items-baseline justify-between">
           <span className="font-mono font-semibold">{m.symbol}</span>
           <span className={cn("font-mono font-semibold", color)}>
@@ -1145,13 +1145,13 @@ function WeeklyDigestDialog({
         {loading && (
           <div className="py-8 text-center">
             <Loader2 className="mx-auto h-5 w-5 animate-spin text-muted-foreground" />
-            <div className="mt-2 text-xs text-muted-foreground">
+            <div className="mt-2 text-sm text-muted-foreground">
               Aggregating weekly movers + catalysts…
             </div>
           </div>
         )}
         {error && (
-          <div className="rounded border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
+          <div className="rounded border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-sm text-rose-200">
             {error}
           </div>
         )}
@@ -1161,20 +1161,20 @@ function WeeklyDigestDialog({
               Week of {data.weekStart} · {data.cached ? "cached" : "fresh"}
             </div>
             <section className="space-y-2">
-              <h3 className="text-sm font-semibold text-emerald-300">Top 3 Up</h3>
+              <h3 className="text-base font-semibold text-emerald-300">Top 3 Up</h3>
               <ul className="space-y-2">
                 {data.upMovers.length === 0 ? (
-                  <li className="text-xs text-muted-foreground">No data.</li>
+                  <li className="text-sm text-muted-foreground">No data.</li>
                 ) : (
                   data.upMovers.map(renderMover)
                 )}
               </ul>
             </section>
             <section className="space-y-2">
-              <h3 className="text-sm font-semibold text-rose-300">Top 3 Down</h3>
+              <h3 className="text-base font-semibold text-rose-300">Top 3 Down</h3>
               <ul className="space-y-2">
                 {data.downMovers.length === 0 ? (
-                  <li className="text-xs text-muted-foreground">No data.</li>
+                  <li className="text-sm text-muted-foreground">No data.</li>
                 ) : (
                   data.downMovers.map(renderMover)
                 )}

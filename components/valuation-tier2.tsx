@@ -223,7 +223,7 @@ export function ValuationTier2({
 
 function DCFContextStrip({ model }: { model: ValuationModelV2 }) {
   return (
-    <div className="grid grid-cols-2 gap-x-4 gap-y-1 rounded border border-border bg-background/40 p-2 text-xs sm:grid-cols-4">
+    <div className="grid grid-cols-2 gap-x-4 gap-y-1 rounded border border-border bg-background/40 p-2 text-sm sm:grid-cols-4">
       <KV label="Last Revenue" value={fmtBigDollars(model.last_revenue)} />
       <KV label="Net Debt" value={fmtBigDollars(model.net_debt)} />
       <KV label="Shares" value={`${(model.shares_outstanding / 1e6).toFixed(1)}M`} />
@@ -273,7 +273,7 @@ function InputBlock({
     <div>
       <SectionLabel>{title}</SectionLabel>
       <div className="overflow-x-auto rounded border border-border">
-        <table className="min-w-full text-xs">
+        <table className="min-w-full text-sm">
           <thead className="bg-background/60">
             <tr>
               <th className="px-2 py-1 text-left font-medium text-muted-foreground"></th>
@@ -335,7 +335,7 @@ function DiscountBlock({
     <div>
       <SectionLabel>Discount rate (WACC)</SectionLabel>
       <div className="overflow-x-auto rounded border border-border">
-        <table className="min-w-full text-xs">
+        <table className="min-w-full text-sm">
           <thead className="bg-background/60">
             <tr>
               <th className="px-2 py-1 text-left font-medium text-muted-foreground"></th>
@@ -469,7 +469,7 @@ function TerminalBlock({
     <div>
       <SectionLabel>Terminal value</SectionLabel>
       <div className="overflow-x-auto rounded border border-border">
-        <table className="min-w-full text-xs">
+        <table className="min-w-full text-sm">
           <thead className="bg-background/60">
             <tr>
               <th className="px-2 py-1 text-left font-medium text-muted-foreground"></th>
@@ -500,7 +500,7 @@ function TerminalBlock({
                       )
                     }
                     disabled={!editable}
-                    className="cursor-pointer rounded border border-white/15 bg-white/[0.05] px-2 py-1 text-xs hover:border-white/40 disabled:cursor-default disabled:opacity-70"
+                    className="cursor-pointer rounded border border-white/15 bg-white/[0.05] px-2 py-1 text-sm hover:border-white/40 disabled:cursor-default disabled:opacity-70"
                   >
                     <option value="gordon">Gordon Growth</option>
                     <option value="exit_multiple">Exit Multiple</option>
@@ -553,7 +553,7 @@ function ProbabilityRow({
   return (
     <div>
       <div className="overflow-x-auto rounded border border-border">
-        <table className="min-w-full text-xs">
+        <table className="min-w-full text-sm">
           <tbody>
             <tr>
               <td className="px-2 py-1 text-foreground">
@@ -744,7 +744,7 @@ function WeightedTargetCard({
       <div className="mt-1 text-2xl font-bold text-foreground">
         {fmtRoundPrice(baseValue)}{" "}
         <span
-          className={`text-sm font-medium ${baseReturn >= 0 ? "text-emerald-300" : "text-rose-300"}`}
+          className={`text-base font-medium ${baseReturn >= 0 ? "text-emerald-300" : "text-rose-300"}`}
         >
           ({fmtSignedPct(baseReturn, 1)} from {fmtPrice(currentPrice)})
         </span>
@@ -851,7 +851,7 @@ function DCFSensitivity({
     <div>
       <SectionLabel>Sensitivity: Intrinsic value by WACC × FCF margin</SectionLabel>
       <div className="overflow-x-auto rounded border border-border">
-        <table className="min-w-full text-xs">
+        <table className="min-w-full text-sm">
           <thead className="bg-background/60">
             <tr>
               <th className="px-2 py-1 text-left font-medium text-muted-foreground">

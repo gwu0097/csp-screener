@@ -54,7 +54,7 @@ export function TooltipBody({
   warning?: React.ReactNode;
 }) {
   return (
-    <div className="space-y-2 text-xs leading-relaxed">
+    <div className="space-y-2 text-sm leading-relaxed">
       <div>{intro}</div>
       {howToSet && (
         <div>

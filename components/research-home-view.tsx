@@ -206,16 +206,16 @@ export function ResearchHomeView() {
       />
       <RecentPills recents={recents} onPick={go} />
       {error && (
-        <div className="rounded border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-300">
+        <div className="rounded border border-rose-500/40 bg-rose-500/10 p-3 text-base text-rose-300">
           {error}
         </div>
       )}
       {sorted === null ? (
-        <div className="rounded border border-border bg-background/40 p-6 text-sm text-muted-foreground">
+        <div className="rounded border border-border bg-background/40 p-6 text-base text-muted-foreground">
           Loading…
         </div>
       ) : sorted.length === 0 ? (
-        <div className="rounded border border-dashed border-border bg-background/40 p-6 text-center text-sm text-muted-foreground">
+        <div className="rounded border border-dashed border-border bg-background/40 p-6 text-center text-base text-muted-foreground">
           No stocks researched yet. Search for a ticker above to start.
         </div>
       ) : (
@@ -324,13 +324,13 @@ function SearchBox({
             }
           }}
           placeholder="Search or enter ticker (e.g. LULU, AMD, NVDA)"
-          className="flex-1 bg-transparent text-sm focus:outline-none"
+          className="flex-1 bg-transparent text-base focus:outline-none"
           autoFocus
         />
         <button
           type="submit"
           disabled={!query.trim()}
-          className="rounded border border-border bg-emerald-500/10 px-3 py-1.5 text-sm font-medium text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-50"
+          className="rounded border border-border bg-emerald-500/10 px-3 py-1.5 text-base font-medium text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-50"
         >
           Research
         </button>
@@ -350,11 +350,11 @@ function SearchBox({
                 onSubmit(s.symbol);
               }}
               onMouseEnter={() => setActive(i)}
-              className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs hover:bg-white/[0.04] ${
+              className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-white/[0.04] ${
                 i === active ? "bg-white/[0.04]" : ""
               }`}
             >
-              <span className="w-16 font-mono text-sm font-semibold text-foreground">
+              <span className="w-16 font-mono text-base font-semibold text-foreground">
                 {s.symbol}
               </span>
               <span className="flex-1 truncate text-muted-foreground">
@@ -393,7 +393,7 @@ function RecentPills({
           key={s}
           type="button"
           onClick={() => onPick(s)}
-          className="rounded border border-border bg-background/40 px-2 py-0.5 text-xs font-mono font-medium text-foreground hover:border-emerald-500/40 hover:bg-emerald-500/10"
+          className="rounded border border-border bg-background/40 px-2 py-0.5 text-sm font-mono font-medium text-foreground hover:border-emerald-500/40 hover:bg-emerald-500/10"
         >
           {s}
         </button>
@@ -417,7 +417,7 @@ function StockTable({
 }) {
   return (
     <div className="overflow-x-auto rounded border border-border">
-      <table className="min-w-full text-xs">
+      <table className="min-w-full text-sm">
         <thead className="bg-background/60">
           <tr>
             <Th>Symbol</Th>
@@ -558,7 +558,7 @@ function Row({ s }: { s: RecentStock }) {
       <td className="px-3 py-2">
         <Link
           href={`/research/${encodeURIComponent(s.symbol)}`}
-          className="font-mono text-sm font-semibold text-foreground hover:text-emerald-300 hover:underline"
+          className="font-mono text-base font-semibold text-foreground hover:text-emerald-300 hover:underline"
         >
           {s.symbol}
         </Link>

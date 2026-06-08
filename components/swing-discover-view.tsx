@@ -754,7 +754,7 @@ export function SwingDiscoverView({
             </>
           )}
         </Button>
-        <span className="text-xs text-muted-foreground">
+        <span className="text-sm text-muted-foreground">
           {scanning
             ? activeTab === "all"
               ? "Four Perplexity queries + Yahoo enrichment — takes ~25-30s"
@@ -764,12 +764,12 @@ export function SwingDiscoverView({
       </div>
 
       {error && (
-        <div className="flex items-start justify-between gap-3 rounded border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-300">
+        <div className="flex items-start justify-between gap-3 rounded border border-rose-500/40 bg-rose-500/10 p-3 text-base text-rose-300">
           <span>{error}</span>
           <button
             type="button"
             onClick={() => setError(null)}
-            className="text-xs text-rose-200 hover:text-white"
+            className="text-sm text-rose-200 hover:text-white"
           >
             Dismiss
           </button>
@@ -777,9 +777,9 @@ export function SwingDiscoverView({
       )}
 
       {loading && candidates.length === 0 && !scanning ? (
-        <div className="text-sm text-muted-foreground">Loading previous scan…</div>
+        <div className="text-base text-muted-foreground">Loading previous scan…</div>
       ) : candidates.length === 0 && !scanning ? (
-        <div className="rounded border border-border bg-background/40 p-6 text-sm text-muted-foreground">
+        <div className="rounded border border-border bg-background/40 p-6 text-base text-muted-foreground">
           No scan results yet. Click &ldquo;Scan Now&rdquo; to run the AI catalyst
           scanner — it takes about 25-30 seconds.
         </div>
@@ -868,7 +868,7 @@ export function SwingDiscoverView({
                   <div className="space-y-5">
                     {themeGroups.map(([theme, group]) => (
                       <div key={theme} className="space-y-2">
-                        <div className="flex flex-wrap items-center gap-2 text-sm">
+                        <div className="flex flex-wrap items-center gap-2 text-base">
                           <span className="font-medium">{theme}</span>
                           {group.momentum && (
                             <span
@@ -903,7 +903,7 @@ export function SwingDiscoverView({
                   <EmptyTab label="social/retail candidates" />
                 ) : (
                   <>
-                    <p className="mb-3 text-xs text-muted-foreground">
+                    <p className="mb-3 text-sm text-muted-foreground">
                       What retail traders and financial communities are talking
                       about — ahead of analyst consensus
                     </p>
@@ -972,7 +972,7 @@ function TabTrigger({
 
 function EmptyTab({ label }: { label: string }) {
   return (
-    <div className="rounded border border-border bg-background/40 p-6 text-sm text-muted-foreground">
+    <div className="rounded border border-border bg-background/40 p-6 text-base text-muted-foreground">
       No {label} in this scan.
     </div>
   );
@@ -1162,9 +1162,9 @@ function CandidateRow({
 
   return (
     <div className={`overflow-hidden rounded-md border ${accent}`}>
-      <div className={`${ROW_GRID} pt-2 text-xs`}>
+      <div className={`${ROW_GRID} pt-2 text-sm`}>
         {/* 1. Symbol */}
-        <div className="truncate text-left font-mono text-sm font-semibold text-foreground">
+        <div className="truncate text-left font-mono text-base font-semibold text-foreground">
           {c.symbol}
         </div>
         {/* 2. Company — hidden on mobile */}
@@ -1306,7 +1306,7 @@ function CandidateRowLine2({
           onToggle();
         }
       }}
-      className="flex cursor-pointer items-center gap-2 px-3 pb-2 pt-1 text-sm text-muted-foreground hover:bg-white/[0.02]"
+      className="flex cursor-pointer items-center gap-2 px-3 pb-2 pt-1 text-base text-muted-foreground hover:bg-white/[0.02]"
     >
       <span className="flex h-4 w-4 shrink-0 items-center justify-center text-muted-foreground/70">
         {expanded ? (
@@ -1416,7 +1416,7 @@ function MiniFundamentalsPanel({
 }) {
   const f = research?.fundamentals ?? null;
   const wrap = (children: React.ReactNode) => (
-    <div className="border-t border-border/40 bg-background/40 px-3 py-2 text-xs">
+    <div className="border-t border-border/40 bg-background/40 px-3 py-2 text-sm">
       {children}
     </div>
   );
@@ -1519,10 +1519,10 @@ function NextEarningsPanel({ earnings }: { earnings: NextEarnings | null }) {
         Next earnings
       </div>
       {!earnings ? (
-        <div className="mt-1 text-sm text-muted-foreground">—</div>
+        <div className="mt-1 text-base text-muted-foreground">—</div>
       ) : (
         <div className="mt-1 space-y-0.5">
-          <div className={`text-sm font-medium ${earningsProximityTone(earnings.daysAway)}`}>
+          <div className={`text-base font-medium ${earningsProximityTone(earnings.daysAway)}`}>
             {fmtEarningsDate(earnings.date)}
             {earnings.timing && earnings.timing !== "unknown" && (
               <span className="ml-1 text-[10px] uppercase text-muted-foreground">
@@ -1825,13 +1825,13 @@ function DeepDiveDrawer({
             <SheetTitle className="flex flex-wrap items-baseline gap-2 text-lg">
               <span className="font-mono">{c?.symbol}</span>
               {c?.company_name && (
-                <span className="truncate text-sm font-normal text-muted-foreground">
+                <span className="truncate text-base font-normal text-muted-foreground">
                   — {c.company_name}
                 </span>
               )}
             </SheetTitle>
             {c && (
-              <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
+              <div className="mt-2 flex flex-wrap items-center gap-2 text-base">
                 <span className="font-mono text-foreground">
                   {fmtMoney(c.current_price)}
                 </span>
@@ -1904,19 +1904,19 @@ function DeepDiveDrawer({
             className="min-h-0 flex-1 overflow-y-auto px-6 py-6 text-base"
           >
             {loading && !dive && (
-              <div className="flex flex-col items-center justify-center gap-2 py-16 text-sm text-muted-foreground">
+              <div className="flex flex-col items-center justify-center gap-2 py-16 text-base text-muted-foreground">
                 <Loader2 className="h-7 w-7 animate-spin" />
                 <span className="text-base">
                   Researching {c?.symbol ?? ""}…
                 </span>
-                <span className="text-xs">
+                <span className="text-sm">
                   Pulling recent news, fundamentals, sentiment, and bear case
                 </span>
               </div>
             )}
 
             {!loading && !dive && error && (
-              <div className="rounded border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-300">
+              <div className="rounded border border-rose-500/40 bg-rose-500/10 p-3 text-base text-rose-300">
                 {error}
               </div>
             )}
@@ -1936,7 +1936,7 @@ function DeepDiveDrawer({
                 </DeepSection>
 
                 <DeepSection title="⚡ Catalyst">
-                  <div className="mb-2 flex flex-wrap gap-4 text-sm">
+                  <div className="mb-2 flex flex-wrap gap-4 text-base">
                     <span className="text-muted-foreground">
                       Credibility:{" "}
                       <span className="font-medium uppercase text-foreground">
@@ -1958,7 +1958,7 @@ function DeepDiveDrawer({
                 </DeepSection>
 
                 <DeepSection title="👥 Sentiment">
-                  <div className="flex flex-wrap gap-6 text-sm">
+                  <div className="flex flex-wrap gap-6 text-base">
                     <span className="text-muted-foreground">
                       Retail:{" "}
                       <span className="font-medium capitalize text-foreground">
@@ -1998,7 +1998,7 @@ function DeepDiveDrawer({
                 <div
                   className={`rounded border p-5 ${verdictClasses(dive.verdict)}`}
                 >
-                  <div className="text-xs font-semibold uppercase tracking-wider">
+                  <div className="text-sm font-semibold uppercase tracking-wider">
                     Verdict: {dive.verdict} priority
                   </div>
                   {dive.verdict_reasoning && (
@@ -2043,11 +2043,11 @@ function DeepDiveDrawer({
             className="min-h-0 flex-1 overflow-y-auto px-6 py-6 text-base"
           >
             {!c || c.sources.length === 0 ? (
-              <div className="rounded border border-border bg-background/40 p-4 text-sm text-muted-foreground">
+              <div className="rounded border border-border bg-background/40 p-4 text-base text-muted-foreground">
                 No sources attached to this candidate.
               </div>
             ) : (
-              <ol className="space-y-2 pl-5 text-sm leading-relaxed text-foreground/90">
+              <ol className="space-y-2 pl-5 text-base leading-relaxed text-foreground/90">
                 {c.sources.map((rawSrc, i) => {
                   const src = ensureHttp(rawSrc);
                   return (
@@ -2133,12 +2133,12 @@ function ResearchNews({
     <DeepSection title="📰 Recent news (last 7)">
       {loading && !data && <SkeletonList rows={4} />}
       {!loading && error && !data && (
-        <div className="rounded border border-rose-500/40 bg-rose-500/10 p-2 text-xs text-rose-300">
+        <div className="rounded border border-rose-500/40 bg-rose-500/10 p-2 text-sm text-rose-300">
           {error}
         </div>
       )}
       {data && data.news.length === 0 && (
-        <div className="text-sm text-muted-foreground">
+        <div className="text-base text-muted-foreground">
           No recent news found.
         </div>
       )}
@@ -2150,7 +2150,7 @@ function ResearchNews({
               className="flex items-start justify-between gap-3 rounded-md border border-border bg-background/40 p-2.5"
             >
               <div className="min-w-0 flex-1">
-                <div className="line-clamp-2 text-sm leading-relaxed text-foreground/90">
+                <div className="line-clamp-2 text-base leading-relaxed text-foreground/90">
                   {n.title}
                 </div>
                 <div className="mt-1 text-[11px] text-muted-foreground">
@@ -2191,12 +2191,12 @@ function ResearchFundamentals({
     <DeepSection title="💰 Key fundamentals">
       {loading && !f && <SkeletonList rows={4} />}
       {!loading && !f && (
-        <div className="text-sm text-muted-foreground">
+        <div className="text-base text-muted-foreground">
           Yahoo did not return fundamentals for {c.symbol}.
         </div>
       )}
       {f && (
-        <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+        <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-base">
           <FundRow
             label="Revenue Growth"
             value={fmtGrowth(f.revenueGrowth)}
@@ -2370,7 +2370,7 @@ function ResearchQuickLinks({ candidate: c }: { candidate: Candidate }) {
             href={l.href}
             target="_blank"
             rel="noopener noreferrer"
-            className="flex items-center justify-between gap-2 rounded-md border border-border bg-background/40 px-3 py-2 text-sm text-foreground/90 hover:bg-background/60"
+            className="flex items-center justify-between gap-2 rounded-md border border-border bg-background/40 px-3 py-2 text-base text-foreground/90 hover:bg-background/60"
           >
             <span className="truncate">{l.label}</span>
             <ExternalLink className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />

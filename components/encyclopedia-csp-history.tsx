@@ -165,7 +165,7 @@ export function CspHistoryTab({ symbol }: { symbol: string }) {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center rounded-md border border-border bg-background/40 px-6 py-12 text-sm text-muted-foreground">
+      <div className="flex items-center justify-center rounded-md border border-border bg-background/40 px-6 py-12 text-base text-muted-foreground">
         <Loader2 className="mr-2 h-4 w-4 animate-spin" />
         Loading CSP history…
       </div>
@@ -173,7 +173,7 @@ export function CspHistoryTab({ symbol }: { symbol: string }) {
   }
   if (error) {
     return (
-      <div className="rounded-md border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
+      <div className="rounded-md border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200">
         <AlertTriangle className="mr-1.5 inline h-3 w-3" />
         {error}
       </div>
@@ -181,7 +181,7 @@ export function CspHistoryTab({ symbol }: { symbol: string }) {
   }
   if (!events || events.length === 0) {
     return (
-      <div className="rounded-md border border-dashed border-border bg-background/40 px-6 py-12 text-center text-sm text-muted-foreground">
+      <div className="rounded-md border border-dashed border-border bg-background/40 px-6 py-12 text-center text-base text-muted-foreground">
         No CSP history for {symbol} yet.
         <br />
         Run the CSP screener when {symbol} has upcoming earnings to start
@@ -202,10 +202,10 @@ export function CspHistoryTab({ symbol }: { symbol: string }) {
 function CspEventCard({ event: e }: { event: CspHistoryEvent }) {
   const tag = todayHeaderTag(e);
   return (
-    <div className={`rounded-md border p-4 text-xs ${cardBorderClass(e)}`}>
+    <div className={`rounded-md border p-4 text-sm ${cardBorderClass(e)}`}>
       <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2 border-b border-border/60 pb-2">
         <div className="font-semibold text-foreground">
-          <span className="text-sm">{e.qtrLabel}</span>
+          <span className="text-base">{e.qtrLabel}</span>
           <span className="ml-2 text-muted-foreground">
             — {shortDate(e.earningsDate)}
           </span>

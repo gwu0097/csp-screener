@@ -155,14 +155,14 @@ export function UndoImportPopover({ open, onClose, onUndone }: Props) {
       />
       <div className="absolute right-0 top-full z-50 mt-1 w-[24rem] rounded-lg border border-border bg-background/95 p-3 shadow-lg backdrop-blur">
         <div className="mb-2 flex items-center justify-between">
-          <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          <div className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
             <Undo2 className="mr-1 inline h-3 w-3" />
             Undo Import
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="text-xs text-muted-foreground hover:text-foreground"
+            className="text-sm text-muted-foreground hover:text-foreground"
             aria-label="Close"
           >
             ×
@@ -170,21 +170,21 @@ export function UndoImportPopover({ open, onClose, onUndone }: Props) {
         </div>
 
         {loading && (
-          <div className="flex items-center gap-2 px-2 py-3 text-xs text-muted-foreground">
+          <div className="flex items-center gap-2 px-2 py-3 text-sm text-muted-foreground">
             <Loader2 className="h-3 w-3 animate-spin" />
             Loading recent imports…
           </div>
         )}
 
         {!loading && error && (
-          <div className="rounded border border-rose-500/40 bg-rose-500/10 px-2 py-1.5 text-xs text-rose-200">
+          <div className="rounded border border-rose-500/40 bg-rose-500/10 px-2 py-1.5 text-sm text-rose-200">
             <AlertTriangle className="mr-1 inline h-3 w-3" />
             {error}
           </div>
         )}
 
         {!loading && !error && batches && batches.length === 0 && (
-          <div className="rounded border border-border bg-background/60 px-2 py-3 text-xs text-muted-foreground">
+          <div className="rounded border border-border bg-background/60 px-2 py-3 text-sm text-muted-foreground">
             No recent imports to undo. (Pre-migration imports aren&apos;t
             tracked.)
           </div>
@@ -199,7 +199,7 @@ export function UndoImportPopover({ open, onClose, onUndone }: Props) {
               return (
                 <div
                   key={b.batchId}
-                  className="rounded border border-border bg-background/60 px-2 py-1.5 text-xs"
+                  className="rounded border border-border bg-background/60 px-2 py-1.5 text-sm"
                 >
                   <div className="flex items-baseline justify-between gap-2">
                     <div className="min-w-0 flex-1">

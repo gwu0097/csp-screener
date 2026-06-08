@@ -67,7 +67,7 @@ export function LogTradeDialog({ row, open, onOpenChange, onSuccess }: Props) {
             Sell to open · expiry {row.expiry} · grade {row.stageThree?.crushGrade}/{row.stageFour?.opportunityGrade}
           </DialogDescription>
         </DialogHeader>
-        <div className="space-y-3 text-sm">
+        <div className="space-y-3 text-base">
           <Field label="Strike">
             <input
               type="number"
@@ -112,7 +112,7 @@ export function LogTradeDialog({ row, open, onOpenChange, onSuccess }: Props) {
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <label className="block">
-      <span className="mb-1 block text-xs text-muted-foreground">{label}</span>
+      <span className="mb-1 block text-sm text-muted-foreground">{label}</span>
       {children}
     </label>
   );

@@ -92,7 +92,7 @@ export function AssignmentStockPromptModal({
           <DialogTitle>Stock positions from assignment</DialogTitle>
         </DialogHeader>
 
-        <p className="shrink-0 text-sm text-muted-foreground">
+        <p className="shrink-0 text-base text-muted-foreground">
           The following {rows.length === 1 ? "position was" : "positions were"}{" "}
           assigned. Create stock {rows.length === 1 ? "position" : "positions"}{" "}
           at cost basis? Uncheck any you don&apos;t want to track.
@@ -111,7 +111,7 @@ export function AssignmentStockPromptModal({
                 type="button"
                 onClick={() => toggle(r.positionId)}
                 disabled={submitting}
-                className="flex w-full items-start gap-2 rounded border border-border bg-background/40 px-3 py-2 text-left text-sm hover:bg-background/60 disabled:opacity-50"
+                className="flex w-full items-start gap-2 rounded border border-border bg-background/40 px-3 py-2 text-left text-base hover:bg-background/60 disabled:opacity-50"
               >
                 {checked ? (
                   <CheckSquare className="mt-0.5 h-4 w-4 shrink-0 text-emerald-300" />
@@ -127,14 +127,14 @@ export function AssignmentStockPromptModal({
                       ${r.strike}P ×{r.contracts} assigned
                     </span>
                   </div>
-                  <div className="text-xs text-muted-foreground">
+                  <div className="text-sm text-muted-foreground">
                     Cost basis = ${r.strike.toFixed(2)} − {premiumStr} premium ={" "}
                     <span className="font-mono text-foreground">
                       ${r.costBasis.toFixed(2)}
                     </span>{" "}
                     per share
                   </div>
-                  <div className="text-xs">
+                  <div className="text-sm">
                     <span className="font-mono font-semibold text-foreground">
                       {r.shares} shares
                     </span>{" "}

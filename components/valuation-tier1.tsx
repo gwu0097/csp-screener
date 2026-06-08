@@ -229,7 +229,7 @@ export function ValuationTier1({
         />
         <CellLegend />
         <div className="overflow-x-auto rounded border border-border">
-          <table className="min-w-full text-xs">
+          <table className="min-w-full text-sm">
             <thead className="bg-background/60">
               <tr>
                 <th className="px-2 py-1 text-left font-medium text-muted-foreground"></th>
@@ -599,7 +599,7 @@ function StalenessBanner({
     ? "border-amber-500/40 bg-amber-500/10 text-amber-100"
     : "border-sky-500/30 bg-sky-500/[0.06] text-sky-100";
   return (
-    <div className={`mb-2 rounded border ${cls} px-3 py-2 text-xs`}>
+    <div className={`mb-2 rounded border ${cls} px-3 py-2 text-sm`}>
       <div className="flex items-start gap-2">
         <span className="mt-0.5 shrink-0">{critical ? "⚠️" : "ℹ️"}</span>
         <div className="flex-1 space-y-1">
@@ -891,7 +891,7 @@ function EpsAnchorNote({
 
 function KV({ label, value, source }: { label: string; value: string; source?: string }) {
   return (
-    <div className="flex items-center gap-2 text-xs">
+    <div className="flex items-center gap-2 text-sm">
       <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
         {label}
       </span>
@@ -938,7 +938,7 @@ function WeightedTargetCard({
       <div className="mt-1 text-2xl font-bold text-foreground">
         {fmtRoundPrice(baseTarget)}{" "}
         <span
-          className={`text-sm font-medium ${baseReturn >= 0 ? "text-emerald-300" : "text-rose-300"}`}
+          className={`text-base font-medium ${baseReturn >= 0 ? "text-emerald-300" : "text-rose-300"}`}
         >
           ({fmtSignedPct(baseReturn, 1)} from {fmtPrice(currentPrice)})
         </span>
@@ -1021,7 +1021,7 @@ function SensitivityTable({
     <div>
       <SectionLabel>Sensitivity: Price target by EPS × P/E</SectionLabel>
       <div className="overflow-x-auto rounded border border-border">
-        <table className="min-w-full text-xs">
+        <table className="min-w-full text-sm">
           <thead className="bg-background/60">
             <tr>
               <th className="px-2 py-1 text-left font-medium text-muted-foreground">

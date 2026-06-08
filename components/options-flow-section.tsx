@@ -55,7 +55,7 @@ export function OptionsFlowSection({ flow }: { flow: OptionsFlow | null }) {
   const ys = flow.yourStrikeFlow;
 
   return (
-    <div className="rounded-md border border-border bg-background/40 p-3 text-xs">
+    <div className="rounded-md border border-border bg-background/40 p-3 text-sm">
       <div className="mb-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
         <span>Options flow</span>
         <Tooltip>
@@ -81,7 +81,7 @@ export function OptionsFlowSection({ flow }: { flow: OptionsFlow | null }) {
       <div className="grid gap-3 rounded border border-border bg-background/60 p-2 md:grid-cols-3">
         <div className="flex items-center gap-2">
           <span className="text-muted-foreground">P/C Ratio</span>
-          <span className="font-mono text-sm font-semibold text-foreground">
+          <span className="font-mono text-base font-semibold text-foreground">
             {flow.putCallRatio.toFixed(2)}
           </span>
           <span
@@ -92,7 +92,7 @@ export function OptionsFlowSection({ flow }: { flow: OptionsFlow | null }) {
         </div>
         <div className="flex items-center gap-2">
           <span className="text-muted-foreground">Put OI / Call OI</span>
-          <span className="font-mono text-sm text-foreground">
+          <span className="font-mono text-base text-foreground">
             {flow.putCallOI.toFixed(2)}
           </span>
         </div>

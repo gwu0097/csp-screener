@@ -134,8 +134,8 @@ export function SellSharesModal({ open, target, onCancel, onConfirm }: Props) {
         <DialogHeader>
           <DialogTitle>Sell {target.symbol} Shares</DialogTitle>
         </DialogHeader>
-        <div className="space-y-3 text-sm">
-          <div className="flex items-baseline justify-between text-xs text-muted-foreground">
+        <div className="space-y-3 text-base">
+          <div className="flex items-baseline justify-between text-sm text-muted-foreground">
             <span>
               {target.totalShares} shares held @ cost basis{" "}
               <span className="font-mono text-foreground">
@@ -148,7 +148,7 @@ export function SellSharesModal({ open, target, onCancel, onConfirm }: Props) {
           </div>
 
           <label className="block">
-            <span className="text-xs text-muted-foreground">Shares to sell</span>
+            <span className="text-sm text-muted-foreground">Shares to sell</span>
             <input
               type="number"
               min={1}
@@ -156,12 +156,12 @@ export function SellSharesModal({ open, target, onCancel, onConfirm }: Props) {
               step={1}
               value={shares}
               onChange={(e) => setShares(e.target.value)}
-              className="mt-1 w-full rounded border border-border bg-background px-2 py-1.5 font-mono text-sm"
+              className="mt-1 w-full rounded border border-border bg-background px-2 py-1.5 font-mono text-base"
             />
           </label>
 
           <label className="block">
-            <span className="text-xs text-muted-foreground">Sale price (per share)</span>
+            <span className="text-sm text-muted-foreground">Sale price (per share)</span>
             <div className="mt-1 flex items-center rounded border border-border bg-background px-2 py-1.5">
               <span className="mr-1 font-mono text-muted-foreground">$</span>
               <input
@@ -171,22 +171,22 @@ export function SellSharesModal({ open, target, onCancel, onConfirm }: Props) {
                 value={price}
                 onChange={(e) => setPrice(e.target.value)}
                 placeholder="0.00"
-                className="w-full bg-transparent font-mono text-sm outline-none"
+                className="w-full bg-transparent font-mono text-base outline-none"
               />
             </div>
           </label>
 
           <label className="block">
-            <span className="text-xs text-muted-foreground">Date</span>
+            <span className="text-sm text-muted-foreground">Date</span>
             <input
               type="date"
               value={date}
               onChange={(e) => setDate(e.target.value)}
-              className="mt-1 w-full rounded border border-border bg-background px-2 py-1.5 text-sm"
+              className="mt-1 w-full rounded border border-border bg-background px-2 py-1.5 text-base"
             />
           </label>
 
-          <div className="rounded border border-border bg-background/40 p-2 text-xs">
+          <div className="rounded border border-border bg-background/40 p-2 text-sm">
             <div className="mb-1 font-semibold uppercase tracking-wide text-muted-foreground">
               Preview P&L
             </div>
@@ -220,7 +220,7 @@ export function SellSharesModal({ open, target, onCancel, onConfirm }: Props) {
           </div>
 
           {error && (
-            <div className="rounded border border-rose-500/40 bg-rose-500/10 px-2 py-1.5 text-xs text-rose-200">
+            <div className="rounded border border-rose-500/40 bg-rose-500/10 px-2 py-1.5 text-sm text-rose-200">
               {error}
             </div>
           )}

@@ -209,7 +209,7 @@ export function ExpireConfirmationModal({ open, rows, onCancel, onConfirm }: Pro
           </DialogTitle>
         </DialogHeader>
 
-        <p className="shrink-0 text-sm text-muted-foreground">
+        <p className="shrink-0 text-base text-muted-foreground">
           These positions are at or past expiry. Rows labeled{" "}
           <span className="text-emerald-300">Worthless</span> are comfortably
           out-of-the-money (&gt;5%) and safe to close. Rows labeled{" "}
@@ -218,7 +218,7 @@ export function ExpireConfirmationModal({ open, rows, onCancel, onConfirm }: Pro
           uncheck to leave them open.
         </p>
 
-        <div className="flex shrink-0 items-center justify-between text-xs">
+        <div className="flex shrink-0 items-center justify-between text-sm">
           <button
             type="button"
             className="text-foreground/70 underline-offset-2 hover:text-foreground hover:underline disabled:opacity-50"
@@ -238,10 +238,10 @@ export function ExpireConfirmationModal({ open, rows, onCancel, onConfirm }: Pro
         <div className="-mx-6 min-h-0 flex-1 space-y-3 overflow-y-auto px-6">
           {grouped.map((g) => (
             <div key={g.key} className="space-y-1.5">
-              <div className="text-xs font-bold uppercase tracking-wider text-foreground/80">
+              <div className="text-sm font-bold uppercase tracking-wider text-foreground/80">
                 {g.label}
               </div>
-              <ul className="space-y-1.5 rounded border border-border bg-background/40 px-3 py-2 text-sm">
+              <ul className="space-y-1.5 rounded border border-border bg-background/40 px-3 py-2 text-base">
                 {g.items.map((r) => {
                   const worthless = isExpiredWorthless(r);
                   const checked = selectedIds.has(r.positionId);
@@ -303,7 +303,7 @@ export function ExpireConfirmationModal({ open, rows, onCancel, onConfirm }: Pro
                         </span>
                       </div>
                       {!worthless && (
-                        <div className="ml-6 space-y-0.5 text-xs">
+                        <div className="ml-6 space-y-0.5 text-sm">
                           <div className="text-muted-foreground">
                             Cost basis ={" "}
                             <span className="text-foreground">
@@ -341,7 +341,7 @@ export function ExpireConfirmationModal({ open, rows, onCancel, onConfirm }: Pro
           ))}
         </div>
 
-        <div className="shrink-0 rounded border border-border bg-background/40 px-3 py-1.5 text-xs text-muted-foreground">
+        <div className="shrink-0 rounded border border-border bg-background/40 px-3 py-1.5 text-sm text-muted-foreground">
           {selectedCount} position{selectedCount === 1 ? "" : "s"} ·{" "}
           {selectedContracts} contract{selectedContracts === 1 ? "" : "s"}
           {assignedCount > 0 ? (

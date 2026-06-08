@@ -332,8 +332,8 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
           <DialogTitle>Import from screenshot</DialogTitle>
         </DialogHeader>
 
-        <div className="flex flex-wrap items-center gap-3 text-sm">
-          <label className="text-xs text-muted-foreground">Broker</label>
+        <div className="flex flex-wrap items-center gap-3 text-base">
+          <label className="text-sm text-muted-foreground">Broker</label>
           <select
             value={broker}
             onChange={(e) => setBroker(e.target.value)}
@@ -345,7 +345,7 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
               </option>
             ))}
           </select>
-          <label className="text-xs text-muted-foreground">Timezone</label>
+          <label className="text-sm text-muted-foreground">Timezone</label>
           <select
             value={timezone}
             onChange={(e) => pickTimezone(e.target.value)}
@@ -368,7 +368,7 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
         {!dataUrl && (
           <>
             <div
-              className="mt-3 flex cursor-pointer flex-col items-center justify-center rounded-md border-2 border-dashed border-border bg-background/40 px-4 py-10 text-center text-sm text-muted-foreground hover:bg-background/60"
+              className="mt-3 flex cursor-pointer flex-col items-center justify-center rounded-md border-2 border-dashed border-border bg-background/40 px-4 py-10 text-center text-base text-muted-foreground hover:bg-background/60"
               onClick={() => inputRef.current?.click()}
               onDragOver={(e) => e.preventDefault()}
               onDrop={async (e) => {
@@ -379,7 +379,7 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
             >
               <Upload className="mb-2 h-8 w-8" />
               <div>Click, drag & drop, or paste (Ctrl/⌘+V) a broker screenshot</div>
-              <div className="mt-1 text-xs">PNG / JPG</div>
+              <div className="mt-1 text-sm">PNG / JPG</div>
               <input
                 ref={inputRef}
                 type="file"
@@ -388,7 +388,7 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
                 onChange={(e) => onFile(e.target.files?.[0])}
               />
             </div>
-            <div className="mt-2 text-xs text-muted-foreground">
+            <div className="mt-2 text-sm text-muted-foreground">
               {BROKER_INSTRUCTIONS[broker as (typeof BROKERS)[number]] ??
                 BROKER_INSTRUCTIONS.schwab}
             </div>
@@ -411,8 +411,8 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
         )}
 
         {parsed && parsed.length > 0 && (
-          <div className="mt-3 space-y-2 text-xs">
-            <div className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+          <div className="mt-3 space-y-2 text-sm">
+            <div className="text-base font-semibold uppercase tracking-wider text-muted-foreground">
               Options ({parsed.length})
             </div>
             <div className="max-h-96 overflow-auto rounded border border-border">
@@ -566,8 +566,8 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
         )}
 
         {parsedStocks && parsedStocks.length > 0 && (
-          <div className="mt-3 space-y-2 text-xs">
-            <div className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+          <div className="mt-3 space-y-2 text-sm">
+            <div className="text-base font-semibold uppercase tracking-wider text-muted-foreground">
               Stocks ({parsedStocks.length})
             </div>
             <div className="max-h-80 overflow-auto rounded border border-border">
@@ -673,7 +673,7 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
         )}
 
         {rejections.length > 0 && (
-          <div className="mt-2 space-y-1 rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-xs text-amber-100">
+          <div className="mt-2 space-y-1 rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-sm text-amber-100">
             <div className="font-semibold uppercase tracking-wide text-amber-200">
               {rejections.length} row{rejections.length === 1 ? "" : "s"} failed validation
             </div>
@@ -686,7 +686,7 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
         )}
 
         {error && (
-          <div className="mt-2 rounded border border-rose-500/40 bg-rose-500/10 px-2 py-1 text-xs text-rose-200">
+          <div className="mt-2 rounded border border-rose-500/40 bg-rose-500/10 px-2 py-1 text-sm text-rose-200">
             <div className="font-semibold">{error}</div>
             {errorList.length > 0 && (
               <ul className="mt-1 list-disc space-y-0.5 pl-5">

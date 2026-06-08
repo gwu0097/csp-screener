@@ -183,17 +183,17 @@ export function LongTermIdeasBoard() {
   return (
     <div className="space-y-4">
       {error && (
-        <div className="rounded border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-300">
+        <div className="rounded border border-rose-500/40 bg-rose-500/10 p-3 text-base text-rose-300">
           {error}
         </div>
       )}
       {actionError && (
-        <div className="flex items-start justify-between gap-3 rounded border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-300">
+        <div className="flex items-start justify-between gap-3 rounded border border-rose-500/40 bg-rose-500/10 p-3 text-base text-rose-300">
           <span>{actionError}</span>
           <button
             type="button"
             onClick={() => setActionError(null)}
-            className="text-xs text-rose-200 hover:text-white"
+            className="text-sm text-rose-200 hover:text-white"
           >
             Dismiss
           </button>
@@ -201,7 +201,7 @@ export function LongTermIdeasBoard() {
       )}
 
       {loading && ideas.length === 0 ? (
-        <div className="text-sm text-muted-foreground">Loading ideas…</div>
+        <div className="text-base text-muted-foreground">Loading ideas…</div>
       ) : (
         <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
           {COLUMNS.map((col) => {
@@ -219,7 +219,7 @@ export function LongTermIdeasBoard() {
                     : "border border-border"
                 }`}
               >
-                <div className="flex items-center justify-between border-b border-border px-3 py-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                <div className="flex items-center justify-between border-b border-border px-3 py-2 text-sm font-semibold uppercase tracking-wider text-muted-foreground">
                   <span>
                     {col.label}{" "}
                     <span className="ml-1 rounded bg-white/5 px-1.5 py-0.5 text-[10px] text-foreground">
@@ -229,7 +229,7 @@ export function LongTermIdeasBoard() {
                 </div>
                 <div className="flex-1 space-y-2 overflow-y-auto p-2">
                   {list.length === 0 ? (
-                    <div className="py-6 text-center text-xs text-muted-foreground">
+                    <div className="py-6 text-center text-sm text-muted-foreground">
                       —
                     </div>
                   ) : (
@@ -344,12 +344,12 @@ function IdeaCard({
       draggable
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
-      className={`cursor-grab rounded-md border p-3 text-xs active:cursor-grabbing ${stageStyle} ${
+      className={`cursor-grab rounded-md border p-3 text-sm active:cursor-grabbing ${stageStyle} ${
         dragging ? "opacity-40" : ""
       }`}
     >
       <div className="mb-1 flex items-center justify-between gap-2">
-        <span className="font-mono text-sm font-semibold text-foreground">
+        <span className="font-mono text-base font-semibold text-foreground">
           {idea.symbol}
         </span>
         {idea.analyst_sentiment && (

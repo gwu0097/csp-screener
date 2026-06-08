@@ -125,25 +125,25 @@ export function SwingTradeDialog({
 
         <div className="grid gap-3 py-2">
           <div className="grid grid-cols-2 gap-3">
-            <label className="grid gap-1 text-xs">
+            <label className="grid gap-1 text-sm">
               <span className="text-muted-foreground">Symbol *</span>
               <input
                 type="text"
                 value={symbol}
                 onChange={(e) => setSymbol(e.target.value.toUpperCase())}
-                className="rounded border border-border bg-background px-2 py-1.5 font-mono text-sm uppercase"
+                className="rounded border border-border bg-background px-2 py-1.5 font-mono text-base uppercase"
                 placeholder="AMD"
                 autoFocus
               />
             </label>
-            <label className="grid gap-1 text-xs">
+            <label className="grid gap-1 text-sm">
               <span className="text-muted-foreground">Broker</span>
               <select
                 value={broker}
                 onChange={(e) =>
                   setBroker(e.target.value as "schwab" | "schwab2" | "robinhood" | "other")
                 }
-                className="rounded border border-border bg-background px-2 py-1.5 text-sm"
+                className="rounded border border-border bg-background px-2 py-1.5 text-base"
               >
                 <option value="schwab">Schwab</option>
                 <option value="schwab2">Schwab 2</option>
@@ -154,70 +154,70 @@ export function SwingTradeDialog({
           </div>
 
           <div className="grid grid-cols-3 gap-3">
-            <label className="grid gap-1 text-xs">
+            <label className="grid gap-1 text-sm">
               <span className="text-muted-foreground">Shares *</span>
               <input
                 type="number"
                 step="0.01"
                 value={shares}
                 onChange={(e) => setShares(e.target.value)}
-                className="rounded border border-border bg-background px-2 py-1.5 text-sm"
+                className="rounded border border-border bg-background px-2 py-1.5 text-base"
               />
             </label>
-            <label className="grid gap-1 text-xs">
+            <label className="grid gap-1 text-sm">
               <span className="text-muted-foreground">Entry price *</span>
               <input
                 type="number"
                 step="0.01"
                 value={entryPrice}
                 onChange={(e) => setEntryPrice(e.target.value)}
-                className="rounded border border-border bg-background px-2 py-1.5 text-sm"
+                className="rounded border border-border bg-background px-2 py-1.5 text-base"
               />
             </label>
-            <label className="grid gap-1 text-xs">
+            <label className="grid gap-1 text-sm">
               <span className="text-muted-foreground">Entry date *</span>
               <input
                 type="date"
                 value={entryDate}
                 onChange={(e) => setEntryDate(e.target.value)}
-                className="rounded border border-border bg-background px-2 py-1.5 text-sm"
+                className="rounded border border-border bg-background px-2 py-1.5 text-base"
               />
             </label>
           </div>
 
           <div className="rounded-md border border-border/60 bg-background/40 p-3">
-            <div className="mb-2 text-xs font-medium text-muted-foreground">
+            <div className="mb-2 text-sm font-medium text-muted-foreground">
               Exit (leave blank if still open)
             </div>
             <div className="grid grid-cols-2 gap-3">
-              <label className="grid gap-1 text-xs">
+              <label className="grid gap-1 text-sm">
                 <span className="text-muted-foreground">Exit price</span>
                 <input
                   type="number"
                   step="0.01"
                   value={exitPrice}
                   onChange={(e) => setExitPrice(e.target.value)}
-                  className="rounded border border-border bg-background px-2 py-1.5 text-sm"
+                  className="rounded border border-border bg-background px-2 py-1.5 text-base"
                 />
               </label>
-              <label className="grid gap-1 text-xs">
+              <label className="grid gap-1 text-sm">
                 <span className="text-muted-foreground">Exit date</span>
                 <input
                   type="date"
                   value={exitDate}
                   onChange={(e) => setExitDate(e.target.value)}
                   disabled={!isClosing}
-                  className="rounded border border-border bg-background px-2 py-1.5 text-sm disabled:opacity-50"
+                  className="rounded border border-border bg-background px-2 py-1.5 text-base disabled:opacity-50"
                 />
               </label>
             </div>
             {isClosing && (
-              <label className="mt-2 grid gap-1 text-xs">
+              <label className="mt-2 grid gap-1 text-sm">
                 <span className="text-muted-foreground">Exit reason</span>
                 <select
                   value={exitReason}
                   onChange={(e) => setExitReason(e.target.value as ExitReason)}
-                  className="rounded border border-border bg-background px-2 py-1.5 text-sm"
+                  className="rounded border border-border bg-background px-2 py-1.5 text-base"
                 >
                   <option value="target_hit">Target Hit</option>
                   <option value="stop_loss">Stop Loss</option>
@@ -228,18 +228,18 @@ export function SwingTradeDialog({
             )}
           </div>
 
-          <label className="grid gap-1 text-xs">
+          <label className="grid gap-1 text-sm">
             <span className="text-muted-foreground">Thesis</span>
             <textarea
               value={thesis}
               onChange={(e) => setThesis(e.target.value)}
               rows={2}
-              className="rounded border border-border bg-background px-2 py-1.5 text-sm"
+              className="rounded border border-border bg-background px-2 py-1.5 text-base"
             />
           </label>
 
           {error && (
-            <div className="rounded border border-rose-500/40 bg-rose-500/10 p-2 text-xs text-rose-300">
+            <div className="rounded border border-rose-500/40 bg-rose-500/10 p-2 text-sm text-rose-300">
               {error}
             </div>
           )}

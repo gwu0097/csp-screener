@@ -171,7 +171,7 @@ function MetricBox({
 }) {
   return (
     <div className="flex-1 rounded-md bg-muted px-3 py-2.5">
-      <div className="text-xs text-muted-foreground">{label}</div>
+      <div className="text-sm text-muted-foreground">{label}</div>
       <div className={cn("mt-0.5 text-xl font-medium", valueClass)}>{value}</div>
     </div>
   );
@@ -358,7 +358,7 @@ export function DashboardView() {
 
   function MoverRow({ r }: { r: WatchRow }) {
     return (
-      <div className="flex items-center gap-2 py-1 text-sm">
+      <div className="flex items-center gap-2 py-1 text-base">
         <span className="w-[50px] shrink-0 font-mono font-semibold">
           {r.symbol}
         </span>
@@ -381,9 +381,9 @@ export function DashboardView() {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Morning Dashboard</h1>
-          <div className="mt-1 flex items-center gap-2 text-sm text-muted-foreground">
+          <div className="mt-1 flex items-center gap-2 text-base text-muted-foreground">
             <span>{prettyToday()}</span>
-            <span className="rounded bg-muted px-2 py-0.5 font-mono text-xs text-foreground">
+            <span className="rounded bg-muted px-2 py-0.5 font-mono text-sm text-foreground">
               VIX{" "}
               {vix.status === "loading"
                 ? "…"
@@ -395,7 +395,7 @@ export function DashboardView() {
         </div>
         <Link
           href="/"
-          className="inline-flex items-center gap-1.5 rounded-md bg-indigo-500 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-indigo-400"
+          className="inline-flex items-center gap-1.5 rounded-md bg-indigo-500 px-4 py-2 text-base font-semibold text-white transition-colors hover:bg-indigo-400"
         >
           Screen Today <ArrowRight className="h-4 w-4" />
         </Link>
@@ -412,7 +412,7 @@ export function DashboardView() {
             {positions.status === "loading" ? (
               <SkeletonLines n={4} />
             ) : positions.status === "error" ? (
-              <p className="text-sm text-muted-foreground">—</p>
+              <p className="text-base text-muted-foreground">—</p>
             ) : (
               <>
                 <div className="flex gap-2">
@@ -423,7 +423,7 @@ export function DashboardView() {
                     valueClass={pnlColor(unrealized)}
                   />
                 </div>
-                <div className="mt-3 space-y-1 text-sm">
+                <div className="mt-3 space-y-1 text-base">
                   <div className="text-muted-foreground">
                     Expiring today + tmrw:{" "}
                     <span className="font-semibold text-foreground">
@@ -454,9 +454,9 @@ export function DashboardView() {
             {watch.status === "loading" ? (
               <SkeletonLines n={4} />
             ) : watch.status === "error" ? (
-              <p className="text-sm text-muted-foreground">—</p>
+              <p className="text-base text-muted-foreground">—</p>
             ) : alertRows.length === 0 ? (
-              <p className="text-sm text-muted-foreground">
+              <p className="text-base text-muted-foreground">
                 No active alerts.
               </p>
             ) : (
@@ -465,7 +465,7 @@ export function DashboardView() {
                   {alertRows.slice(0, 4).map(({ row, flag }) => (
                     <div
                       key={row.symbol}
-                      className="flex items-center gap-2 text-sm"
+                      className="flex items-center gap-2 text-base"
                     >
                       <span className="w-[50px] shrink-0 font-mono font-semibold">
                         {row.symbol}
@@ -474,7 +474,7 @@ export function DashboardView() {
                         kind={row.action}
                         label={row.action.replace(/_/g, " ")}
                       />
-                      <span className="flex-1 truncate text-xs text-muted-foreground">
+                      <span className="flex-1 truncate text-sm text-muted-foreground">
                         {flag!.label}
                       </span>
                       <span className="w-16 text-right">
@@ -483,7 +483,7 @@ export function DashboardView() {
                     </div>
                   ))}
                 </div>
-                <div className="mt-3 flex items-center gap-1 text-xs font-medium text-muted-foreground group-hover:text-foreground">
+                <div className="mt-3 flex items-center gap-1 text-sm font-medium text-muted-foreground group-hover:text-foreground">
                   {alertRows.length} active alert
                   {alertRows.length === 1 ? "" : "s"}
                   <ArrowRight className="h-3 w-3" /> view all
@@ -501,7 +501,7 @@ export function DashboardView() {
           {market.status === "loading" ? (
             <SkeletonLines n={4} />
           ) : market.status === "error" || !m ? (
-            <p className="text-sm text-muted-foreground">—</p>
+            <p className="text-base text-muted-foreground">—</p>
           ) : (
             <>
               <div className="flex gap-2">
@@ -516,7 +516,7 @@ export function DashboardView() {
                   valueClass={pnlColor(m.qqq.changePct)}
                 />
               </div>
-              <div className="mt-3 space-y-1.5 text-sm">
+              <div className="mt-3 space-y-1.5 text-base">
                 <div className="flex items-center justify-between">
                   <span className="text-muted-foreground">Tech (XLK)</span>
                   <ChangeCell pct={m.xlk.changePct} />
@@ -546,9 +546,9 @@ export function DashboardView() {
         {positions.status === "loading" ? (
           <SkeletonLines n={3} />
         ) : positions.status === "error" ? (
-          <p className="text-sm text-muted-foreground">—</p>
+          <p className="text-base text-muted-foreground">—</p>
         ) : attention.length === 0 ? (
-          <div className="flex items-center gap-2 text-sm font-medium text-emerald-400">
+          <div className="flex items-center gap-2 text-base font-medium text-emerald-400">
             <CheckCircle2 className="h-4 w-4" />
             All positions healthy ✓
           </div>
@@ -560,7 +560,7 @@ export function DashboardView() {
               <span className="text-rose-400">Positions needing attention</span>
             </SectionHeader>
             <div className="overflow-x-auto">
-              <table className="w-full text-sm">
+              <table className="w-full text-base">
                 <thead>
                   <tr className="text-left text-[11px] uppercase tracking-wider text-muted-foreground">
                     <th className="py-1.5 pr-3 font-medium">Symbol</th>
@@ -598,7 +598,7 @@ export function DashboardView() {
                       <td className="py-1.5">
                         <Link
                           href="/positions"
-                          className="text-xs font-semibold text-rose-300 hover:text-rose-200"
+                          className="text-sm font-semibold text-rose-300 hover:text-rose-200"
                         >
                           Close →
                         </Link>
@@ -622,9 +622,9 @@ export function DashboardView() {
           {watch.status === "loading" ? (
             <SkeletonLines n={5} />
           ) : watch.status === "error" ? (
-            <p className="text-sm text-muted-foreground">—</p>
+            <p className="text-base text-muted-foreground">—</p>
           ) : withChange.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No quotes today.</p>
+            <p className="text-base text-muted-foreground">No quotes today.</p>
           ) : (
             <div className="space-y-3">
               <div>
@@ -632,7 +632,7 @@ export function DashboardView() {
                   Gainers
                 </div>
                 {gainers.length === 0 ? (
-                  <p className="text-xs text-muted-foreground">—</p>
+                  <p className="text-sm text-muted-foreground">—</p>
                 ) : (
                   gainers.map((r) => <MoverRow key={r.symbol} r={r} />)
                 )}
@@ -643,7 +643,7 @@ export function DashboardView() {
                   Losers
                 </div>
                 {losers.length === 0 ? (
-                  <p className="text-xs text-muted-foreground">—</p>
+                  <p className="text-sm text-muted-foreground">—</p>
                 ) : (
                   losers.map((r) => <MoverRow key={r.symbol} r={r} />)
                 )}
@@ -663,7 +663,7 @@ export function DashboardView() {
             AI morning brief
           </SectionHeader>
           {briefError && (
-            <div className="mb-2 rounded border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
+            <div className="mb-2 rounded border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-sm text-rose-200">
               {briefError}
             </div>
           )}
@@ -679,7 +679,7 @@ export function DashboardView() {
                 type="button"
                 onClick={() => void generateBrief()}
                 disabled={briefLoading}
-                className="mt-3 inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs font-semibold hover:border-foreground/40 hover:text-foreground disabled:opacity-60"
+                className="mt-3 inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm font-semibold hover:border-foreground/40 hover:text-foreground disabled:opacity-60"
               >
                 {briefLoading ? (
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -703,7 +703,7 @@ export function DashboardView() {
             <button
               type="button"
               onClick={() => void generateBrief()}
-              className="inline-flex items-center gap-1.5 rounded-md bg-indigo-500 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-indigo-400"
+              className="inline-flex items-center gap-1.5 rounded-md bg-indigo-500 px-4 py-2 text-base font-semibold text-white transition-colors hover:bg-indigo-400"
             >
               <Brain className="h-4 w-4" />
               Generate Morning Brief

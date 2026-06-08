@@ -190,7 +190,7 @@ export function ImportManualModal({ open, onOpenChange, onSuccess, prefill }: Pr
         {/* Trade-type toggle — sits above the fields so the form below
             re-renders into the matching shape. Stock fields are a
             distinct set (Shares / Price) and don't share the option grid. */}
-        <div className="mb-3 flex gap-2 text-xs">
+        <div className="mb-3 flex gap-2 text-sm">
           <button
             type="button"
             onClick={() => setTradeType("option")}
@@ -218,7 +218,7 @@ export function ImportManualModal({ open, onOpenChange, onSuccess, prefill }: Pr
         </div>
 
         {tradeType === "option" ? (
-          <div className="grid grid-cols-2 gap-3 text-sm">
+          <div className="grid grid-cols-2 gap-3 text-base">
             <Field label="Symbol">
               <input
                 value={symbol}
@@ -330,7 +330,7 @@ export function ImportManualModal({ open, onOpenChange, onSuccess, prefill }: Pr
             </Field>
           </div>
         ) : (
-          <div className="grid grid-cols-2 gap-3 text-sm">
+          <div className="grid grid-cols-2 gap-3 text-base">
             <Field label="Symbol">
               <input
                 value={symbol}
@@ -399,7 +399,7 @@ export function ImportManualModal({ open, onOpenChange, onSuccess, prefill }: Pr
         )}
 
         {error && (
-          <div className="mt-2 rounded border border-rose-500/40 bg-rose-500/10 px-2 py-1 text-xs text-rose-200">
+          <div className="mt-2 rounded border border-rose-500/40 bg-rose-500/10 px-2 py-1 text-sm text-rose-200">
             {error}
           </div>
         )}
@@ -423,7 +423,7 @@ export function ImportManualModal({ open, onOpenChange, onSuccess, prefill }: Pr
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <label className="flex flex-col gap-1">
-      <span className="text-xs text-muted-foreground">{label}</span>
+      <span className="text-sm text-muted-foreground">{label}</span>
       {children}
     </label>
   );

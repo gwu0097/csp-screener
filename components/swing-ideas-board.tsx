@@ -183,17 +183,17 @@ export function SwingIdeasBoard() {
   return (
     <div className="space-y-4">
       {error && (
-        <div className="rounded border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-300">
+        <div className="rounded border border-rose-500/40 bg-rose-500/10 p-3 text-base text-rose-300">
           {error}
         </div>
       )}
       {actionError && (
-        <div className="flex items-start justify-between gap-3 rounded border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-300">
+        <div className="flex items-start justify-between gap-3 rounded border border-rose-500/40 bg-rose-500/10 p-3 text-base text-rose-300">
           <span>{actionError}</span>
           <button
             type="button"
             onClick={() => setActionError(null)}
-            className="text-xs text-rose-200 hover:text-white"
+            className="text-sm text-rose-200 hover:text-white"
           >
             Dismiss
           </button>
@@ -201,7 +201,7 @@ export function SwingIdeasBoard() {
       )}
 
       {loading && ideas.length === 0 ? (
-        <div className="text-sm text-muted-foreground">Loading ideas…</div>
+        <div className="text-base text-muted-foreground">Loading ideas…</div>
       ) : (
         <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
           {COLUMNS.map((col) => {
@@ -212,7 +212,7 @@ export function SwingIdeasBoard() {
                 key={col.key}
                 className="flex min-h-[400px] flex-col rounded-md border border-border bg-background/40"
               >
-                <div className="flex items-center justify-between border-b border-border px-3 py-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                <div className="flex items-center justify-between border-b border-border px-3 py-2 text-sm font-semibold uppercase tracking-wider text-muted-foreground">
                   <span>
                     {col.label}{" "}
                     <span className="ml-1 rounded bg-white/5 px-1.5 py-0.5 text-[10px] text-foreground">
@@ -230,7 +230,7 @@ export function SwingIdeasBoard() {
                 </div>
                 <div className="flex-1 space-y-2 overflow-y-auto p-2">
                   {list.length === 0 ? (
-                    <div className="py-6 text-center text-xs text-muted-foreground">
+                    <div className="py-6 text-center text-sm text-muted-foreground">
                       —
                     </div>
                   ) : (
@@ -313,7 +313,7 @@ function IdeaCard(props: {
 function CardHeader({ idea }: { idea: SwingIdea }) {
   return (
     <div className="mb-1 flex items-center justify-between gap-2">
-      <span className="font-mono text-sm font-semibold text-foreground">
+      <span className="font-mono text-base font-semibold text-foreground">
         {idea.symbol}
       </span>
       {idea.analyst_sentiment && (
@@ -341,7 +341,7 @@ function SetupReadyCard({
   const summary =
     idea.catalyst?.trim() || idea.user_thesis?.trim() || idea.ai_summary?.trim() || "";
   return (
-    <div className="rounded-md border border-border bg-zinc-900/60 p-3 text-xs">
+    <div className="rounded-md border border-border bg-zinc-900/60 p-3 text-sm">
       <CardHeader idea={idea} />
 
       <div className="mb-1 flex gap-3 text-[11px] text-muted-foreground">
@@ -435,7 +435,7 @@ function EnteredCard({
         : "text-rose-300";
 
   return (
-    <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3 text-xs">
+    <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3 text-sm">
       <CardHeader idea={idea} />
 
       <div className="mb-1 flex items-baseline gap-2 text-[11px]">
@@ -497,7 +497,7 @@ function ExitedCard({ idea }: { idea: SwingIdea }) {
         : "text-rose-300";
 
   return (
-    <div className="rounded-md border border-border bg-zinc-900/60 p-3 text-xs opacity-90">
+    <div className="rounded-md border border-border bg-zinc-900/60 p-3 text-sm opacity-90">
       <CardHeader idea={idea} />
 
       <div className="mb-1 flex items-baseline gap-2 text-[11px]">

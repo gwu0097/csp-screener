@@ -191,7 +191,7 @@ type Props =
 //
 // Column widths use minmax(min-px, Nfr) with tight per-column
 // minimums sized to fit the largest realistic content at the
-// shrunken text-xs (12px) baseline. STATUS minimum is 100px so
+// shrunken text-sm (12px) baseline. STATUS minimum is 100px so
 // "MAX PROFIT" / "EMERGENCY_CUT" badges (whitespace-nowrap, no
 // truncation) always render in full; the surrounding cell never
 // clips overflow. fr weights distribute leftover space.
@@ -207,7 +207,7 @@ export const COLLAPSED_ROW_GRID =
   // gap-1.5 below sm (6 px) so the mobile row fits an iPhone 15
   // viewport; gap-2 (8 px) restored at sm+ for the iPad / desktop
   // layouts that have already been tuned to that spacing.
-  "grid w-full items-center gap-1.5 px-3 text-xs sm:gap-2 lg:text-sm " +
+  "grid w-full items-center gap-1.5 px-3 text-sm sm:gap-2 lg:text-base " +
   // Mobile (7 cols) minimums trimmed from earlier 60/40/70/45/45/100
   // to 55/40/65/45/45/90 — saves 15 px of unavoidable width so the
   // sum (24+55+40+65+45+45+90 + 6×6 gap + 24 padding = 414 px) fits
@@ -661,7 +661,7 @@ export function PositionCard(props: Props) {
               onClick={(e) => e.stopPropagation()}
               placeholder="—"
               className={cn(
-                "w-14 rounded border bg-background/60 px-1 py-0.5 text-right font-mono text-xs lg:w-16",
+                "w-14 rounded border bg-background/60 px-1 py-0.5 text-right font-mono text-sm lg:w-16",
                 manualOverrideActive
                   ? "border-amber-500/40 text-amber-300"
                   : "border-border/60 text-foreground/80",
@@ -775,7 +775,7 @@ export function PositionCard(props: Props) {
           ) : p.entryFinalGrade ? (
             <span
               className={cn(
-                "inline-block rounded border px-1.5 py-0.5 text-sm font-semibold",
+                "inline-block rounded border px-1.5 py-0.5 text-base font-semibold",
                 gradeColor(p.entryFinalGrade),
               )}
             >
@@ -796,14 +796,14 @@ export function PositionCard(props: Props) {
                 <TooltipTrigger asChild>
                   <span
                     className={cn(
-                      "rounded border px-1.5 py-0.5 text-[10px] font-semibold whitespace-nowrap lg:px-2 lg:text-xs",
+                      "rounded border px-1.5 py-0.5 text-[10px] font-semibold whitespace-nowrap lg:px-2 lg:text-sm",
                       status.className,
                     )}
                   >
                     {status.label}
                   </span>
                 </TooltipTrigger>
-                <TooltipContent className="max-w-xs text-xs">
+                <TooltipContent className="max-w-xs text-sm">
                   {status.tooltip}
                 </TooltipContent>
               </Tooltip>
@@ -811,7 +811,7 @@ export function PositionCard(props: Props) {
           ) : (
             <span
               className={cn(
-                "rounded border px-1.5 py-0.5 text-[10px] font-semibold whitespace-nowrap lg:px-2 lg:text-xs",
+                "rounded border px-1.5 py-0.5 text-[10px] font-semibold whitespace-nowrap lg:px-2 lg:text-sm",
                 status.className,
               )}
             >
@@ -856,7 +856,7 @@ export function PositionCard(props: Props) {
           row and the expanded detail so the user keeps visual context
           of which row they're about to delete. */}
       {removeOpen && props.kind === "open" && (
-        <div className="flex flex-wrap items-center gap-2 border-t border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs">
+        <div className="flex flex-wrap items-center gap-2 border-t border-rose-500/40 bg-rose-500/10 px-3 py-2 text-sm">
           <span className="font-medium text-rose-200">
             ⚠ Remove this position permanently?
           </span>
@@ -927,7 +927,7 @@ export function PositionCard(props: Props) {
               <button
                 type="button"
                 onClick={() => setEditsOpen((v) => !v)}
-                className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-muted-foreground hover:text-foreground"
+                className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-sm text-muted-foreground hover:text-foreground"
               >
                 <ListChecks className="h-3 w-3" />
                 {editsOpen ? "Hide Fills" : "Edit Fills"}
@@ -935,14 +935,14 @@ export function PositionCard(props: Props) {
             )}
             <Link
               href={`/research/${encodeURIComponent(p.symbol)}`}
-              className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-muted-foreground hover:text-foreground"
+              className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-sm text-muted-foreground hover:text-foreground"
             >
               <ExternalLink className="h-3 w-3" />
               Research
             </Link>
             <Link
               href={`/encyclopedia/${encodeURIComponent(p.symbol)}`}
-              className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-muted-foreground hover:text-foreground"
+              className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-sm text-muted-foreground hover:text-foreground"
             >
               <ExternalLink className="h-3 w-3" />
               View in Encyclopedia
@@ -974,7 +974,7 @@ function RecDot({ rec }: { rec: PostEarningsRecView }) {
             aria-label={`Post-earnings: ${rec.recommendation}`}
           />
         </TooltipTrigger>
-        <TooltipContent className="max-w-xs text-xs">
+        <TooltipContent className="max-w-xs text-sm">
           <div className="font-semibold">
             {rec.recommendation} ({rec.confidence})
           </div>
@@ -987,7 +987,7 @@ function RecDot({ rec }: { rec: PostEarningsRecView }) {
 
 function Row({ k, v }: { k: string; v: React.ReactNode }) {
   return (
-    <div className="flex justify-between gap-2 text-xs">
+    <div className="flex justify-between gap-2 text-sm">
       <span className="text-muted-foreground">{k}</span>
       <span className="text-foreground">{v}</span>
     </div>
@@ -1012,7 +1012,7 @@ function PositionDetailsColumn({
   ].filter(Boolean) as string[];
   return (
     <div className="space-y-1 rounded border border-border bg-background/40 p-3">
-      <div className="mb-1 text-xs font-semibold uppercase text-muted-foreground">
+      <div className="mb-1 text-sm font-semibold uppercase text-muted-foreground">
         Position
       </div>
       <Row
@@ -1058,7 +1058,7 @@ function PositionDetailsColumn({
         v={p.entryVix !== null ? p.entryVix.toFixed(1) : "—"}
       />
       {entryGrades.length > 0 && (
-        <div className="pt-1 text-xs text-muted-foreground">
+        <div className="pt-1 text-sm text-muted-foreground">
           <span className="text-muted-foreground">Entry grades:</span>{" "}
           <span className="text-foreground">{entryGrades.join(" · ")}</span>
         </div>
@@ -1085,7 +1085,7 @@ function LiveDataColumn({ p }: { p: OpenPositionClientView }) {
     ) : null;
   return (
     <div className="space-y-1 rounded border border-border bg-background/40 p-3">
-      <div className="mb-1 text-xs font-semibold uppercase text-muted-foreground">
+      <div className="mb-1 text-sm font-semibold uppercase text-muted-foreground">
         Live
       </div>
       <Row
@@ -1130,7 +1130,7 @@ function PostEarningsPanel({ rec }: { rec: PostEarningsRecView }) {
           ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
           : "border-border bg-muted/20 text-muted-foreground";
   return (
-    <div className={cn("rounded border px-3 py-2 text-xs", color)}>
+    <div className={cn("rounded border px-3 py-2 text-sm", color)}>
       <div className="flex items-center gap-2 font-semibold">
         📊 Post-earnings: {rec.recommendation}
         <span className="rounded border border-current/40 px-1.5 py-0.5 text-[10px]">
@@ -1226,7 +1226,7 @@ function VerifyAssignmentPanel({
   }
 
   return (
-    <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs">
+    <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
       <div className="mb-2 font-semibold text-amber-200">
         ⚠ Expired — verify outcome
       </div>
@@ -1356,7 +1356,7 @@ function ClosePositionInline({
   return (
     <div className="flex flex-wrap items-center gap-2">
       <div className="flex items-center gap-2">
-        <label className="text-xs text-muted-foreground">
+        <label className="text-sm text-muted-foreground">
           Close {p.remainingContracts} @
         </label>
         <input
@@ -1364,7 +1364,7 @@ function ClosePositionInline({
           step="0.01"
           value={closeAllPrice}
           onChange={(e) => setCloseAllPrice(e.target.value)}
-          className="w-20 rounded border border-border bg-background px-2 py-1 text-xs"
+          className="w-20 rounded border border-border bg-background px-2 py-1 text-sm"
         />
         <Button
           size="sm"
@@ -1376,7 +1376,7 @@ function ClosePositionInline({
       </div>
       {p.remainingContracts > 1 && (
         <div className="flex items-center gap-2">
-          <label className="text-xs text-muted-foreground">Partial</label>
+          <label className="text-sm text-muted-foreground">Partial</label>
           <input
             type="number"
             min="1"
@@ -1387,15 +1387,15 @@ function ClosePositionInline({
                 Math.min(p.remainingContracts, Math.max(1, Number(e.target.value) || 1)),
               )
             }
-            className="w-14 rounded border border-border bg-background px-2 py-1 text-xs"
+            className="w-14 rounded border border-border bg-background px-2 py-1 text-sm"
           />
-          <span className="text-xs text-muted-foreground">@</span>
+          <span className="text-sm text-muted-foreground">@</span>
           <input
             type="number"
             step="0.01"
             value={partialPrice}
             onChange={(e) => setPartialPrice(e.target.value)}
-            className="w-20 rounded border border-border bg-background px-2 py-1 text-xs"
+            className="w-20 rounded border border-border bg-background px-2 py-1 text-sm"
           />
           <Button
             size="sm"
@@ -1408,7 +1408,7 @@ function ClosePositionInline({
         </div>
       )}
       {error && (
-        <span className="rounded border border-rose-500/40 bg-rose-500/10 px-2 py-0.5 text-xs text-rose-200">
+        <span className="rounded border border-rose-500/40 bg-rose-500/10 px-2 py-0.5 text-sm text-rose-200">
           {error}
         </span>
       )}
@@ -1588,7 +1588,7 @@ function EditFillsPanel({
   }
 
   return (
-    <div className="mt-4 rounded-md border border-border bg-background/40 p-3 text-xs">
+    <div className="mt-4 rounded-md border border-border bg-background/40 p-3 text-sm">
       <div className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
         Fills
       </div>
@@ -1718,7 +1718,7 @@ function EditFillsPanel({
             value={addDate}
             max={todayPstIso}
             onChange={(e) => setAddDate(e.target.value)}
-            className="rounded border border-border bg-background px-2 py-1 text-xs"
+            className="rounded border border-border bg-background px-2 py-1 text-sm"
           />
           {addDate > todayPstIso && (
             <span className="text-[11px] text-rose-300">
@@ -1728,7 +1728,7 @@ function EditFillsPanel({
           <select
             value={addSide}
             onChange={(e) => setAddSide(e.target.value as "open" | "close")}
-            className="rounded border border-border bg-background px-2 py-1 text-xs"
+            className="rounded border border-border bg-background px-2 py-1 text-sm"
           >
             <option value="open">SELL (open)</option>
             <option value="close">BUY (close)</option>
@@ -1739,7 +1739,7 @@ function EditFillsPanel({
             placeholder="Qty"
             value={addQty}
             onChange={(e) => setAddQty(e.target.value)}
-            className="w-20 rounded border border-border bg-background px-2 py-1 text-xs"
+            className="w-20 rounded border border-border bg-background px-2 py-1 text-sm"
           />
           <input
             type="number"
@@ -1747,13 +1747,13 @@ function EditFillsPanel({
             placeholder="Price"
             value={addPrice}
             onChange={(e) => setAddPrice(e.target.value)}
-            className="w-24 rounded border border-border bg-background px-2 py-1 text-xs"
+            className="w-24 rounded border border-border bg-background px-2 py-1 text-sm"
           />
           <button
             type="button"
             onClick={() => void handleAdd()}
             disabled={busy === "add" || addDate > todayPstIso}
-            className="inline-flex items-center gap-1 rounded border border-border bg-background px-2 py-1 text-xs hover:bg-background/80 disabled:opacity-50"
+            className="inline-flex items-center gap-1 rounded border border-border bg-background px-2 py-1 text-sm hover:bg-background/80 disabled:opacity-50"
           >
             {busy === "add" ? (
               <Loader2 className="h-3 w-3 animate-spin" />
@@ -1768,7 +1768,7 @@ function EditFillsPanel({
               setAddOpen(false);
               setError(null);
             }}
-            className="text-xs text-muted-foreground hover:text-foreground"
+            className="text-sm text-muted-foreground hover:text-foreground"
           >
             Cancel
           </button>

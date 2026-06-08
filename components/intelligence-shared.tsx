@@ -359,14 +359,14 @@ export function DateRangeControls({
     onRangeChange({ from: draftFrom, to: draftTo });
   }
 
-  const pillBase = "rounded px-2 py-1 text-xs";
+  const pillBase = "rounded px-2 py-1 text-sm";
   const pillActive = "bg-foreground text-background";
   const pillInactive =
     "border border-border text-muted-foreground hover:text-foreground";
   const divider = "mx-3 self-stretch border-r border-white/10";
 
   return (
-    <div className="flex flex-wrap items-center gap-x-1 gap-y-2 text-xs">
+    <div className="flex flex-wrap items-center gap-x-1 gap-y-2 text-sm">
       {/* Group 1: manual dates */}
       <label className="flex items-center gap-1">
         <span className="text-muted-foreground">From</span>
@@ -374,7 +374,7 @@ export function DateRangeControls({
           type="date"
           value={draftFrom}
           onChange={(e) => setDraftFrom(e.target.value)}
-          className="rounded border border-border bg-background px-2 py-1 text-xs"
+          className="rounded border border-border bg-background px-2 py-1 text-sm"
         />
       </label>
       <label className="flex items-center gap-1">
@@ -383,14 +383,14 @@ export function DateRangeControls({
           type="date"
           value={draftTo}
           onChange={(e) => setDraftTo(e.target.value)}
-          className="rounded border border-border bg-background px-2 py-1 text-xs"
+          className="rounded border border-border bg-background px-2 py-1 text-sm"
         />
       </label>
       <button
         type="button"
         onClick={applyDraft}
         disabled={applyDisabled}
-        className="rounded bg-foreground px-2 py-1 text-xs text-background disabled:cursor-not-allowed disabled:opacity-50"
+        className="rounded bg-foreground px-2 py-1 text-sm text-background disabled:cursor-not-allowed disabled:opacity-50"
       >
         Apply
       </button>
@@ -774,7 +774,7 @@ export function PerformanceSection({
           <div className="space-y-0.5">
             <span>
               {stats.wins} / {stats.total_trades}{" "}
-              <span className="text-xs text-muted-foreground">
+              <span className="text-sm text-muted-foreground">
                 ({fmtPct(stats.win_rate, 0)})
               </span>
             </span>
@@ -802,7 +802,7 @@ export function PerformanceSection({
           </div>
         </StatCard>
         <StatCard label="Best / Worst">
-          <div className="space-y-1 text-xs">
+          <div className="space-y-1 text-sm">
             {stats.best_trade ? (
               <div>
                 <span className="text-muted-foreground">Best:</span>{" "}
@@ -832,8 +832,8 @@ export function PerformanceSection({
 
       <div className="rounded-md border border-border bg-background/40 p-3">
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-          <div className="text-sm font-medium">Equity curve</div>
-          <div className="inline-flex overflow-hidden rounded-md border border-border bg-background/60 text-xs">
+          <div className="text-base font-medium">Equity curve</div>
+          <div className="inline-flex overflow-hidden rounded-md border border-border bg-background/60 text-sm">
             <button
               type="button"
               className={`px-2.5 py-1 ${
@@ -859,7 +859,7 @@ export function PerformanceSection({
           </div>
         </div>
         {mode === "total" && (
-          <div className="mb-2 rounded border border-border bg-background/50 px-2.5 py-1.5 text-xs">
+          <div className="mb-2 rounded border border-border bg-background/50 px-2.5 py-1.5 text-sm">
             {unrealizedLoading ? (
               <span className="text-muted-foreground">
                 Fetching open-position marks…
@@ -912,14 +912,14 @@ export function PerformanceSection({
             const unrealizedSign =
               totalUnrealized >= 0 ? "text-emerald-300" : "text-rose-300";
             return (
-              <div className="py-8 text-center text-sm text-muted-foreground">
+              <div className="py-8 text-center text-base text-muted-foreground">
                 <div>No completed trades in this period.</div>
                 {unrealizedLoading && !unrealized ? (
-                  <div className="mt-1 text-xs">
+                  <div className="mt-1 text-sm">
                     Fetching open-position marks…
                   </div>
                 ) : unrealized ? (
-                  <div className="mt-1 text-xs">
+                  <div className="mt-1 text-sm">
                     Current unrealized:{" "}
                     <span className={`font-mono font-semibold ${unrealizedSign}`}>
                       {fmtMoney(totalUnrealized, true)}
@@ -931,7 +931,7 @@ export function PerformanceSection({
           }
           if (chartCurve.length < 2) {
             return (
-              <div className="py-8 text-center text-sm text-muted-foreground">
+              <div className="py-8 text-center text-base text-muted-foreground">
                 Not enough trades in this range to display equity curve.
               </div>
             );
@@ -996,8 +996,8 @@ function PartialClosesPanel({
   const totalColor = total >= 0 ? "text-emerald-300" : "text-rose-300";
   return (
     <div className="rounded-md border border-border bg-background/40 p-3">
-      <div className="mb-2 text-sm font-medium">
-        Partial closes <span className="text-xs font-normal text-muted-foreground">(open positions)</span>
+      <div className="mb-2 text-base font-medium">
+        Partial closes <span className="text-sm font-normal text-muted-foreground">(open positions)</span>
       </div>
       <div className="space-y-1.5">
         {rows.map((r) => {
@@ -1012,7 +1012,7 @@ function PartialClosesPanel({
           return (
             <div
               key={r.positionId}
-              className="flex items-baseline justify-between gap-3 text-sm"
+              className="flex items-baseline justify-between gap-3 text-base"
             >
               <div className="flex items-baseline gap-2">
                 <span className="font-mono font-semibold text-foreground">
@@ -1023,7 +1023,7 @@ function PartialClosesPanel({
                     {r.broker}
                   </span>
                 )}
-                <span className="text-xs text-muted-foreground">
+                <span className="text-sm text-muted-foreground">
                   ({r.remainingContracts} {remainingUnit} remaining)
                 </span>
               </div>
@@ -1034,7 +1034,7 @@ function PartialClosesPanel({
           );
         })}
       </div>
-      <div className="mt-2 flex items-baseline justify-between border-t border-border/40 pt-2 text-sm">
+      <div className="mt-2 flex items-baseline justify-between border-t border-border/40 pt-2 text-base">
         <span className="text-muted-foreground">Total partial P&L:</span>
         <span className={`font-mono font-semibold ${totalColor}`}>
           {fmtMoney(total, true)}
@@ -1054,7 +1054,7 @@ function PairedAssignmentsPanel({ pairs }: { pairs: PairedAssignment[] }) {
   if (pairs.length === 0) return null;
   return (
     <div className="rounded-md border border-border bg-background/40 p-3">
-      <div className="mb-2 text-sm font-medium">Paired assignments</div>
+      <div className="mb-2 text-base font-medium">Paired assignments</div>
       <div className="space-y-3">
         {pairs.map((p) => {
           const parentPnl = p.parent?.realizedPnl ?? 0;
@@ -1068,7 +1068,7 @@ function PairedAssignmentsPanel({ pairs }: { pairs: PairedAssignment[] }) {
           return (
             <div
               key={p.stock.positionId}
-              className="rounded border border-border/60 bg-background/40 p-3 text-sm"
+              className="rounded border border-border/60 bg-background/40 p-3 text-base"
             >
               <div className="mb-1 flex items-baseline justify-between">
                 <span className="text-base font-semibold">{p.symbol}</span>
@@ -1102,7 +1102,7 @@ function PairedAssignmentsPanel({ pairs }: { pairs: PairedAssignment[] }) {
                   <span className={stockColor}>{fmtMoney(stockPnl, true)}</span>
                 </div>
                 <div className="my-1 border-t border-border/60" />
-                <div className="flex justify-between gap-3 text-sm font-semibold">
+                <div className="flex justify-between gap-3 text-base font-semibold">
                   <span>Total {p.symbol} P&L:</span>
                   <span className={totalColor}>{fmtMoney(p.totalPnl, true)}</span>
                 </div>
@@ -1145,7 +1145,7 @@ function EquityTooltip({
     const unrealizedColor = nd.unrealized >= 0 ? "text-emerald-300" : "text-rose-300";
     const realizedColor = nd.realized >= 0 ? "text-emerald-300" : "text-rose-300";
     return (
-      <div className="min-w-[220px] rounded border border-border bg-zinc-900/95 p-2 text-xs shadow-lg">
+      <div className="min-w-[220px] rounded border border-border bg-zinc-900/95 p-2 text-sm shadow-lg">
         <div className="mb-1 font-medium text-foreground">
           {b.label}{" "}
           <span className="text-muted-foreground">
@@ -1185,7 +1185,7 @@ function EquityTooltip({
   }
 
   return (
-    <div className="min-w-[180px] rounded border border-border bg-zinc-900/95 p-2 text-xs shadow-lg">
+    <div className="min-w-[180px] rounded border border-border bg-zinc-900/95 p-2 text-sm shadow-lg">
       <div className="mb-1 font-medium text-foreground">
         {b.label}{" "}
         <span className="text-muted-foreground">
@@ -1231,7 +1231,7 @@ function EquityTooltip({
 function StatCard({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="rounded-md border border-border bg-background/40 p-3">
-      <div className="text-xs text-muted-foreground">{label}</div>
+      <div className="text-sm text-muted-foreground">{label}</div>
       <div className="mt-1 text-lg font-semibold">{children}</div>
     </div>
   );
@@ -1262,7 +1262,7 @@ export function TickerRankingsSection({
     <section className="space-y-3">
       <div>
         <h2 className="text-lg font-semibold">Capital Efficiency by Ticker</h2>
-        <p className="text-xs text-muted-foreground">
+        <p className="text-sm text-muted-foreground">
           Sorted by average ROC — your best-performing setups
         </p>
       </div>
@@ -1272,11 +1272,11 @@ export function TickerRankingsSection({
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Search ticker..."
-          className="w-full max-w-xs rounded border border-border bg-background px-3 py-1.5 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-foreground/40"
+          className="w-full max-w-xs rounded border border-border bg-background px-3 py-1.5 text-base placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-foreground/40"
         />
       </div>
       {rankings.length === 0 ? (
-        <div className="rounded border border-border bg-background/40 p-6 text-sm text-muted-foreground">
+        <div className="rounded border border-border bg-background/40 p-6 text-base text-muted-foreground">
           No closed trades yet. Rankings appear after your first closed position.
         </div>
       ) : (
@@ -1299,7 +1299,7 @@ export function TickerRankingsSection({
                   <TableRow>
                     <TableCell
                       colSpan={7}
-                      className="py-6 text-center text-sm text-muted-foreground"
+                      className="py-6 text-center text-base text-muted-foreground"
                     >
                       No tickers match &ldquo;{search}&rdquo;.
                     </TableCell>
@@ -1317,7 +1317,7 @@ export function TickerRankingsSection({
               </TableBody>
             </Table>
           </div>
-          <div className="text-xs text-muted-foreground">
+          <div className="text-sm text-muted-foreground">
             Showing {filtered.length} of {rankings.length} tickers
           </div>
         </>
@@ -1356,7 +1356,7 @@ function TickerRow({
             <span className="text-muted-foreground">—</span>
           )}
         </TableCell>
-        <TableCell className="text-right text-xs">
+        <TableCell className="text-right text-sm">
           {row.rec_total !== null && row.rec_total > 0
             ? `${row.rec_aligned}/${row.rec_total} correct`
             : "—"}
@@ -1366,10 +1366,10 @@ function TickerRow({
         <TableRow className="bg-background/40">
           <TableCell colSpan={7}>
             <div className="space-y-2 py-2">
-              <div className="text-xs font-medium text-foreground">
+              <div className="text-sm font-medium text-foreground">
                 Closed trades for {row.symbol}
               </div>
-              <table className="w-full text-xs">
+              <table className="w-full text-sm">
                 <thead className="text-muted-foreground">
                   <tr>
                     <th className="text-left">Opened</th>
@@ -1420,7 +1420,7 @@ export function PatternIntelligenceSection({
     <section className="space-y-4">
       <h2 className="text-lg font-semibold">Pattern Intelligence</h2>
       {!patterns.enabled ? (
-        <div className="rounded border border-border bg-background/40 p-6 text-sm text-muted-foreground">
+        <div className="rounded border border-border bg-background/40 p-6 text-base text-muted-foreground">
           Pattern detection requires 10+ closed trades. You have {patterns.total_closed} so
           far — keep trading.
         </div>
@@ -1459,9 +1459,9 @@ function PanelShell({
 }) {
   return (
     <div className="rounded-md border border-border bg-background/40 p-3">
-      <div className="mb-2 text-sm font-medium">{title}</div>
+      <div className="mb-2 text-base font-medium">{title}</div>
       <div className="h-48 w-full">{children}</div>
-      <div className="mt-2 text-xs text-muted-foreground">{interp}</div>
+      <div className="mt-2 text-sm text-muted-foreground">{interp}</div>
     </div>
   );
 }
@@ -1585,9 +1585,9 @@ function CalibrationPanel({
   const expected: Record<string, string> = { A: "High", B: "Medium", C: "Low", F: "Skip" };
   return (
     <div className="rounded-md border border-border bg-background/40 p-3">
-      <div className="mb-2 text-sm font-medium">Was the screener right?</div>
+      <div className="mb-2 text-base font-medium">Was the screener right?</div>
       <div className="overflow-x-auto">
-        <table className="w-full text-xs">
+        <table className="w-full text-sm">
           <thead className="text-muted-foreground">
             <tr>
               <th className="text-left">Grade</th>
@@ -1627,7 +1627,7 @@ function CalibrationPanel({
           </tbody>
         </table>
       </div>
-      <div className="mt-3 text-xs text-muted-foreground">{calibration.summary}</div>
+      <div className="mt-3 text-sm text-muted-foreground">{calibration.summary}</div>
     </div>
   );
 }
@@ -1639,8 +1639,8 @@ function RecAccuracyPanel({
 }) {
   return (
     <div className="rounded-md border border-border bg-background/40 p-3">
-      <div className="mb-2 text-sm font-medium">Post-earnings recommendation accuracy</div>
-      <div className="space-y-1 text-xs">
+      <div className="mb-2 text-base font-medium">Post-earnings recommendation accuracy</div>
+      <div className="space-y-1 text-sm">
         <div>
           CLOSE recommendations:{" "}
           <span className="text-foreground">
@@ -1675,13 +1675,13 @@ export function ExportSection({
     <section className="space-y-2">
       <div>
         <h2 className="text-lg font-semibold">Export Intelligence</h2>
-        <p className="text-xs text-muted-foreground">
+        <p className="text-sm text-muted-foreground">
           One-click JSON dump for pasting into Claude chat for deeper analysis
         </p>
       </div>
       <div className="flex items-center gap-3">
         <Button onClick={onCopy}>📋 Copy Intelligence JSON</Button>
-        {copyStatus && <span className="text-xs text-emerald-300">{copyStatus}</span>}
+        {copyStatus && <span className="text-sm text-emerald-300">{copyStatus}</span>}
       </div>
     </section>
   );
@@ -1711,12 +1711,12 @@ export function IntelligencePageShell({
       </div>
       {controls && <div className="space-y-3">{controls}</div>}
       {error && (
-        <div className="rounded border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-300">
+        <div className="rounded border border-rose-500/40 bg-rose-500/10 p-3 text-base text-rose-300">
           {error}
         </div>
       )}
       {loading && !data && (
-        <div className="text-sm text-muted-foreground">Loading intelligence…</div>
+        <div className="text-base text-muted-foreground">Loading intelligence…</div>
       )}
       {data && <div className="space-y-8">{children}</div>}
     </div>

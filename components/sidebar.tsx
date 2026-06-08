@@ -272,7 +272,7 @@ export function Sidebar() {
                 aria-label="CSP Screener"
               >
                 <BarChart3 className="h-5 w-5 shrink-0 text-emerald-400" />
-                <span className="text-sm">CSP Screener</span>
+                <span className="text-base">CSP Screener</span>
               </Link>
               {/* Desktop collapse toggle — sits in the header's right
                   edge. Hidden on mobile since the drawer is always
@@ -375,7 +375,7 @@ function SectionHeader({ label, mode }: { label: string; mode: Mode }) {
     return <div className="my-2 border-t border-white/5" />;
   }
   return (
-    <div className="mt-4 px-3 py-2 text-xs uppercase tracking-wider text-gray-500">
+    <div className="mt-4 px-3 py-2 text-sm uppercase tracking-wider text-gray-500">
       {label}
     </div>
   );
@@ -425,7 +425,7 @@ function CollapsibleGroup({
         type="button"
         onClick={onToggle}
         className={cn(
-          "flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm",
+          "flex w-full items-center gap-3 rounded-md px-3 py-2 text-base",
           active
             ? "bg-white/10 text-white"
             : "text-gray-400 hover:bg-white/5 hover:text-white",
@@ -446,7 +446,7 @@ function CollapsibleGroup({
               key={sub.href}
               href={sub.href}
               className={cn(
-                "block rounded-md py-1.5 pl-11 pr-3 text-sm",
+                "block rounded-md py-1.5 pl-11 pr-3 text-base",
                 subActive(pathname, sub.href)
                   ? "bg-white/5 font-medium text-white"
                   : "text-gray-500 hover:text-gray-200",
@@ -473,7 +473,7 @@ function SidebarLink({
   const active = itemActive(pathname, item.href);
   const Icon = item.icon;
   const base = cn(
-    "flex items-center gap-3 rounded-md px-3 py-2 text-sm",
+    "flex items-center gap-3 rounded-md px-3 py-2 text-base",
     active
       ? "bg-white/10 text-white"
       : "text-gray-400 hover:bg-white/5 hover:text-white",

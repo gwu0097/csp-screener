@@ -283,7 +283,7 @@ export function CrushHistoryTable({
   const mostRecentSimilar = similar[0] ?? null;
 
   return (
-    <div className="rounded-md border border-border bg-background/40 p-3 text-xs">
+    <div className="rounded-md border border-border bg-background/40 p-3 text-sm">
       <div className="mb-2 flex items-center justify-between gap-2">
         <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
           Earnings history
@@ -384,7 +384,7 @@ export function CrushHistoryTable({
                           <TooltipTrigger asChild>
                             <span className="cursor-help text-muted-foreground">—</span>
                           </TooltipTrigger>
-                          <TooltipContent className="max-w-xs text-xs">
+                          <TooltipContent className="max-w-xs text-sm">
                             Implied move not available for this quarter — Polygon had no options data.
                           </TooltipContent>
                         </Tooltip>
@@ -405,7 +405,7 @@ export function CrushHistoryTable({
                           <TooltipTrigger asChild>
                             <span className="cursor-help text-muted-foreground">—</span>
                           </TooltipTrigger>
-                          <TooltipContent className="max-w-xs text-xs">
+                          <TooltipContent className="max-w-xs text-sm">
                             Ratio needs both actual and implied move. Implied move not available for this quarter.
                           </TooltipContent>
                         </Tooltip>
@@ -425,7 +425,7 @@ export function CrushHistoryTable({
                               —
                             </span>
                           </TooltipTrigger>
-                          <TooltipContent className="max-w-xs text-xs">
+                          <TooltipContent className="max-w-xs text-sm">
                             Grade requires the implied/actual ratio. Implied move not available for this quarter.
                           </TooltipContent>
                         </Tooltip>

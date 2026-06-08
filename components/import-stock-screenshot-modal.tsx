@@ -199,8 +199,8 @@ export function ImportStockScreenshotModal({ open, onOpenChange, onSuccess }: Pr
           <DialogTitle>Import stock trades from screenshot</DialogTitle>
         </DialogHeader>
 
-        <div className="flex items-center gap-3 text-sm">
-          <label className="text-xs text-muted-foreground">Broker</label>
+        <div className="flex items-center gap-3 text-base">
+          <label className="text-sm text-muted-foreground">Broker</label>
           <select
             value={broker}
             onChange={(e) => setBroker(e.target.value as (typeof BROKERS)[number])}
@@ -222,7 +222,7 @@ export function ImportStockScreenshotModal({ open, onOpenChange, onSuccess }: Pr
         {!dataUrl && (
           <>
             <div
-              className="mt-3 flex cursor-pointer flex-col items-center justify-center rounded-md border-2 border-dashed border-border bg-background/40 px-4 py-10 text-center text-sm text-muted-foreground hover:bg-background/60"
+              className="mt-3 flex cursor-pointer flex-col items-center justify-center rounded-md border-2 border-dashed border-border bg-background/40 px-4 py-10 text-center text-base text-muted-foreground hover:bg-background/60"
               onClick={() => inputRef.current?.click()}
               onDragOver={(e) => e.preventDefault()}
               onDrop={async (e) => {
@@ -233,7 +233,7 @@ export function ImportStockScreenshotModal({ open, onOpenChange, onSuccess }: Pr
             >
               <Upload className="mb-2 h-8 w-8" />
               <div>Click, drag &amp; drop, or paste (Ctrl/⌘+V) a broker screenshot</div>
-              <div className="mt-1 text-xs">PNG / JPG</div>
+              <div className="mt-1 text-sm">PNG / JPG</div>
               <input
                 ref={inputRef}
                 type="file"
@@ -242,7 +242,7 @@ export function ImportStockScreenshotModal({ open, onOpenChange, onSuccess }: Pr
                 onChange={(e) => onFile(e.target.files?.[0])}
               />
             </div>
-            <div className="mt-2 text-xs text-muted-foreground">
+            <div className="mt-2 text-sm text-muted-foreground">
               {BROKER_INSTRUCTIONS[broker]}
             </div>
           </>
@@ -264,8 +264,8 @@ export function ImportStockScreenshotModal({ open, onOpenChange, onSuccess }: Pr
         )}
 
         {parsed && parsed.length > 0 && (
-          <div className="mt-3 space-y-2 text-xs">
-            <div className="text-sm text-muted-foreground">
+          <div className="mt-3 space-y-2 text-sm">
+            <div className="text-base text-muted-foreground">
               Found {parsed.length} trade{parsed.length === 1 ? "" : "s"} — review and confirm
             </div>
             <div className="max-h-96 overflow-auto rounded border border-border">
@@ -355,7 +355,7 @@ export function ImportStockScreenshotModal({ open, onOpenChange, onSuccess }: Pr
         )}
 
         {error && (
-          <div className="mt-2 rounded border border-rose-500/40 bg-rose-500/10 px-2 py-1 text-xs text-rose-200">
+          <div className="mt-2 rounded border border-rose-500/40 bg-rose-500/10 px-2 py-1 text-sm text-rose-200">
             {error}
           </div>
         )}

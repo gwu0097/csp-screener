@@ -104,7 +104,7 @@ export function SchwabTokenBanner() {
 
   return (
     <div
-      className={`flex items-center justify-between gap-3 rounded-lg border p-3 text-sm ${palette}`}
+      className={`flex items-center justify-between gap-3 rounded-lg border p-3 text-base ${palette}`}
     >
       <div className="flex items-center gap-2">
         <AlertTriangle className="h-4 w-4 shrink-0" />
@@ -113,7 +113,7 @@ export function SchwabTokenBanner() {
       <div className="flex items-center gap-2">
         <a
           href="/api/auth/schwab"
-          className={`inline-flex items-center gap-1.5 rounded border px-2.5 py-1 text-xs font-semibold ${
+          className={`inline-flex items-center gap-1.5 rounded border px-2.5 py-1 text-sm font-semibold ${
             tone === "red"
               ? "border-rose-300/40 bg-rose-500/20 hover:bg-rose-500/30"
               : tone === "orange"
@@ -127,7 +127,7 @@ export function SchwabTokenBanner() {
         <button
           type="button"
           onClick={() => setDismissed(true)}
-          className="text-xs opacity-70 hover:opacity-100"
+          className="text-sm opacity-70 hover:opacity-100"
           aria-label="Dismiss"
         >
           ✕

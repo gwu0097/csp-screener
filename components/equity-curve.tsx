@@ -42,7 +42,7 @@ export function EquityCurve({ points, range }: Props) {
 
   if (filtered.length === 0) {
     return (
-      <div className="flex h-64 items-center justify-center rounded-lg border border-dashed border-border bg-background/40 text-xs text-muted-foreground">
+      <div className="flex h-64 items-center justify-center rounded-lg border border-dashed border-border bg-background/40 text-sm text-muted-foreground">
         No realized trades in this range
       </div>
     );

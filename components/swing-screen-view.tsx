@@ -58,7 +58,7 @@ function Tipped({
       </TooltipTrigger>
       <TooltipContent
         side={side}
-        className="max-w-sm whitespace-pre-line text-xs leading-relaxed"
+        className="max-w-sm whitespace-pre-line text-sm leading-relaxed"
       >
         {content}
       </TooltipContent>
@@ -422,18 +422,18 @@ export function SwingScreenView() {
 
       {running && <RunningBanner phase={phase} pass1Count={pass1Count} />}
       {runError && (
-        <div className="rounded border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-300">
+        <div className="rounded border border-rose-500/40 bg-rose-500/10 p-3 text-base text-rose-300">
           {runError}
         </div>
       )}
       {toast && (
-        <div className="rounded border border-emerald-500/40 bg-emerald-500/10 p-3 text-sm text-emerald-300">
+        <div className="rounded border border-emerald-500/40 bg-emerald-500/10 p-3 text-base text-emerald-300">
           {toast}
         </div>
       )}
 
       {loading ? (
-        <div className="rounded border border-border bg-background/40 p-6 text-sm text-muted-foreground">
+        <div className="rounded border border-border bg-background/40 p-6 text-base text-muted-foreground">
           Loading cached screen…
         </div>
       ) : !data || data.screenedAt === null ? (
@@ -476,12 +476,12 @@ function ControlsBar({
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border bg-background/40 p-3">
       <div className="flex flex-col gap-0.5">
-        <div className="text-xs text-muted-foreground">
+        <div className="text-sm text-muted-foreground">
           Last screened:{" "}
           <span className="text-foreground">{fmtRelDate(data?.screenedAt ?? null)}</span>
         </div>
         {data && data.screenedAt !== null && (
-          <div className="text-xs text-muted-foreground">
+          <div className="text-sm text-muted-foreground">
             <span className="text-foreground">{data.candidates.length}</span> setups
             from <span className="text-foreground">{data.screened}</span> stocks
             screened ·{" "}
@@ -494,7 +494,7 @@ function ControlsBar({
         type="button"
         onClick={onRun}
         disabled={loading || running}
-        className="inline-flex items-center gap-2 rounded-md border border-border bg-emerald-500/10 px-3 py-1.5 text-sm font-medium text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-50"
+        className="inline-flex items-center gap-2 rounded-md border border-border bg-emerald-500/10 px-3 py-1.5 text-base font-medium text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-50"
       >
         {running ? (
           <Loader2 className="h-4 w-4 animate-spin" />
@@ -546,11 +546,11 @@ function RunningBanner({
     return { title: "Working…", detail: "" };
   })();
   return (
-    <div className="flex items-start gap-3 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-200">
+    <div className="flex items-start gap-3 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-base text-amber-200">
       <RefreshCw className="mt-0.5 h-4 w-4 animate-spin shrink-0" />
       <div className="space-y-1">
         <div className="font-medium">{title}</div>
-        {detail && <div className="text-xs text-amber-200/80">{detail}</div>}
+        {detail && <div className="text-sm text-amber-200/80">{detail}</div>}
       </div>
     </div>
   );
@@ -560,7 +560,7 @@ function EmptyStateNoScan() {
   return (
     <div className="rounded-md border border-dashed border-border bg-background/40 p-10 text-center">
       <div className="text-lg font-medium">No screens run yet</div>
-      <p className="mx-auto mt-2 max-w-xl text-sm text-muted-foreground">
+      <p className="mx-auto mt-2 max-w-xl text-base text-muted-foreground">
         Click <span className="font-medium text-foreground">Run Screen</span> to
         scan S&amp;P 500 + Nasdaq 100 for swing setups.
       </p>
@@ -572,11 +572,11 @@ function EmptyStateNoResults({ data }: { data: CachedResult }) {
   return (
     <div className="rounded-md border border-dashed border-border bg-background/40 p-10 text-center">
       <div className="text-lg font-medium">No setups today</div>
-      <p className="mx-auto mt-2 max-w-xl text-sm text-muted-foreground">
+      <p className="mx-auto mt-2 max-w-xl text-base text-muted-foreground">
         Market conditions don&rsquo;t favor swing setups right now. Try again
         tomorrow.
       </p>
-      <p className="mx-auto mt-3 text-xs text-muted-foreground">
+      <p className="mx-auto mt-3 text-sm text-muted-foreground">
         Screened <span className="text-foreground">{data.screened}</span>{" "}
         stocks · <span className="text-foreground">{data.pass1Survivors}</span>{" "}
         passed technical filter ·{" "}
@@ -850,9 +850,9 @@ function CandidateRow({
 
   return (
     <div className="overflow-hidden rounded-md border border-border bg-background/30">
-      <div className={`${ROW_GRID} pt-2 text-xs`}>
+      <div className={`${ROW_GRID} pt-2 text-sm`}>
         {/* 1. Symbol */}
-        <div className="truncate text-left font-mono text-sm font-semibold text-foreground">
+        <div className="truncate text-left font-mono text-base font-semibold text-foreground">
           {c.symbol}
         </div>
         {/* 2. Company — hidden mobile */}
@@ -1085,7 +1085,7 @@ function Line2({
           onToggle();
         }
       }}
-      className="flex cursor-pointer items-start gap-2 px-3 pb-2 pt-1 text-sm text-muted-foreground hover:bg-white/[0.02]"
+      className="flex cursor-pointer items-start gap-2 px-3 pb-2 pt-1 text-base text-muted-foreground hover:bg-white/[0.02]"
     >
       <span className="flex h-4 w-4 shrink-0 items-center justify-center text-muted-foreground/70">
         {expanded ? (
@@ -1177,7 +1177,7 @@ function ExpandedDetail({
       : 0;
 
   return (
-    <div className="space-y-3 border-t border-border/60 bg-background/40 px-3 py-3 text-xs">
+    <div className="space-y-3 border-t border-border/60 bg-background/40 px-3 py-3 text-sm">
       <div className="grid grid-cols-1 gap-4 md:grid-cols-[3fr_2fr]">
         <div className="space-y-3">
           <DetailSection title="Trade setup">
@@ -1838,8 +1838,8 @@ function ScoreBreakdown({ candidate: c }: { candidate: SwingCandidate }) {
         <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
           Setup Score
         </span>
-        <span className="font-mono text-sm text-foreground">{c.setupScore}/10</span>
-        <span className="ml-2 font-mono text-xs tracking-tighter text-muted-foreground">
+        <span className="font-mono text-base text-foreground">{c.setupScore}/10</span>
+        <span className="ml-2 font-mono text-sm tracking-tighter text-muted-foreground">
           {"━".repeat(filled)}
           <span className="text-muted-foreground/40">{"░".repeat(10 - filled)}</span>
         </span>

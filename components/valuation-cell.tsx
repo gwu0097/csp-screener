@@ -78,7 +78,7 @@ export function EditableCell({
             if (e.key === "Enter") commit();
             else if (e.key === "Escape") setEditing(false);
           }}
-          className={`${width} rounded border border-amber-500 bg-background px-2 py-1 text-center font-mono text-xs outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500/30`}
+          className={`${width} rounded border border-amber-500 bg-background px-2 py-1 text-center font-mono text-sm outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500/30`}
         />
       ) : (
         <button
@@ -92,7 +92,7 @@ export function EditableCell({
                 ? "Click to edit"
                 : "Read-only"
           }
-          className={`${width} inline-flex items-center justify-between gap-1 rounded border px-2 py-1 font-mono text-xs transition-colors ${
+          className={`${width} inline-flex items-center justify-between gap-1 rounded border px-2 py-1 font-mono text-sm transition-colors ${
             customized
               ? "border-amber-500/60 bg-amber-500/15 text-amber-200"
               : `${baseBtnCls} text-foreground`

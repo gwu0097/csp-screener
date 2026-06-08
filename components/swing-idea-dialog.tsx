@@ -181,19 +181,19 @@ export function SwingIdeaDialog({
         </DialogHeader>
 
         <div className="grid gap-3 py-2">
-          <label className="grid gap-1 text-xs">
+          <label className="grid gap-1 text-sm">
             <span className="text-muted-foreground">Symbol *</span>
             <input
               type="text"
               value={symbol}
               onChange={(e) => setSymbol(e.target.value.toUpperCase())}
-              className="rounded border border-border bg-background px-2 py-1.5 font-mono text-sm uppercase"
+              className="rounded border border-border bg-background px-2 py-1.5 font-mono text-base uppercase"
               placeholder="AMD"
               autoFocus
             />
           </label>
 
-          <label className="grid gap-1 text-xs">
+          <label className="grid gap-1 text-sm">
             <span className="text-muted-foreground">
               Catalyst{" "}
               <span className="text-[10px]">(near-term driver — Phase 2 will auto-fill)</span>
@@ -202,31 +202,31 @@ export function SwingIdeaDialog({
               type="text"
               value={catalyst}
               onChange={(e) => setCatalyst(e.target.value)}
-              className="rounded border border-border bg-background px-2 py-1.5 text-sm"
+              className="rounded border border-border bg-background px-2 py-1.5 text-base"
               placeholder="MI350 launch + MSFT deal"
             />
           </label>
 
-          <label className="grid gap-1 text-xs">
+          <label className="grid gap-1 text-sm">
             <span className="text-muted-foreground">Your thesis</span>
             <textarea
               value={userThesis}
               onChange={(e) => setUserThesis(e.target.value)}
               rows={3}
-              className="rounded border border-border bg-background px-2 py-1.5 text-sm"
+              className="rounded border border-border bg-background px-2 py-1.5 text-base"
               placeholder="Why do you like this?"
             />
           </label>
 
           <div className="grid grid-cols-2 gap-3">
-            <label className="grid gap-1 text-xs">
+            <label className="grid gap-1 text-sm">
               <span className="text-muted-foreground">Timeframe</span>
               <select
                 value={timeframe}
                 onChange={(e) =>
                   setTimeframe(e.target.value as "1month" | "3months" | "6months")
                 }
-                className="rounded border border-border bg-background px-2 py-1.5 text-sm"
+                className="rounded border border-border bg-background px-2 py-1.5 text-base"
               >
                 <option value="1month">1 month</option>
                 <option value="3months">3 months</option>
@@ -234,14 +234,14 @@ export function SwingIdeaDialog({
               </select>
             </label>
 
-            <label className="grid gap-1 text-xs">
+            <label className="grid gap-1 text-sm">
               <span className="text-muted-foreground">Conviction</span>
               <StarRating value={conviction} onChange={setConviction} />
             </label>
           </div>
 
           <div className="grid grid-cols-2 gap-3">
-            <label className="grid gap-1 text-xs">
+            <label className="grid gap-1 text-sm">
               <span className="text-muted-foreground">Analyst sentiment</span>
               <select
                 value={sentiment}
@@ -250,7 +250,7 @@ export function SwingIdeaDialog({
                     e.target.value as "bullish" | "bearish" | "mixed" | "neutral",
                   )
                 }
-                className="rounded border border-border bg-background px-2 py-1.5 text-sm"
+                className="rounded border border-border bg-background px-2 py-1.5 text-base"
               >
                 <option value="bullish">Bullish</option>
                 <option value="bearish">Bearish</option>
@@ -259,47 +259,47 @@ export function SwingIdeaDialog({
               </select>
             </label>
 
-            <label className="grid gap-1 text-xs">
+            <label className="grid gap-1 text-sm">
               <span className="text-muted-foreground">Analyst target</span>
               <input
                 type="number"
                 step="0.01"
                 value={analystTarget}
                 onChange={(e) => setAnalystTarget(e.target.value)}
-                className="rounded border border-border bg-background px-2 py-1.5 text-sm"
+                className="rounded border border-border bg-background px-2 py-1.5 text-base"
                 placeholder="optional"
               />
             </label>
           </div>
 
           <div className="grid grid-cols-2 gap-3">
-            <label className="grid gap-1 text-xs">
+            <label className="grid gap-1 text-sm">
               <span className="text-muted-foreground">Price at discovery</span>
               <input
                 type="number"
                 step="0.01"
                 value={priceAtDiscovery}
                 onChange={(e) => setPriceAtDiscovery(e.target.value)}
-                className="rounded border border-border bg-background px-2 py-1.5 text-sm"
+                className="rounded border border-border bg-background px-2 py-1.5 text-base"
                 placeholder="175.40"
               />
             </label>
 
-            <label className="grid gap-1 text-xs">
+            <label className="grid gap-1 text-sm">
               <span className="text-muted-foreground">Forward P/E</span>
               <input
                 type="number"
                 step="0.1"
                 value={forwardPe}
                 onChange={(e) => setForwardPe(e.target.value)}
-                className="rounded border border-border bg-background px-2 py-1.5 text-sm"
+                className="rounded border border-border bg-background px-2 py-1.5 text-base"
                 placeholder="28"
               />
             </label>
           </div>
 
           {error && (
-            <div className="rounded border border-rose-500/40 bg-rose-500/10 p-2 text-xs text-rose-300">
+            <div className="rounded border border-rose-500/40 bg-rose-500/10 p-2 text-sm text-rose-300">
               {error}
             </div>
           )}

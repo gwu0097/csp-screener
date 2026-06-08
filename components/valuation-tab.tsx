@@ -99,7 +99,7 @@ export function ValuationTab({ symbol }: { symbol: string }) {
 
   return (
     <TooltipProvider delayDuration={150}>
-      <div className="rounded-md border border-border bg-background/30 p-3 text-xs">
+      <div className="rounded-md border border-border bg-background/30 p-3 text-sm">
         {loading ? (
         <div className="flex items-center justify-center gap-2 p-6 text-muted-foreground">
           <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -174,7 +174,7 @@ function EmptyState({
         type="button"
         onClick={onGenerate}
         disabled={generating}
-        className="inline-flex items-center gap-2 rounded border border-emerald-500/50 bg-emerald-500/15 px-3 py-1.5 text-xs font-medium text-emerald-200 hover:bg-emerald-500/25 disabled:opacity-60"
+        className="inline-flex items-center gap-2 rounded border border-emerald-500/50 bg-emerald-500/15 px-3 py-1.5 text-sm font-medium text-emerald-200 hover:bg-emerald-500/25 disabled:opacity-60"
       >
         {generating ? (
           <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -204,7 +204,7 @@ function V1Notice({
   generating: boolean;
 }) {
   return (
-    <div className="mt-3 rounded border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-200">
+    <div className="mt-3 rounded border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-200">
       This is a legacy v1 model from{" "}
       {fmtDate((version.output as { saved_at?: string }).saved_at ?? version.runAt)}.
       Generate a new version to enable the upgraded P/E + DCF tiers and editing.
@@ -213,7 +213,7 @@ function V1Notice({
           type="button"
           onClick={onGenerate}
           disabled={generating}
-          className="inline-flex items-center gap-1 rounded border border-amber-500/50 bg-amber-500/20 px-2 py-1 text-xs hover:bg-amber-500/30 disabled:opacity-60"
+          className="inline-flex items-center gap-1 rounded border border-amber-500/50 bg-amber-500/20 px-2 py-1 text-sm hover:bg-amber-500/30 disabled:opacity-60"
         >
           {generating ? (
             <Loader2 className="h-3 w-3 animate-spin" />
@@ -267,7 +267,7 @@ function Header({
         <select
           value={selected.id}
           onChange={(e) => onSelect(e.target.value)}
-          className="rounded border border-border bg-background px-1.5 py-0.5 text-xs"
+          className="rounded border border-border bg-background px-1.5 py-0.5 text-sm"
         >
           {versions.map((v) => {
             const sa = (v.output as { saved_at?: string }).saved_at ?? v.runAt;
@@ -299,7 +299,7 @@ function Header({
         type="button"
         onClick={onGenerate}
         disabled={generating}
-        className="inline-flex items-center gap-1 rounded border border-border bg-background/40 px-2 py-1 text-xs hover:bg-background/60 disabled:opacity-60"
+        className="inline-flex items-center gap-1 rounded border border-border bg-background/40 px-2 py-1 text-sm hover:bg-background/60 disabled:opacity-60"
       >
         {generating ? (
           <Loader2 className="h-3 w-3 animate-spin" />
@@ -558,7 +558,7 @@ function TierTab({
     <button
       type="button"
       onClick={onClick}
-      className={`rounded px-3 py-1 text-xs font-medium transition-colors ${
+      className={`rounded px-3 py-1 text-sm font-medium transition-colors ${
         active
           ? "bg-foreground text-background"
           : "text-muted-foreground hover:text-foreground"
@@ -637,11 +637,11 @@ function ClassificationBanner({ model }: { model: ValuationModelV2 }) {
   const def = CLASSIFICATION_COPY[cat];
   if (!def) return null;
   return (
-    <div className={`rounded border ${def.tone} px-3 py-2 text-xs`}>
+    <div className={`rounded border ${def.tone} px-3 py-2 text-sm`}>
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <div className="flex items-baseline gap-2">
           <span className="text-base">{def.emoji}</span>
-          <span className="text-sm font-semibold">{def.label}</span>
+          <span className="text-base font-semibold">{def.label}</span>
           <span className="text-muted-foreground">
             (Forward P/E {multipleStr(model.forward_pe)}, Revenue{" "}
             {pctStr(model.revenue_growth_ttm)})
@@ -671,7 +671,7 @@ function MarketContext({ model }: { model: ValuationModelV2 }) {
   const tier2Base = model.tier2?.outputs?.base?.intrinsic_value ?? null;
   const pegFair = pegFairValue(model, 1.0);
   return (
-    <div className="rounded border border-border bg-background/40 p-3 text-xs">
+    <div className="rounded border border-border bg-background/40 p-3 text-sm">
       <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
         Market context
       </div>
@@ -882,7 +882,7 @@ function PegTab({ model }: { model: ValuationModelV2 }) {
     growth <= 0
   ) {
     return (
-      <div className="rounded border border-dashed border-border bg-background/40 p-6 text-center text-xs text-muted-foreground">
+      <div className="rounded border border-dashed border-border bg-background/40 p-6 text-center text-sm text-muted-foreground">
         PEG requires a positive forward P/E, forward EPS, and a positive
         growth rate. Missing one or more —{" "}
         {[
@@ -898,7 +898,7 @@ function PegTab({ model }: { model: ValuationModelV2 }) {
   }
 
   return (
-    <div className="space-y-3 text-xs">
+    <div className="space-y-3 text-sm">
       <div className="rounded border border-border bg-background/40 p-3">
         <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
           Current PEG
@@ -908,7 +908,7 @@ function PegTab({ model }: { model: ValuationModelV2 }) {
             {peg !== null ? peg.toFixed(2) : "—"}
           </span>
           {interp && (
-            <span className={`text-sm font-medium ${interp.cls}`}>
+            <span className={`text-base font-medium ${interp.cls}`}>
               {interp.label}
             </span>
           )}
@@ -926,7 +926,7 @@ function PegTab({ model }: { model: ValuationModelV2 }) {
         <div className="border-b border-border px-3 py-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
           Fair value at target PEG
         </div>
-        <table className="min-w-full text-xs">
+        <table className="min-w-full text-sm">
           <thead className="bg-background/60">
             <tr className="text-left text-[10px] uppercase tracking-wide text-muted-foreground">
               <th className="px-2 py-1.5">Target PEG</th>
@@ -1006,7 +1006,7 @@ function HistoricalTable({ model }: { model: ValuationModelV2 }) {
         Historical financials (5y)
       </div>
       <div className="overflow-x-auto rounded border border-border">
-        <table className="min-w-full text-xs">
+        <table className="min-w-full text-sm">
           <thead className="bg-background/60">
             <tr>
               <th className="px-2 py-1 text-left font-medium text-muted-foreground">

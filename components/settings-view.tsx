@@ -37,7 +37,7 @@ export function SettingsView({ connected, lastRefresh, envFlags, schwabFlash, sc
           backfill any historical EM rows that don't have a Polygon
           implied_move_pct yet — once the sub lapses, those rows
           can't be filled at all (Schwab is live-only). */}
-      <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-200">
+      <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-base text-amber-200">
         <div className="flex items-start gap-2">
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
           <div>
@@ -54,12 +54,12 @@ export function SettingsView({ connected, lastRefresh, envFlags, schwabFlash, sc
       </div>
 
       {schwabFlash === "connected" && (
-        <div className="rounded-md border border-emerald-500/30 bg-emerald-500/10 p-2 text-sm text-emerald-300">
+        <div className="rounded-md border border-emerald-500/30 bg-emerald-500/10 p-2 text-base text-emerald-300">
           Schwab connected successfully.
         </div>
       )}
       {schwabFlash === "error" && (
-        <div className="rounded-md border border-rose-500/30 bg-rose-500/10 p-2 text-sm text-rose-300">
+        <div className="rounded-md border border-rose-500/30 bg-rose-500/10 p-2 text-base text-rose-300">
           Schwab connection failed{schwabReason ? `: ${schwabReason}` : ""}.
         </div>
       )}
@@ -72,7 +72,7 @@ export function SettingsView({ connected, lastRefresh, envFlags, schwabFlash, sc
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
-          <div className="text-sm text-muted-foreground">
+          <div className="text-base text-muted-foreground">
             Last refresh: {lastRefresh ? new Date(lastRefresh).toLocaleString() : "never"}
           </div>
           <div className="flex gap-2">
@@ -108,7 +108,7 @@ export function SettingsView({ connected, lastRefresh, envFlags, schwabFlash, sc
           <CardTitle>Environment variables</CardTitle>
         </CardHeader>
         <CardContent>
-          <ul className="divide-y divide-border text-sm">
+          <ul className="divide-y divide-border text-base">
             {Object.entries(envFlags).map(([k, present]) => (
               <li key={k} className="flex items-center justify-between py-2">
                 <code className="font-mono">{k}</code>
@@ -124,7 +124,7 @@ export function SettingsView({ connected, lastRefresh, envFlags, schwabFlash, sc
               </li>
             ))}
           </ul>
-          <p className="mt-3 text-xs text-muted-foreground">
+          <p className="mt-3 text-sm text-muted-foreground">
             Values are never shown. Set them in <code>.env.local</code> or in your Vercel project settings.
           </p>
         </CardContent>
@@ -172,7 +172,7 @@ function ManualTokenSection({ onSaved }: { onSaved: () => void }) {
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center justify-between px-3 py-2 text-left text-sm text-amber-300 hover:bg-amber-500/10"
+        className="flex w-full items-center justify-between px-3 py-2 text-left text-base text-amber-300 hover:bg-amber-500/10"
       >
         <span className="inline-flex items-center gap-2">
           {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
@@ -181,34 +181,34 @@ function ManualTokenSection({ onSaved }: { onSaved: () => void }) {
         <AlertTriangle className="h-4 w-4" />
       </button>
       {open && (
-        <div className="space-y-3 border-t border-amber-500/20 px-3 py-3 text-sm">
-          <p className="text-xs text-amber-200/80">
+        <div className="space-y-3 border-t border-amber-500/20 px-3 py-3 text-base">
+          <p className="text-sm text-amber-200/80">
             <strong>Temporary workaround.</strong> Paste Schwab <code>access_token</code> and{" "}
             <code>refresh_token</code> obtained out-of-band. Tokens are written directly to Supabase and
             the OAuth flow is bypassed. Use only while the registered Schwab callback URL is pending.
             Remove this section once OAuth works.
           </p>
           <label className="block">
-            <span className="mb-1 block text-xs text-muted-foreground">access_token</span>
+            <span className="mb-1 block text-sm text-muted-foreground">access_token</span>
             <textarea
               value={accessToken}
               onChange={(e) => setAccessToken(e.target.value)}
               rows={3}
               spellCheck={false}
               autoComplete="off"
-              className="w-full rounded-md border border-border bg-background px-2 py-1 font-mono text-xs"
+              className="w-full rounded-md border border-border bg-background px-2 py-1 font-mono text-sm"
               placeholder="Paste Schwab access_token…"
             />
           </label>
           <label className="block">
-            <span className="mb-1 block text-xs text-muted-foreground">refresh_token</span>
+            <span className="mb-1 block text-sm text-muted-foreground">refresh_token</span>
             <textarea
               value={refreshToken}
               onChange={(e) => setRefreshToken(e.target.value)}
               rows={3}
               spellCheck={false}
               autoComplete="off"
-              className="w-full rounded-md border border-border bg-background px-2 py-1 font-mono text-xs"
+              className="w-full rounded-md border border-border bg-background px-2 py-1 font-mono text-sm"
               placeholder="Paste Schwab refresh_token…"
             />
           </label>
@@ -224,8 +224,8 @@ function ManualTokenSection({ onSaved }: { onSaved: () => void }) {
               <span
                 className={
                   message.kind === "ok"
-                    ? "text-xs text-emerald-300"
-                    : "text-xs text-rose-300"
+                    ? "text-sm text-emerald-300"
+                    : "text-sm text-rose-300"
                 }
               >
                 {message.text}
@@ -342,7 +342,7 @@ function PolygonBulkBackfill() {
     total !== null && total > 0 ? Math.round((done / total) * 100) : 0;
 
   return (
-    <div className="space-y-3 text-sm">
+    <div className="space-y-3 text-base">
       <p className="text-muted-foreground">
         <strong className="text-foreground">Polygon bulk backfill.</strong>{" "}
         Drains every <code>earnings_history</code> row with{" "}
@@ -356,12 +356,12 @@ function PolygonBulkBackfill() {
       </Button>
       {total !== null && (
         <div className="space-y-1.5">
-          <div className="flex items-baseline justify-between text-xs">
+          <div className="flex items-baseline justify-between text-sm">
             <span className="text-muted-foreground">
               {done} / {total} processed
               {total > 0 && <span className="ml-2 font-mono">({pct}%)</span>}
             </span>
-            <span className="font-mono text-xs">
+            <span className="font-mono text-sm">
               <span className="text-emerald-300">✓ {populatedCount}</span>{" "}
               <span className="text-amber-300">· {skippedCount} skipped</span>
               {errorCount > 0 && (
@@ -378,17 +378,17 @@ function PolygonBulkBackfill() {
         </div>
       )}
       {stoppedReason && (
-        <div className="rounded border border-border bg-background/40 p-2 text-xs text-muted-foreground">
+        <div className="rounded border border-border bg-background/40 p-2 text-sm text-muted-foreground">
           {stoppedReason}
         </div>
       )}
       {errMsg && (
-        <div className="rounded border border-rose-500/40 bg-rose-500/10 p-2 text-xs text-rose-300">
+        <div className="rounded border border-rose-500/40 bg-rose-500/10 p-2 text-sm text-rose-300">
           {errMsg}
         </div>
       )}
       {recent.length > 0 && (
-        <details className="rounded border border-border bg-background/40 text-xs">
+        <details className="rounded border border-border bg-background/40 text-sm">
           <summary className="cursor-pointer px-2 py-1 text-muted-foreground hover:text-foreground">
             Recent outcomes (last {recent.length})
           </summary>
@@ -461,7 +461,7 @@ function ImpliedMoveBackfill() {
   }
 
   return (
-    <div className="space-y-3 text-sm">
+    <div className="space-y-3 text-base">
       <p className="text-muted-foreground">
         Backfills the <code>implied_move_pct</code> column on
         <code className="mx-1">earnings_history</code> rows that are
@@ -474,12 +474,12 @@ function ImpliedMoveBackfill() {
         {busy ? "Running…" : "Backfill historical implied moves"}
       </Button>
       {error && (
-        <div className="rounded border border-rose-500/40 bg-rose-500/10 p-2 text-xs text-rose-300">
+        <div className="rounded border border-rose-500/40 bg-rose-500/10 p-2 text-sm text-rose-300">
           {error}
         </div>
       )}
       {last && (
-        <div className="rounded border border-border bg-background/40 p-2 text-xs">
+        <div className="rounded border border-border bg-background/40 p-2 text-sm">
           <div className="font-mono text-muted-foreground">
             scanned={last.scanned} · updated={last.updated} · skipped
             no-data={last.skippedNoData} · low-confidence=
@@ -557,7 +557,7 @@ function RekeySymbol() {
   }
 
   return (
-    <div className="space-y-3 border-t border-border pt-3 text-sm">
+    <div className="space-y-3 border-t border-border pt-3 text-base">
       <p className="text-muted-foreground">
         Manually re-keys earnings_history rows from fiscal-quarter end to
         the actual announcement date and re-fetches price action with
@@ -570,19 +570,19 @@ function RekeySymbol() {
           value={symbol}
           onChange={(e) => setSymbol(e.target.value.toUpperCase())}
           placeholder="Ticker (e.g. SPOT)"
-          className="w-32 rounded border border-border bg-background px-2 py-1 font-mono text-xs uppercase"
+          className="w-32 rounded border border-border bg-background px-2 py-1 font-mono text-sm uppercase"
         />
         <Button size="sm" onClick={run} disabled={busy || !symbol.trim()}>
           {busy ? "Running…" : "Re-key earnings history"}
         </Button>
       </div>
       {error && (
-        <div className="rounded border border-rose-500/40 bg-rose-500/10 p-2 text-xs text-rose-300">
+        <div className="rounded border border-rose-500/40 bg-rose-500/10 p-2 text-sm text-rose-300">
           {error}
         </div>
       )}
       {last && (
-        <div className="rounded border border-border bg-background/40 p-2 text-xs">
+        <div className="rounded border border-border bg-background/40 p-2 text-sm">
           <div className="font-mono text-muted-foreground">
             {last.rekey.symbol} · rekeyed={last.rekey.reingested} · merged=
             {last.rekey.merged_with_existing} · unmatched=

@@ -273,7 +273,7 @@ export function ResearchStockView({ symbol }: { symbol: string }) {
       <div>
         <Link
           href="/research"
-          className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+          className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
         >
           <ChevronLeft className="h-3 w-3" />
           Back to Research
@@ -399,14 +399,14 @@ function Header({
 }) {
   if (stockError) {
     return (
-      <div className="rounded border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-300">
+      <div className="rounded border border-rose-500/40 bg-rose-500/10 p-3 text-base text-rose-300">
         Could not load {symbol}: {stockError}
       </div>
     );
   }
   if (!stock) {
     return (
-      <div className="rounded border border-border bg-background/40 p-4 text-sm text-muted-foreground">
+      <div className="rounded border border-border bg-background/40 p-4 text-base text-muted-foreground">
         Loading {symbol}…
       </div>
     );
@@ -423,11 +423,11 @@ function Header({
         <h1 className="font-mono text-2xl font-semibold text-foreground">
           {stock.symbol}
         </h1>
-        <span className="text-sm text-muted-foreground">
+        <span className="text-base text-muted-foreground">
           {stock.companyName ?? "—"}
         </span>
       </div>
-      <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+      <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-muted-foreground">
         <span className="font-mono text-foreground">
           {fmtMoney(stock.currentPrice)}
         </span>
@@ -483,7 +483,7 @@ function ModuleHeader({
   return (
     <div className="space-y-1">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        <div className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
           {title}
         </div>
         <div className="flex items-center gap-2">
@@ -554,7 +554,7 @@ function BusinessOverviewCard({
       />
       <div className="mt-3">
         {!mod ? (
-          <div className="rounded border border-dashed border-border bg-background/40 p-6 text-center text-xs text-muted-foreground">
+          <div className="rounded border border-dashed border-border bg-background/40 p-6 text-center text-sm text-muted-foreground">
             Click <span className="font-medium text-foreground">Run module</span>{" "}
             to pull company profile (Yahoo) and a structured business
             breakdown (Perplexity).
@@ -569,7 +569,7 @@ function BusinessOverviewCard({
 
 export function BusinessOverviewBody({ data }: { data: BusinessOverview }) {
   return (
-    <div className="space-y-3 text-xs">
+    <div className="space-y-3 text-sm">
       <div className="grid grid-cols-1 gap-x-4 gap-y-1 sm:grid-cols-2">
         <DetailLine label="Sector" value={data.sector ?? "—"} />
         <DetailLine label="Industry" value={data.industry ?? "—"} />
@@ -711,7 +711,7 @@ function FundamentalHealthCard({
       />
       <div className="mt-3">
         {!mod ? (
-          <div className="rounded border border-dashed border-border bg-background/40 p-6 text-center text-xs text-muted-foreground">
+          <div className="rounded border border-dashed border-border bg-background/40 p-6 text-center text-sm text-muted-foreground">
             Pulls 5 years of 10-K financials from SEC EDGAR + current ratios
             from Yahoo Finance.
           </div>
@@ -745,7 +745,7 @@ export function FundamentalHealthBody({ data }: { data: FundamentalHealth }) {
   );
   const c = data.current;
   return (
-    <div className="space-y-3 text-xs">
+    <div className="space-y-3 text-sm">
       <Section title="Historical financials (SEC EDGAR)">
         {annual.length === 0 ? (
           <div className="text-muted-foreground">
@@ -1084,7 +1084,7 @@ function CatalystScannerCard({
           ) : null
         }
       />
-      <div className="mt-3 space-y-3 text-xs">
+      <div className="mt-3 space-y-3 text-sm">
         {!mod ? (
           <div className="rounded border border-dashed border-border bg-background/40 p-6 text-center text-muted-foreground">
             Searches Perplexity for specific catalysts across the next 1–3

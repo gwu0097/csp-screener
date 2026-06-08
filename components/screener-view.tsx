@@ -1791,7 +1791,7 @@ export function ScreenerView({ connected }: Props) {
       <div className="space-y-4">
         <SchwabTokenBanner />
         {dailyContext && (
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-muted-foreground">
             <span>
               VIX:{" "}
               <span className={vixRegimeColor}>
@@ -1806,7 +1806,7 @@ export function ScreenerView({ connected }: Props) {
               <span>
                 Best:{" "}
                 <span className="text-foreground">{bestCandidate.symbol}</span>{" "}
-                <span className="text-xs">({bestCandidate.recommendation})</span>
+                <span className="text-sm">({bestCandidate.recommendation})</span>
               </span>
             )}
             <span>
@@ -1816,7 +1816,7 @@ export function ScreenerView({ connected }: Props) {
           </div>
         )}
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-3 text-sm">
+          <div className="flex items-center gap-3 text-base">
             {(() => {
               // Tier the badge by refresh-token age. Click-through to
               // /api/auth/schwab is the same surface as the
@@ -1867,17 +1867,17 @@ export function ScreenerView({ connected }: Props) {
               );
             })()}
             {screenedAt && (
-              <span className="text-xs text-muted-foreground">
+              <span className="text-sm text-muted-foreground">
                 Last screened:{" "}
                 {screenedAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: true })}
               </span>
             )}
             {message && !error && (
-              <span className="whitespace-pre-line text-xs leading-snug text-emerald-300">
+              <span className="whitespace-pre-line text-sm leading-snug text-emerald-300">
                 {message}
               </span>
             )}
-            {trackToast && <span className="text-xs text-sky-300">{trackToast}</span>}
+            {trackToast && <span className="text-sm text-sky-300">{trackToast}</span>}
           </div>
           <div className="flex items-center gap-2">
             {!connected && (
@@ -2036,7 +2036,7 @@ export function ScreenerView({ connected }: Props) {
 
         {chainProgress && (
           <div
-            className={`rounded-lg border px-3 py-2 text-xs ${
+            className={`rounded-lg border px-3 py-2 text-sm ${
               chainProgress.phase === "done"
                 ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-200"
                 : "border-sky-500/30 bg-sky-500/10 text-sky-200"
@@ -2073,7 +2073,7 @@ export function ScreenerView({ connected }: Props) {
         <ScreenerCriteriaPanel />
 
         {showStaleNotice && (
-          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-200">
             <AlertTriangle className="mr-1.5 inline h-3 w-3" />
             Results from {staleAgeHours} hour{staleAgeHours === 1 ? "" : "s"} ago — consider
             re-screening.
@@ -2084,7 +2084,7 @@ export function ScreenerView({ connected }: Props) {
           <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-border bg-background/40 px-6 py-16 text-center">
             <Play className="mb-3 h-10 w-10 text-muted-foreground" />
             <h2 className="mb-1 text-lg font-semibold">No screen run yet</h2>
-            <p className="mb-6 max-w-md text-sm text-muted-foreground">
+            <p className="mb-6 max-w-md text-base text-muted-foreground">
               Click Screen Today to pull today&apos;s AMC and tomorrow&apos;s BMO earnings and score them
               through Stage 1 and Stage 2. Run Analysis later to fill in crush + opportunity grades.
             </p>
@@ -2098,16 +2098,16 @@ export function ScreenerView({ connected }: Props) {
         {status === "screening" && (
           <div className="flex flex-col items-center justify-center rounded-lg border border-border bg-background/40 px-6 py-16 text-center">
             <Loader2 className="mb-3 h-10 w-10 animate-spin text-muted-foreground" />
-            <div className="text-sm text-muted-foreground">
+            <div className="text-base text-muted-foreground">
               Fetching earnings calendar, pricing batch, and scoring stages 1 & 2…
             </div>
           </div>
         )}
 
         {emptyAfterScreen && lastStats && (
-          <div className="rounded-lg border border-border bg-background/40 p-4 text-sm">
+          <div className="rounded-lg border border-border bg-background/40 p-4 text-base">
             <div className="mb-2 font-medium">No candidates survived the filters.</div>
-            <div className="space-y-1 font-mono text-xs text-muted-foreground">
+            <div className="space-y-1 font-mono text-sm text-muted-foreground">
               <div>
                 Finnhub raw: <span className="text-foreground">{lastStats.finnhub}</span>
               </div>
@@ -2136,7 +2136,7 @@ export function ScreenerView({ connected }: Props) {
                 Final: <span className="text-foreground">{lastStats.final}</span>
               </div>
             </div>
-            <div className="mt-3 text-xs text-muted-foreground">
+            <div className="mt-3 text-sm text-muted-foreground">
               If Finnhub raw is 0, check the Vercel runtime logs for the <code>[finnhub]</code> and <code>[earnings]</code>
               lines — they show the exact URL, date window, and raw row breakdown.
             </div>
@@ -2149,7 +2149,7 @@ export function ScreenerView({ connected }: Props) {
               <TableHeader>
                 <TableRow>
                   <TableHead className="w-8"></TableHead>
-                  <TableHead className="w-14 text-xs text-muted-foreground">Track</TableHead>
+                  <TableHead className="w-14 text-sm text-muted-foreground">Track</TableHead>
                   <SortableHeader
                     label="Grade"
                     active={sortKey === "grade"}
@@ -2220,7 +2220,7 @@ export function ScreenerView({ connected }: Props) {
               <TableBody>
                 {sortedResults.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={15} className="py-10 text-center text-sm text-muted-foreground">
+                    <TableCell colSpan={15} className="py-10 text-center text-base text-muted-foreground">
                       No qualifying earnings today or tomorrow after filters.
                     </TableCell>
                   </TableRow>
@@ -2237,7 +2237,7 @@ export function ScreenerView({ connected }: Props) {
                         <TableRow key={`divider-${idx}`} className="hover:bg-transparent">
                           <TableCell
                             colSpan={15}
-                            className="bg-amber-500/10 py-1.5 text-center text-xs italic text-amber-300/90"
+                            className="bg-amber-500/10 py-1.5 text-center text-sm italic text-amber-300/90"
                           >
                             <AlertTriangle className="mr-1.5 inline h-3 w-3" />
                             Outside screener criteria — use caution
@@ -2261,14 +2261,14 @@ export function ScreenerView({ connected }: Props) {
                           {r.threeLayer ? (
                             <span
                               className={cn(
-                                "rounded-md border px-3 py-1 text-sm font-bold",
+                                "rounded-md border px-3 py-1 text-base font-bold",
                                 finalGradeBadgeColor(r.threeLayer.finalGrade),
                               )}
                             >
                               {r.threeLayer.finalGrade}
                             </span>
                           ) : (
-                            <span className="text-sm text-muted-foreground">—</span>
+                            <span className="text-base text-muted-foreground">—</span>
                           )}
                         </TableCell>
                         <TableCell className="text-[15px] font-bold">
@@ -2294,11 +2294,11 @@ export function ScreenerView({ connected }: Props) {
                             )}
                           </span>
                         </TableCell>
-                        <TableCell className="text-sm">{fmtPrice(displayedPrice)}</TableCell>
-                        <TableCell className="text-xs">
+                        <TableCell className="text-base">{fmtPrice(displayedPrice)}</TableCell>
+                        <TableCell className="text-sm">
                           {r.earningsDate} <span className="text-muted-foreground">· {r.earningsTiming}</span>
                         </TableCell>
-                        <TableCell className="font-mono text-sm">
+                        <TableCell className="font-mono text-base">
                           {(() => {
                             const em = r.stageThree?.details?.expectedMovePct;
                             if (em !== null && em !== undefined) {
@@ -2315,10 +2315,10 @@ export function ScreenerView({ connected }: Props) {
                             return "—";
                           })()}
                         </TableCell>
-                        <TableCell className={cn("font-mono text-sm", gradeColor(displayCrushGrade(r.stageThree)))}>
+                        <TableCell className={cn("font-mono text-base", gradeColor(displayCrushGrade(r.stageThree)))}>
                           {analyzingRow ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : displayCrushGrade(r.stageThree)}
                         </TableCell>
-                        <TableCell className={cn("font-mono text-sm", gradeColor(r.stageFour?.opportunityGrade))}>
+                        <TableCell className={cn("font-mono text-base", gradeColor(r.stageFour?.opportunityGrade))}>
                           {analyzingRow ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : (r.stageFour?.opportunityGrade ?? "—")}
                         </TableCell>
                         {(() => {
@@ -2346,18 +2346,18 @@ export function ScreenerView({ connected }: Props) {
                                   }
                                 />
                               </TableCell>
-                              <TableCell className={cn("text-sm font-mono", pctDropColor(displayedPrice, effStrike))}>
+                              <TableCell className={cn("text-base font-mono", pctDropColor(displayedPrice, effStrike))}>
                                 {fmtPctDrop(displayedPrice, effStrike)}
                               </TableCell>
-                              <TableCell className="text-sm">
+                              <TableCell className="text-base">
                                 {effPremium !== null && effPremium !== undefined
                                   ? `$${fmtNum(effPremium)}`
                                   : "—"}
                               </TableCell>
-                              <TableCell className={cn("text-sm font-mono", yieldColor(effPremium, effStrike))}>
+                              <TableCell className={cn("text-base font-mono", yieldColor(effPremium, effStrike))}>
                                 {fmtYield(effPremium, effStrike)}
                               </TableCell>
-                              <TableCell className="text-sm">{fmtNum(effDelta, 3)}</TableCell>
+                              <TableCell className="text-base">{fmtNum(effDelta, 3)}</TableCell>
                               <TableCell className="text-center">
                                 {effSpread !== null && effSpread !== undefined && effSpread > 50 ? (
                                   <Tooltip>
@@ -2418,7 +2418,7 @@ function ScreenerCriteriaPanel() {
   const [open, setOpen] = useState(false);
   const cfg = ACTIVE_SCREENER;
   return (
-    <div className="rounded-lg border border-border bg-background/40 text-xs">
+    <div className="rounded-lg border border-border bg-background/40 text-sm">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -2491,7 +2491,7 @@ function SortableHeader({
               {active && (dir === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />)}
             </span>
           </TooltipTrigger>
-          <TooltipContent className="max-w-sm text-xs">{tooltip}</TooltipContent>
+          <TooltipContent className="max-w-sm text-sm">{tooltip}</TooltipContent>
         </Tooltip>
       ) : (
         inner
@@ -2517,7 +2517,7 @@ function GradeBadge({
   tooltip?: React.ReactNode;
   size?: "sm" | "md";
 }) {
-  const sizing = size === "md" ? "px-3 py-1 text-sm font-bold" : "px-1.5 py-0.5 font-mono";
+  const sizing = size === "md" ? "px-3 py-1 text-base font-bold" : "px-1.5 py-0.5 font-mono";
   const badge = (
     <span className={cn("rounded border", sizing, gradeBadgeColor(grade))}>
       {grade ?? "?"}
@@ -2529,7 +2529,7 @@ function GradeBadge({
       <TooltipTrigger asChild>
         <span className="cursor-help">{badge}</span>
       </TooltipTrigger>
-      <TooltipContent className="max-w-sm text-xs">{tooltip}</TooltipContent>
+      <TooltipContent className="max-w-sm text-sm">{tooltip}</TooltipContent>
     </Tooltip>
   );
 }
@@ -2611,7 +2611,7 @@ function ExpandedDetail({
       <div className="space-y-3 p-3">
         {onAnalyze && (
           <div className="flex items-center justify-between rounded border border-amber-500/30 bg-amber-500/5 px-3 py-2">
-            <div className="text-xs text-amber-200">
+            <div className="text-sm text-amber-200">
               Three-layer grade not yet computed for {r.symbol}.
               {stage2Failed && (
                 <div className="mt-0.5 text-[11px] text-amber-300/90">
@@ -2658,7 +2658,7 @@ function ExpandedDetail({
               </>
             )}
           </StageCard>
-          <div className="text-xs text-muted-foreground md:col-span-2">
+          <div className="text-sm text-muted-foreground md:col-span-2">
             Click <span className="font-medium">Run Analysis</span> at the top
             of the table to grade every candidate, or use the per-symbol
             button above for just {r.symbol}.
@@ -2696,7 +2696,7 @@ function ExpandedDetail({
             onClick={() => onAnalyze(r.symbol)}
             disabled={analyzing}
             className={cn(
-              "inline-flex items-center gap-1 rounded px-2 py-1 text-xs transition",
+              "inline-flex items-center gap-1 rounded px-2 py-1 text-sm transition",
               newsLooksFailed
                 ? "border border-amber-500/40 bg-amber-500/10 text-amber-200 hover:bg-amber-500/20"
                 : "text-muted-foreground hover:text-foreground",
@@ -2792,7 +2792,7 @@ function ExpandedDetail({
           }
         >
           {tl.personalFactors.dataInsufficient ? (
-            <div className="text-xs text-muted-foreground">
+            <div className="text-sm text-muted-foreground">
               Insufficient data — need 5+ trades on {r.symbol} (you have {tl.personalFactors.tickerTradeCount})
             </div>
           ) : (
@@ -2858,14 +2858,14 @@ function ExpandedDetail({
             }
           />
           {tl.regimeFactors.hasActiveOverhang && (
-            <div className="mt-2 rounded border border-rose-500/40 bg-rose-500/10 px-2 py-1 text-xs text-rose-300">
+            <div className="mt-2 rounded border border-rose-500/40 bg-rose-500/10 px-2 py-1 text-sm text-rose-300">
               <AlertTriangle className="mr-1 inline h-3 w-3" />
               Active overhang: {tl.regimeFactors.overhangDescription ?? "see news"}
               {" "}({tl.regimeFactors.gradePenalty}pts)
             </div>
           )}
           {!tl.regimeFactors.hasActiveOverhang && tl.regimeFactors.gradePenalty !== 0 && (
-            <div className="mt-2 text-xs text-amber-300">
+            <div className="mt-2 text-sm text-amber-300">
               Penalty {tl.regimeFactors.gradePenalty}pts
             </div>
           )}
@@ -2899,7 +2899,7 @@ function ExpandedDetail({
 
       <div className="rounded-md border border-border bg-background/40 p-3">
         <div className="flex items-center gap-2">
-          <span className="text-xs font-medium text-muted-foreground">FINAL GRADE:</span>
+          <span className="text-sm font-medium text-muted-foreground">FINAL GRADE:</span>
           <GradeBadge
             grade={tl.finalGrade}
             size="md"
@@ -2916,7 +2916,7 @@ function ExpandedDetail({
             }
           />
         </div>
-        <div className="mt-3 space-y-2 text-xs leading-relaxed text-muted-foreground">
+        <div className="mt-3 space-y-2 text-sm leading-relaxed text-muted-foreground">
           {tl.recommendationReason.split("\n\n").map((para, i) => {
             const sep = para.indexOf(": ");
             if (sep === -1) return <div key={i}>{para}</div>;
@@ -3006,7 +3006,7 @@ function CustomStrikeAnalyzer({
   }
 
   return (
-    <div className="rounded-md border border-border bg-background/40 p-3 text-xs">
+    <div className="rounded-md border border-border bg-background/40 p-3 text-sm">
       <div className="flex flex-wrap items-center gap-3">
         <span className="text-muted-foreground">
           Suggested:{" "}
@@ -3074,7 +3074,7 @@ function LayerCard({
   children: React.ReactNode;
 }) {
   return (
-    <div className="rounded-md border border-border bg-background/40 p-3 text-xs">
+    <div className="rounded-md border border-border bg-background/40 p-3 text-sm">
       <div className="mb-2 flex items-center justify-between">
         <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
           {title}
@@ -3098,7 +3098,7 @@ function StageCard({
   children: React.ReactNode;
 }) {
   return (
-    <div className="rounded-md border border-border bg-background/40 p-3 text-xs">
+    <div className="rounded-md border border-border bg-background/40 p-3 text-sm">
       <div className="mb-2 flex items-center justify-between">
         <div className="font-medium text-foreground">{title}</div>
         <span
@@ -3133,7 +3133,7 @@ function AnalysisErrorBanner({
 }) {
   const { title, detail, action } = describeAnalysisError(err);
   return (
-    <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-200">
+    <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-base text-rose-200">
       <div className="mb-1 flex items-start gap-2 font-medium">
         <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" /> {title}
       </div>
@@ -3159,14 +3159,14 @@ function AnalysisErrorBanner({
           </Button>
         )}
         {err.partialAvailable && (
-          <span className="text-xs text-rose-200/70">
+          <span className="text-sm text-rose-200/70">
             ✓ Pass 2 grades already shown in the table — Pass 3 (news /
             regime / final grade) is missing for {pendingCount}{" "}
             candidate{pendingCount === 1 ? "" : "s"}.
           </span>
         )}
         {!err.partialAvailable && err.pass === "pass2" && (
-          <span className="text-xs text-rose-200/70">
+          <span className="text-sm text-rose-200/70">
             Showing ungraded candidates — options data unavailable until
             Pass 2 succeeds.
           </span>
@@ -3174,7 +3174,7 @@ function AnalysisErrorBanner({
         <button
           type="button"
           onClick={onDismiss}
-          className="ml-auto text-xs text-rose-200/60 hover:text-rose-200"
+          className="ml-auto text-sm text-rose-200/60 hover:text-rose-200"
         >
           Dismiss
         </button>
@@ -3234,7 +3234,7 @@ function StreamProgressPanel({
     return Math.max(0, total - stillPending);
   })();
   return (
-    <div className="rounded-lg border border-sky-500/30 bg-sky-500/5 p-3 text-xs text-sky-100">
+    <div className="rounded-lg border border-sky-500/30 bg-sky-500/5 p-3 text-sm text-sky-100">
       <div className="mb-2 flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 font-medium">
           {running ? (
@@ -3453,13 +3453,13 @@ function EditableStrikeCell({
           commit();
           setEditing(false);
         }}
-        className="w-20 rounded border border-border bg-background px-1.5 py-0.5 text-sm font-mono"
+        className="w-20 rounded border border-border bg-background px-1.5 py-0.5 text-base font-mono"
       />
     );
   }
 
   if (displayStrike === null) {
-    return <span className="text-sm text-muted-foreground">—</span>;
+    return <span className="text-base text-muted-foreground">—</span>;
   }
 
   return (
@@ -3471,7 +3471,7 @@ function EditableStrikeCell({
       }}
       title="Click to edit strike"
     >
-      <span className="text-sm">${fmtNum(displayStrike)}</span>
+      <span className="text-base">${fmtNum(displayStrike)}</span>
       <Pencil className="ml-1 inline h-3 w-3 opacity-0 transition-opacity group-hover:opacity-50" />
       {userHasOverride && (
         <button
@@ -3559,7 +3559,7 @@ function CrushRow({
           </span>
         </TooltipTrigger>
         <TooltipContent side="right" className="max-w-[340px]">
-          <div className="space-y-2 text-xs leading-relaxed">
+          <div className="space-y-2 text-sm leading-relaxed">
             <div>
               <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
                 Crush rating

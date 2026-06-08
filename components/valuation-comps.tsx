@@ -33,7 +33,7 @@ export function ValuationComps({
 }) {
   if (!comps || comps.peers.length === 0) {
     return (
-      <div className="rounded border border-dashed border-border bg-background/40 p-3 text-xs text-muted-foreground">
+      <div className="rounded border border-dashed border-border bg-background/40 p-3 text-sm text-muted-foreground">
         No peer data available for this sector.
       </div>
     );
@@ -69,7 +69,7 @@ export function ValuationComps({
         Comparable companies
       </div>
       <div className="overflow-x-auto rounded border border-border">
-        <table className="min-w-full text-xs">
+        <table className="min-w-full text-sm">
           <thead className="bg-background/60">
             <tr>
               <th className="px-2 py-1 text-left font-medium text-muted-foreground">

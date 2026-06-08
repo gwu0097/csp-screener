@@ -330,7 +330,7 @@ export function EncyclopediaStockView({ symbol }: { symbol: string }) {
       <div>
         <Link
           href="/encyclopedia"
-          className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+          className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
         >
           <ChevronLeft className="h-3 w-3" />
           Back to Encyclopedia
@@ -396,7 +396,7 @@ function Header({ symbol, stock }: { symbol: string; stock: StockInfo | null }) 
           <div className="flex items-baseline gap-2">
             <span className="text-2xl font-semibold">{symbol}</span>
             {stock?.company_name && (
-              <span className="text-sm text-muted-foreground">
+              <span className="text-base text-muted-foreground">
                 {stock.company_name}
               </span>
             )}
@@ -409,7 +409,7 @@ function Header({ symbol, stock }: { symbol: string; stock: StockInfo | null }) 
               </span>
             )}
           </div>
-          <div className="mt-1 flex flex-wrap gap-3 text-xs text-muted-foreground">
+          <div className="mt-1 flex flex-wrap gap-3 text-sm text-muted-foreground">
             {stock?.sector && <span>{stock.sector}</span>}
             {stock?.industry && (
               <span className="text-muted-foreground/60">· {stock.industry}</span>
@@ -424,7 +424,7 @@ function Header({ symbol, stock }: { symbol: string; stock: StockInfo | null }) 
         </div>
         <Link
           href={`/research/${encodeURIComponent(symbol)}`}
-          className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-muted-foreground hover:text-foreground"
+          className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-sm text-muted-foreground hover:text-foreground"
         >
           <ExternalLink className="h-3 w-3" />
           Open in Research
@@ -466,7 +466,7 @@ function OverviewTab({
 }) {
   if (loading && !encyclopedia && !tradesSummary) {
     return (
-      <div className="flex items-center gap-2 text-sm text-muted-foreground">
+      <div className="flex items-center gap-2 text-base text-muted-foreground">
         <Loader2 className="h-4 w-4 animate-spin" /> Loading {symbol}…
       </div>
     );
@@ -475,7 +475,7 @@ function OverviewTab({
   return (
     <div className="space-y-3">
       {error && (
-        <div className="rounded border border-rose-500/40 bg-rose-500/10 p-2 text-sm text-rose-300">
+        <div className="rounded border border-rose-500/40 bg-rose-500/10 p-2 text-base text-rose-300">
           {error}
         </div>
       )}
@@ -535,7 +535,7 @@ function OverviewTab({
       </div>
 
       {tradesSummary && tradesSummary.totalTrades > 0 && (
-        <div className="rounded border border-border bg-background/40 p-3 text-xs text-muted-foreground">
+        <div className="rounded border border-border bg-background/40 p-3 text-sm text-muted-foreground">
           Win rate:{" "}
           <span className="text-foreground">
             {tradesSummary.winRate !== null
@@ -591,16 +591,16 @@ function OverviewTab({
             <span className="ml-1">Re-ingest historical dates</span>
           </Button>
           {encyclopedia?.updated_at && (
-            <span className="text-xs text-muted-foreground">
+            <span className="text-sm text-muted-foreground">
               Last updated: {fmtDateTime(encyclopedia.updated_at)}
             </span>
           )}
         </div>
         {maintenanceErr && (
-          <div className="mt-2 text-xs text-rose-300">{maintenanceErr}</div>
+          <div className="mt-2 text-sm text-rose-300">{maintenanceErr}</div>
         )}
         {maintenanceMsg && !maintenanceErr && (
-          <div className="mt-2 text-xs text-emerald-300">{maintenanceMsg}</div>
+          <div className="mt-2 text-sm text-emerald-300">{maintenanceMsg}</div>
         )}
       </div>
     </div>
@@ -627,12 +627,12 @@ function StatCard({
       </div>
       <div className="mt-0.5 text-2xl font-semibold">{value}</div>
       {accent && (
-        <div className={`mt-1 font-mono text-xs ${accentColor ?? ""}`}>
+        <div className={`mt-1 font-mono text-sm ${accentColor ?? ""}`}>
           {accent}
         </div>
       )}
       {sub && (
-        <div className="mt-1 text-xs text-muted-foreground">{sub}</div>
+        <div className="mt-1 text-sm text-muted-foreground">{sub}</div>
       )}
     </div>
   );
@@ -685,7 +685,7 @@ function TradesTab({ symbol }: { symbol: string }) {
 
   return (
     <div className="space-y-3">
-      <div className="rounded border border-border bg-background/40 p-3 text-xs">
+      <div className="rounded border border-border bg-background/40 p-3 text-sm">
         <div className="flex flex-wrap items-baseline gap-3">
           <span>
             <span className="text-muted-foreground">Trades:</span>{" "}
@@ -715,7 +715,7 @@ function TradesTab({ symbol }: { symbol: string }) {
       </div>
 
       <div className="overflow-x-auto rounded border border-border">
-        <table className="min-w-full text-xs">
+        <table className="min-w-full text-sm">
           <thead className="bg-background/60">
             <tr className="text-left text-[10px] uppercase tracking-wide text-muted-foreground">
               <th className="px-2 py-1.5">Opened</th>
@@ -814,7 +814,7 @@ function SwingsTab({ symbol }: { symbol: string }) {
 
   return (
     <div className="space-y-3">
-      <div className="rounded border border-border bg-background/40 p-3 text-xs">
+      <div className="rounded border border-border bg-background/40 p-3 text-sm">
         <span className="text-muted-foreground">Appearances:</span>{" "}
         <span className="font-semibold">{data.summary.totalAppearances}</span>
         {" · "}
@@ -822,7 +822,7 @@ function SwingsTab({ symbol }: { symbol: string }) {
         <span className="font-semibold">{data.summary.categories.join(", ")}</span>
       </div>
       <div className="overflow-x-auto rounded border border-border">
-        <table className="min-w-full text-xs">
+        <table className="min-w-full text-sm">
           <thead className="bg-background/60">
             <tr className="text-left text-[10px] uppercase tracking-wide text-muted-foreground">
               <th className="px-2 py-1.5">Scanned</th>
@@ -967,14 +967,14 @@ function ResearchTab({ symbol }: { symbol: string }) {
 
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-baseline justify-between gap-2 text-xs text-muted-foreground">
+      <div className="flex flex-wrap items-baseline justify-between gap-2 text-sm text-muted-foreground">
         <span>
           Every historical run of each research module — newest first.
           Read-only here; use the Research page to re-run.
         </span>
         <Link
           href={`/research/${encodeURIComponent(symbol)}`}
-          className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+          className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
         >
           <ExternalLink className="h-3 w-3" />
           /research/{symbol}
@@ -992,7 +992,7 @@ function ResearchTab({ symbol }: { symbol: string }) {
               key={def.slug}
               type="button"
               onClick={() => selectSubtab(def.slug)}
-              className={`-mb-px whitespace-nowrap border-b-2 px-1 pb-2 pt-1 text-xs font-medium transition-colors ${
+              className={`-mb-px whitespace-nowrap border-b-2 px-1 pb-2 pt-1 text-sm font-medium transition-colors ${
                 isActive
                   ? "border-foreground text-foreground"
                   : "border-transparent text-muted-foreground hover:border-border hover:text-foreground"
@@ -1067,7 +1067,7 @@ function ModuleSection({
       <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-border/60 px-4 py-2.5">
         <div className="flex items-baseline gap-2">
           <span className="text-base">{emoji}</span>
-          <span className="text-sm font-semibold">{label}</span>
+          <span className="text-base font-semibold">{label}</span>
           {latest && (
             <span className="text-[11px] text-muted-foreground">
               · Latest: {fmtDateTime(latest.createdAt)}
@@ -1137,7 +1137,7 @@ function VersionHistory({
               <button
                 type="button"
                 onClick={() => toggleOlder(run.id)}
-                className="flex w-full items-center justify-between px-2 py-1.5 text-left text-xs hover:bg-background/60"
+                className="flex w-full items-center justify-between px-2 py-1.5 text-left text-sm hover:bg-background/60"
               >
                 <span className="font-mono text-muted-foreground">
                   {open ? "▾" : "▸"} {fmtDateTime(run.createdAt)}
@@ -1170,10 +1170,10 @@ function ModuleEmpty({
 }) {
   return (
     <div className="rounded-md border border-dashed border-border bg-background/40 p-6 text-center">
-      <div className="text-sm text-muted-foreground">No {label} data yet.</div>
+      <div className="text-base text-muted-foreground">No {label} data yet.</div>
       <Link
         href={researchHref}
-        className="mt-3 inline-flex items-center gap-1 rounded-md border border-border bg-background/60 px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground"
+        className="mt-3 inline-flex items-center gap-1 rounded-md border border-border bg-background/60 px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground"
       >
         Run in Research
         <ExternalLink className="h-3 w-3" />
@@ -1232,7 +1232,7 @@ function ValuationSummary({
   const output = run.output;
   if (!isV2(output)) {
     return (
-      <div className="rounded border border-dashed border-border bg-background/40 p-3 text-xs text-muted-foreground">
+      <div className="rounded border border-dashed border-border bg-background/40 p-3 text-sm text-muted-foreground">
         Legacy valuation model (V1). Open in Research for the full
         view.
       </div>
@@ -1244,7 +1244,7 @@ function ValuationSummary({
   const tier2Target = m.tier2?.outputs?.weighted_target ?? null;
   const tier2Return = m.tier2?.outputs?.weighted_return_pct ?? null;
   return (
-    <div className="space-y-2 text-xs">
+    <div className="space-y-2 text-sm">
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
         <ValuationStat
           label="Tier 1 — Comps weighted"
@@ -1298,7 +1298,7 @@ function ValuationStat({
         </span>
         {ret !== null && Number.isFinite(ret) && (
           <span
-            className={`font-mono text-xs ${ret >= 0 ? "text-emerald-300" : "text-rose-300"}`}
+            className={`font-mono text-sm ${ret >= 0 ? "text-emerald-300" : "text-rose-300"}`}
           >
             {(ret * 100).toFixed(1)}%
           </span>
@@ -1312,7 +1312,7 @@ function ValuationStat({
 
 function Spinner({ label }: { label: string }) {
   return (
-    <div className="flex items-center justify-center rounded-md border border-border bg-background/40 px-6 py-12 text-sm text-muted-foreground">
+    <div className="flex items-center justify-center rounded-md border border-border bg-background/40 px-6 py-12 text-base text-muted-foreground">
       <Loader2 className="mr-2 h-4 w-4 animate-spin" />
       {label}
     </div>
@@ -1321,7 +1321,7 @@ function Spinner({ label }: { label: string }) {
 
 function ErrorBanner({ message }: { message: string }) {
   return (
-    <div className="rounded-md border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
+    <div className="rounded-md border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200">
       <AlertTriangle className="mr-1.5 inline h-3 w-3" />
       {message}
     </div>
@@ -1330,7 +1330,7 @@ function ErrorBanner({ message }: { message: string }) {
 
 function EmptyState({ children }: { children: React.ReactNode }) {
   return (
-    <div className="rounded-md border border-dashed border-border bg-background/40 px-6 py-12 text-center text-sm text-muted-foreground">
+    <div className="rounded-md border border-dashed border-border bg-background/40 px-6 py-12 text-center text-base text-muted-foreground">
       {children}
     </div>
   );

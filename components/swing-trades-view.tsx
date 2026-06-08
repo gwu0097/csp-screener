@@ -196,7 +196,7 @@ export function SwingTradesView() {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Search ticker..."
-          className="w-full max-w-xs rounded border border-border bg-background px-3 py-1.5 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-foreground/40"
+          className="w-full max-w-xs rounded border border-border bg-background px-3 py-1.5 text-base placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-foreground/40"
         />
         <div className="flex items-center gap-2">
           {selectedCount > 0 ? (
@@ -223,31 +223,31 @@ export function SwingTradesView() {
         </div>
       </div>
 
-      <div className="text-xs text-muted-foreground">
+      <div className="text-sm text-muted-foreground">
         Showing {filtered.length} of {trades.length}{" "}
         {trades.length === 1 ? "trade" : "trades"}
       </div>
 
       {toast && (
-        <div className="rounded border border-emerald-500/40 bg-emerald-500/10 p-2 text-xs text-emerald-200">
+        <div className="rounded border border-emerald-500/40 bg-emerald-500/10 p-2 text-sm text-emerald-200">
           {toast}
         </div>
       )}
 
       {error && (
-        <div className="rounded border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-300">
+        <div className="rounded border border-rose-500/40 bg-rose-500/10 p-3 text-base text-rose-300">
           {error}
         </div>
       )}
 
       {loading && trades.length === 0 ? (
-        <div className="text-sm text-muted-foreground">Loading trades…</div>
+        <div className="text-base text-muted-foreground">Loading trades…</div>
       ) : trades.length === 0 ? (
-        <div className="rounded border border-border bg-background/40 p-6 text-sm text-muted-foreground">
+        <div className="rounded border border-border bg-background/40 p-6 text-base text-muted-foreground">
           No swing trades logged yet. Click &ldquo;Log Trade&rdquo; to add one.
         </div>
       ) : filtered.length === 0 ? (
-        <div className="rounded border border-border bg-background/40 p-6 text-sm text-muted-foreground">
+        <div className="rounded border border-border bg-background/40 p-6 text-base text-muted-foreground">
           No trades match &ldquo;{search}&rdquo;.
         </div>
       ) : (
@@ -301,7 +301,7 @@ export function SwingTradesView() {
                       />
                     </TableCell>
                     <TableCell className="font-mono">{t.symbol}</TableCell>
-                    <TableCell className="text-xs">{t.entry_date ?? "—"}</TableCell>
+                    <TableCell className="text-sm">{t.entry_date ?? "—"}</TableCell>
                     <TableCell className="text-right">
                       {fmtMoney(t.entry_price)}
                     </TableCell>
@@ -315,8 +315,8 @@ export function SwingTradesView() {
                     <TableCell className={`text-right ${pnlColor}`}>
                       {fmtPct(t.return_pct)}
                     </TableCell>
-                    <TableCell className="text-xs capitalize">{t.status}</TableCell>
-                    <TableCell className="text-xs">
+                    <TableCell className="text-sm capitalize">{t.status}</TableCell>
+                    <TableCell className="text-sm">
                       {exitReasonLabel(t.exit_reason)}
                     </TableCell>
                     <TableCell className="w-8 text-right">

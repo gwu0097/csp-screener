@@ -28,7 +28,7 @@ export function WatchlistView({ initialWhitelist, initialBlacklist }: Props) {
     <div className="space-y-4">
       <header className="flex flex-col gap-1">
         <h1 className="text-2xl font-semibold tracking-tight">Watchlist</h1>
-        <p className="text-sm text-muted-foreground">
+        <p className="text-base text-muted-foreground">
           Whitelisted symbols auto-add on &quot;Apply Watchlist&quot; when they report earnings. Blacklisted
           symbols are always excluded from screens.
         </p>
@@ -129,12 +129,12 @@ function ListPanel({
     <Card>
       <CardHeader>
         <CardTitle>{title}</CardTitle>
-        <p className="text-xs text-muted-foreground">{description}</p>
+        <p className="text-sm text-muted-foreground">{description}</p>
       </CardHeader>
       <CardContent className="space-y-3">
         <form onSubmit={onAdd} className="flex items-center gap-2">
           <input
-            className="flex-1 rounded-md border border-border bg-background px-3 py-1.5 text-sm uppercase placeholder:text-muted-foreground"
+            className="flex-1 rounded-md border border-border bg-background px-3 py-1.5 text-base uppercase placeholder:text-muted-foreground"
             placeholder="Ticker, e.g. MSFT"
             value={input}
             onChange={(e) => setInput(e.target.value.toUpperCase())}
@@ -147,10 +147,10 @@ function ListPanel({
           </Button>
         </form>
 
-        {error && <div className="text-xs text-rose-300">{error}</div>}
+        {error && <div className="text-sm text-rose-300">{error}</div>}
 
         {sorted.length === 0 ? (
-          <div className="rounded-md border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">
+          <div className="rounded-md border border-dashed border-border px-4 py-8 text-center text-base text-muted-foreground">
             No symbols in this list yet.
           </div>
         ) : (
@@ -167,7 +167,7 @@ function ListPanel({
                 {sorted.map((entry) => (
                   <TableRow key={entry.symbol}>
                     <TableCell className="font-medium">{entry.symbol}</TableCell>
-                    <TableCell className="text-xs text-muted-foreground">
+                    <TableCell className="text-sm text-muted-foreground">
                       {new Date(entry.addedAt).toLocaleDateString(undefined, {
                         year: "numeric",
                         month: "short",

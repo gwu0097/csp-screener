@@ -18,7 +18,7 @@ export function ErrorBanner({
   onDismiss: () => void;
 }) {
   return (
-    <div className="rounded-md border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-100">
+    <div className="rounded-md border border-rose-500/40 bg-rose-500/10 p-3 text-base text-rose-100">
       <div className="flex items-start gap-2">
         <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-rose-300" />
         <div className="flex-1 space-y-1">

@@ -152,9 +152,9 @@ export function SwingConvictionGate({
           </DialogTitle>
         </DialogHeader>
 
-        <div className="space-y-4 py-2 text-sm">
+        <div className="space-y-4 py-2 text-base">
           {valuation && (
-            <div className="rounded-md border border-emerald-500/30 bg-emerald-500/[0.05] p-2 text-xs">
+            <div className="rounded-md border border-emerald-500/30 bg-emerald-500/[0.05] p-2 text-sm">
               <div className="text-[10px] font-semibold uppercase tracking-wide text-emerald-300/80">
                 Valuation model suggests
               </div>
@@ -168,7 +168,7 @@ export function SwingConvictionGate({
               </div>
             </div>
           )}
-          <p className="text-xs text-muted-foreground">
+          <p className="text-sm text-muted-foreground">
             Before marking as conviction, confirm:
           </p>
 
@@ -191,7 +191,7 @@ export function SwingConvictionGate({
             ))}
           </div>
 
-          <label className="grid gap-1 text-xs">
+          <label className="grid gap-1 text-sm">
             <span className="text-muted-foreground">
               My thesis <span className="text-rose-300">*</span>{" "}
               <span className="text-[10px]">
@@ -202,7 +202,7 @@ export function SwingConvictionGate({
               value={thesis}
               onChange={(e) => setThesis(e.target.value)}
               rows={3}
-              className="rounded border border-border bg-background px-2 py-1.5 text-sm"
+              className="rounded border border-border bg-background px-2 py-1.5 text-base"
               placeholder="SaaS sticky businesses won't be replaced by AI quickly — enterprise switching costs are too high…"
             />
             <span
@@ -216,7 +216,7 @@ export function SwingConvictionGate({
             </span>
           </label>
 
-          <label className="grid gap-1 text-xs">
+          <label className="grid gap-1 text-sm">
             <span className="text-muted-foreground">
               My exit condition <span className="text-rose-300">*</span>{" "}
               <span className="text-[10px]">
@@ -227,7 +227,7 @@ export function SwingConvictionGate({
               value={exit}
               onChange={(e) => setExit(e.target.value)}
               rows={2}
-              className="rounded border border-border bg-background px-2 py-1.5 text-sm"
+              className="rounded border border-border bg-background px-2 py-1.5 text-base"
               placeholder="Close if AI disruption narrative accelerates or company misses two quarters of revenue guidance…"
             />
             <span
@@ -241,13 +241,13 @@ export function SwingConvictionGate({
             </span>
           </label>
 
-          <div className="flex items-center gap-2 text-xs">
+          <div className="flex items-center gap-2 text-sm">
             <span className="text-muted-foreground">Conviction level:</span>
             <StarRating value={conviction} onChange={setConviction} />
           </div>
 
           {error && (
-            <div className="rounded border border-rose-500/40 bg-rose-500/10 p-2 text-xs text-rose-300">
+            <div className="rounded border border-rose-500/40 bg-rose-500/10 p-2 text-sm text-rose-300">
               {error}
             </div>
           )}

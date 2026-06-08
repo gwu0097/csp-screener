@@ -158,8 +158,8 @@ export function CloseOptionModal({ open, target, onCancel, onConfirm }: Props) {
             {target.optionType === "put" ? "P" : "C"} {target.expiry}
           </DialogTitle>
         </DialogHeader>
-        <div className="space-y-3 text-sm">
-          <div className="flex items-baseline justify-between text-xs text-muted-foreground">
+        <div className="space-y-3 text-base">
+          <div className="flex items-baseline justify-between text-sm text-muted-foreground">
             <span>
               {target.remainingContracts} contract
               {target.remainingContracts === 1 ? "" : "s"} remaining · avg
@@ -174,7 +174,7 @@ export function CloseOptionModal({ open, target, onCancel, onConfirm }: Props) {
           </div>
 
           <label className="block">
-            <span className="text-xs text-muted-foreground">Contracts to close</span>
+            <span className="text-sm text-muted-foreground">Contracts to close</span>
             <input
               type="number"
               min={1}
@@ -182,12 +182,12 @@ export function CloseOptionModal({ open, target, onCancel, onConfirm }: Props) {
               step={1}
               value={qty}
               onChange={(e) => setQty(e.target.value)}
-              className="mt-1 w-full rounded border border-border bg-background px-2 py-1.5 font-mono text-sm"
+              className="mt-1 w-full rounded border border-border bg-background px-2 py-1.5 font-mono text-base"
             />
           </label>
 
           <label className="block">
-            <span className="text-xs text-muted-foreground">
+            <span className="text-sm text-muted-foreground">
               Close price (per contract)
             </span>
             <div className="mt-1 flex items-center rounded border border-border bg-background px-2 py-1.5">
@@ -199,19 +199,19 @@ export function CloseOptionModal({ open, target, onCancel, onConfirm }: Props) {
                 value={price}
                 onChange={(e) => setPrice(e.target.value)}
                 placeholder="0.00"
-                className="w-full bg-transparent font-mono text-sm outline-none"
+                className="w-full bg-transparent font-mono text-base outline-none"
               />
             </div>
           </label>
 
           <label className="block">
-            <span className="text-xs text-muted-foreground">Date</span>
+            <span className="text-sm text-muted-foreground">Date</span>
             <input
               type="date"
               value={date}
               max={today}
               onChange={(e) => setDate(e.target.value)}
-              className="mt-1 w-full rounded border border-border bg-background px-2 py-1.5 text-sm"
+              className="mt-1 w-full rounded border border-border bg-background px-2 py-1.5 text-base"
             />
             {date > today && (
               <div className="mt-1 text-[11px] text-rose-300">
@@ -220,7 +220,7 @@ export function CloseOptionModal({ open, target, onCancel, onConfirm }: Props) {
             )}
           </label>
 
-          <div className="rounded border border-border bg-background/40 p-2 text-xs">
+          <div className="rounded border border-border bg-background/40 p-2 text-sm">
             <div className="mb-1 font-semibold uppercase tracking-wide text-muted-foreground">
               Preview P&L
             </div>
@@ -261,7 +261,7 @@ export function CloseOptionModal({ open, target, onCancel, onConfirm }: Props) {
           </div>
 
           {error && (
-            <div className="rounded border border-rose-500/40 bg-rose-500/10 px-2 py-1.5 text-xs text-rose-200">
+            <div className="rounded border border-rose-500/40 bg-rose-500/10 px-2 py-1.5 text-sm text-rose-200">
               {error}
             </div>
           )}

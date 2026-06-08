@@ -132,7 +132,7 @@ export function RiskTab({ symbol }: { symbol: string }) {
   }
 
   return (
-    <div className="rounded-md border border-border bg-background/30 p-3 text-xs">
+    <div className="rounded-md border border-border bg-background/30 p-3 text-sm">
       <Header
         loading={loading}
         running={running}
@@ -186,7 +186,7 @@ function Header({
         type="button"
         onClick={onRun}
         disabled={running}
-        className="inline-flex items-center gap-1 rounded border border-border bg-background/40 px-2 py-1 text-xs hover:bg-background/60 disabled:opacity-60"
+        className="inline-flex items-center gap-1 rounded border border-border bg-background/40 px-2 py-1 text-sm hover:bg-background/60 disabled:opacity-60"
       >
         {running ? (
           <Loader2 className="h-3 w-3 animate-spin" />

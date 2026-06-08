@@ -441,7 +441,7 @@ function ReleaseCard({ r }: { r: EarningsReleaseRow }) {
   return (
     <div className="rounded-md border border-border bg-background/60 p-3">
       <div className="mb-2 flex items-baseline justify-between gap-2">
-        <div className="text-sm font-semibold">
+        <div className="text-base font-semibold">
           {r.quarter}
           <span className="ml-2 text-[11px] font-normal text-muted-foreground">
             Reported {fmtDate(r.reported_date)} · period end{" "}

@@ -187,7 +187,7 @@ function PositionsTableHeader({
     <div
       className={cn(
         COLLAPSED_ROW_GRID,
-        "hidden py-1.5 text-[10px] font-semibold uppercase text-muted-foreground sm:grid lg:text-xs",
+        "hidden py-1.5 text-[10px] font-semibold uppercase text-muted-foreground sm:grid lg:text-sm",
       )}
     >
       {/* 1 dot */}
@@ -246,14 +246,14 @@ function TickerSubHeader({
         ? "text-emerald-300"
         : "text-rose-300";
   return (
-    <div className="flex items-baseline justify-between gap-2 border-t border-border/40 px-3 pt-2 pb-0.5 text-sm first:border-t-0 first:pt-1">
+    <div className="flex items-baseline justify-between gap-2 border-t border-border/40 px-3 pt-2 pb-0.5 text-base first:border-t-0 first:pt-1">
       <div className="flex items-baseline gap-2">
         <span className="text-lg font-bold tracking-wide text-foreground">{symbol}</span>
-        <span className="font-mono text-sm text-muted-foreground">
+        <span className="font-mono text-base text-muted-foreground">
           {contractCount} {contractCount === 1 ? "contract" : "contracts"}
         </span>
         {stockPrice !== null && (
-          <span className="font-mono text-sm text-muted-foreground/80">
+          <span className="font-mono text-base text-muted-foreground/80">
             · {fmtDollars(stockPrice)}
           </span>
         )}
@@ -1101,7 +1101,7 @@ export function PositionsView() {
                 </>
               )}
             </div>
-            <div className="flex flex-wrap items-baseline gap-x-5 gap-y-1 text-sm">
+            <div className="flex flex-wrap items-baseline gap-x-5 gap-y-1 text-base">
               {positions.length > 0 && (
                 <div>
                   <span className="text-muted-foreground">Max Profit </span>
@@ -1164,7 +1164,7 @@ export function PositionsView() {
                     {market.vix !== null ? market.vix.toFixed(2) : "—"}
                   </span>
                   {market.regime && (
-                    <span className={cn("ml-1 text-xs", regimeColor(market.regime))}>
+                    <span className={cn("ml-1 text-sm", regimeColor(market.regime))}>
                       ({market.regime})
                     </span>
                   )}
@@ -1173,7 +1173,7 @@ export function PositionsView() {
               {best && (
                 <div className="text-muted-foreground">
                   Best: <span className="text-foreground">{best.symbol}</span>{" "}
-                  <span className="text-xs">({best.recommendation})</span>
+                  <span className="text-sm">({best.recommendation})</span>
                 </div>
               )}
             </div>
@@ -1185,7 +1185,7 @@ export function PositionsView() {
                   variant="ghost"
                   size="sm"
                   onClick={() => setShowUndo((v) => !v)}
-                  className="text-xs text-muted-foreground hover:text-foreground"
+                  className="text-sm text-muted-foreground hover:text-foreground"
                 >
                   <Undo2 className="mr-1.5 h-3.5 w-3.5" />
                   Undo
@@ -1200,7 +1200,7 @@ export function PositionsView() {
                 variant="ghost"
                 size="sm"
                 onClick={() => setShowScreenshot(true)}
-                className="text-xs text-muted-foreground hover:text-foreground"
+                className="text-sm text-muted-foreground hover:text-foreground"
               >
                 <Camera className="mr-1.5 h-3.5 w-3.5" />
                 Import
@@ -1209,7 +1209,7 @@ export function PositionsView() {
                 variant="ghost"
                 size="sm"
                 onClick={() => setShowManual(true)}
-                className="text-xs text-muted-foreground hover:text-foreground"
+                className="text-sm text-muted-foreground hover:text-foreground"
               >
                 <Plus className="mr-1.5 h-3.5 w-3.5" />
                 Add
@@ -1265,7 +1265,7 @@ export function PositionsView() {
       </div>
 
       {pendingConfirmation.length > 0 && (
-        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-200">
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-base text-amber-200">
           <div className="flex items-center gap-2">
             <AlertTriangle className="h-4 w-4 shrink-0" />
             <span>
@@ -1288,7 +1288,7 @@ export function PositionsView() {
 
       {market?.warning && (
         <div
-          className={`rounded-lg border px-3 py-2 text-xs ${
+          className={`rounded-lg border px-3 py-2 text-sm ${
             market.regime === "panic"
               ? "border-rose-500/30 bg-rose-500/10 text-rose-200"
               : "border-amber-500/30 bg-amber-500/10 text-amber-200"
@@ -1300,20 +1300,20 @@ export function PositionsView() {
       )}
 
       {message && (
-        <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-200">
+        <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200">
           {message}
         </div>
       )}
 
       {error && (
-        <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
+        <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200">
           <AlertTriangle className="mr-1.5 inline h-3 w-3" /> {error}
         </div>
       )}
 
       {/* ---------- Account filter tabs ---------- */}
       {brokerGroups.length > 1 && (
-        <div className="flex flex-wrap items-center gap-1 rounded-md border border-border bg-background/40 p-1 text-xs font-semibold uppercase tracking-wide">
+        <div className="flex flex-wrap items-center gap-1 rounded-md border border-border bg-background/40 p-1 text-sm font-semibold uppercase tracking-wide">
           <button
             type="button"
             onClick={() => setBrokerFilter("all")}
@@ -1356,7 +1356,7 @@ export function PositionsView() {
       )}
 
       {loading && !data && (
-        <div className="flex items-center justify-center rounded-lg border border-border bg-background/40 px-6 py-12 text-sm text-muted-foreground">
+        <div className="flex items-center justify-center rounded-lg border border-border bg-background/40 px-6 py-12 text-base text-muted-foreground">
           <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading positions…
         </div>
       )}
@@ -1364,7 +1364,7 @@ export function PositionsView() {
       {!loading && positions.length === 0 && (
         <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-border bg-background/40 px-6 py-12 text-center">
           <Briefcase className="mb-3 h-8 w-8 text-muted-foreground" />
-          <div className="text-sm text-muted-foreground">
+          <div className="text-base text-muted-foreground">
             No open positions. Import from a screenshot or log one manually.
           </div>
         </div>
@@ -1392,18 +1392,18 @@ export function PositionsView() {
                 <span className={cn("text-2xl font-bold uppercase tracking-wider", accent.text)}>
                   {group.label}
                 </span>
-                <span className="font-mono text-sm text-muted-foreground">
+                <span className="font-mono text-base text-muted-foreground">
                   {group.contractCount} {group.contractCount === 1 ? "contract" : "contracts"}
                 </span>
               </div>
-              <div className="flex items-baseline gap-4 text-sm">
+              <div className="flex items-baseline gap-4 text-base">
                 <div>
                   <span className="text-muted-foreground">Max Profit </span>
                   <span className="font-mono font-semibold text-emerald-300">
                     {fmtDollarsSigned(stats.maxProfit)}
                   </span>
                   {stats.maxProfitMissing > 0 && (
-                    <span className="ml-1 text-xs text-muted-foreground/70">
+                    <span className="ml-1 text-sm text-muted-foreground/70">
                       ({stats.maxProfitMissing} excluded)
                     </span>
                   )}
@@ -1511,11 +1511,11 @@ export function PositionsView() {
                 <span className={cn("text-2xl font-bold uppercase tracking-wider", accent.text)}>
                   {o.label}
                 </span>
-                <span className="font-mono text-sm text-muted-foreground">
+                <span className="font-mono text-base text-muted-foreground">
                   {totalShares} {totalShares === 1 ? "share" : "shares"}
                 </span>
               </div>
-              <div className="flex items-baseline gap-4 text-sm">
+              <div className="flex items-baseline gap-4 text-base">
                 <div>
                   <span className="text-muted-foreground">Unrealized </span>
                   {stockUnrealizedAvailable ? (
@@ -1550,7 +1550,7 @@ export function PositionsView() {
         <button
           type="button"
           onClick={toggleClosed}
-          className="flex items-center gap-1 text-sm font-semibold text-muted-foreground hover:text-foreground"
+          className="flex items-center gap-1 text-base font-semibold text-muted-foreground hover:text-foreground"
         >
           {closedOpen ? (
             <ChevronDown className="h-4 w-4" />
@@ -1559,7 +1559,7 @@ export function PositionsView() {
           )}
           Closed positions
           {closedPositions !== null && (
-            <span className="text-xs font-normal text-muted-foreground">
+            <span className="text-sm font-normal text-muted-foreground">
               ({closedPositions.length})
             </span>
           )}
@@ -1567,12 +1567,12 @@ export function PositionsView() {
         {closedOpen && (
           <div className="mt-3 space-y-2">
             {closedLoading && !closedPositions && (
-              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <div className="flex items-center gap-2 text-base text-muted-foreground">
                 <Loader2 className="h-3 w-3 animate-spin" /> Loading closed positions…
               </div>
             )}
             {closedPositions?.length === 0 && (
-              <div className="rounded-lg border border-border bg-background/40 px-3 py-4 text-sm text-muted-foreground">
+              <div className="rounded-lg border border-border bg-background/40 px-3 py-4 text-base text-muted-foreground">
                 No closed positions yet.
               </div>
             )}
@@ -1597,7 +1597,7 @@ export function PositionsView() {
                           <span className={cn("text-2xl font-bold uppercase tracking-wider", accent.text)}>
                             {group.label}
                           </span>
-                          <span className="font-mono text-sm text-muted-foreground">
+                          <span className="font-mono text-base text-muted-foreground">
                             {group.items.length} {group.items.length === 1 ? "position" : "positions"}
                           </span>
                         </div>
@@ -1752,16 +1752,16 @@ function StockTickerGroup({
         : "text-rose-300";
   return (
     <div className="space-y-1">
-      <div className="flex items-baseline justify-between gap-2 border-t border-border/40 px-3 pt-2 pb-0.5 text-sm first:border-t-0 first:pt-1">
+      <div className="flex items-baseline justify-between gap-2 border-t border-border/40 px-3 pt-2 pb-0.5 text-base first:border-t-0 first:pt-1">
         <div className="flex items-baseline gap-2">
           <span className="text-lg font-bold tracking-wide text-foreground">
             {symbol}
           </span>
-          <span className="font-mono text-sm text-muted-foreground">
+          <span className="font-mono text-base text-muted-foreground">
             {totalShares} {totalShares === 1 ? "share" : "shares"}
           </span>
           {spot !== null && (
-            <span className="font-mono text-sm text-muted-foreground/80">
+            <span className="font-mono text-base text-muted-foreground/80">
               · {fmtDollars(spot)}
               {priceSource === "post" ? " AH" : priceSource === "pre" ? " PM" : ""}
             </span>
