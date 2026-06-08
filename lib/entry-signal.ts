@@ -44,10 +44,23 @@ export function computeEntrySignal(
   const price = snapshot.price;
   const hist = snapshot.price_history_5d ?? [];
 
-  // ---- Recent big move → pullback logic (the swing sweet spot) ----
+  // ---- Big move TODAY → wait for the pullback ----
+  // Today's intraday change often isn't in the daily 5d history yet, so
+  // check the live quote directly: a >5% up day means the stock just
+  // moved and hasn't pulled back, so don't chase it.
+  const todayChange = snapshot.change_pct;
+  if (todayChange !== null && todayChange > 5) {
+    return {
+      signal: "WAIT_PULLBACK",
+      reason: `Big move today (+${todayChange.toFixed(1)}%) — wait for a 3-8% pullback`,
+      score: 20,
+    };
+  }
+
+  // ---- Recent big move in the 5d window → pullback logic ----
   if (price !== null && hist.length > 0) {
     const hadBigMove = hist.some(
-      (d) => d.change_pct !== null && d.change_pct > 5,
+      (d) => d.change_pct !== null && Math.abs(d.change_pct) > 5,
     );
     if (hadBigMove) {
       const closes = hist.map((d) => d.close);
@@ -66,7 +79,7 @@ export function computeEntrySignal(
       if (pullbackPct < 3) {
         return {
           signal: "WAIT_PULLBACK",
-          reason: "Big move today/recently — wait for a 3-8% pullback",
+          reason: "Big move recently — wait for a 3-8% pullback",
           score: 20,
         };
       }
