@@ -339,13 +339,16 @@ export function DashboardView() {
   const byDesc = [...withChange].sort(
     (a, b) => (b.changePct ?? 0) - (a.changePct ?? 0),
   );
-  const gainersOver = byDesc.filter((r) => (r.changePct ?? 0) > 5);
-  const gainers = gainersOver.length > 0 ? gainersOver : byDesc.slice(0, 5);
+  // Always show at least 5: take everyone past the threshold, but never
+  // fewer than the top/bottom 5 — so a quiet day still fills the panel
+  // with the next-best performers.
+  const gainersOver = byDesc.filter((r) => (r.changePct ?? 0) > 5).length;
+  const gainers = byDesc.slice(0, Math.max(5, gainersOver));
   const byAsc = [...withChange].sort(
     (a, b) => (a.changePct ?? 0) - (b.changePct ?? 0),
   );
-  const losersUnder = byAsc.filter((r) => (r.changePct ?? 0) < -5);
-  const losers = losersUnder.length > 0 ? losersUnder : byAsc.slice(0, 5);
+  const losersUnder = byAsc.filter((r) => (r.changePct ?? 0) < -5).length;
+  const losers = byAsc.slice(0, Math.max(5, losersUnder));
 
   function moverBadge(r: WatchRow) {
     const f = r.flags[0];
