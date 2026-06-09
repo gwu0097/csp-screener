@@ -220,6 +220,63 @@ export function DashboardView() {
   const [briefLoading, setBriefLoading] = useState(false);
   const [briefError, setBriefError] = useState<string | null>(null);
 
+  // Data is fresh at mount; the global Refresh button updates this.
+  const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(
+    () => new Date(),
+  );
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  // Global refresh: force-refresh every cached snapshot, then re-pull the
+  // snapshot-backed panels + positions. Does NOT touch the AI brief (own
+  // Regenerate button, 4h cache) or Perplexity catalysts (24h cache).
+  // Silent — keeps showing current data until the new data swaps in, so
+  // panels don't flash skeletons; the spinning button is the indicator.
+  const doGlobalRefresh = useCallback(async () => {
+    setIsRefreshing(true);
+    try {
+      // Positions don't depend on the snapshot — fetch alongside the force-refresh.
+      const positionsP = fetch("/api/positions/open", { cache: "no-store" })
+        .then((r) => r.json())
+        .then((j) => setPositions({ status: "ok", data: j as PositionsResp }))
+        .catch(() => {});
+      // Force-refresh all cached snapshots first so the panels below read fresh data.
+      await fetch("/api/market/snapshot/batch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ force: true }),
+        cache: "no-store",
+      }).catch(() => {});
+      await Promise.all([
+        fetch("/api/longterm/watchlist", { cache: "no-store" })
+          .then((r) => r.json())
+          .then((j) => setWatch({ status: "ok", data: j as WatchResp }))
+          .catch(() => {}),
+        fetch("/api/dashboard/market-context", { cache: "no-store" })
+          .then((r) => r.json())
+          .then((j) => setMarket({ status: "ok", data: j as MarketResp }))
+          .catch(() => {}),
+        fetch("/api/swings/ideas", { cache: "no-store" })
+          .then((r) => r.json())
+          .then((j) => setSwings({ status: "ok", data: j as SwingsResp }))
+          .catch(() => {}),
+        fetch("/api/context/daily", { cache: "no-store" })
+          .then((r) => r.json())
+          .then((j) =>
+            setVix({
+              status: "ok",
+              data:
+                (j as { market?: { vix?: number | null } }).market?.vix ?? null,
+            }),
+          )
+          .catch(() => {}),
+        positionsP,
+      ]);
+      setLastRefreshedAt(new Date());
+    } finally {
+      setIsRefreshing(false);
+    }
+  }, []);
+
   useEffect(() => {
     let alive = true;
     async function load<T>(
@@ -439,12 +496,34 @@ export function DashboardView() {
             </span>
           </div>
         </div>
-        <Link
-          href="/"
-          className="inline-flex items-center gap-1.5 rounded-md bg-indigo-500 px-4 py-2 text-base font-semibold text-white transition-colors hover:bg-indigo-400"
-        >
-          Screen Today <ArrowRight className="h-4 w-4" />
-        </Link>
+        <div className="flex flex-col items-end gap-1">
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => void doGlobalRefresh()}
+              disabled={isRefreshing}
+              className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-2 text-base font-medium transition-colors hover:border-foreground/40 hover:text-foreground disabled:opacity-60"
+            >
+              <RefreshCw className={cn("h-4 w-4", isRefreshing && "animate-spin")} />
+              {isRefreshing ? "Refreshing…" : "Refresh"}
+            </button>
+            <Link
+              href="/"
+              className="inline-flex items-center gap-1.5 rounded-md bg-indigo-500 px-4 py-2 text-base font-semibold text-white transition-colors hover:bg-indigo-400"
+            >
+              Screen Today <ArrowRight className="h-4 w-4" />
+            </Link>
+          </div>
+          {lastRefreshedAt && (
+            <span className="text-[11px] text-muted-foreground">
+              Last refreshed{" "}
+              {lastRefreshedAt.toLocaleTimeString([], {
+                hour: "numeric",
+                minute: "2-digit",
+              })}
+            </span>
+          )}
+        </div>
       </div>
 
       {/* ---------- ROW 1: three cards ---------- */}
