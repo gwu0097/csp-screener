@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import YahooFinance from "yahoo-finance2";
 import { createServerClient } from "@/lib/supabase";
+import { getOrRefreshSnapshot } from "@/lib/market-snapshot";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 30;
@@ -79,21 +80,29 @@ export async function GET(
       }
     | null) ?? null;
 
-  // Live quote — separate from research_stocks so the price stays fresh
-  // even if the user hasn't re-run a module today.
+  // Live price/change/cap/name from the shared snapshot cache. Research
+  // is a deliberate user action, so on a cache miss (snapshot null) fall
+  // back to a direct Yahoo quote — the header should always show
+  // something. When the snapshot is warm this avoids the extra Yahoo hop.
+  const snap = await getOrRefreshSnapshot(symbol, 15).catch(() => null);
   let quote: Record<string, unknown> | null = null;
-  try {
-    const r = await yf.quote(symbol, {}, MODULE_OPTS);
-    quote = (Array.isArray(r) ? r[0] : r) as Record<string, unknown> | null;
-  } catch {
-    quote = null;
+  if (!snap) {
+    try {
+      const r = await yf.quote(symbol, {}, MODULE_OPTS);
+      quote = (Array.isArray(r) ? r[0] : r) as Record<string, unknown> | null;
+    } catch {
+      quote = null;
+    }
   }
-  const currentPrice = quote ? pickNum(quote, "regularMarketPrice") : null;
-  const priceChange1d = quote ? pickNum(quote, "regularMarketChangePercent") : null;
-  const liveCap = quote ? pickNum(quote, "marketCap") : null;
-  const liveName = quote
-    ? pickStr(quote, "shortName") ?? pickStr(quote, "longName")
-    : null;
+  const currentPrice =
+    snap?.price ?? (quote ? pickNum(quote, "regularMarketPrice") : null);
+  const priceChange1d =
+    snap?.change_pct ?? (quote ? pickNum(quote, "regularMarketChangePercent") : null);
+  const liveCap =
+    snap?.market_cap ?? (quote ? pickNum(quote, "marketCap") : null);
+  const liveName =
+    snap?.company_name ??
+    (quote ? pickStr(quote, "shortName") ?? pickStr(quote, "longName") : null);
 
   const marketCap = stockRow?.market_cap ?? liveCap ?? null;
   const out: StockInfo = {

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCurrentPrice } from "@/lib/yahoo";
+import { getOrRefreshSnapshot } from "@/lib/market-snapshot";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 30;
@@ -26,6 +27,11 @@ export async function GET(req: NextRequest) {
   const entries = await Promise.all(
     symbols.map(async (symbol) => {
       try {
+        // ENTERED swing symbols are active ideas → almost always warm in
+        // the snapshot cache. Fall back to a direct Yahoo quote only if
+        // the snapshot is missing, so an active position never shows "—".
+        const snap = await getOrRefreshSnapshot(symbol, 15).catch(() => null);
+        if (snap && snap.price !== null) return [symbol, snap.price] as const;
         const price = await getCurrentPrice(symbol);
         return [symbol, price] as const;
       } catch (e) {

@@ -5,7 +5,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
 import { askPerplexityRaw } from "@/lib/perplexity";
-import { getQuoteEnrichment } from "@/lib/yahoo";
+import { getOrRefreshSnapshot } from "@/lib/market-snapshot";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -85,12 +85,12 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  // 2. Fetch company name + a coarse change-pct to feed the prompt.
-  //    Both come from the lightweight quote call we already use across
-  //    the watchlist, so this is one extra hop, not a big-batch crawl.
-  const quote = await getQuoteEnrichment(symbol).catch(() => null);
-  const companyName = quote?.companyName ?? symbol;
-  const change = quote?.regularMarketChangePercent ?? null;
+  // 2. Company name + a coarse change-pct to feed the prompt, read from
+  //    the shared snapshot cache (these are watchlist symbols, almost
+  //    always already warm). Null snapshot → omit price gracefully.
+  const snap = await getOrRefreshSnapshot(symbol, 15).catch(() => null);
+  const companyName = snap?.company_name ?? symbol;
+  const change = snap?.change_pct ?? null;
   const changeText =
     change !== null && Number.isFinite(change)
       ? `${change >= 0 ? "+" : ""}${change.toFixed(2)}%`

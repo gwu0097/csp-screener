@@ -6,7 +6,8 @@
 import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
 import { askPerplexityRaw } from "@/lib/perplexity";
-import { getHistoricalPrices, getQuoteEnrichment } from "@/lib/yahoo";
+import { getHistoricalPrices } from "@/lib/yahoo";
+import { getOrRefreshSnapshot } from "@/lib/market-snapshot";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -118,8 +119,12 @@ export async function GET() {
   // 4. Pull company name + Perplexity catalyst for each mover. We
   //    only spend on the 6 stories (3 + 3) to keep latency bounded.
   async function expandMover(p: { symbol: string; change: number }): Promise<Mover> {
-    const quote = await getQuoteEnrichment(p.symbol).catch(() => null);
-    const companyName = quote?.companyName ?? p.symbol;
+    // Company name from the shared snapshot cache (warm watchlist
+    // symbols). p.change is the true 1-week change from getWeekChangePct
+    // — kept as-is so this stays a *weekly* digest (snapshot.change_pct
+    // is today's daily move, which would be the wrong window here).
+    const snap = await getOrRefreshSnapshot(p.symbol, 15).catch(() => null);
+    const companyName = snap?.company_name ?? p.symbol;
     const catalyst = await getPerplexityCatalyst(p.symbol, companyName, p.change);
     return { symbol: p.symbol, companyName, changePct: p.change, catalyst };
   }
