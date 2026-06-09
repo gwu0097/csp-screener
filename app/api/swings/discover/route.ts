@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { askPerplexityRaw } from "@/lib/perplexity";
 import { createServerClient } from "@/lib/supabase";
-import { getQuoteEnrichment } from "@/lib/yahoo";
+import { getOrRefreshSnapshot } from "@/lib/market-snapshot";
 
 export const dynamic = "force-dynamic";
 // Four Perplexity calls in parallel + Yahoo enrichment per returned
@@ -312,40 +312,26 @@ async function enrichCandidates(
 ): Promise<EnrichedCandidate[]> {
   const out: EnrichedCandidate[] = [];
   for (const c of candidates) {
-    const q = await getQuoteEnrichment(c.symbol);
-    const current = q?.regularMarketPrice ?? null;
-    const high = q?.fiftyTwoWeekHigh ?? null;
-    const low = q?.fiftyTwoWeekLow ?? null;
-    const target = q?.targetMeanPrice ?? null;
-    const pctFromHigh =
-      current !== null && high !== null && high > 0
-        ? ((current - high) / high) * 100
-        : null;
-    const upsideToTarget =
-      current !== null && target !== null && current > 0
-        ? ((target - current) / current) * 100
-        : null;
-    const fiftyDayMa = q?.fiftyDayAverage ?? null;
-    const vs50dMa =
-      current !== null && fiftyDayMa !== null && fiftyDayMa > 0
-        ? ((current - fiftyDayMa) / fiftyDayMa) * 100
-        : null;
-    const marketCap = q?.marketCap ?? null;
+    // Read enrichment from the shared snapshot cache (now carries sma50
+    // + analyst_target). On a snapshot miss (Yahoo failed), skip the
+    // candidate rather than failing the whole discovery batch.
+    const snap = await getOrRefreshSnapshot(c.symbol, 15).catch(() => null);
+    if (!snap) continue;
     out.push({
       ...c,
-      company_name: q?.companyName ?? null,
-      current_price: current,
-      week_52_low: low,
-      week_52_high: high,
-      forward_pe: q?.forwardPE ?? null,
-      analyst_target: target,
-      price_change_pct: q?.regularMarketChangePercent ?? null,
-      pct_from_52w_high: pctFromHigh,
-      upside_to_target: upsideToTarget,
-      fifty_day_ma: fiftyDayMa,
-      vs_50d_ma_pct: vs50dMa,
-      market_cap: marketCap,
-      market_cap_category: categorizeMarketCap(marketCap),
+      company_name: snap.company_name,
+      current_price: snap.price,
+      week_52_low: snap.week52_low,
+      week_52_high: snap.week52_high,
+      forward_pe: snap.forward_pe,
+      analyst_target: snap.analyst_target,
+      price_change_pct: snap.change_pct,
+      pct_from_52w_high: snap.pct_from_52w_high,
+      upside_to_target: snap.upside_to_target,
+      fifty_day_ma: snap.sma50,
+      vs_50d_ma_pct: snap.vs_sma50_pct,
+      market_cap: snap.market_cap,
+      market_cap_category: categorizeMarketCap(snap.market_cap),
     });
     await sleep(100);
   }

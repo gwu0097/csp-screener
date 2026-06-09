@@ -21,6 +21,8 @@ export type SymbolSnapshot = {
   pct_from_52w_high: number | null;
   sma200: number | null;
   vs_sma200_pct: number | null;
+  sma50: number | null;
+  vs_sma50_pct: number | null;
   sma20: number | null;
   vs_sma20_pct: number | null;
   rsi14: number | null;
@@ -28,6 +30,8 @@ export type SymbolSnapshot = {
   forward_pe: number | null;
   peg_ratio: number | null;
   market_cap: number | null;
+  analyst_target: number | null;
+  upside_to_target: number | null;
   return_3m: number | null;
   return_1y: number | null;
   return_3y: number | null;
@@ -165,6 +169,16 @@ export async function refreshSymbolSnapshot(
   const sma200 = quote.twoHundredDayAverage;
   const vs_sma200_pct =
     sma200 !== null && sma200 > 0 ? round(((price - sma200) / sma200) * 100) : null;
+  // 50-day SMA + analyst target are already in the quote payload — just
+  // not stored until now. No extra Yahoo call.
+  const sma50 = quote.fiftyDayAverage;
+  const vs_sma50_pct =
+    sma50 !== null && sma50 > 0 ? round(((price - sma50) / sma50) * 100) : null;
+  const analystTarget = quote.targetMeanPrice;
+  const upsideToTarget =
+    analystTarget !== null && price > 0
+      ? round(((analystTarget - price) / price) * 100)
+      : null;
   const change_pct = quote.regularMarketChangePercent;
   // Yahoo's light quote doesn't carry the $ change, derive it from %.
   const change_amt =
@@ -187,6 +201,8 @@ export async function refreshSymbolSnapshot(
     pct_from_52w_high,
     sma200: round(sma200),
     vs_sma200_pct,
+    sma50: round(sma50),
+    vs_sma50_pct,
     sma20,
     vs_sma20_pct,
     rsi14,
@@ -194,6 +210,8 @@ export async function refreshSymbolSnapshot(
     forward_pe: round(quote.forwardPE),
     peg_ratio: round(quote.pegRatio),
     market_cap: quote.marketCap,
+    analyst_target: round(analystTarget),
+    upside_to_target: upsideToTarget,
     return_3m,
     return_1y,
     return_3y,
@@ -207,17 +225,26 @@ export async function refreshSymbolSnapshot(
   // still return the computed snapshot so callers degrade gracefully.
   try {
     const sb = createServerClient();
-    let { error } = await sb
-      .from("symbol_market_snapshot")
-      .upsert(snapshot, { onConflict: "symbol" });
-    // Tolerate the company_name column not being migrated yet — persist
-    // everything else so the cache still works before the ALTER runs.
-    if (error && /company_name/i.test(error.message)) {
-      const { company_name: _omit, ...rest } = snapshot;
-      void _omit;
-      ({ error } = await sb
+    // Tolerate newer columns not being migrated yet (company_name,
+    // sma50, analyst_target, …): on a "column not found" error, strip
+    // the column the error names and retry, so the cache still persists
+    // everything else before the ALTER runs.
+    let payload: Record<string, unknown> = { ...snapshot };
+    let error: { message: string } | null = null;
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      const res = await sb
         .from("symbol_market_snapshot")
-        .upsert(rest, { onConflict: "symbol" }));
+        .upsert(payload, { onConflict: "symbol" });
+      error = res.error;
+      if (!error) break;
+      const m = error.message.match(
+        /'([a-z_]+)' column|column "?([a-z_]+)"? does not exist/i,
+      );
+      const col = m?.[1] ?? m?.[2];
+      if (!col || !(col in payload) || col === "symbol") break;
+      const { [col]: _drop, ...rest } = payload;
+      void _drop;
+      payload = rest;
     }
     if (error) {
       console.warn(`[snapshot] ${sym}: upsert failed — ${error.message}`);
