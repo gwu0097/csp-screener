@@ -15,12 +15,18 @@ export const maxDuration = 60;
 
 // POST /api/research/[symbol]/fetch-8k
 //
-// Pulls the most recent 8-K filed in the last 90 days, finds the
-// earnings press release exhibit (typically *exhibit991*.htm), strips
-// it to plain text, asks Perplexity to extract structured numbers,
-// and upserts a row into earnings_releases keyed on (symbol, quarter).
-// The caller then reads the latest releases via the GET sibling at
+// Pulls the most recent EARNINGS 8-K (item 2.02 — Results of
+// Operations) filed in the last 90 days, finds the earnings press
+// release exhibit (typically *exhibit991*.htm), strips it to plain
+// text, asks Perplexity to extract structured numbers, and upserts a
+// row into earnings_releases keyed on (symbol, quarter). The caller
+// then reads the latest releases via the GET sibling at
 // /earnings-releases.
+//
+// The 2.02 gate matters: capital-markets 8-Ks (notes offerings,
+// secondaries) also attach a 99.1 press release, so a filename-only
+// exhibit heuristic on the newest 8-K can grab the wrong filing
+// (CIEN's Jun 2026 convertible notes vs its Jun 4 Q2 earnings).
 
 const NINETY_DAYS_MS = 90 * 86_400_000;
 
@@ -163,23 +169,25 @@ export async function POST(
       { status: 404 },
     );
   }
-  const recent = await getRecentFilings(cik, ["8-K"], 25);
+  const recent = await getRecentFilings(cik, ["8-K"], 25, {
+    requireItem: "2.02",
+  });
   const cutoff = Date.now() - NINETY_DAYS_MS;
   const within90 = recent.filter((f) => {
     const t = new Date(f.filingDate + "T12:00:00Z").getTime();
     return Number.isFinite(t) && t >= cutoff;
   });
   console.log(
-    `[fetch-8k] ${symbol}: 8-Ks in last 90 days = ${within90.length} of ${recent.length} total. Most recent: ${
+    `[fetch-8k] ${symbol}: earnings (item 2.02) 8-Ks in last 90 days = ${within90.length} of ${recent.length} total. Most recent: ${
       within90
         .slice(0, 5)
-        .map((f) => `${f.filingDate} (${f.accessionNumber})`)
+        .map((f) => `${f.filingDate} (${f.accessionNumber}) [${f.items.join(",")}]`)
         .join(", ") || "(none)"
     }`,
   );
   if (within90.length === 0) {
     return NextResponse.json(
-      { error: "No 8-K filed in the last 90 days" },
+      { error: "No earnings 8-K (item 2.02) filed in the last 90 days" },
       { status: 404 },
     );
   }

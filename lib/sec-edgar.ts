@@ -730,6 +730,10 @@ export type SecFiling = {
   filingDate: string; // YYYY-MM-DD
   reportDate: string | null; // YYYY-MM-DD (period end / event date)
   primaryDocDescription: string | null;
+  // 8-K item codes from the submissions JSON ("2.02,9.01" → ["2.02",
+  // "9.01"]). Empty for forms without items. 2.02 = Results of
+  // Operations — the earnings-release marker.
+  items: string[];
 };
 
 // Convert "0001783879-26-000061" → "000178387926000061" for archive
@@ -753,6 +757,12 @@ export async function getRecentFilings(
   cik: string,
   forms: string[],
   limit = 25,
+  opts: {
+    // Only return filings whose items include this code (e.g. "2.02"
+    // so an 8-K list contains earnings releases, never capital-markets
+    // or other-event filings). Ignored when unset.
+    requireItem?: string;
+  } = {},
 ): Promise<SecFiling[]> {
   const url = `${EDGAR_DATA_BASE}/submissions/CIK${cik}.json`;
   let res: Response;
@@ -771,6 +781,7 @@ export async function getRecentFilings(
         filingDate?: string[];
         reportDate?: string[];
         primaryDocDescription?: string[];
+        items?: string[];
       };
     };
   };
@@ -785,6 +796,11 @@ export async function getRecentFilings(
     const accessionNumber = recent.accessionNumber?.[i] ?? "";
     const primaryDocument = recent.primaryDocument?.[i] ?? "";
     if (!accessionNumber || !primaryDocument) continue;
+    const items = (recent.items?.[i] ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (opts.requireItem && !items.includes(opts.requireItem)) continue;
     out.push({
       form,
       accessionNumber,
@@ -792,6 +808,7 @@ export async function getRecentFilings(
       filingDate: recent.filingDate?.[i] ?? "",
       reportDate: recent.reportDate?.[i] || null,
       primaryDocDescription: recent.primaryDocDescription?.[i] ?? null,
+      items,
     });
     if (out.length >= limit) break;
   }
