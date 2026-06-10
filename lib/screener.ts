@@ -33,11 +33,9 @@ import {
 import { computeOptionsFlow, type OptionsFlow } from "@/lib/options-flow";
 
 // ---------- Hard-kill thresholds ----------
-
-// Minimum stock price for a CSP candidate. Below this, strike granularity
-// gets too coarse and premium-to-capital ratios stop working for the
-// strategy. Enforced upstream in /api/screener/screen.
-export const MIN_STOCK_PRICE = 70;
+// The price floor, market-cap floor, and Stage 2 tier gate live in
+// the active screener config (lib/screener-config.ts → screener_configs
+// table) and are applied by /api/screener/screen — no duplicates here.
 
 // ---------- Types ----------
 
@@ -345,7 +343,15 @@ async function fetchMarketCapBillions(symbol: string): Promise<number | null> {
 export async function runStageTwo(
   candidate: EarningsCandidate,
   industryClass: IndustryClass,
-  options: { industryPenalty?: number; isWhitelisted?: boolean } = {},
+  options: {
+    industryPenalty?: number;
+    isWhitelisted?: boolean;
+    // Minimum market-cap tier (0-3) from the active screener config.
+    // <= 0 disables the gate. Defaults to 1 ($10B+), the CSP Earnings
+    // preset value, so callers that don't thread a config keep the
+    // historical behaviour.
+    minMarketCapTier?: number;
+  } = {},
 ): Promise<StageTwoResult> {
   const [mcapB, analyst] = await Promise.all([
     fetchMarketCapBillions(candidate.symbol),
@@ -358,19 +364,22 @@ export async function runStageTwo(
   const overhangPenalty = ACTIVE_OVERHANG.has(normalizeSymbol(candidate.symbol)) ? -3 : 0;
   const industryPenalty = options.industryPenalty ?? 0;
   const score = preOverhang + overhangPenalty + industryPenalty;
-  // v4 gate: require marketCapTier >= 1 (i.e. $10B+). Sub-scores for
-  // businessSimplicity and analystDispersion are still surfaced for
-  // display, but no longer drive pass/fail — the simulation showed
+  // v4 gate: require marketCapTier >= config tier floor. Sub-scores
+  // for businessSimplicity and analystDispersion are still surfaced
+  // for display, but no longer drive pass/fail — the simulation showed
   // they were knocking out legitimate $20-30B mid-cap CSP names on
   // false-negative analyst data and the curated bs map is too thin
   // to be a reliable gate. Whitelisted symbols bypass entirely.
-  const meetsFloor = marketCapTier >= 1;
+  const minTier = options.minMarketCapTier ?? 1;
+  const meetsFloor = minTier <= 0 || marketCapTier >= minTier;
   const pass = options.isWhitelisted ? true : meetsFloor;
   const reason = options.isWhitelisted
     ? `Whitelisted — market cap floor bypassed (mcap=${mcapB ?? "null"}B)`
-    : meetsFloor
-      ? `Market cap floor met (mcap=${mcapB ?? "null"}B, tier ${marketCapTier}/3)`
-      : `Below $10B market cap floor (mcap=${mcapB ?? "null"}B, tier ${marketCapTier}/3)`;
+    : minTier <= 0
+      ? `Market cap tier not gated (mcap=${mcapB ?? "null"}B, tier ${marketCapTier}/3)`
+      : meetsFloor
+        ? `Market cap floor met (mcap=${mcapB ?? "null"}B, tier ${marketCapTier}/3)`
+        : `Below tier ${minTier} market cap floor (mcap=${mcapB ?? "null"}B, tier ${marketCapTier}/3)`;
   return {
     score,
     maxScore: 9,

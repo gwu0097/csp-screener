@@ -4,18 +4,29 @@ import { useEffect, useMemo, useState } from "react";
 import {
   Play,
   AlertTriangle,
+  Check,
   ChevronDown,
   ChevronRight,
   History,
   Info,
   Loader2,
+  Lock,
   Pencil,
+  Plus,
   RefreshCcw,
   Sparkles,
   Star,
+  Trash2,
   ArrowUp,
   ArrowDown,
 } from "lucide-react";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -42,7 +53,12 @@ import { PriceChart } from "@/components/price-chart";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { ErrorBanner } from "@/components/error-banner";
 import { SchwabTokenBanner } from "@/components/schwab-token-banner";
-import { ACTIVE_SCREENER } from "@/lib/screener-config";
+import {
+  CSP_EARNINGS_SCREENER,
+  DEFAULT_SCREENER_ID,
+  resolveScreenerFilters,
+  type ScreenerConfigRow,
+} from "@/lib/screener-config";
 import {
   interpretError,
   interpretFetchError,
@@ -274,6 +290,7 @@ function gradeOrder(g: string | null | undefined): number {
 }
 
 // localStorage keys for screener persistence.
+const LS_ACTIVE_CONFIG = "screener_active_config";
 const LS_RESULTS = "screener_results";
 const LS_TIMESTAMP = "screener_timestamp";
 const LS_PRICES = "screener_prices";
@@ -512,6 +529,50 @@ export function ScreenerView({ connected }: Props) {
   const [lastStats, setLastStats] = useState<ScreenStats | null>(null);
   const [analyzingSymbols, setAnalyzingSymbols] = useState<Set<string>>(new Set());
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  // Named screener configs. The active selection persists to
+  // localStorage so it survives reloads; the id is passed to the
+  // screen route so the run uses exactly the displayed criteria.
+  const [configs, setConfigs] = useState<ScreenerConfigRow[]>([]);
+  const [activeConfigId, setActiveConfigId] = useState<string>(DEFAULT_SCREENER_ID);
+  const activeConfig =
+    configs.find((c) => c.id === activeConfigId) ?? null;
+
+  async function loadConfigs(): Promise<ScreenerConfigRow[]> {
+    try {
+      const res = await fetch("/api/screener/configs", { cache: "no-store" });
+      if (!res.ok) return [];
+      const json = (await res.json()) as { configs?: ScreenerConfigRow[] };
+      const list = json.configs ?? [];
+      setConfigs(list);
+      return list;
+    } catch {
+      return [];
+    }
+  }
+
+  function selectConfig(id: string) {
+    setActiveConfigId(id);
+    try {
+      localStorage.setItem(LS_ACTIVE_CONFIG, id);
+    } catch {
+      /* ignore — quota / privacy mode */
+    }
+  }
+
+  useEffect(() => {
+    void (async () => {
+      const list = await loadConfigs();
+      try {
+        const stored = localStorage.getItem(LS_ACTIVE_CONFIG);
+        if (stored && list.some((c) => c.id === stored)) {
+          setActiveConfigId(stored);
+        }
+      } catch {
+        /* ignore */
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   // Track checkbox state: set of UPPERCASE symbols the user has opted to
   // track for tonight's trades. Persisted in localStorage; passed to the
   // analyze endpoint so tracked_tickers gets upserted on every run.
@@ -909,10 +970,13 @@ export function ScreenerView({ connected }: Props) {
       // chain verification DEFERRED to /verify-chains so a Schwab
       // outage can't blank the board.
       setMessage("Fetching earnings calendar…");
-      const r1 = await fetch("/api/screener/screen", {
-        method: "POST",
-        cache: "no-store",
-      });
+      const r1 = await fetch(
+        `/api/screener/screen?configId=${encodeURIComponent(activeConfigId)}`,
+        {
+          method: "POST",
+          cache: "no-store",
+        },
+      );
       const j1 = (await r1.json().catch(() => ({}))) as {
         results?: ScreenerResult[];
         prices?: Record<string, number>;
@@ -948,6 +1012,30 @@ export function ScreenerView({ connected }: Props) {
       setMessage(
         `Screened ${initialResults.length} candidates — scoring & verifying option chains…`,
       );
+
+      // Stream C only runs when the active config requires a weekly
+      // chain — e.g. the Swing Earnings preset keeps monthly-only
+      // names, so verified-absent must not drop rows.
+      const requireChain = activeConfig
+        ? resolveScreenerFilters(activeConfig).requireWeeklyChain
+        : true;
+      if (!requireChain) {
+        persistScreenSnapshot({
+          candidates: initialResults,
+          prices: initialPrices,
+          screenedAt: timestampIso,
+          graded: false,
+          pass1Count: initialStats?.afterPriceFilter ?? null,
+          pass2Count: initialResults.length,
+        });
+        setStatus("idle");
+        setMessage(
+          `Screened ${initialResults.length} candidates · chain verification skipped (${
+            activeConfig?.name ?? "active screener"
+          } doesn't require weekly chains)`,
+        );
+        return;
+      }
 
       // ---- Stream C: chain verification, batched ----
       const BATCH_SIZE = 10;
@@ -2128,7 +2216,15 @@ export function ScreenerView({ connected }: Props) {
           </div>
         )}
 
-        <ScreenerCriteriaPanel />
+        <div className="space-y-2">
+          <ScreenerConfigBar
+            configs={configs}
+            activeId={activeConfigId}
+            onSelect={selectConfig}
+            onChanged={loadConfigs}
+          />
+          <ScreenerCriteriaPanel cfg={activeConfig} />
+        </div>
 
         {showStaleNotice && (
           <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-200">
@@ -2468,13 +2564,406 @@ export function ScreenerView({ connected }: Props) {
   );
 }
 
-// Expandable panel showing the active screener's filter criteria.
-// Sourced from ACTIVE_SCREENER (lib/screener-config.ts) so the same
-// numbers drive both the live route and this display — no drift.
+// Named-screener dropdown: pick the active config, clone it via
+// "Save current as…", edit/delete custom configs. System presets show
+// a lock and are read-only (the API enforces this server-side too).
+function ScreenerConfigBar({
+  configs,
+  activeId,
+  onSelect,
+  onChanged,
+}: {
+  configs: ScreenerConfigRow[];
+  activeId: string;
+  onSelect: (id: string) => void;
+  onChanged: () => Promise<ScreenerConfigRow[]>;
+}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [editor, setEditor] = useState<{
+    mode: "create" | "edit";
+    base: ScreenerConfigRow;
+  } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const active = configs.find((c) => c.id === activeId) ?? null;
+  const fallbackBase: ScreenerConfigRow = active ?? {
+    ...CSP_EARNINGS_SCREENER,
+    isSystem: true,
+  };
+
+  async function handleDelete() {
+    if (!active || active.isSystem) return;
+    if (
+      !window.confirm(
+        `Delete screener "${active.name}"? This cannot be undone.`,
+      )
+    ) {
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await fetch(
+        `/api/screener/configs/${encodeURIComponent(active.id)}`,
+        { method: "DELETE" },
+      );
+      if (res.ok) {
+        onSelect(DEFAULT_SCREENER_ID);
+        await onChanged();
+      } else {
+        const j = (await res.json().catch(() => ({}))) as { error?: string };
+        window.alert(j.error ?? `Delete failed (HTTP ${res.status})`);
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="relative inline-flex items-center gap-2">
+      <button
+        type="button"
+        onClick={() => setMenuOpen((v) => !v)}
+        className="inline-flex items-center gap-2 rounded-lg border border-border bg-background/40 px-3 py-2 text-sm hover:bg-background/70"
+      >
+        <span className="text-muted-foreground">Screener</span>
+        <span className="inline-flex items-center gap-1.5 font-semibold">
+          {active?.isSystem && (
+            <Lock className="h-3 w-3 text-muted-foreground" />
+          )}
+          {active?.name ?? "Select…"}
+        </span>
+        <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
+      </button>
+
+      {menuOpen && (
+        <>
+          <div
+            className="fixed inset-0 z-40"
+            onClick={() => setMenuOpen(false)}
+          />
+          <div className="absolute left-0 top-full z-50 mt-1 w-80 overflow-hidden rounded-md border border-border bg-background shadow-xl">
+            {configs.map((c) => (
+              <button
+                key={c.id}
+                type="button"
+                onClick={() => {
+                  onSelect(c.id);
+                  setMenuOpen(false);
+                }}
+                className={cn(
+                  "flex w-full items-start gap-2 px-3 py-2 text-left text-sm hover:bg-muted/60",
+                  c.id === activeId && "bg-muted/40",
+                )}
+              >
+                <span className="mt-0.5 w-4 shrink-0">
+                  {c.id === activeId && (
+                    <Check className="h-3.5 w-3.5 text-emerald-300" />
+                  )}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="flex items-center gap-1.5 font-medium">
+                    {c.name}
+                    {c.isSystem && (
+                      <Lock className="h-3 w-3 shrink-0 text-muted-foreground" />
+                    )}
+                  </span>
+                  <span className="block truncate text-[11px] text-muted-foreground">
+                    {c.description}
+                  </span>
+                </span>
+              </button>
+            ))}
+            <div className="border-t border-border" />
+            <button
+              type="button"
+              onClick={() => {
+                setEditor({ mode: "create", base: fallbackBase });
+                setMenuOpen(false);
+              }}
+              className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              Save current as…
+            </button>
+            {active && !active.isSystem && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditor({ mode: "edit", base: active });
+                    setMenuOpen(false);
+                  }}
+                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+                >
+                  <Pencil className="h-3.5 w-3.5" />
+                  Edit &quot;{active.name}&quot;
+                </button>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => {
+                    setMenuOpen(false);
+                    void handleDelete();
+                  }}
+                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-rose-300 hover:bg-rose-500/10 disabled:opacity-60"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  Delete &quot;{active.name}&quot;
+                </button>
+              </>
+            )}
+          </div>
+        </>
+      )}
+
+      {editor && (
+        <ConfigEditorDialog
+          mode={editor.mode}
+          base={editor.base}
+          onClose={() => setEditor(null)}
+          onSaved={async (id) => {
+            setEditor(null);
+            await onChanged();
+            onSelect(id);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// Create/edit dialog for a screener config. "create" clones the
+// passed base (the currently selected config); "edit" mutates a
+// custom row in place. Market cap is edited in billions and stored
+// in dollars, matching the system presets.
+function ConfigEditorDialog({
+  mode,
+  base,
+  onClose,
+  onSaved,
+}: {
+  mode: "create" | "edit";
+  base: ScreenerConfigRow;
+  onClose: () => void;
+  onSaved: (id: string) => void | Promise<void>;
+}) {
+  const resolved = resolveScreenerFilters(base);
+  const [name, setName] = useState(mode === "edit" ? base.name : "");
+  const [description, setDescription] = useState(base.description);
+  const [notes, setNotes] = useState(mode === "edit" ? base.notes : "");
+  const [priceFloor, setPriceFloor] = useState(String(resolved.priceFloor));
+  const [mcapB, setMcapB] = useState(String(resolved.minMarketCapBillions));
+  const [tier, setTier] = useState(String(resolved.minMarketCapTier));
+  const [weekly, setWeekly] = useState(resolved.requireWeeklyChain);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const inputCls =
+    "w-full rounded border border-border bg-background px-2 py-1.5 text-sm";
+
+  async function save() {
+    const pf = Number(priceFloor);
+    const mc = Number(mcapB);
+    const t = Number(tier);
+    if (!name.trim()) {
+      setError("Name is required");
+      return;
+    }
+    if (![pf, mc, t].every(Number.isFinite) || pf < 0 || mc < 0) {
+      setError("Price floor, market cap and tier must be valid numbers");
+      return;
+    }
+    const filters = {
+      priceFloor: { value: pf, label: `Stock price ≥ $${pf}` },
+      minMarketCap: {
+        value: mc * 1_000_000_000,
+        label: `Market cap ≥ $${mc}B (hard floor)`,
+      },
+      minMarketCapTier: {
+        value: t,
+        label:
+          t <= 0 ? "Market cap tier: not gated" : `Market cap tier ≥ ${t}`,
+      },
+      requireWeeklyChain: {
+        value: weekly,
+        label: weekly
+          ? "Has a weekly options expiry the Friday on/after earnings"
+          : "Weekly options chain: not required",
+      },
+    };
+    setSaving(true);
+    setError(null);
+    try {
+      const res =
+        mode === "create"
+          ? await fetch("/api/screener/configs", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                name: name.trim(),
+                description,
+                notes,
+                filters,
+              }),
+              cache: "no-store",
+            })
+          : await fetch(
+              `/api/screener/configs/${encodeURIComponent(base.id)}`,
+              {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  name: name.trim(),
+                  description,
+                  notes,
+                  filters,
+                }),
+                cache: "no-store",
+              },
+            );
+      const j = (await res.json().catch(() => ({}))) as {
+        config?: { id: string };
+        error?: string;
+      };
+      if (!res.ok) {
+        setError(j.error ?? `HTTP ${res.status}`);
+        return;
+      }
+      await onSaved(j.config?.id ?? base.id);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Network error");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Dialog
+      open
+      onOpenChange={(o) => {
+        if (!o) onClose();
+      }}
+    >
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>
+            {mode === "create"
+              ? "Save current as new screener"
+              : `Edit "${base.name}"`}
+          </DialogTitle>
+        </DialogHeader>
+        <div className="space-y-3 text-sm">
+          <label className="block space-y-1">
+            <span className="text-muted-foreground">Name</span>
+            <input
+              className={inputCls}
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="e.g. Mid-cap weeklies"
+              maxLength={60}
+            />
+          </label>
+          <label className="block space-y-1">
+            <span className="text-muted-foreground">Description</span>
+            <input
+              className={inputCls}
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              maxLength={500}
+            />
+          </label>
+          <div className="grid grid-cols-3 gap-2">
+            <label className="block space-y-1">
+              <span className="text-muted-foreground">Price floor ($)</span>
+              <input
+                className={inputCls}
+                type="number"
+                min={0}
+                value={priceFloor}
+                onChange={(e) => setPriceFloor(e.target.value)}
+              />
+            </label>
+            <label className="block space-y-1">
+              <span className="text-muted-foreground">Min mcap ($B)</span>
+              <input
+                className={inputCls}
+                type="number"
+                min={0}
+                step="0.5"
+                value={mcapB}
+                onChange={(e) => setMcapB(e.target.value)}
+              />
+            </label>
+            <label className="block space-y-1">
+              <span className="text-muted-foreground">Min cap tier</span>
+              <select
+                className={inputCls}
+                value={tier}
+                onChange={(e) => setTier(e.target.value)}
+              >
+                <option value="0">0 — not gated</option>
+                <option value="1">1 — $10B+</option>
+                <option value="2">2</option>
+                <option value="3">3</option>
+              </select>
+            </label>
+          </div>
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={weekly}
+              onChange={(e) => setWeekly(e.target.checked)}
+              className="h-4 w-4 rounded border-border bg-background"
+            />
+            <span>Require a weekly options chain</span>
+          </label>
+          <label className="block space-y-1">
+            <span className="text-muted-foreground">Notes</span>
+            <textarea
+              className={cn(inputCls, "min-h-[60px]")}
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              maxLength={1000}
+            />
+          </label>
+          {error && (
+            <div className="rounded border border-rose-500/40 bg-rose-500/10 p-2 text-rose-200">
+              {error}
+            </div>
+          )}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" size="sm" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button size="sm" onClick={save} disabled={saving}>
+            {saving ? (
+              <>
+                <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                Saving…
+              </>
+            ) : mode === "create" ? (
+              "Create screener"
+            ) : (
+              "Save changes"
+            )}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// Expandable panel showing the selected screener's filter criteria.
+// The same config row drives the live screen route (passed via
+// ?configId=), so display and execution can't drift.
 // Collapsed by default; opens to a labelled list of every gate.
-function ScreenerCriteriaPanel() {
+function ScreenerCriteriaPanel({
+  cfg: selected,
+}: {
+  cfg: ScreenerConfigRow | null;
+}) {
   const [open, setOpen] = useState(false);
-  const cfg = ACTIVE_SCREENER;
+  const cfg = selected ?? { ...CSP_EARNINGS_SCREENER, isSystem: true };
   return (
     <div className="rounded-lg border border-border bg-background/40 text-sm">
       <button

@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { getTodayEarnings } from "@/lib/earnings";
 import { getBatchPrices } from "@/lib/price";
 import { isSchwabConnected } from "@/lib/schwab";
@@ -7,11 +7,11 @@ import { getIndustryClassification, type IndustryClass } from "@/lib/classificat
 import {
   buildCandidateFromEarnings,
   isLikelyCommonEquity,
-  MIN_STOCK_PRICE,
   runStageTwo,
   ScreenerResult,
 } from "@/lib/screener";
-import { MIN_MARKET_CAP_BILLIONS } from "@/lib/screener-config";
+import { resolveScreenerFilters } from "@/lib/screener-config";
+import { getScreenerConfigOrDefault } from "@/lib/screener-configs-db";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -44,6 +44,8 @@ const MAX_RESULTS = 20;
 type ScreenResponse = {
   connected: boolean;
   screenedAt: string;
+  configId?: string;
+  configName?: string;
   results: ScreenerResult[];
   prices: Record<string, number>;
   stats: {
@@ -68,8 +70,22 @@ type ScreenResponse = {
   error?: string;
 };
 
-export async function POST() {
+export async function POST(req: NextRequest) {
   console.log(`[screen] handler called at ${new Date().toISOString()}`);
+
+  // The selected named screener drives every gate below. Falls back
+  // to the CSP Earnings preset when no configId is passed or the row
+  // is gone. resolveScreenerFilters() backfills any missing filter
+  // keys, so a partial custom config still screens sanely.
+  const cfg = await getScreenerConfigOrDefault(
+    req.nextUrl.searchParams.get("configId"),
+  );
+  const f = resolveScreenerFilters(cfg);
+  console.log(
+    `[screen] config="${cfg.id}" (${cfg.name}) → priceFloor=$${f.priceFloor} ` +
+      `mcap>=$${f.minMarketCapBillions}B tier>=${f.minMarketCapTier} ` +
+      `weeklyChain=${f.requireWeeklyChain}`,
+  );
 
   const stats: ScreenResponse["stats"] = {
     finnhub: 0,
@@ -155,7 +171,7 @@ export async function POST() {
     const afterPrice: Survivor[] = [];
     for (const s of survivors) {
       const p = prices[s.symbol.toUpperCase()] ?? 0;
-      if (s.isWhitelisted || p >= MIN_STOCK_PRICE) {
+      if (s.isWhitelisted || p >= f.priceFloor) {
         afterPrice.push(s);
       } else {
         stats.droppedByPrice.push(`${s.symbol.toUpperCase()}($${p.toFixed(2)})`);
@@ -163,7 +179,7 @@ export async function POST() {
     }
     stats.afterPriceFilter = afterPrice.length;
     console.log(
-      `[screen] after $${MIN_STOCK_PRICE} price floor: ${afterPrice.length} ` +
+      `[screen] after $${f.priceFloor} price floor: ${afterPrice.length} ` +
         `(dropped=${stats.droppedByPrice.length}; examples=${stats.droppedByPrice.slice(0, 6).join(",")})`,
     );
 
@@ -219,7 +235,11 @@ export async function POST() {
           const stageTwo = await runStageTwo(
             candidate,
             cls.industry as IndustryClass,
-            { industryPenalty, isWhitelisted: row.isWhitelisted },
+            {
+              industryPenalty,
+              isWhitelisted: row.isWhitelisted,
+              minMarketCapTier: f.minMarketCapTier,
+            },
           );
           return { row, price, cls, industryStatus, stageTwo };
         }),
@@ -231,16 +251,16 @@ export async function POST() {
         // names bypass (the user explicitly opted them in).
         const meetsHardMcapFloor =
           v.row.isWhitelisted ||
-          (mcapB !== null && mcapB >= MIN_MARKET_CAP_BILLIONS);
+          (mcapB !== null && mcapB >= f.minMarketCapBillions);
         if (!meetsHardMcapFloor) {
           stats.droppedByMcap.push(
             `${upper}(${mcapB === null ? "null" : `$${mcapB}B`})`,
           );
           continue;
         }
-        // Stage 2 quality gate — currently mc>=1 ($10B+) per
-        // SCREENER_CONFIG. Whitelisted bypass handled inside
-        // runStageTwo.
+        // Stage 2 quality gate — tier floor comes from the active
+        // config (<= 0 disables it). Whitelisted bypass handled
+        // inside runStageTwo.
         if (!v.stageTwo.pass) {
           stats.droppedByQuality.push(
             `${upper}(${mcapB === null ? "null" : `$${mcapB}B`})`,
@@ -265,7 +285,7 @@ export async function POST() {
     stats.afterQualityFilter = scored.length;
     console.log(
       `[screen] Stage 2 quality floor: ${scored.length} pass / ` +
-        `${stats.droppedByMcap.length} dropped @ <$${MIN_MARKET_CAP_BILLIONS}B / ` +
+        `${stats.droppedByMcap.length} dropped @ <$${f.minMarketCapBillions}B / ` +
         `${stats.droppedByQuality.length} dropped @ Stage 2 ` +
         `in ${Date.now() - t0}ms`,
     );
@@ -329,8 +349,8 @@ export async function POST() {
 
     console.log(
       `[screen] SUMMARY finnhub=${stats.finnhub} afterEtfBlacklist=${stats.afterEtfAndBlacklist} ` +
-        `afterPrice(>=$${MIN_STOCK_PRICE})=${stats.afterPriceFilter} ` +
-        `afterMcap(>=$${MIN_MARKET_CAP_BILLIONS}B)=${stats.afterMcapFloor} ` +
+        `afterPrice(>=$${f.priceFloor})=${stats.afterPriceFilter} ` +
+        `afterMcap(>=$${f.minMarketCapBillions}B)=${stats.afterMcapFloor} ` +
         `afterQuality=${stats.afterQualityFilter} afterChain=${stats.afterChainFilter} ` +
         `(${stats.unverifiedChain?.length ?? 0} unverified) final=${stats.final} connected=${connected}`,
     );
@@ -338,6 +358,8 @@ export async function POST() {
     const response: ScreenResponse = {
       connected,
       screenedAt: new Date().toISOString(),
+      configId: cfg.id,
+      configName: cfg.name,
       results: final,
       prices,
       stats,
