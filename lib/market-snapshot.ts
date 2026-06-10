@@ -8,15 +8,6 @@ import { computeRSI, computeSMA } from "@/lib/indicators";
 
 export type Price5d = { date: string; close: number; change_pct: number | null };
 
-// One daily OHLC bar of the persisted 90-day history (chart rendering).
-export type Bar90 = {
-  date: string;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-};
-
 // Snake_case to mirror the DB columns 1:1 (the row is returned to
 // callers as-is and upserted without remapping).
 export type SymbolSnapshot = {
@@ -46,7 +37,6 @@ export type SymbolSnapshot = {
   return_3y: number | null;
   vs_spy_3y: number | null;
   price_history_5d: Price5d[] | null;
-  historical_90d: Bar90[] | null;
   last_refreshed_at: string;
   refresh_source: string;
 };
@@ -149,25 +139,6 @@ export async function refreshSymbolSnapshot(
     });
   }
 
-  // Full 90d window as daily OHLC bars for the price chart. Same pull
-  // the technicals use — no extra Yahoo call.
-  const historical_90d: Bar90[] = [...bars90]
-    .filter(
-      (b) =>
-        b.date &&
-        [b.open, b.high, b.low, b.close].every(
-          (v) => typeof v === "number" && Number.isFinite(v) && v > 0,
-        ),
-    )
-    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
-    .map((b) => ({
-      date: new Date(b.date).toISOString().slice(0, 10),
-      open: round(b.open, 4) as number,
-      high: round(b.high, 4) as number,
-      low: round(b.low, 4) as number,
-      close: round(b.close, 4) as number,
-    }));
-
   // ---- Returns from the 3Y series ----
   const series3y = sortedCloses(bars3y);
   const return_3y =
@@ -246,7 +217,6 @@ export async function refreshSymbolSnapshot(
     return_3y,
     vs_spy_3y,
     price_history_5d,
-    historical_90d: historical_90d.length > 0 ? historical_90d : null,
     last_refreshed_at: now.toISOString(),
     refresh_source: "yahoo",
   };
