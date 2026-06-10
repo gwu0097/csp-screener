@@ -131,7 +131,81 @@ type SwingCandidate = {
   redFlags: string[];
   signalCount: number;
   setupScore: number;
+  // Setup-type tabs. Optional — rows persisted before the tab redesign
+  // lack them and get backfilled by normalizeCandidate().
+  setupTabs?: SetupTab[];
+  tabScores?: Partial<Record<SetupTab, number>>;
+  tabStats?: {
+    redDayCount: number;
+    move5dPct: number;
+    rsi14: number | null;
+    sma20: number | null;
+    return3m: number | null;
+    return1y: number | null;
+  } | null;
 };
+
+type SetupTab = "capitulation" | "pullback" | "insider" | "options_flow";
+
+const SETUP_TABS: Array<{ key: SetupTab; label: string; blurb: string }> = [
+  {
+    key: "capitulation",
+    label: "Capitulation",
+    blurb:
+      "Oversold bounce candidates: 3+ consecutive red days, worse than -12% over 5 days, RSI14 < 40. Ranked by severity (deeper selloff + lower RSI + larger cap).",
+  },
+  {
+    key: "pullback",
+    label: "Pullback",
+    blurb:
+      "Strong uptrends pulling back to support: above the 200d SMA with a positive 3-month return, sitting at the 50d SMA (or between the 20d and 50d), 5-12% off the recent high. Ranked by trend quality.",
+  },
+  {
+    key: "insider",
+    label: "Insider",
+    blurb:
+      "Recent open-market insider buys, excluding stocks in freefall (worse than -25% vs the 200d SMA). Ranked by conviction (buy size, distinct insiders, recency).",
+  },
+  {
+    key: "options_flow",
+    label: "Options Flow",
+    blurb:
+      "Unusual call activity (volume/OI on the hottest strike). Ranked by flow aggressiveness (vol/OI ratio + OTM skew).",
+  },
+];
+
+const TAB_LABEL: Record<SetupTab, string> = {
+  capitulation: "Capitulation",
+  pullback: "Pullback",
+  insider: "Insider",
+  options_flow: "Options Flow",
+};
+
+// Rows saved before the tab redesign carry tier1Signals but no
+// setupTabs — backfill insider/options membership so an old cached
+// run still renders sensibly in the new layout.
+function normalizeCandidate(c: SwingCandidate): SwingCandidate {
+  if (Array.isArray(c.setupTabs)) return c;
+  const setupTabs: SetupTab[] = [];
+  const tabScores: Partial<Record<SetupTab, number>> = {};
+  if (c.tier1Signals.includes("INSIDER_BUYING") && c.vsMA200 > -0.25) {
+    setupTabs.push("insider");
+    tabScores.insider = c.setupScore;
+  }
+  if (c.tier1Signals.includes("UNUSUAL_OPTIONS")) {
+    setupTabs.push("options_flow");
+    tabScores.options_flow = c.setupScore;
+  }
+  return { ...c, setupTabs, tabScores, tabStats: null };
+}
+
+function candidateTabs(c: SwingCandidate): SetupTab[] {
+  return c.setupTabs ?? [];
+}
+
+function tabScoreOf(c: SwingCandidate, tab: SetupTab): number {
+  return c.tabScores?.[tab] ?? c.setupScore;
+}
 
 // Mirror of /api/swings/screen/chart row shape — see route handler.
 type ChartPoint = {
@@ -246,9 +320,16 @@ function compareCandidates(
 function sortCandidates(
   list: SwingCandidate[],
   sort: SortState,
+  activeTab: SetupTab,
 ): SwingCandidate[] {
   return [...list].sort((a, b) => {
-    const primary = compareCandidates(a, b, sort);
+    // The Score column ranks by the ACTIVE TAB's score — each tab has
+    // its own scoring (severity / trend quality / conviction / flow).
+    const primary =
+      sort.key === "setupScore"
+        ? (sort.dir === "asc" ? 1 : -1) *
+          (tabScoreOf(a, activeTab) - tabScoreOf(b, activeTab))
+        : compareCandidates(a, b, sort);
     if (primary !== 0) return primary;
     // Stable-ish tiebreaker so re-sorts don't churn order on ties.
     return a.symbol.localeCompare(b.symbol);
@@ -278,6 +359,10 @@ export function SwingScreenView() {
   const [sort, setSort] = useState<SortState>(DEFAULT_SORT);
   const [importOpen, setImportOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  // One Run Screen populates all four setup tabs; Capitulation is the
+  // default view. Tab membership is baked into each candidate
+  // (setupTabs) so the split survives reload via the saved run.
+  const [activeTab, setActiveTab] = useState<SetupTab>("capitulation");
 
   const running = phase !== "idle";
 
@@ -286,7 +371,10 @@ export function SwingScreenView() {
       const res = await fetch("/api/swings/screen", { cache: "no-store" });
       const json = (await res.json()) as CachedResult & { error?: string };
       if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
-      setData(json);
+      setData({
+        ...json,
+        candidates: (json.candidates ?? []).map(normalizeCandidate),
+      });
     } catch (e) {
       setRunError(e instanceof Error ? e.message : "Failed to load");
     } finally {
@@ -335,11 +423,32 @@ export function SwingScreenView() {
       // (~15-30s). Split out from pass 2 so neither route exceeds the
       // 60s Hobby ceiling.
       setPhase("pass3");
+      // Carry forward catalysts from the prior run when it's < 24h
+      // old — Perplexity enrichment is expensive and a catalyst found
+      // this morning is still the catalyst this afternoon.
+      const knownCatalysts: Record<string, unknown> = {};
+      if (
+        data?.screenedAt &&
+        Date.now() - new Date(data.screenedAt).getTime() < 24 * 3600_000
+      ) {
+        for (const prev of data.candidates) {
+          if (prev.catalystRawResponse === null && !prev.catalystFound) continue;
+          knownCatalysts[prev.symbol.toUpperCase()] = {
+            catalystFound: prev.catalystFound,
+            catalystType: prev.catalystType,
+            catalystDate: prev.catalystDate,
+            catalystDescription: prev.catalystDescription,
+            catalystConfidence: prev.catalystConfidence,
+            catalystInsiderAngle: prev.catalystInsiderAngle,
+            catalystRawResponse: prev.catalystRawResponse,
+          };
+        }
+      }
       const r3 = await fetch("/api/swings/screen/pass3", {
         method: "POST",
         cache: "no-store",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ candidates: enriched }),
+        body: JSON.stringify({ candidates: enriched, knownCatalysts }),
       });
       const p3 = (await r3.json()) as {
         candidates?: SwingCandidate[];
@@ -347,7 +456,7 @@ export function SwingScreenView() {
         error?: string;
       };
       if (!r3.ok) throw new Error(p3.error ?? `Pass 3 failed: HTTP ${r3.status}`);
-      const candidates = p3.candidates ?? enriched;
+      const candidates = (p3.candidates ?? enriched).map(normalizeCandidate);
 
       const result: CachedResult = {
         candidates,
@@ -388,9 +497,29 @@ export function SwingScreenView() {
     }
   }
 
+  const tabCounts = useMemo(() => {
+    const counts: Record<SetupTab, number> = {
+      capitulation: 0,
+      pullback: 0,
+      insider: 0,
+      options_flow: 0,
+    };
+    for (const c of data?.candidates ?? []) {
+      for (const t of candidateTabs(c)) counts[t] += 1;
+    }
+    return counts;
+  }, [data]);
+
   const sortedCandidates = useMemo(
-    () => sortCandidates(data?.candidates ?? [], sort),
-    [data, sort],
+    () =>
+      sortCandidates(
+        (data?.candidates ?? []).filter((c) =>
+          candidateTabs(c).includes(activeTab),
+        ),
+        sort,
+        activeTab,
+      ),
+    [data, sort, activeTab],
   );
 
   function handleHeaderClick(key: SortKey) {
@@ -438,15 +567,29 @@ export function SwingScreenView() {
         </div>
       ) : !data || data.screenedAt === null ? (
         <EmptyStateNoScan />
-      ) : sortedCandidates.length === 0 ? (
-        <EmptyStateNoResults data={data} />
       ) : (
-        <ResultsTable
-          candidates={sortedCandidates}
-          sort={sort}
-          onSort={handleHeaderClick}
-          onEnterTrade={() => setImportOpen(true)}
-        />
+        <>
+          <SetupTabBar
+            active={activeTab}
+            counts={tabCounts}
+            onSelect={setActiveTab}
+          />
+          {sortedCandidates.length === 0 ? (
+            data.candidates.length === 0 ? (
+              <EmptyStateNoResults data={data} />
+            ) : (
+              <EmptyTab tab={activeTab} />
+            )
+          ) : (
+            <ResultsTable
+              candidates={sortedCandidates}
+              sort={sort}
+              activeTab={activeTab}
+              onSort={handleHeaderClick}
+              onEnterTrade={() => setImportOpen(true)}
+            />
+          )}
+        </>
       )}
 
       <ImportStockScreenshotModal
@@ -556,6 +699,65 @@ function RunningBanner({
   );
 }
 
+function SetupTabBar({
+  active,
+  counts,
+  onSelect,
+}: {
+  active: SetupTab;
+  counts: Record<SetupTab, number>;
+  onSelect: (tab: SetupTab) => void;
+}) {
+  const blurb = SETUP_TABS.find((t) => t.key === active)?.blurb ?? "";
+  return (
+    <div className="space-y-1.5">
+      <div className="flex flex-wrap gap-1 rounded-md border border-border bg-background/40 p-1">
+        {SETUP_TABS.map((t) => {
+          const isActive = t.key === active;
+          return (
+            <button
+              key={t.key}
+              type="button"
+              onClick={() => onSelect(t.key)}
+              className={`inline-flex items-center gap-1.5 rounded px-3 py-1.5 text-sm font-medium transition ${
+                isActive
+                  ? "bg-background text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {t.label}
+              <span
+                className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${
+                  isActive
+                    ? "bg-emerald-500/20 text-emerald-300"
+                    : "bg-muted text-muted-foreground"
+                }`}
+              >
+                {counts[t.key]}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+      <div className="px-1 text-[11px] text-muted-foreground/80">{blurb}</div>
+    </div>
+  );
+}
+
+function EmptyTab({ tab }: { tab: SetupTab }) {
+  return (
+    <div className="rounded-md border border-dashed border-border bg-background/40 p-8 text-center">
+      <div className="text-base font-medium">
+        No {TAB_LABEL[tab].toLowerCase()} setups in this screen
+      </div>
+      <p className="mx-auto mt-1.5 max-w-xl text-sm text-muted-foreground">
+        Nothing in the last run qualified for this setup type. Check the
+        other tabs or re-run the screen later.
+      </p>
+    </div>
+  );
+}
+
 function EmptyStateNoScan() {
   return (
     <div className="rounded-md border border-dashed border-border bg-background/40 p-10 text-center">
@@ -590,11 +792,13 @@ function EmptyStateNoResults({ data }: { data: CachedResult }) {
 function ResultsTable({
   candidates,
   sort,
+  activeTab,
   onSort,
   onEnterTrade,
 }: {
   candidates: SwingCandidate[];
   sort: SortState;
+  activeTab: SetupTab;
   onSort: (key: SortKey) => void;
   onEnterTrade: () => void;
 }) {
@@ -606,6 +810,7 @@ function ResultsTable({
           <CandidateRow
             key={c.symbol}
             candidate={c}
+            activeTab={activeTab}
             onEnterTrade={onEnterTrade}
           />
         ))}
@@ -771,9 +976,11 @@ function SortHeader({
 
 function CandidateRow({
   candidate: c,
+  activeTab,
   onEnterTrade,
 }: {
   candidate: SwingCandidate;
+  activeTab: SetupTab;
   onEnterTrade: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
@@ -879,9 +1086,9 @@ function CandidateRow({
         </div>
         {/* 7. R/R */}
         <div className={`hidden text-right md:block ${rr.cls}`}>{rr.text}</div>
-        {/* 8. Score */}
+        {/* 8. Score — the ACTIVE TAB's score (each tab ranks its own way) */}
         <div className="flex justify-center">
-          <ScoreBadge score={c.setupScore} />
+          <ScoreBadge score={tabScoreOf(c, activeTab)} />
         </div>
         {/* 9. Signals */}
         <div className="hidden flex-wrap justify-start gap-1 md:flex">
@@ -890,6 +1097,7 @@ function CandidateRow({
             insiderSignal={c.insiderSignal}
             catalystConfidence={c.catalystConfidence}
           />
+          <ConfluenceBadge candidate={c} activeTab={activeTab} />
         </div>
         {/* 10. Actions */}
         <div
@@ -929,6 +1137,27 @@ function CandidateRow({
         />
       )}
     </div>
+  );
+}
+
+// Confluence: a stock qualifying for multiple setup types is a
+// feature — surface the OTHER tabs it also appears in.
+function ConfluenceBadge({
+  candidate: c,
+  activeTab,
+}: {
+  candidate: SwingCandidate;
+  activeTab: SetupTab;
+}) {
+  const others = candidateTabs(c).filter((t) => t !== activeTab);
+  if (others.length === 0) return null;
+  return (
+    <span
+      className="inline-flex items-center gap-1 rounded border border-sky-500/40 bg-sky-500/10 px-1 py-0.5 text-[9px] font-medium text-sky-300"
+      title={`Also qualifies for: ${others.map((t) => TAB_LABEL[t]).join(", ")} — multi-setup confluence`}
+    >
+      ⧉ ALSO {others.map((t) => TAB_LABEL[t].toUpperCase()).join(" · ")}
+    </span>
   );
 }
 

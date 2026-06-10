@@ -23,6 +23,10 @@ import {
   type SchwabOptionsChain,
 } from "./schwab";
 import { getResearchSnapshot } from "./yahoo";
+import {
+  batchRefreshSnapshots,
+  type SymbolSnapshot,
+} from "./market-snapshot";
 import YahooFinance from "yahoo-finance2";
 
 // Reuse the same yahoo-finance2 instance pattern as lib/yahoo.ts.
@@ -69,6 +73,23 @@ export type CatalystType =
   | "restructuring"
   | "other"
   | "none";
+
+// The four setup-type tabs. A candidate can qualify for several
+// (confluence) — setupTabs lists every tab it belongs to and
+// tabScores carries the per-tab ranking score (0-10).
+export type SetupTab = "capitulation" | "pullback" | "insider" | "options_flow";
+
+// Snapshot-derived stats for the technical tabs. Computed in pass 1
+// from symbol_market_snapshot (rsi14 + price_history_5d + sma20 +
+// return_3m/1y) for symbols that pass the cheap quote-only pre-gate.
+export type TabStats = {
+  redDayCount: number;
+  move5dPct: number; // decimal, e.g. -0.14 = -14% over ~5 trading days
+  rsi14: number | null;
+  sma20: number | null;
+  return3m: number | null; // percent (snapshot.return_3m)
+  return1y: number | null; // percent
+};
 
 export type InsiderTransaction = {
   name: string;
@@ -152,6 +173,12 @@ export type SwingCandidate = {
 
   signalCount: number;
   setupScore: number;
+
+  // Setup-type tabs (see SetupTab). Older persisted rows lack these —
+  // the client backfills insider/options membership from tier1Signals.
+  setupTabs: SetupTab[];
+  tabScores: Partial<Record<SetupTab, number>>;
+  tabStats: TabStats | null;
 };
 
 // ---------- Pass 1 helpers ----------
@@ -330,6 +357,200 @@ function detectTier2Signals(q: Pass1Quote): string[] {
   return signals;
 }
 
+// ---------- Tab qualification (capitulation / pullback) ----------
+
+// Today's date in market time so "today counts intraday" works on a
+// UTC server: a snapshot history bar dated today already reflects the
+// intraday move; otherwise the live quote change supplies it.
+function nyTodayIso(): string {
+  return new Date().toLocaleDateString("en-CA", {
+    timeZone: "America/New_York",
+  });
+}
+
+// Builds TabStats for one symbol from its snapshot + live quote.
+// Returns null when the snapshot lacks the daily history we need.
+function computeTabStats(
+  snap: SymbolSnapshot,
+  q: Pass1Quote,
+): TabStats | null {
+  const bars = snap.price_history_5d ?? [];
+  if (bars.length < 4) return null;
+  const price = snap.price ?? q.currentPrice;
+
+  // Consecutive red days counted backwards from the latest bar. When
+  // the latest bar isn't today's (snapshot refreshed pre-open or the
+  // history pull excluded the partial bar), today's live intraday
+  // change extends — or breaks — the streak.
+  const lastBarIsToday = bars[bars.length - 1]?.date === nyTodayIso();
+  let trailingRed = 0;
+  for (let i = bars.length - 1; i >= 0; i -= 1) {
+    const chg = bars[i].change_pct;
+    if (chg !== null && chg < 0) trailingRed += 1;
+    else break;
+  }
+  let redDayCount: number;
+  if (lastBarIsToday) {
+    redDayCount = trailingRed;
+  } else if (q.priceChange1d < 0) {
+    redDayCount = trailingRed + 1;
+  } else {
+    redDayCount = 0; // green today breaks the streak intraday
+  }
+
+  // ~5-trading-day cumulative move: live price vs the close BEFORE the
+  // oldest bar in the 5-bar window (derived from that bar's change%).
+  const first = bars[0];
+  const prevClose =
+    first.change_pct !== null && first.change_pct > -100
+      ? first.close / (1 + first.change_pct / 100)
+      : first.close;
+  const move5dPct = prevClose > 0 ? price / prevClose - 1 : 0;
+
+  return {
+    redDayCount,
+    move5dPct,
+    rsi14: snap.rsi14,
+    sma20: snap.sma20,
+    return3m: snap.return_3m,
+    return1y: snap.return_1y,
+  };
+}
+
+// TAB 1 — CAPITULATION: 3+ consecutive red days (today counts
+// intraday), 5d cumulative worse than -12%, RSI14 < 40. Mirrors the
+// manual ThinkorSwim scan (3 red / -15% in 5d) slightly loosened.
+function qualifiesCapitulation(stats: TabStats): boolean {
+  return (
+    stats.redDayCount >= 3 &&
+    stats.move5dPct <= -0.12 &&
+    stats.rsi14 !== null &&
+    stats.rsi14 < 40
+  );
+}
+
+// TAB 2 — PULLBACK TO TREND: uptrend intact (above 200d, positive 3m
+// return), price within ~3% of the 50d SMA or sitting between the 20d
+// and 50d, and an orderly 5-12% pullback from the recent high.
+function qualifiesPullback(stats: TabStats, q: Pass1Quote): boolean {
+  if (q.currentPrice <= q.ma200) return false;
+  if (stats.return3m === null || stats.return3m <= 0) return false;
+  const vsMA50 = (q.currentPrice - q.ma50) / q.ma50;
+  const nearMA50 = Math.abs(vsMA50) <= 0.03;
+  const betweenMAs =
+    stats.sma20 !== null &&
+    q.currentPrice <= stats.sma20 &&
+    q.currentPrice >= q.ma50;
+  if (!nearMA50 && !betweenMAs) return false;
+  const pctFromHigh = (q.currentPrice - q.week52High) / q.week52High;
+  return pctFromHigh <= -0.05 && pctFromHigh >= -0.12;
+}
+
+// Severity ranking for capitulation: deeper selloff + lower RSI +
+// larger cap ranks higher; elevated volume = seller-exhaustion bonus.
+export function scoreCapitulation(stats: TabStats, q: Pass1Quote): number {
+  const depth = Math.min(4, (Math.abs(stats.move5dPct) * 100 - 12) * 0.5);
+  const rsi = stats.rsi14 !== null ? Math.min(3, (40 - stats.rsi14) * 0.15) : 0;
+  const cap =
+    q.marketCap >= 100e9 ? 2 : q.marketCap >= 10e9 ? 1.5 : q.marketCap >= 2e9 ? 1 : 0;
+  const volumeRatio = q.avgVolume10d > 0 ? q.todayVolume / q.avgVolume10d : 0;
+  const vol = volumeRatio > 1.5 ? 1 : 0;
+  return Math.min(10, Math.round(depth + rsi + cap + vol));
+}
+
+// Trend-quality ranking for pullback: stronger 3m/1y returns + tighter
+// pullback to the 50d ranks higher.
+export function scorePullback(stats: TabStats, q: Pass1Quote): number {
+  const r3 = stats.return3m ?? 0;
+  const r1y = stats.return1y ?? 0;
+  const vsMA50 = Math.abs((q.currentPrice - q.ma50) / q.ma50);
+  const pctFromHigh = (q.currentPrice - q.week52High) / q.week52High;
+  const trend3m = r3 >= 20 ? 3 : r3 >= 10 ? 2 : 1;
+  const trend1y = r1y >= 30 ? 2 : r1y >= 10 ? 1 : 0;
+  const tight = vsMA50 <= 0.01 ? 3 : vsMA50 <= 0.02 ? 2 : 1;
+  const orderly = pctFromHigh >= -0.08 ? 2 : 1;
+  return Math.min(10, Math.round(trend3m + trend1y + tight + orderly));
+}
+
+// Levels for tab candidates that don't clear the legacy R/R funnel —
+// swing-sized stop/target anchored to the live price instead of the
+// 52w-low geometry (which is meaningless mid-capitulation).
+function fallbackLevels(q: Pass1Quote): TradeLevels {
+  const entryPrice = q.currentPrice;
+  const stopPrice = entryPrice * 0.92;
+  const capTarget = entryPrice * 1.15;
+  const targetPrice =
+    q.analystTarget !== null && q.analystTarget > entryPrice
+      ? Math.min(q.analystTarget, capTarget)
+      : entryPrice * 1.12;
+  const reward = targetPrice - entryPrice;
+  const risk = entryPrice - stopPrice;
+  return {
+    entryPrice,
+    targetPrice,
+    stopPrice,
+    reward,
+    risk,
+    rr: risk > 0 ? reward / risk : 0,
+  };
+}
+
+// Cheap quote-only pre-gates so we only refresh snapshots (3 Yahoo
+// calls each) for plausible tab candidates, capped to protect the 60s
+// route budget. A stock down 12%+ in 5 days is necessarily below its
+// 50d MA and 10%+ off its high, so the capitulation pre-gate can't
+// false-negative; the pullback pre-gate brackets the final bands.
+const MAX_SNAPSHOT_ENRICH = 80;
+
+function pregateTabSymbols(quotes: Map<string, Pass1Quote>): string[] {
+  const capitulation: Pass1Quote[] = [];
+  const pullback: Pass1Quote[] = [];
+  for (const q of Array.from(quotes.values())) {
+    if (q.currentPrice < 10 || q.marketCap < 500_000_000) continue;
+    const vsMA50 = (q.currentPrice - q.ma50) / q.ma50;
+    const pctFromHigh = (q.currentPrice - q.week52High) / q.week52High;
+    if (
+      q.priceChange1d < 0 &&
+      q.currentPrice < q.ma50 &&
+      pctFromHigh <= -0.1
+    ) {
+      capitulation.push(q);
+    }
+    if (
+      q.currentPrice > q.ma200 &&
+      vsMA50 >= -0.04 &&
+      vsMA50 <= 0.08 &&
+      pctFromHigh <= -0.04 &&
+      pctFromHigh >= -0.13
+    ) {
+      pullback.push(q);
+    }
+  }
+  // Worst 1-day movers first (capitulation), tightest to the 50d first
+  // (pullback) — if the cap bites, we keep the best candidates.
+  capitulation.sort((a, b) => a.priceChange1d - b.priceChange1d);
+  pullback.sort(
+    (a, b) =>
+      Math.abs((a.currentPrice - a.ma50) / a.ma50) -
+      Math.abs((b.currentPrice - b.ma50) / b.ma50),
+  );
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const interleaved = [];
+  const maxLen = Math.max(capitulation.length, pullback.length);
+  for (let i = 0; i < maxLen; i += 1) {
+    if (capitulation[i]) interleaved.push(capitulation[i].symbol);
+    if (pullback[i]) interleaved.push(pullback[i].symbol);
+  }
+  for (const sym of interleaved) {
+    if (seen.has(sym)) continue;
+    seen.add(sym);
+    out.push(sym);
+    if (out.length >= MAX_SNAPSHOT_ENRICH) break;
+  }
+  return out;
+}
+
 // ---------- Pass 1 ----------
 
 export async function pass1Filter(symbols: string[]): Promise<{
@@ -338,6 +559,8 @@ export async function pass1Filter(symbols: string[]): Promise<{
   trades: Map<string, TradeLevels>;
   tier2ByCandidate: Map<string, string[]>;
   errors: string[];
+  capitulation: Record<string, TabStats>;
+  pullback: Record<string, TabStats>;
 }> {
   const errors: string[] = [];
   const quotes = new Map<string, Pass1Quote>();
@@ -382,15 +605,72 @@ export async function pass1Filter(symbols: string[]): Promise<{
   // Missing fields are treated leniently — Yahoo simply doesn't return some
   // fundamentals on every symbol, and we'd rather not throw out a valid
   // setup over a Yahoo coverage gap.
-  const survivors: string[] = [];
+  const funnelSurvivors: string[] = [];
   for (const q of techSurvivors) {
     if (q.numAnalysts < 3) continue;
     if (q.revenueGrowth !== null && q.revenueGrowth < -0.2) continue;
     if (q.shortPercentFloat !== null && q.shortPercentFloat > 0.4) continue;
-    survivors.push(q.symbol);
+    funnelSurvivors.push(q.symbol);
   }
 
-  return { survivors, quotes, trades, tier2ByCandidate, errors };
+  // Step 4: capitulation / pullback tab qualification. Quote-only
+  // pre-gate first, then snapshots (rsi14 + 5d history + sma20 + 3m/1y
+  // returns) only for that pre-gated subset — symbol_market_snapshot
+  // has a 15-min TTL so repeat runs are mostly cache reads.
+  const capitulation: Record<string, TabStats> = {};
+  const pullback: Record<string, TabStats> = {};
+  const pregated = pregateTabSymbols(quotes);
+  if (pregated.length > 0) {
+    let snaps: SymbolSnapshot[] = [];
+    try {
+      snaps = await batchRefreshSnapshots(pregated, 15);
+    } catch (e) {
+      errors.push(
+        `snapshots:${e instanceof Error ? e.message : "batch failed"}`,
+      );
+    }
+    for (const snap of snaps) {
+      const q = quotes.get(snap.symbol.toUpperCase());
+      if (!q) continue;
+      const stats = computeTabStats(snap, q);
+      if (!stats) continue;
+      if (qualifiesCapitulation(stats)) capitulation[q.symbol] = stats;
+      if (qualifiesPullback(stats, q)) pullback[q.symbol] = stats;
+    }
+  }
+  console.log(
+    `[swing-screener] pass1 tabs: pregated=${pregated.length} ` +
+      `capitulation=${Object.keys(capitulation).length} ` +
+      `pullback=${Object.keys(pullback).length} funnel=${funnelSurvivors.length}`,
+  );
+
+  // Survivors = union of the legacy funnel (insider/options path) and
+  // the tab-qualified symbols, so pass 2 enriches (and earnings-gates)
+  // everything. Tab symbols that didn't clear the legacy R/R funnel
+  // get swing-sized fallback levels.
+  const survivorSet = new Set<string>(funnelSurvivors);
+  for (const sym of [
+    ...Object.keys(capitulation),
+    ...Object.keys(pullback),
+  ]) {
+    survivorSet.add(sym);
+    if (!trades.has(sym)) {
+      const q = quotes.get(sym);
+      if (q) trades.set(sym, fallbackLevels(q));
+    }
+    if (!tier2ByCandidate.has(sym)) tier2ByCandidate.set(sym, []);
+  }
+  const survivors = Array.from(survivorSet);
+
+  return {
+    survivors,
+    quotes,
+    trades,
+    tier2ByCandidate,
+    errors,
+    capitulation,
+    pullback,
+  };
 }
 
 // ---------- Pass 2 helpers ----------
@@ -536,6 +816,61 @@ function daysFromTodayUtc(dateIso: string): number | null {
   return Math.round((b - a) / (24 * 60 * 60 * 1000));
 }
 
+// Insider conviction (0-10): open-market purchase dollars + number of
+// distinct buyers + recency of the latest buy.
+export function scoreInsiderConviction(
+  transactions: InsiderTransaction[],
+): number {
+  const buys = transactions.filter((t) => t.transactionCode === "P");
+  if (buys.length === 0) return 0;
+  const dollars = buys.reduce((s, t) => s + t.dollarValue, 0);
+  const distinct = new Set(buys.map((t) => t.name)).size;
+  let newestDays: number | null = null;
+  for (const t of buys) {
+    const d = t.date ? daysFromTodayUtc(t.date) : null;
+    if (d === null) continue;
+    const age = -d; // past dates are negative days-ahead
+    if (newestDays === null || age < newestDays) newestDays = age;
+  }
+  const size =
+    dollars >= 1_000_000 ? 4 : dollars >= 250_000 ? 3 : dollars >= 100_000 ? 2 : 1;
+  const breadth = distinct >= 3 ? 3 : distinct === 2 ? 2 : 1;
+  const recency =
+    newestDays !== null && newestDays <= 7
+      ? 3
+      : newestDays !== null && newestDays <= 14
+        ? 2
+        : newestDays !== null && newestDays <= 30
+          ? 1
+          : 0;
+  return Math.min(10, size + breadth + recency);
+}
+
+// Options-flow aggressiveness (0-10): vol/OI ratio of the hottest call
+// strike + how far OTM the money is positioned + total-flow context.
+export function scoreOptionsFlow(
+  opts: OptionsAnalysis,
+  q: Pass1Quote,
+): number {
+  const ratio = opts.callVolumeOiRatio ?? 0;
+  const ratioPts =
+    ratio >= 3 ? 5 : ratio >= 2 ? 4 : ratio >= 1 ? 3 : ratio >= 0.5 ? 2 : 1;
+  const strike = opts.topOptionsStrike;
+  const skewPts =
+    strike !== null && strike > q.currentPrice * 1.05
+      ? 2
+      : strike !== null && strike > q.currentPrice
+        ? 1
+        : 0;
+  const volumeRatio = q.avgVolume10d > 0 ? q.todayVolume / q.avgVolume10d : 0;
+  const volPts = volumeRatio > 1.5 ? 1 : 0;
+  return Math.min(10, ratioPts + skewPts + volPts);
+}
+
+// Insider tab technical sanity gate: insider buying in a collapsing
+// stock is averaging-down, not a swing setup.
+const INSIDER_FREEFALL_VS_MA200 = -0.25;
+
 // ---------- Pass 2 ----------
 
 export async function pass2Enrich(
@@ -543,6 +878,10 @@ export async function pass2Enrich(
   pass1Data: Map<string, Pass1Quote>,
   trades: Map<string, ReturnType<typeof computeTradeLevels>>,
   tier2ByCandidate: Map<string, string[]>,
+  tabInfo: {
+    capitulation: Record<string, TabStats>;
+    pullback: Record<string, TabStats>;
+  } = { capitulation: {}, pullback: {} },
 ): Promise<SwingCandidate[]> {
   // Schwab is best-effort — if disconnected or after-hours flake, options
   // signal stays neutral and the candidate isn't dropped.
@@ -628,8 +967,35 @@ export async function pass2Enrich(
     }
     if (insider.signal === "bearish") redFlags.push("INSIDER_SELLING");
 
+    // Earnings inside 7 days excludes a stock from EVERY tab — swing
+    // entries must not run into binary events.
     if (redFlags.includes("EARNINGS_TOO_SOON")) return null;
-    if (tier1Signals.length === 0) return null;
+
+    // ---- Setup-tab bucketing ----
+    const setupTabs: SetupTab[] = [];
+    const tabScores: Partial<Record<SetupTab, number>> = {};
+    const capStats = tabInfo.capitulation[symbol] ?? null;
+    const pullStats = tabInfo.pullback[symbol] ?? null;
+    if (capStats) {
+      setupTabs.push("capitulation");
+      tabScores.capitulation = scoreCapitulation(capStats, q);
+    }
+    if (pullStats) {
+      setupTabs.push("pullback");
+      tabScores.pullback = scorePullback(pullStats, q);
+    }
+    if (
+      tier1Signals.includes("INSIDER_BUYING") &&
+      vsMA200 > INSIDER_FREEFALL_VS_MA200
+    ) {
+      setupTabs.push("insider");
+      tabScores.insider = scoreInsiderConviction(insider.transactions);
+    }
+    if (opts.unusualOptionsActivity) {
+      setupTabs.push("options_flow");
+      tabScores.options_flow = scoreOptionsFlow(opts, q);
+    }
+    if (setupTabs.length === 0) return null;
 
     // Score (out of 10). Catalyst points (+2/+1/0) are added in pass 3.
     //   +2 strong_bullish insider (P-code purchase >$100K)
@@ -649,6 +1015,11 @@ export async function pass2Enrich(
     if (q.shortPercentFloat !== null && q.shortPercentFloat > 0.15) setupScore += 1;
     if (vsMA50 >= -0.02 && vsMA50 <= 0.02) setupScore += 1;
     setupScore = Math.min(10, setupScore);
+    // Pure capitulation/pullback candidates have no tier-1 signals, so
+    // the legacy additive score would read ~0 — the overall score is
+    // the best of (legacy additive, best tab score).
+    const bestTabScore = Math.max(0, ...Object.values(tabScores));
+    setupScore = Math.min(10, Math.max(setupScore, bestTabScore));
 
     const tier2Signals = tier2ByCandidate.get(symbol) ?? [];
 
@@ -701,6 +1072,9 @@ export async function pass2Enrich(
       redFlags,
       signalCount: tier1Signals.length,
       setupScore,
+      setupTabs,
+      tabScores,
+      tabStats: capStats ?? pullStats,
     });
     return null;
   });
@@ -872,19 +1246,67 @@ function applyCatalystResponse(
   return out;
 }
 
+// Catalyst fields a prior run can carry forward so a re-screen doesn't
+// re-pay Perplexity for symbols it already researched recently.
+export type KnownCatalyst = Pick<
+  SwingCandidate,
+  | "catalystFound"
+  | "catalystType"
+  | "catalystDate"
+  | "catalystDescription"
+  | "catalystConfidence"
+  | "catalystInsiderAngle"
+  | "catalystRawResponse"
+>;
+
+// Hard ceiling on fresh Perplexity calls per run. With 4 tabs the
+// candidate set can be much larger than the old insider-dominated
+// list; 24 × ~3s / 3-concurrency ≈ 24s keeps the route under 60s.
+const MAX_FRESH_CATALYST_CALLS = 24;
+
 export async function pass3CatalystDiscovery(
   candidates: SwingCandidate[],
+  opts: { knownCatalysts?: Record<string, KnownCatalyst> } = {},
 ): Promise<SwingCandidate[]> {
   if (candidates.length === 0) return [];
-  // Process in fixed-size batches with a 500ms inter-batch gap so we don't
-  // burst the Perplexity rate limit. Concurrency 3 = 3 simultaneous calls;
-  // 5-15 candidates × ~3s = well under the 60s pass-2 ceiling.
-  const BATCH = 3;
+  const known = opts.knownCatalysts ?? {};
+
+  // Split: cached catalysts apply instantly; the rest get fresh
+  // Perplexity calls, highest setupScore first, capped.
   const out: SwingCandidate[] = new Array(candidates.length);
-  for (let i = 0; i < candidates.length; i += BATCH) {
-    const batch = candidates.slice(i, i + BATCH);
+  const freshIdx: number[] = [];
+  for (let i = 0; i < candidates.length; i += 1) {
+    const c = candidates[i];
+    const cached = known[c.symbol.toUpperCase()];
+    if (cached) {
+      out[i] = { ...c, ...cached };
+    } else {
+      freshIdx.push(i);
+    }
+  }
+  freshIdx.sort(
+    (a, b) => candidates[b].setupScore - candidates[a].setupScore,
+  );
+  const toFetch = freshIdx.slice(0, MAX_FRESH_CATALYST_CALLS);
+  for (const i of freshIdx.slice(MAX_FRESH_CATALYST_CALLS)) {
+    out[i] = candidates[i]; // beyond the cap: defaults stay "none"
+  }
+  if (freshIdx.length > MAX_FRESH_CATALYST_CALLS) {
+    console.log(
+      `[pass3] capping fresh catalyst calls at ${MAX_FRESH_CATALYST_CALLS} ` +
+        `(${freshIdx.length - MAX_FRESH_CATALYST_CALLS} lower-scored candidates skipped, ` +
+        `${candidates.length - freshIdx.length} served from prior run)`,
+    );
+  }
+
+  // Process in fixed-size batches with a 500ms inter-batch gap so we don't
+  // burst the Perplexity rate limit. Concurrency 3 = 3 simultaneous calls.
+  const BATCH = 3;
+  for (let i = 0; i < toFetch.length; i += BATCH) {
+    const batch = toFetch.slice(i, i + BATCH);
     const results = await Promise.all(
-      batch.map(async (c) => {
+      batch.map(async (idx) => {
+        const c = candidates[idx];
         try {
           const raw = await askPerplexityRaw(
             buildCatalystPrompt(c.symbol, c.companyName),
@@ -900,9 +1322,9 @@ export async function pass3CatalystDiscovery(
       }),
     );
     for (let j = 0; j < batch.length; j += 1) {
-      out[i + j] = results[j];
+      out[toFetch[i + j]] = results[j];
     }
-    if (i + BATCH < candidates.length) await sleep(500);
+    if (i + BATCH < toFetch.length) await sleep(500);
   }
 
   // Re-score with catalyst points: +2 high, +1 medium, +0 low/none.
@@ -942,7 +1364,10 @@ export async function runSwingScreener(
 ): Promise<ScreenerResult> {
   const started = Date.now();
   const p1 = await pass1Filter(universe);
-  const p2 = await pass2Enrich(p1.survivors, p1.quotes, p1.trades, p1.tier2ByCandidate);
+  const p2 = await pass2Enrich(p1.survivors, p1.quotes, p1.trades, p1.tier2ByCandidate, {
+    capitulation: p1.capitulation,
+    pullback: p1.pullback,
+  });
   const p3 = await pass3CatalystDiscovery(p2);
   // Re-sort post-pass-3 since catalyst points can shift the ranking.
   p3.sort((a, b) => b.setupScore - a.setupScore);
@@ -970,6 +1395,8 @@ export type Pass1Wire = {
   quotes: Record<string, Pass1Quote>;
   trades: Record<string, TradeLevels>;
   tier2ByCandidate: Record<string, string[]>;
+  capitulation: Record<string, TabStats>;
+  pullback: Record<string, TabStats>;
 };
 
 export function serializePass1(
@@ -996,6 +1423,8 @@ export function serializePass1(
     quotes,
     trades,
     tier2ByCandidate,
+    capitulation: result.capitulation,
+    pullback: result.pullback,
   };
 }
 

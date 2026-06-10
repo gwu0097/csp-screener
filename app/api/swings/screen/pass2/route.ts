@@ -32,6 +32,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     quotes,
     trades,
     tier2ByCandidate,
+    {
+      capitulation: body.capitulation ?? {},
+      pullback: body.pullback ?? {},
+    },
   );
   return NextResponse.json({
     candidates,

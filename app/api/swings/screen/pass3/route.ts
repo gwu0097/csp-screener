@@ -1,16 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
   pass3CatalystDiscovery,
+  type KnownCatalyst,
   type SwingCandidate,
 } from "@/lib/swing-screener";
 
 export const dynamic = "force-dynamic";
 // Pass 3 = Perplexity catalyst discovery in batches of 3 with a 500ms
-// inter-batch gap. Per-call timeout in lib/perplexity (45s) keeps the
-// total inside the 60s Hobby ceiling even with 10+ tier-1 survivors.
+// inter-batch gap, capped at 24 fresh calls per run (highest-scored
+// first). knownCatalysts lets the client carry forward catalysts from
+// a recent prior run so re-screens don't re-pay Perplexity.
 export const maxDuration = 60;
 
-type Body = { candidates?: SwingCandidate[] };
+type Body = {
+  candidates?: SwingCandidate[];
+  knownCatalysts?: Record<string, KnownCatalyst>;
+};
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   const started = Date.now();
@@ -26,7 +31,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       { status: 400 },
     );
   }
-  const candidates = await pass3CatalystDiscovery(body.candidates);
+  const candidates = await pass3CatalystDiscovery(body.candidates, {
+    knownCatalysts:
+      body.knownCatalysts && typeof body.knownCatalysts === "object"
+        ? body.knownCatalysts
+        : undefined,
+  });
   // Re-sort here because catalyst bonus shifts ranking.
   candidates.sort((a, b) => b.setupScore - a.setupScore);
   return NextResponse.json({
