@@ -44,7 +44,7 @@ const SIMILAR_EM_TOLERANCE = 0.02; // ±2pp from today's EM
 
 // Em-dash on missing data — communicates "not available" rather than
 // "?" which previously looked like a parse failure. Per-cell tooltips
-// in the table explain the specific reason (no Polygon EM, etc.).
+// in the table explain the specific reason (no implied-move data, etc.).
 function fmtPct(n: number | null, digits = 1): string {
   if (n === null || !Number.isFinite(n)) return "—";
   return `${(Math.abs(n) * 100).toFixed(digits)}%`;
@@ -94,16 +94,13 @@ export function CrushHistoryTable({
 }) {
   const [refreshed, setRefreshed] = useState<CrushHistoryEvent[] | null>(null);
   const [fetchStatus, setFetchStatus] = useState<"idle" | "fetching" | "done" | "error">("idle");
-  // Two-count tracking: actuals come from the seed step (Finnhub /
-  // Yahoo backfill), implied moves come from the Polygon backfill.
-  // The old single "Populated N quarters" message was misleading
-  // when seed succeeded but Polygon found no contracts — the user
-  // saw "✓ Populated 4" with empty Ratio/Grade columns and assumed
-  // something was broken.
+  // Two-count tracking: actual moves come from the seed step (Finnhub /
+  // Yahoo backfill). Implied moves are live-only (stamped by screener
+  // runs from the Schwab chain) — the historical backfill source was
+  // discontinued, so coverage is surfaced rather than fetched.
   const [actualPopulated, setActualPopulated] = useState(0);
-  const [emPopulated, setEmPopulated] = useState(0);
+  const [eventsWithEm, setEventsWithEm] = useState(0);
   const [eventsWithActual, setEventsWithActual] = useState(0);
-  const [fetchProgress, setFetchProgress] = useState<string | null>(null);
   const [fetchError, setFetchError] = useState<string | null>(null);
 
   // On mount: read the latest events for this symbol from the DB so
@@ -142,112 +139,44 @@ export function CrushHistoryTable({
     setFetchStatus("fetching");
     setFetchError(null);
     setActualPopulated(0);
-    setEmPopulated(0);
+    setEventsWithEm(0);
     setEventsWithActual(0);
-    setFetchProgress(null);
-    let totalActual = 0;
-    let totalEm = 0;
-    let lastEventsWithActual = 0;
-    let totalSkipMessages: string[] = [];
-    let lastRemaining = Number.POSITIVE_INFINITY;
-    // Loop until backend reports remainingMissing===0. Bail out if a
-    // call makes no progress (avoids infinite loop on persistent skips
-    // like "outside 24-month window").
-    for (let i = 0; i < 12; i++) {
-      try {
-        const res = await fetch("/api/screener/fetch-em-history", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ symbol: todaySymbol }),
-          cache: "no-store",
-        });
-        const json = (await res.json()) as
-          | {
-              populated: number;
-              seedAdded?: number;
-              emPopulated?: number;
-              eventsWithActual?: number;
-              eventsWithEm?: number;
-              skipped: number;
-              remainingMissing: number;
-              processed: number;
-              totalMissingAtStart: number;
-              events: CrushHistoryEvent[];
-              messages: string[];
-            }
-          | { error: string };
-        console.log("[fetch-em] response:", { status: res.status, json });
-        if (!res.ok || !("events" in json)) {
-          const msg = "error" in json ? json.error : `HTTP ${res.status}`;
-          console.error("[fetch-em] error:", msg);
-          setFetchStatus("error");
-          setFetchError(`Failed to fetch EM data — ${msg}`);
-          return;
-        }
-        const seedAddedThisCall = json.seedAdded ?? 0;
-        const emAddedThisCall = json.emPopulated ?? json.populated ?? 0;
-        totalActual += seedAddedThisCall;
-        totalEm += emAddedThisCall;
-        lastEventsWithActual = json.eventsWithActual ?? lastEventsWithActual;
-        totalSkipMessages = totalSkipMessages.concat(json.messages ?? []);
-        setActualPopulated(totalActual);
-        setEmPopulated(totalEm);
-        setEventsWithActual(lastEventsWithActual);
-        setRefreshed(json.events);
-        setFetchProgress(
-          json.remainingMissing > 0
-            ? `Populated ${totalActual + totalEm} · ${json.remainingMissing} EM remaining…`
-            : null,
-        );
-        if (json.remainingMissing === 0) {
-          // True success — only branch where the button is replaced.
-          if (totalActual + totalEm === 0) {
-            setFetchStatus("error");
-            setFetchError(
-              "Failed to fetch EM data — server reported nothing to populate. Try again.",
-            );
-            return;
+    try {
+      const res = await fetch("/api/screener/fetch-em-history", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ symbol: todaySymbol }),
+        cache: "no-store",
+      });
+      const json = (await res.json()) as
+        | {
+            seedAdded: number;
+            eventsWithActual: number;
+            eventsWithEm: number;
+            events: CrushHistoryEvent[];
+            messages: string[];
           }
-          setFetchStatus("done");
-          return;
-        }
-        if (json.remainingMissing >= lastRemaining) {
-          // No progress — every remaining row is being skipped. Surface
-          // the skip messages so the user knows why.
-          console.warn(
-            "[fetch-em] no progress — surfaceable skip messages:",
-            totalSkipMessages,
-          );
-          if (totalActual + totalEm === 0) {
-            setFetchStatus("error");
-            setFetchError(
-              `Failed to fetch EM data — try again. ${
-                totalSkipMessages.slice(-2).join(" · ") ||
-                "All rows skipped (check Vercel logs for Polygon errors)."
-              }`,
-            );
-            return;
-          }
-          // Partial success — actuals seeded, EMs couldn't be populated.
-          setFetchStatus("done");
-          return;
-        }
-        lastRemaining = json.remainingMissing;
-      } catch (e) {
-        console.error("[fetch-em] error:", e);
+        | { error: string };
+      console.log("[fetch-em] response:", { status: res.status, json });
+      if (!res.ok || !("events" in json)) {
+        const msg = "error" in json ? json.error : `HTTP ${res.status}`;
+        console.error("[fetch-em] error:", msg);
         setFetchStatus("error");
-        setFetchError(
-          `Failed to fetch EM data — ${e instanceof Error ? e.message : "network error"}. Try again.`,
-        );
+        setFetchError(`Failed to fetch history — ${msg}`);
         return;
       }
-    }
-    if (totalActual + totalEm === 0) {
+      setActualPopulated(json.seedAdded);
+      setEventsWithActual(json.eventsWithActual);
+      setEventsWithEm(json.eventsWithEm);
+      setRefreshed(json.events);
+      setFetchStatus("done");
+    } catch (e) {
+      console.error("[fetch-em] error:", e);
       setFetchStatus("error");
-      setFetchError("Failed to fetch EM data — too many iterations without progress. Try again.");
-      return;
+      setFetchError(
+        `Failed to fetch history — ${e instanceof Error ? e.message : "network error"}. Try again.`,
+      );
     }
-    setFetchStatus("done");
   }
 
   const similar: CrushHistoryEvent[] = [];
@@ -288,7 +217,7 @@ export function CrushHistoryTable({
         <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
           Earnings history
         </div>
-        {!(fetchStatus === "done" && (actualPopulated > 0 || emPopulated > 0)) && (
+        {fetchStatus !== "done" && (
           <button
             type="button"
             onClick={handleFetchEmHistory}
@@ -310,30 +239,27 @@ export function CrushHistoryTable({
             )}
           </button>
         )}
-        {fetchStatus === "done" && (actualPopulated > 0 || emPopulated > 0) && (
+        {fetchStatus === "done" && (
           <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] font-semibold uppercase tracking-wide">
-            {actualPopulated > 0 && (
-              <span className="text-emerald-300">
-                ✓ {actualPopulated} actual {actualPopulated === 1 ? "move" : "moves"} populated
-              </span>
-            )}
+            <span className="text-emerald-300">
+              {actualPopulated > 0
+                ? `✓ ${actualPopulated} actual ${actualPopulated === 1 ? "move" : "moves"} populated`
+                : "✓ history up to date"}
+            </span>
             {eventsWithActual > 0 && (
-              emPopulated < eventsWithActual ? (
+              eventsWithEm < eventsWithActual ? (
                 <span className="text-amber-300">
-                  · ⚠️ {emPopulated}/{eventsWithActual} implied moves (no Polygon data)
+                  · ⚠️ {eventsWithEm}/{eventsWithActual} implied moves (historical backfill discontinued)
                 </span>
               ) : (
                 <span className="text-emerald-300">
-                  · ✓ {emPopulated}/{eventsWithActual} implied moves
+                  · ✓ {eventsWithEm}/{eventsWithActual} implied moves
                 </span>
               )
             )}
           </div>
         )}
       </div>
-      {fetchStatus === "fetching" && fetchProgress && (
-        <div className="mb-2 text-[10px] text-muted-foreground">{fetchProgress}</div>
-      )}
       {fetchStatus === "error" && fetchError && (
         <div className="mb-2 flex items-start gap-1 rounded border border-rose-500/40 bg-rose-500/10 p-1.5 text-[10px] text-rose-200">
           <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
@@ -385,7 +311,7 @@ export function CrushHistoryTable({
                             <span className="cursor-help text-muted-foreground">—</span>
                           </TooltipTrigger>
                           <TooltipContent className="max-w-xs text-sm">
-                            Implied move not available for this quarter — Polygon had no options data.
+                            Implied move not available for this quarter — no historical options-data source (backfill discontinued).
                           </TooltipContent>
                         </Tooltip>
                       </TooltipProvider>

@@ -7,8 +7,8 @@ export const revalidate = 0;
 // CrushHistoryTable on mount so a remount/re-expand always shows the
 // latest DB state — instead of falling back to the stageThree.details.
 // crushHistory snapshot baked into the screener_results cache, which
-// is stale the moment the user clicks Fetch EM History and the seed /
-// Polygon populate writes new rows.
+// is stale the moment the user clicks Fetch EM History and the seed
+// step writes new rows.
 export const maxDuration = 10;
 
 export async function GET(req: NextRequest) {
