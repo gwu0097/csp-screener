@@ -976,9 +976,27 @@ export async function reingestHistoricalDates(
     return report;
   }
 
+  // Yahoo's earnings module only ships ~4 recent quarters, so a
+  // quarter-end row older than that window can never be matched to an
+  // announcement date — retrying it costs a Yahoo calendar call per
+  // symbol on EVERY maintenance sweep, forever. Treat old rows as
+  // permanently unmatched and only fetch the calendar when a recent
+  // row might actually match.
+  const reingestCutoff = addDaysIso(todayIso(), -REINGEST_CALENDAR_WINDOW_DAYS);
+  const attemptable: typeof quarterEndRows = [];
+  for (const r of quarterEndRows) {
+    if (r.earnings_date >= reingestCutoff) attemptable.push(r);
+    else
+      report.unmatched_rows.push({
+        oldDate: r.earnings_date,
+        reason: "calendar_window_exceeded",
+      });
+  }
+  if (attemptable.length === 0) return report;
+
   const calendar = await fetchFinnhubEarningsCalendar(sym);
   if (calendar.length === 0) {
-    for (const r of quarterEndRows) {
+    for (const r of attemptable) {
       report.unmatched_rows.push({
         oldDate: r.earnings_date,
         reason: "calendar_empty",
@@ -990,7 +1008,7 @@ export async function reingestHistoricalDates(
   const sb = createServerClient();
   const existingByDate = new Map(allRows.map((r) => [r.earnings_date, r]));
 
-  for (const row of quarterEndRows) {
+  for (const row of attemptable) {
     const match = matchQuarterToAnnouncement(row.earnings_date, calendar);
     if (!match) {
       report.unmatched_rows.push({
@@ -1771,32 +1789,57 @@ export type MaintenanceReport = {
   errors: Array<{ symbol: string; earnings_date: string | null; stage: string; reason: string }>;
 };
 
-// Builds the set of symbols relevant to encyclopedia maintenance:
-//   - open positions
-//   - today's tracked_tickers
-//   - every symbol already in the encyclopedia
-async function buildRelevantSymbols(): Promise<Set<string>> {
+// Builds the two symbol sets maintenance works from:
+//   active   — open positions + today's tracked_tickers. The per-symbol
+//              history refresh / re-key (step 1) only runs for these.
+//              Running it across the whole encyclopedia table made the
+//              sweep scale with table size — at 550 symbols that was a
+//              20+ minute crawl of sequential Finnhub/Yahoo calls.
+//   relevant — active + every encyclopedia symbol. Used only as a
+//              FILTER for the event-driven steps (T0/T1/expiry/
+//              Perplexity backfill), which are bounded by actual recent
+//              events rather than table size.
+async function buildMaintenanceSymbolSets(): Promise<{
+  active: Set<string>;
+  relevant: Set<string>;
+}> {
   const sb = createServerClient();
-  const result = new Set<string>();
+  const active = new Set<string>();
+  const relevant = new Set<string>();
   const [opens, tracked, encs] = await Promise.all([
     sb.from("positions").select("symbol").eq("status", "open"),
     sb.from("tracked_tickers").select("symbol").eq("screened_date", todayIso()),
     sb.from("stock_encyclopedia").select("symbol"),
   ]);
   for (const r of (opens.data ?? []) as Array<{ symbol: string }>) {
-    result.add(r.symbol.toUpperCase());
+    active.add(r.symbol.toUpperCase());
   }
   for (const r of (tracked.data ?? []) as Array<{ symbol: string }>) {
-    result.add(r.symbol.toUpperCase());
+    active.add(r.symbol.toUpperCase());
   }
+  for (const s of Array.from(active)) relevant.add(s);
   for (const r of (encs.data ?? []) as Array<{ symbol: string }>) {
-    result.add(r.symbol.toUpperCase());
+    relevant.add(r.symbol.toUpperCase());
   }
-  return result;
+  return { active, relevant };
 }
 
 const PERPLEXITY_GAP_MS = 1000;
 const ENCYCLOPEDIA_STALENESS_DAYS = 7;
+// Quarter-end rows older than this can never be re-keyed (Yahoo only
+// ships ~4 recent quarters) — see reingestHistoricalDates.
+const REINGEST_CALENDAR_WINDOW_DAYS = 450;
+// Perplexity backfill bounds: only rows recent enough for the news
+// context to still matter, hard-capped per sweep. The unbounded version
+// once walked a ~2,000-row backlog = hours of sequential API calls in
+// what is supposed to be a quick background tidy-up.
+const PERPLEXITY_BACKFILL_MAX_AGE_DAYS = 120;
+const PERPLEXITY_BACKFILL_CAP = 8;
+// Hard wall-clock budget for one sweep. Maintenance is best-effort
+// upkeep — every Run Analysis fires another sweep, so anything that
+// doesn't fit simply defers. Also keeps the post-actions route inside
+// Vercel's 60s Hobby ceiling.
+const MAINTENANCE_BUDGET_MS = 45_000;
 
 export async function runEncyclopediaMaintenance(): Promise<MaintenanceReport> {
   const report: MaintenanceReport = {
@@ -1809,60 +1852,72 @@ export async function runEncyclopediaMaintenance(): Promise<MaintenanceReport> {
     errors: [],
   };
 
-  const relevant = await buildRelevantSymbols();
-  report.symbolsProcessed = relevant.size;
+  const { active, relevant } = await buildMaintenanceSymbolSets();
+  report.symbolsProcessed = active.size;
   if (relevant.size === 0) return report;
 
   const sb = createServerClient();
   const todayStr = todayIso();
+  const startedAt = Date.now();
+  const overBudget = (stage: string): boolean => {
+    if (Date.now() - startedAt < MAINTENANCE_BUDGET_MS) return false;
+    console.warn(
+      `[encyclopedia] maintenance budget exhausted at ${stage} after ${Date.now() - startedAt}ms — remaining work defers to the next sweep`,
+    );
+    return true;
+  };
 
-  // 1. Refresh Phase-1 ingestion for any stale symbols so Perplexity has
-  // EPS/revenue context to enrich the prompt. Stale = never pulled or
-  // >7d since last pull.
-  const encRes = await sb
-    .from("stock_encyclopedia")
-    .select("symbol,last_historical_pull_date")
-    .in("symbol", Array.from(relevant));
-  const encMap = new Map(
-    ((encRes.data ?? []) as Array<{ symbol: string; last_historical_pull_date: string | null }>).map(
-      (r) => [r.symbol, r.last_historical_pull_date],
-    ),
-  );
-  for (const sym of Array.from(relevant)) {
-    const lastPull = encMap.get(sym) ?? null;
-    const stale =
-      !lastPull ||
-      (new Date(todayStr + "T00:00:00Z").getTime() -
-        new Date(lastPull + "T00:00:00Z").getTime()) /
-        86400000 >=
-        ENCYCLOPEDIA_STALENESS_DAYS;
-    if (stale) {
-      try {
-        await updateEncyclopedia(sym);
-      } catch (e) {
-        report.errors.push({
-          symbol: sym,
-          earnings_date: null,
-          stage: "updateEncyclopedia",
-          reason: e instanceof Error ? e.message : String(e),
-        });
-      }
-    } else {
-      // Non-stale symbols still need a Phase 2C sweep to clean up any
-      // legacy quarter-end-keyed rows. reingestHistoricalDates bails
-      // early on clean symbols (one Yahoo earnings-module call), so
-      // running it always here is cheap. Without this, symbols that
-      // were ingested in the last 7 days never get their stale rows
-      // re-keyed by maintenance — exactly the SPOT gap.
-      try {
-        await reingestHistoricalDates(sym);
-      } catch (e) {
-        report.errors.push({
-          symbol: sym,
-          earnings_date: null,
-          stage: "reingestHistoricalDates",
-          reason: e instanceof Error ? e.message : String(e),
-        });
+  // 1. Refresh Phase-1 ingestion for stale ACTIVE symbols (open
+  // positions + today's tracked) so Perplexity has EPS/revenue context
+  // to enrich the prompt. Stale = never pulled or >7d since last pull.
+  // Deliberately NOT the whole encyclopedia table — broad refresh is a
+  // per-symbol concern (/api/encyclopedia/update), not something every
+  // analysis run should crawl 550 symbols for.
+  if (active.size > 0) {
+    const encRes = await sb
+      .from("stock_encyclopedia")
+      .select("symbol,last_historical_pull_date")
+      .in("symbol", Array.from(active));
+    const encMap = new Map(
+      ((encRes.data ?? []) as Array<{ symbol: string; last_historical_pull_date: string | null }>).map(
+        (r) => [r.symbol, r.last_historical_pull_date],
+      ),
+    );
+    for (const sym of Array.from(active)) {
+      if (overBudget("phase1-refresh")) break;
+      const lastPull = encMap.get(sym) ?? null;
+      const stale =
+        !lastPull ||
+        (new Date(todayStr + "T00:00:00Z").getTime() -
+          new Date(lastPull + "T00:00:00Z").getTime()) /
+          86400000 >=
+          ENCYCLOPEDIA_STALENESS_DAYS;
+      if (stale) {
+        try {
+          await updateEncyclopedia(sym);
+        } catch (e) {
+          report.errors.push({
+            symbol: sym,
+            earnings_date: null,
+            stage: "updateEncyclopedia",
+            reason: e instanceof Error ? e.message : String(e),
+          });
+        }
+      } else {
+        // Non-stale symbols still need a Phase 2C sweep to clean up any
+        // legacy quarter-end-keyed rows. reingestHistoricalDates bails
+        // early on clean symbols and on rows too old for Yahoo's
+        // calendar window, so running it here is cheap.
+        try {
+          await reingestHistoricalDates(sym);
+        } catch (e) {
+          report.errors.push({
+            symbol: sym,
+            earnings_date: null,
+            stage: "reingestHistoricalDates",
+            reason: e instanceof Error ? e.message : String(e),
+          });
+        }
       }
     }
   }
@@ -1883,6 +1938,7 @@ export async function runEncyclopediaMaintenance(): Promise<MaintenanceReport> {
   }
   for (const a of todayAnnouncements) {
     if (!relevant.has(a.symbol)) continue;
+    if (overBudget("t0-capture")) break;
     try {
       const r = await captureEarningsT0(a.symbol, a.date);
       if (r.captured) report.t0Captured.push({ symbol: a.symbol, earnings_date: a.date });
@@ -1928,6 +1984,7 @@ export async function runEncyclopediaMaintenance(): Promise<MaintenanceReport> {
     implied_move_pct: number | null;
   }>).filter((r) => r.implied_move_pct !== null);
   for (const c of t1Candidates) {
+    if (overBudget("t1-capture")) break;
     try {
       const r = await captureEarningsT1(c.symbol, c.earnings_date);
       if (r.captured) report.t1Captured.push(c);
@@ -1954,14 +2011,18 @@ export async function runEncyclopediaMaintenance(): Promise<MaintenanceReport> {
     }
   }
 
-  // 4. Price-at-expiry — every row missing it. ensurePriceAtExpiry
-  // internally skips not-yet-expired + quarter-end legacy rows.
+  // 4. Price-at-expiry — every row missing it. Quarter-end legacy rows
+  // are filtered here in memory (Friday-after a fiscal quarter end is
+  // meaningless) — ensurePriceAtExpiry would skip them anyway, but only
+  // after a per-row DB read and a warn line repeated every sweep.
   const expiryCandidates = await sb
     .from("earnings_history")
     .select("symbol,earnings_date")
     .in("symbol", Array.from(relevant))
     .is("price_at_expiry", null);
   for (const c of (expiryCandidates.data ?? []) as Array<{ symbol: string; earnings_date: string }>) {
+    if (isQuarterEndDate(c.earnings_date)) continue;
+    if (overBudget("price-at-expiry")) break;
     try {
       const r = await ensurePriceAtExpiry(c.symbol, c.earnings_date);
       if (r.captured) report.expiryBackfilled.push(c);
@@ -1991,17 +2052,30 @@ export async function runEncyclopediaMaintenance(): Promise<MaintenanceReport> {
   // before reaching Perplexity (already captured, row gone, no key)
   // must not pay it — with a large backlog of skipped rows the
   // unconditional sleep alone added minutes to the sweep.
+  //
+  // Bounded: newest rows first (their news context is what the grading
+  // UI actually reads), only rows recent enough to still matter, and a
+  // hard per-sweep cap. Quarter-end legacy keys are excluded — they're
+  // pending re-key and a call against them is wasted on a row that may
+  // merge away.
   const PPLX_NO_CALL_REASONS = new Set([
     "row_not_found",
     "already_captured",
     "no_api_key",
   ]);
-  const pplxCandidates = await sb
+  const pplxRes = await sb
     .from("earnings_history")
     .select("symbol,earnings_date")
     .in("symbol", Array.from(relevant))
-    .is("perplexity_pulled_at", null);
-  for (const c of (pplxCandidates.data ?? []) as Array<{ symbol: string; earnings_date: string }>) {
+    .is("perplexity_pulled_at", null)
+    .gte("earnings_date", addDaysIso(todayStr, -PERPLEXITY_BACKFILL_MAX_AGE_DAYS))
+    .order("earnings_date", { ascending: false })
+    .limit(PERPLEXITY_BACKFILL_CAP * 3);
+  const pplxCandidates = ((pplxRes.data ?? []) as Array<{ symbol: string; earnings_date: string }>)
+    .filter((c) => !isQuarterEndDate(c.earnings_date))
+    .slice(0, PERPLEXITY_BACKFILL_CAP);
+  for (const c of pplxCandidates) {
+    if (overBudget("perplexity-backfill")) break;
     let apiCallAttempted = true;
     try {
       const r = await ensurePerplexityData(c.symbol, c.earnings_date);
@@ -2050,6 +2124,7 @@ export async function runEncyclopediaMaintenance(): Promise<MaintenanceReport> {
       realized_pnl: number | null;
     }>;
     for (const p of openPositions) {
+      if (overBudget("post-earnings-rec")) break;
       try {
         const rec = await analyzePositionPostEarnings(p);
         if (rec) {
@@ -2100,6 +2175,13 @@ export async function runEncyclopediaMaintenance(): Promise<MaintenanceReport> {
       });
     }
   }
+
+  console.log(
+    `[encyclopedia] maintenance done in ${Date.now() - startedAt}ms · active=${active.size} ` +
+      `t0=${report.t0Captured.length} t1=${report.t1Captured.length} ` +
+      `expiry=${report.expiryBackfilled.length} perplexity=${report.perplexityBackfilled.length} ` +
+      `recs=${report.recommendationsGenerated.length} errors=${report.errors.length}`,
+  );
 
   return report;
 }
