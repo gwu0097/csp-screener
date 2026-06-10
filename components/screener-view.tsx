@@ -38,6 +38,8 @@ import type { PerplexityNewsResult } from "@/lib/perplexity";
 import type { MarketContext } from "@/lib/market";
 import { CrushHistoryTable } from "@/components/crush-history-table";
 import { OptionsFlowSection } from "@/components/options-flow-section";
+import { PriceChart } from "@/components/price-chart";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { ErrorBanner } from "@/components/error-banner";
 import { SchwabTokenBanner } from "@/components/schwab-token-banner";
 import { ACTIVE_SCREENER } from "@/lib/screener-config";
@@ -2775,7 +2777,25 @@ function ExpandedDetail({
           </button>
         </div>
       )}
-      <div className="grid gap-3 md:grid-cols-3">
+      {/* Uncontrolled tabs: the detail row unmounts on collapse, so the
+          tab resets to Overview on re-expand for free. forceMount keeps
+          all three panes mounted (hidden via CSS) so tab switches don't
+          refetch EM history or drop in-progress state — same lifecycle
+          as the old stacked layout. */}
+      <Tabs defaultValue="overview">
+        <TabsList>
+          <TabsTrigger value="overview">📋 Overview</TabsTrigger>
+          <TabsTrigger value="flow">🌊 Flow</TabsTrigger>
+          <TabsTrigger value="history">📅 History</TabsTrigger>
+        </TabsList>
+
+        <TabsContent
+          value="overview"
+          forceMount
+          className="space-y-3 data-[state=inactive]:hidden"
+        >
+          <PriceChart symbol={r.symbol} />
+          <div className="grid gap-3 md:grid-cols-3">
         <LayerCard
           title="LAYER 1 — INDUSTRY STANDARD"
           grade={tl.industryGrade}
@@ -2929,64 +2949,85 @@ function ExpandedDetail({
             {tl.regimeFactors.newsSummary}
           </div>
         </LayerCard>
-      </div>
+          </div>
 
-      <OptionsFlowSection flow={r.stageThree?.details?.optionsFlow ?? null} />
+          <div className="rounded-md border border-border bg-background/40 p-3">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-muted-foreground">FINAL GRADE:</span>
+              <GradeBadge
+                grade={tl.finalGrade}
+                size="md"
+                tooltip={
+                  <div className="space-y-1">
+                    <div className="font-semibold">Rule-based grade</div>
+                    <div>A: crush A/B · POP ≥ 90% · opp ≠ F · no overhang · VIX &lt; 25</div>
+                    <div>B: POP ≥ 83% and (crush A/B or POP ≥ 95%), no overhang</div>
+                    <div>C: POP ≥ 75% and penalty &gt; −15</div>
+                    <div className="pt-1 text-muted-foreground">
+                      Overrides: overhang → F · VIX &gt; 30 drops one level · personal wr &gt;80%+roc &gt;0.4% boosts · wr &lt;50% drops
+                    </div>
+                  </div>
+                }
+              />
+            </div>
+            <div className="mt-3 space-y-2 text-sm leading-relaxed text-muted-foreground">
+              {tl.recommendationReason.split("\n\n").map((para, i) => {
+                const sep = para.indexOf(": ");
+                if (sep === -1) return <div key={i}>{para}</div>;
+                return (
+                  <div key={i}>
+                    <span className="font-semibold text-foreground">
+                      {para.slice(0, sep + 1)}
+                    </span>{" "}
+                    <span>{para.slice(sep + 2)}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
 
-      <CrushHistoryTable
-        events={r.stageThree?.details?.crushHistory}
-        todayEmPct={r.stageThree?.details?.expectedMovePct ?? null}
-        todaySymbol={r.symbol}
-        todayEarningsDate={r.earningsDate}
-      />
-
-      <CustomStrikeAnalyzer
-        suggestedStrike={tl.industryFactors.breakevenPrice + (r.stageFour?.premium ?? 0)}
-        currentPrice={r.price}
-        availableStrikes={r.stageFour?.availableStrikes}
-        crushGrade={tl.industryFactors.crushGrade}
-        opportunityGrade={tl.industryFactors.opportunityGrade}
-        hasOverhang={tl.regimeFactors.hasActiveOverhang}
-        vix={tl.regimeFactors.vix}
-        penalty={tl.regimeFactors.gradePenalty}
-        personalModifier={personalModifier}
-        currentFinalGrade={tl.finalGrade}
-      />
-
-      <div className="rounded-md border border-border bg-background/40 p-3">
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-medium text-muted-foreground">FINAL GRADE:</span>
-          <GradeBadge
-            grade={tl.finalGrade}
-            size="md"
-            tooltip={
-              <div className="space-y-1">
-                <div className="font-semibold">Rule-based grade</div>
-                <div>A: crush A/B · POP ≥ 90% · opp ≠ F · no overhang · VIX &lt; 25</div>
-                <div>B: POP ≥ 83% and (crush A/B or POP ≥ 95%), no overhang</div>
-                <div>C: POP ≥ 75% and penalty &gt; −15</div>
-                <div className="pt-1 text-muted-foreground">
-                  Overrides: overhang → F · VIX &gt; 30 drops one level · personal wr &gt;80%+roc &gt;0.4% boosts · wr &lt;50% drops
-                </div>
-              </div>
-            }
+          <CustomStrikeAnalyzer
+            suggestedStrike={tl.industryFactors.breakevenPrice + (r.stageFour?.premium ?? 0)}
+            currentPrice={r.price}
+            availableStrikes={r.stageFour?.availableStrikes}
+            crushGrade={tl.industryFactors.crushGrade}
+            opportunityGrade={tl.industryFactors.opportunityGrade}
+            hasOverhang={tl.regimeFactors.hasActiveOverhang}
+            vix={tl.regimeFactors.vix}
+            penalty={tl.regimeFactors.gradePenalty}
+            personalModifier={personalModifier}
+            currentFinalGrade={tl.finalGrade}
           />
-        </div>
-        <div className="mt-3 space-y-2 text-sm leading-relaxed text-muted-foreground">
-          {tl.recommendationReason.split("\n\n").map((para, i) => {
-            const sep = para.indexOf(": ");
-            if (sep === -1) return <div key={i}>{para}</div>;
-            return (
-              <div key={i}>
-                <span className="font-semibold text-foreground">
-                  {para.slice(0, sep + 1)}
-                </span>{" "}
-                <span>{para.slice(sep + 2)}</span>
-              </div>
-            );
-          })}
-        </div>
-      </div>
+        </TabsContent>
+
+        <TabsContent
+          value="flow"
+          forceMount
+          className="space-y-3 data-[state=inactive]:hidden"
+        >
+          {r.stageThree?.details?.optionsFlow ? (
+            <OptionsFlowSection flow={r.stageThree.details.optionsFlow} />
+          ) : (
+            <div className="rounded-md border border-border bg-background/40 p-3 text-sm text-muted-foreground">
+              No options flow data — the option chain fetch didn&apos;t return
+              flow for {r.symbol}. Re-run analysis to retry.
+            </div>
+          )}
+        </TabsContent>
+
+        <TabsContent
+          value="history"
+          forceMount
+          className="data-[state=inactive]:hidden"
+        >
+          <CrushHistoryTable
+            events={r.stageThree?.details?.crushHistory}
+            todayEmPct={r.stageThree?.details?.expectedMovePct ?? null}
+            todaySymbol={r.symbol}
+            todayEarningsDate={r.earningsDate}
+          />
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }
