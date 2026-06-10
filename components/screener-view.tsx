@@ -458,10 +458,13 @@ export function ScreenerView({ connected }: Props) {
   // Two-stream Pass 3 state. After Pass 2 lands, the client kicks
   // off an independent News stream (Perplexity, /api/screener/
   // analyze/pass3a) and a Grade stream (personal history + three-
-  // layer grade + post-actions, /api/screener/analyze/pass3b). Each
-  // stream batches the candidate list, halves its batch size on
-  // timeout, and drains its own pending-key set so the resume
-  // buttons can replay just the leftovers.
+  // layer grade + tracked upserts, /api/screener/analyze/pass3b).
+  // The slow post-actions (snapshots + encyclopedia maintenance) go
+  // to /api/screener/analyze/post-actions, fired without awaiting
+  // after the final grade batch. Each stream batches the candidate
+  // list, halves its batch size on timeout, and drains its own
+  // pending-key set so the resume buttons can replay just the
+  // leftovers.
   //
   // A stock's final grade lights up only after BOTH streams have
   // returned data for that stock — pass3b uses pass3a's news as
@@ -1208,6 +1211,10 @@ export function ScreenerView({ connected }: Props) {
       snapshots: number;
       encyclopedia: number;
     };
+    // Set when the final grade batch kicked off the background
+    // post-actions request — gates the "running in background…" line
+    // in the completion message (a news-only resume never fires it).
+    postActionsFired: boolean;
   };
 
   // Persist after every batch from either stream. graded=true only
@@ -1363,9 +1370,9 @@ export function ScreenerView({ connected }: Props) {
         reduced,
       });
 
-      // Fire-and-forget post-actions only on the FINAL grade batch
-      // (when this batch will exhaust the pending set). Per-batch
-      // post-actions would re-write tracked / snapshots needlessly.
+      // The FINAL grade batch (the one that exhausts the pending set)
+      // additionally fires the background post-actions request after it
+      // lands — see firePostActions below.
       const willBeFinal =
         cursor + slice.length >= targets.length && ctx.pendingNews.size === 0;
       finalBatchToken.key = willBeFinal ? "final" : "intermediate";
@@ -1386,7 +1393,6 @@ export function ScreenerView({ connected }: Props) {
             ),
             vix: ctx.vix,
             trackedSymbols: Array.from(tracked),
-            runPostActions: willBeFinal,
           }),
           cache: "no-store",
         });
@@ -1395,8 +1401,6 @@ export function ScreenerView({ connected }: Props) {
           results: ScreenerResult[];
           scoredCount?: number;
           trackedUpserted?: number;
-          snapshotsWritten?: number;
-          encyclopediaUpdates?: number;
         };
         const byKey = new Map(
           json.results.map((rr) => [`${rr.symbol}|${rr.earningsDate}`, rr]),
@@ -1413,11 +1417,13 @@ export function ScreenerView({ connected }: Props) {
         setGroupMode(null);
         ctx.summary.scored += json.scoredCount ?? json.results.length;
         ctx.summary.tracked += json.trackedUpserted ?? 0;
-        ctx.summary.snapshots += json.snapshotsWritten ?? 0;
-        ctx.summary.encyclopedia += json.encyclopediaUpdates ?? 0;
         cursor += slice.length;
         i += 1;
         persistAfterBatch(ctx);
+        if (willBeFinal) {
+          ctx.postActionsFired = true;
+          firePostActions(ctx);
+        }
       } catch (e) {
         if (batchSize > 1) {
           batchSize = reduceAdaptiveBatchSize("edgar");
@@ -1542,7 +1548,55 @@ export function ScreenerView({ connected }: Props) {
       pricesForPersist: prices,
       vix: analysisVix,
       summary: { scored: 0, tracked: 0, snapshots: 0, encyclopedia: 0 },
+      postActionsFired: false,
     };
+  }
+
+  // Line shown while the background post-actions request is in flight.
+  // firePostActions swaps it for real counts when the response lands.
+  const POST_ACTIONS_PENDING_LINE =
+    "📸 snapshots + 📚 encyclopedia maintenance running in background…";
+
+  // Fire-and-forget post-actions (position snapshots + encyclopedia
+  // maintenance). Deliberately NOT awaited — the maintenance sweep
+  // scales with the encyclopedia/positions tables, not the analyzed
+  // batch, and used to hold the grade response hostage for minutes.
+  // keepalive lets the request survive a tab close right after the
+  // final batch.
+  function firePostActions(ctx: StreamCtx) {
+    fetch("/api/screener/analyze/post-actions", {
+      method: "POST",
+      cache: "no-store",
+      keepalive: true,
+    })
+      .then(async (r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const json = (await r.json()) as {
+          snapshotsWritten?: number;
+          encyclopediaUpdates?: number;
+        };
+        ctx.summary.snapshots += json.snapshotsWritten ?? 0;
+        ctx.summary.encyclopedia += json.encyclopediaUpdates ?? 0;
+        // Swap the "running in background…" line for real counts. If the
+        // message has since moved on (new run, error banner), leave it —
+        // the counts still land in the console line below.
+        setMessage((prev) =>
+          prev !== null && prev.includes(POST_ACTIONS_PENDING_LINE)
+            ? prev.replace(
+                POST_ACTIONS_PENDING_LINE,
+                `📸 ${ctx.summary.snapshots} position snapshots taken\n📚 ${ctx.summary.encyclopedia} encyclopedia updates`,
+              )
+            : prev,
+        );
+        console.log(
+          `[screener] post-actions done: snapshots=${json.snapshotsWritten ?? 0} encyclopedia=${json.encyclopediaUpdates ?? 0}`,
+        );
+      })
+      .catch((e) => {
+        console.warn(
+          `[screener] post-actions failed (${e instanceof Error ? e.message : e}) — snapshots / encyclopedia maintenance skipped this run`,
+        );
+      });
   }
 
   function finishStreamsIfDone(ctx: StreamCtx) {
@@ -1551,7 +1605,8 @@ export function ScreenerView({ connected }: Props) {
       setNewsProgress(null);
       setGradeProgress(null);
       setMessage(
-        `Analysis complete ✓\n📊 ${ctx.summary.scored} candidates scored\n🎯 ${ctx.summary.tracked} tracked tickers saved\n📸 ${ctx.summary.snapshots} position snapshots taken\n📚 ${ctx.summary.encyclopedia} encyclopedia updates`,
+        `Analysis complete ✓\n📊 ${ctx.summary.scored} candidates scored\n🎯 ${ctx.summary.tracked} tracked tickers saved` +
+          (ctx.postActionsFired ? `\n${POST_ACTIONS_PENDING_LINE}` : ""),
       );
     } else {
       // Partial — leave progress panel up so the resume buttons stay
@@ -1685,6 +1740,7 @@ export function ScreenerView({ connected }: Props) {
       pricesForPersist: mergedPrices,
       vix: p2!.vix,
       summary: { scored: 0, tracked: 0, snapshots: 0, encyclopedia: 0 },
+      postActionsFired: false,
     };
 
     const finalBatchToken = { key: "intermediate" };

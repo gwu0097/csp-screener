@@ -354,3 +354,84 @@ export function buildSnapshotRow(
     close_snapshot: opts.closeSnapshot,
   };
 }
+
+// Snapshots current option price + P&L + Greeks for every open position.
+// Writes one row per position into position_snapshots. One chain fetch
+// per unique symbol. Same logic as the close-time snapshot path in
+// /api/trades/bulk-create. Called from /api/screener/analyze/post-actions
+// (fired by the client after the final grade batch).
+export async function writeOpenPositionSnapshots(): Promise<{
+  written: number;
+  errors: string[];
+}> {
+  const errors: string[] = [];
+  let written = 0;
+  try {
+    const supabase = createServerClient();
+    const { data: opens, error: pErr } = await supabase
+      .from("positions")
+      .select(
+        "id, symbol, strike, expiry, total_contracts, avg_premium_sold, opened_date, entry_stock_price, entry_em_pct",
+      )
+      .eq("status", "open");
+    if (pErr) {
+      return { written: 0, errors: [`fetch open positions: ${pErr.message}`] };
+    }
+    const positions = (opens ?? []) as Array<{
+      id: string;
+      symbol: string;
+      strike: number;
+      expiry: string;
+      total_contracts: number;
+      avg_premium_sold: number | null;
+      opened_date: string | null;
+      entry_stock_price: number | null;
+      entry_em_pct: number | null;
+    }>;
+    if (positions.length === 0) return { written: 0, errors: [] };
+
+    const positionIds = positions.map((p) => p.id);
+    const { data: fillsRaw } = await supabase
+      .from("fills")
+      .select("position_id, fill_type, contracts, premium, fill_date")
+      .in("position_id", positionIds);
+    const fillsByPosition = new Map<string, Fill[]>();
+    for (const f of (fillsRaw ?? []) as Array<Fill & { position_id: string }>) {
+      const arr = fillsByPosition.get(f.position_id) ?? [];
+      arr.push({
+        fill_type: f.fill_type,
+        contracts: f.contracts,
+        premium: f.premium,
+        fill_date: f.fill_date,
+      });
+      fillsByPosition.set(f.position_id, arr);
+    }
+
+    const chainCache = new Map<string, SchwabOptionsChain | null>();
+    await Promise.all(
+      Array.from(new Set(positions.map((p) => p.symbol))).map(async (sym) => {
+        chainCache.set(sym, await fetchChainSafe(sym));
+      }),
+    );
+
+    const nowIso = new Date().toISOString();
+    const todayStr = nowIso.slice(0, 10);
+    for (const p of positions) {
+      const chain = chainCache.get(p.symbol) ?? null;
+      const isExpiryDay = (p.expiry ?? "") <= todayStr;
+      const row = buildSnapshotRow(p, chain, fillsByPosition.get(p.id) ?? [], {
+        nowIso,
+        closeSnapshot: isExpiryDay,
+      });
+      const { error: iErr } = await supabase.from("position_snapshots").insert(row);
+      if (iErr) {
+        errors.push(`${p.symbol}: ${iErr.message}`);
+        continue;
+      }
+      written += 1;
+    }
+  } catch (e) {
+    errors.push(e instanceof Error ? e.message : String(e));
+  }
+  return { written, errors };
+}

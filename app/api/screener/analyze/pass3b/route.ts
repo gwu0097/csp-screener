@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getOptionsChain } from "@/lib/schwab";
 import {
   calculateThreeLayerGrade,
   getPersonalHistory,
@@ -7,18 +6,17 @@ import {
 } from "@/lib/screener";
 import { type PerplexityNewsResult } from "@/lib/perplexity";
 import { createServerClient } from "@/lib/supabase";
-import { type Fill } from "@/lib/positions";
-import { buildSnapshotRow } from "@/lib/snapshots";
-import { runEncyclopediaMaintenance } from "@/lib/encyclopedia";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 // Pass 3b — given a batch of candidates plus a pre-fetched news map
-// (from pass3a), compute the three-layer grade per candidate and run
-// the post-grade DB writes (tracked_tickers / position_snapshots /
-// encyclopedia maintenance). News fetching is handled in pass3a so
-// this route stays bounded by the (fast) personal-history queries +
-// the (medium) DB writes.
+// (from pass3a), compute the three-layer grade per candidate and
+// upsert tracked_tickers entry rows for the batch. News fetching is
+// handled in pass3a; the slow maintenance work (position snapshots +
+// encyclopedia upkeep) lives in /post-actions, which the client fires
+// without awaiting after the final batch — so this route stays bounded
+// by the (fast) personal-history queries + a few upserts and the user
+// gets grades back without waiting on bookkeeping.
 export const maxDuration = 60;
 
 type NewsByKey = Record<string, PerplexityNewsResult>;
@@ -29,11 +27,6 @@ type Body = {
   newsByKey?: NewsByKey;
   vix?: number | null;
   trackedSymbols?: string[];
-  // Whether this batch should fire the post-actions (tracked tickers /
-  // snapshots / encyclopedia). Client passes true only on the LAST
-  // batch — running them per-batch would re-write tracked rows for
-  // candidates already processed in earlier batches.
-  runPostActions?: boolean;
 };
 
 const NEUTRAL_NEWS: PerplexityNewsResult = {
@@ -51,93 +44,6 @@ function keyOf(symbol: string, earningsDate: string): string {
 
 function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
-}
-
-async function writePositionSnapshots(): Promise<{
-  written: number;
-  errors: string[];
-}> {
-  const errors: string[] = [];
-  let written = 0;
-  try {
-    const supabase = createServerClient();
-    const { data: opens, error: pErr } = await supabase
-      .from("positions")
-      .select(
-        "id, symbol, strike, expiry, total_contracts, avg_premium_sold, opened_date, entry_stock_price, entry_em_pct",
-      )
-      .eq("status", "open");
-    if (pErr) {
-      return { written: 0, errors: [`fetch open positions: ${pErr.message}`] };
-    }
-    const positions = (opens ?? []) as Array<{
-      id: string;
-      symbol: string;
-      strike: number;
-      expiry: string;
-      total_contracts: number;
-      avg_premium_sold: number | null;
-      opened_date: string | null;
-      entry_stock_price: number | null;
-      entry_em_pct: number | null;
-    }>;
-    if (positions.length === 0) return { written: 0, errors: [] };
-
-    const positionIds = positions.map((p) => p.id);
-    const { data: fillsRaw } = await supabase
-      .from("fills")
-      .select("position_id, fill_type, contracts, premium, fill_date")
-      .in("position_id", positionIds);
-    const fillsByPosition = new Map<string, Fill[]>();
-    for (const f of (fillsRaw ?? []) as Array<Fill & { position_id: string }>) {
-      const arr = fillsByPosition.get(f.position_id) ?? [];
-      arr.push({
-        fill_type: f.fill_type,
-        contracts: f.contracts,
-        premium: f.premium,
-        fill_date: f.fill_date,
-      });
-      fillsByPosition.set(f.position_id, arr);
-    }
-
-    const chainCache = new Map<
-      string,
-      Awaited<ReturnType<typeof getOptionsChain>> | null
-    >();
-    await Promise.all(
-      Array.from(new Set(positions.map((p) => p.symbol))).map(async (sym) => {
-        try {
-          const chain = await getOptionsChain(sym);
-          chainCache.set(sym, chain);
-        } catch (e) {
-          console.warn(
-            `[snapshots] chain(${sym}) failed: ${e instanceof Error ? e.message : e}`,
-          );
-          chainCache.set(sym, null);
-        }
-      }),
-    );
-
-    const nowIso = new Date().toISOString();
-    const todayStr = nowIso.slice(0, 10);
-    for (const p of positions) {
-      const chain = chainCache.get(p.symbol) ?? null;
-      const isExpiryDay = (p.expiry ?? "") <= todayStr;
-      const row = buildSnapshotRow(p, chain, fillsByPosition.get(p.id) ?? [], {
-        nowIso,
-        closeSnapshot: isExpiryDay,
-      });
-      const { error: iErr } = await supabase.from("position_snapshots").insert(row);
-      if (iErr) {
-        errors.push(`${p.symbol}: ${iErr.message}`);
-        continue;
-      }
-      written += 1;
-    }
-  } catch (e) {
-    errors.push(e instanceof Error ? e.message : String(e));
-  }
-  return { written, errors };
 }
 
 async function upsertTrackedTickers(
@@ -202,7 +108,6 @@ export async function POST(req: NextRequest) {
     (body.trackedSymbols ?? []).map((s) => String(s).toUpperCase()),
   );
   const vix = typeof body.vix === "number" ? body.vix : null;
-  const runPostActions = body.runPostActions === true;
 
   const t0 = Date.now();
 
@@ -236,49 +141,27 @@ export async function POST(req: NextRequest) {
 
   const scoredCount = results.filter((r) => r.threeLayer !== null).length;
 
-  // Post-actions only when the client signals this is the final
-  // batch — running per-batch would re-do tracked / snapshots /
-  // encyclopedia work for every batch (wasteful and noisy in logs).
-  let trackedUpserted = 0;
-  let snapshotsWritten = 0;
-  let encyclopediaUpdates = 0;
-  if (runPostActions) {
-    const [trackedResult, snapshotResult, encUpdates] = await Promise.all([
-      upsertTrackedTickers(results, tracked, vix),
-      writePositionSnapshots(),
-      (async () => {
-        try {
-          const report = await runEncyclopediaMaintenance();
-          return (
-            report.t0Captured.length +
-            report.t1Captured.length +
-            report.expiryBackfilled.length +
-            report.perplexityBackfilled.length
-          );
-        } catch (e) {
-          console.warn(
-            `[analyze/pass3b:encyclopedia] failed: ${e instanceof Error ? e.message : e}`,
-          );
-          return 0;
-        }
-      })(),
-    ]);
-    trackedUpserted = trackedResult.upserted;
-    snapshotsWritten = snapshotResult.written;
-    encyclopediaUpdates = encUpdates;
+  // Tracked upsert runs on EVERY batch, scoped to this batch's results.
+  // It's a handful of idempotent upserts (no external APIs), and the
+  // candidate sort puts tracked symbols in the earliest batches — the
+  // old final-batch-only gate meant tracked rows from earlier batches
+  // never got their entry snapshot written.
+  const trackedResult = await upsertTrackedTickers(results, tracked, vix);
+  if (trackedResult.errors.length > 0) {
+    console.warn(
+      `[analyze/pass3b] tracked upsert errors: ${trackedResult.errors.join("; ")}`,
+    );
   }
 
   const elapsed = Date.now() - t0;
   console.log(
-    `[analyze/pass3b] ${candidates.length} candidates (${scoredCount} scored) · ${elapsed}ms · postActions=${runPostActions} tracked=${trackedUpserted} snapshots=${snapshotsWritten} encyclopedia=${encyclopediaUpdates}`,
+    `[analyze/pass3b] ${candidates.length} candidates (${scoredCount} scored) · ${elapsed}ms · tracked=${trackedResult.upserted}`,
   );
 
   return NextResponse.json({
     results,
     scoredCount,
-    trackedUpserted,
-    snapshotsWritten,
-    encyclopediaUpdates,
+    trackedUpserted: trackedResult.upserted,
     elapsedMs: elapsed,
   });
 }

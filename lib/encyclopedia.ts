@@ -1986,15 +1986,26 @@ export async function runEncyclopediaMaintenance(): Promise<MaintenanceReport> {
     }
   }
 
-  // 5. Perplexity backfill — 1s gap between calls per spec.
+  // 5. Perplexity backfill — 1s gap between calls per spec. The gap is
+  // rate-limit protection between actual API calls, so rows that bail
+  // before reaching Perplexity (already captured, row gone, no key)
+  // must not pay it — with a large backlog of skipped rows the
+  // unconditional sleep alone added minutes to the sweep.
+  const PPLX_NO_CALL_REASONS = new Set([
+    "row_not_found",
+    "already_captured",
+    "no_api_key",
+  ]);
   const pplxCandidates = await sb
     .from("earnings_history")
     .select("symbol,earnings_date")
     .in("symbol", Array.from(relevant))
     .is("perplexity_pulled_at", null);
   for (const c of (pplxCandidates.data ?? []) as Array<{ symbol: string; earnings_date: string }>) {
+    let apiCallAttempted = true;
     try {
       const r = await ensurePerplexityData(c.symbol, c.earnings_date);
+      apiCallAttempted = r.captured || !PPLX_NO_CALL_REASONS.has(r.reason ?? "");
       if (r.captured) report.perplexityBackfilled.push(c);
       else if (r.reason && r.reason !== "already_captured") {
         report.errors.push({
@@ -2012,7 +2023,7 @@ export async function runEncyclopediaMaintenance(): Promise<MaintenanceReport> {
         reason: e instanceof Error ? e.message : String(e),
       });
     }
-    await sleep(PERPLEXITY_GAP_MS);
+    if (apiCallAttempted) await sleep(PERPLEXITY_GAP_MS);
   }
 
   // 5.5. Post-earnings recommendation pass. For each open position
