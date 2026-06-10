@@ -6,7 +6,7 @@
 // and an Annual Report (10-K) placeholder until Phase 2 ships the
 // deep-read distillation.
 
-import { useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
 import {
   Check,
   ClipboardCopy,
@@ -23,6 +23,13 @@ import {
   type InterpretedError,
 } from "@/lib/errors";
 import type { EarningsReleaseRow } from "@/app/api/research/[symbol]/earnings-releases/route";
+import {
+  AddAiSummaryButton,
+  AiSummaryBadge,
+  AnalysisPasteForm,
+  AnalysisViewPanel,
+  type FilingAnalysis,
+} from "@/components/filing-analysis";
 
 type QuarterlyMetrics = {
   fiscalLabel: string;
@@ -105,6 +112,36 @@ export function SecFilingsTab({
     { err: InterpretedError; retry?: () => void | Promise<void> } | null
   >(null);
   const [message, setMessage] = useState<string | null>(null);
+  // Stored Claude analyses for this symbol, keyed by filing_type +
+  // period. Loaded once; reloaded after every save/delete.
+  const [analyses, setAnalyses] = useState<FilingAnalysis[]>([]);
+  // Which 10-Q / 10-K row has its analysis panel or paste form open
+  // (keys like "10-Q|Q3 2025"). 8-K cards manage their own state.
+  const [aiOpenKey, setAiOpenKey] = useState<string | null>(null);
+  const [aiPasteKey, setAiPasteKey] = useState<string | null>(null);
+
+  const loadAnalyses = useCallback(async () => {
+    try {
+      const res = await fetch(
+        `/api/research/${encodeURIComponent(symbol)}/analyses`,
+        { cache: "no-store" },
+      );
+      if (!res.ok) return;
+      const json = (await res.json()) as { analyses?: FilingAnalysis[] };
+      setAnalyses(json.analyses ?? []);
+    } catch {
+      /* non-fatal — badges just don't render */
+    }
+  }, [symbol]);
+
+  useEffect(() => {
+    void loadAnalyses();
+  }, [loadAnalyses]);
+
+  const analysisFor = (filingType: string, period: string) =>
+    analyses.find(
+      (a) => a.filing_type === filingType && a.period === period,
+    ) ?? null;
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -254,7 +291,12 @@ export function SecFilingsTab({
         ) : (
           <div className="space-y-2">
             {releases.map((r) => (
-              <ReleaseCard key={r.id} r={r} />
+              <ReleaseCard
+                key={r.id}
+                r={r}
+                analysis={analysisFor("8-K", r.quarter)}
+                onAnalysesChanged={loadAnalyses}
+              />
             ))}
           </div>
         )}
@@ -345,9 +387,26 @@ export function SecFilingsTab({
                     prior.revenue > 0
                       ? (q.revenue - prior.revenue) / prior.revenue
                       : null;
+                  const aiKey = `10-Q|${q.fiscalLabel}`;
+                  const qAnalysis = analysisFor("10-Q", q.fiscalLabel);
                   return (
-                    <tr key={q.periodEnd} className="border-b border-border/30">
-                      <td className="px-1.5 py-1 font-mono">{q.fiscalLabel}</td>
+                    <Fragment key={q.periodEnd}>
+                    <tr className="border-b border-border/30">
+                      <td className="px-1.5 py-1 font-mono">
+                        <span className="inline-flex items-center gap-1.5">
+                          {q.fiscalLabel}
+                          {qAnalysis && (
+                            <AiSummaryBadge
+                              open={aiOpenKey === aiKey}
+                              onClick={() =>
+                                setAiOpenKey((k) =>
+                                  k === aiKey ? null : aiKey,
+                                )
+                              }
+                            />
+                          )}
+                        </span>
+                      </td>
                       <td className="px-1.5 py-1 text-right font-mono">
                         {q.revenue === null
                           ? "—"
@@ -373,15 +432,56 @@ export function SecFilingsTab({
                         {fmtMonthYear(q.periodEnd)}
                       </td>
                       <td className="px-1.5 py-1 text-right">
-                        <ExportFilingButton
-                          symbol={symbol}
-                          type="10-Q"
-                          quarter={q.fiscalLabel}
-                          periodEnd={q.periodEnd}
-                          compact
-                        />
+                        <span className="inline-flex items-center gap-1.5">
+                          <ExportFilingButton
+                            symbol={symbol}
+                            type="10-Q"
+                            quarter={q.fiscalLabel}
+                            periodEnd={q.periodEnd}
+                            compact
+                          />
+                          {!qAnalysis && (
+                            <AddAiSummaryButton
+                              compact
+                              onClick={() =>
+                                setAiPasteKey((k) =>
+                                  k === aiKey ? null : aiKey,
+                                )
+                              }
+                            />
+                          )}
+                        </span>
                       </td>
                     </tr>
+                    {qAnalysis && aiOpenKey === aiKey && (
+                      <tr className="border-b border-border/30">
+                        <td colSpan={6} className="px-1.5 pb-2">
+                          <AnalysisViewPanel
+                            analysis={qAnalysis}
+                            onChanged={loadAnalyses}
+                          />
+                        </td>
+                      </tr>
+                    )}
+                    {!qAnalysis && aiPasteKey === aiKey && (
+                      <tr className="border-b border-border/30">
+                        <td colSpan={6} className="px-1.5 pb-2">
+                          <AnalysisPasteForm
+                            symbol={symbol}
+                            filingType="10-Q"
+                            period={q.fiscalLabel}
+                            filingDate={q.periodEnd}
+                            onSaved={async () => {
+                              setAiPasteKey(null);
+                              await loadAnalyses();
+                              setAiOpenKey(aiKey);
+                            }}
+                            onCancel={() => setAiPasteKey(null)}
+                          />
+                        </td>
+                      </tr>
+                    )}
+                    </Fragment>
                   );
                 })}
               </tbody>
@@ -395,27 +495,86 @@ export function SecFilingsTab({
       </section>
 
       {/* ---------- Annual Report (10-K) ---------- */}
-      <section className="rounded-md border border-border bg-background/40 p-3">
-        <div className="mb-2 flex items-start justify-between gap-2">
-          <div>
-            <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-              Annual report (10-K)
+      {(() => {
+        // Latest fiscal year from the quarterly series labels the
+        // annual filing ("FY2026"); current year fallback when the
+        // fundamental-health module hasn't run.
+        const fyPeriod = `FY${quarterly[0]?.fiscalYear ?? new Date().getFullYear()}`;
+        const fyKey = `10-K|${fyPeriod}`;
+        const fyAnalysis = analysisFor("10-K", fyPeriod);
+        return (
+          <section className="rounded-md border border-border bg-background/40 p-3">
+            <div className="mb-2 flex items-start justify-between gap-2">
+              <div>
+                <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  <span>
+                    Annual report (10-K) ·{" "}
+                    <span className="font-mono">{fyPeriod}</span>
+                  </span>
+                  {fyAnalysis && (
+                    <AiSummaryBadge
+                      open={aiOpenKey === fyKey}
+                      onClick={() =>
+                        setAiOpenKey((k) => (k === fyKey ? null : fyKey))
+                      }
+                    />
+                  )}
+                </div>
+                <div className="text-[11px] text-muted-foreground/80">
+                  Export pulls Business Overview / MD&amp;A / Risk Factors from
+                  the latest 10-K and runs each through Gemini Flash for a
+                  ~300-word summary tuned for CSP traders.
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                {!fyAnalysis && (
+                  <AddAiSummaryButton
+                    onClick={() =>
+                      setAiPasteKey((k) => (k === fyKey ? null : fyKey))
+                    }
+                  />
+                )}
+                <ExportFilingButton symbol={symbol} type="10-K" />
+              </div>
             </div>
-            <div className="text-[11px] text-muted-foreground/80">
-              Export pulls Business Overview / MD&amp;A / Risk Factors from
-              the latest 10-K and runs each through Gemini Flash for a
-              ~300-word summary tuned for CSP traders.
-            </div>
-          </div>
-          <ExportFilingButton symbol={symbol} type="10-K" />
-        </div>
-        <JournalNoteSection symbol={symbol} filingType="10-K" />
-      </section>
+            {fyAnalysis && aiOpenKey === fyKey && (
+              <AnalysisViewPanel
+                analysis={fyAnalysis}
+                onChanged={loadAnalyses}
+              />
+            )}
+            {!fyAnalysis && aiPasteKey === fyKey && (
+              <AnalysisPasteForm
+                symbol={symbol}
+                filingType="10-K"
+                period={fyPeriod}
+                onSaved={async () => {
+                  setAiPasteKey(null);
+                  await loadAnalyses();
+                  setAiOpenKey(fyKey);
+                }}
+                onCancel={() => setAiPasteKey(null)}
+              />
+            )}
+            <JournalNoteSection symbol={symbol} filingType="10-K" />
+          </section>
+        );
+      })()}
     </div>
   );
 }
 
-function ReleaseCard({ r }: { r: EarningsReleaseRow }) {
+function ReleaseCard({
+  r,
+  analysis,
+  onAnalysesChanged,
+}: {
+  r: EarningsReleaseRow;
+  analysis: FilingAnalysis | null;
+  onAnalysesChanged: () => void | Promise<void>;
+}) {
+  const [aiOpen, setAiOpen] = useState(false);
+  const [aiPasting, setAiPasting] = useState(false);
   const archiveHref =
     r.accession_number !== null
       ? `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&filenum=&CIK=${r.symbol}&type=8-K&dateb=&owner=include&count=10`
@@ -443,12 +602,23 @@ function ReleaseCard({ r }: { r: EarningsReleaseRow }) {
       <div className="mb-2 flex items-baseline justify-between gap-2">
         <div className="text-base font-semibold">
           {r.quarter}
+          {analysis && (
+            <span className="ml-2 align-middle">
+              <AiSummaryBadge
+                open={aiOpen}
+                onClick={() => setAiOpen((v) => !v)}
+              />
+            </span>
+          )}
           <span className="ml-2 text-[11px] font-normal text-muted-foreground">
             Reported {fmtDate(r.reported_date)} · period end{" "}
             {fmtDate(r.period_end)}
           </span>
         </div>
         <div className="flex items-center gap-3">
+          {!analysis && (
+            <AddAiSummaryButton compact onClick={() => setAiPasting(true)} />
+          )}
           <ExportFilingButton
             symbol={r.symbol}
             type="8-K"
@@ -548,6 +718,24 @@ function ReleaseCard({ r }: { r: EarningsReleaseRow }) {
             {r.guidance_notes}
           </div>
         </div>
+      )}
+
+      {analysis && aiOpen && (
+        <AnalysisViewPanel analysis={analysis} onChanged={onAnalysesChanged} />
+      )}
+      {!analysis && aiPasting && (
+        <AnalysisPasteForm
+          symbol={r.symbol}
+          filingType="8-K"
+          period={r.quarter}
+          filingDate={r.reported_date}
+          onSaved={async () => {
+            setAiPasting(false);
+            await onAnalysesChanged();
+            setAiOpen(true);
+          }}
+          onCancel={() => setAiPasting(false)}
+        />
       )}
 
       <JournalNoteSection
