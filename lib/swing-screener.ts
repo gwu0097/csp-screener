@@ -1340,8 +1340,10 @@ export async function pass3CatalystDiscovery(
   // protection keep the route under Vercel's 60s ceiling no matter
   // how Perplexity behaves: a 20s per-call abort, and a 40s launch
   // deadline after which remaining batches keep their defaults.
+  // 35s launch deadline + 20s per-call abort = 55s worst case, safely
+  // inside the 60s function ceiling.
   const BATCH = 3;
-  const PASS3_DEADLINE_MS = 40_000;
+  const PASS3_DEADLINE_MS = 35_000;
   const pass3Started = Date.now();
   for (let i = 0; i < toFetch.length; i += BATCH) {
     if (Date.now() - pass3Started > PASS3_DEADLINE_MS) {
