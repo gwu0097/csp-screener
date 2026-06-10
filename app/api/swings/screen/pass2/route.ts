@@ -26,19 +26,25 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       { status: 400 },
     );
   }
-  const { quotes, trades, tier2ByCandidate } = deserializePass1(body);
-  const candidates = await pass2Enrich(
-    body.survivors,
-    quotes,
-    trades,
-    tier2ByCandidate,
-    {
-      capitulation: body.capitulation ?? {},
-      pullback: body.pullback ?? {},
-    },
-  );
-  return NextResponse.json({
-    candidates,
-    durationMs: Date.now() - started,
-  });
+  try {
+    const { quotes, trades, tier2ByCandidate } = deserializePass1(body);
+    const candidates = await pass2Enrich(
+      body.survivors,
+      quotes,
+      trades,
+      tier2ByCandidate,
+      {
+        capitulation: body.capitulation ?? {},
+        pullback: body.pullback ?? {},
+      },
+    );
+    return NextResponse.json({
+      candidates,
+      durationMs: Date.now() - started,
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "pass2 failed";
+    console.error("[swings/pass2] failed:", e);
+    return NextResponse.json({ error: `Pass 2: ${msg}` }, { status: 500 });
+  }
 }

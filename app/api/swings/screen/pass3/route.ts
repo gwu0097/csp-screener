@@ -31,16 +31,22 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       { status: 400 },
     );
   }
-  const candidates = await pass3CatalystDiscovery(body.candidates, {
-    knownCatalysts:
-      body.knownCatalysts && typeof body.knownCatalysts === "object"
-        ? body.knownCatalysts
-        : undefined,
-  });
-  // Re-sort here because catalyst bonus shifts ranking.
-  candidates.sort((a, b) => b.setupScore - a.setupScore);
-  return NextResponse.json({
-    candidates,
-    durationMs: Date.now() - started,
-  });
+  try {
+    const candidates = await pass3CatalystDiscovery(body.candidates, {
+      knownCatalysts:
+        body.knownCatalysts && typeof body.knownCatalysts === "object"
+          ? body.knownCatalysts
+          : undefined,
+    });
+    // Re-sort here because catalyst bonus shifts ranking.
+    candidates.sort((a, b) => b.setupScore - a.setupScore);
+    return NextResponse.json({
+      candidates,
+      durationMs: Date.now() - started,
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "pass3 failed";
+    console.error("[swings/pass3] failed:", e);
+    return NextResponse.json({ error: `Pass 3: ${msg}` }, { status: 500 });
+  }
 }

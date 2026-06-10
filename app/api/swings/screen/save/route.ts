@@ -28,6 +28,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
   }
 
+  try {
   const sb = createServerClient();
   const del = await sb
     .from("swing_screen_results")
@@ -47,4 +48,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: ins.error.message }, { status: 500 });
   }
   return NextResponse.json({ ok: true, screenedAt: new Date().toISOString() });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "save failed";
+    console.error("[swings/save] failed:", e);
+    return NextResponse.json({ error: `Save: ${msg}` }, { status: 500 });
+  }
 }

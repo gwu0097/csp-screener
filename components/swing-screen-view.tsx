@@ -338,6 +338,43 @@ function sortCandidates(
 
 type RunPhase = "idle" | "pass1" | "pass2" | "pass3" | "saving";
 
+// Fetch + parse defensively. Vercel kills a function that exceeds the
+// 60s production ceiling with a PLAIN-TEXT body ("An error occurred…"),
+// which res.json() turns into a useless "Unexpected token 'A'" parse
+// error — so read text first and translate non-JSON bodies into a
+// labelled, human-readable failure for the banner.
+async function fetchPassJson<T>(
+  label: string,
+  url: string,
+  init?: RequestInit,
+): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetch(url, { cache: "no-store", ...init });
+  } catch (e) {
+    throw new Error(
+      `${label} failed — network error (${e instanceof Error ? e.message : "unknown"})`,
+    );
+  }
+  const text = await res.text();
+  let json: Record<string, unknown> | null = null;
+  try {
+    json = JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    json = null;
+  }
+  if (!res.ok || json === null) {
+    const detail =
+      json && typeof json.error === "string"
+        ? json.error
+        : /^an error occurred/i.test(text.trim())
+          ? `the server timed out (HTTP ${res.status} — Vercel 60s function ceiling)`
+          : `HTTP ${res.status}${text ? ` — ${text.slice(0, 120).trim()}` : ""}`;
+    throw new Error(`${label} failed — ${detail}`);
+  }
+  return json as T;
+}
+
 type Pass1Wire = {
   survivors: string[];
   screened: number;
@@ -356,6 +393,8 @@ export function SwingScreenView() {
   // the user knows how many symbols pass 2 is enriching.
   const [pass1Count, setPass1Count] = useState<number | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
+  // Non-fatal degradation (pass 3 or save failed but results exist).
+  const [runWarning, setRunWarning] = useState<string | null>(null);
   const [sort, setSort] = useState<SortState>(DEFAULT_SORT);
   const [importOpen, setImportOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
@@ -388,40 +427,38 @@ export function SwingScreenView() {
 
   async function runScreen() {
     setRunError(null);
+    setRunWarning(null);
     setPass1Count(null);
     const started = Date.now();
     try {
-      // Pass 1 — Yahoo technical filter on the full universe (~15-25s).
+      // Pass 1 — Yahoo technical filter + tab qualification on the
+      // full universe (~20-40s). A failure here aborts the run.
       setPhase("pass1");
-      const r1 = await fetch("/api/swings/screen/pass1", {
-        method: "POST",
-        cache: "no-store",
-      });
-      const p1 = (await r1.json()) as Pass1Wire & { error?: string };
-      if (!r1.ok) throw new Error(p1.error ?? `Pass 1 failed: HTTP ${r1.status}`);
+      const p1 = await fetchPassJson<Pass1Wire>(
+        "Pass 1 (technical filter)",
+        "/api/swings/screen/pass1",
+        { method: "POST" },
+      );
       setPass1Count(p1.survivors.length);
 
-      // Pass 2 — Finnhub insider + earnings + Schwab options on survivors
-      // (~25-45s). The full pass1 wire payload is the body — pass2 needs
-      // quotes/trades/tier2 to build the candidates.
+      // Pass 2 — Finnhub insider + earnings + Schwab options on
+      // survivors. A failure here also aborts (no candidates exist
+      // without it).
       setPhase("pass2");
-      const r2 = await fetch("/api/swings/screen/pass2", {
-        method: "POST",
-        cache: "no-store",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(p1),
-      });
-      const p2 = (await r2.json()) as {
-        candidates?: SwingCandidate[];
-        durationMs?: number;
-        error?: string;
-      };
-      if (!r2.ok) throw new Error(p2.error ?? `Pass 2 failed: HTTP ${r2.status}`);
+      const p2 = await fetchPassJson<{ candidates?: SwingCandidate[] }>(
+        "Pass 2 (insider/options enrichment)",
+        "/api/swings/screen/pass2",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(p1),
+        },
+      );
       const enriched = p2.candidates ?? [];
 
-      // Pass 3 — Perplexity catalyst discovery on the post-tier-1 set
-      // (~15-30s). Split out from pass 2 so neither route exceeds the
-      // 60s Hobby ceiling.
+      // Pass 3 — Perplexity catalyst discovery. NON-FATAL: if it
+      // fails, the run continues with pass-2 candidates (tabs intact,
+      // catalysts empty) and the banner explains the degradation.
       setPhase("pass3");
       // Carry forward catalysts from the prior run when it's < 24h
       // old — Perplexity enrichment is expensive and a catalyst found
@@ -444,19 +481,24 @@ export function SwingScreenView() {
           };
         }
       }
-      const r3 = await fetch("/api/swings/screen/pass3", {
-        method: "POST",
-        cache: "no-store",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ candidates: enriched, knownCatalysts }),
-      });
-      const p3 = (await r3.json()) as {
-        candidates?: SwingCandidate[];
-        durationMs?: number;
-        error?: string;
-      };
-      if (!r3.ok) throw new Error(p3.error ?? `Pass 3 failed: HTTP ${r3.status}`);
-      const candidates = (p3.candidates ?? enriched).map(normalizeCandidate);
+      let candidates: SwingCandidate[];
+      try {
+        const p3 = await fetchPassJson<{ candidates?: SwingCandidate[] }>(
+          "Pass 3 (catalyst research)",
+          "/api/swings/screen/pass3",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ candidates: enriched, knownCatalysts }),
+          },
+        );
+        candidates = (p3.candidates ?? enriched).map(normalizeCandidate);
+      } catch (e) {
+        candidates = enriched.map(normalizeCandidate);
+        setRunWarning(
+          `${e instanceof Error ? e.message : "Pass 3 failed"}. Showing the screen without catalyst enrichment — all four tabs are still populated.`,
+        );
+      }
 
       const result: CachedResult = {
         candidates,
@@ -468,24 +510,32 @@ export function SwingScreenView() {
         screenedAt: new Date().toISOString(),
       };
 
-      // Save — fast (<1s). Failure here doesn't lose the visible result;
-      // the user just won't see it on next refresh.
+      // Save — fast (<1s). NON-FATAL: failure keeps the visible
+      // result, it just won't survive a reload.
       setPhase("saving");
-      const rs = await fetch("/api/swings/screen/save", {
-        method: "POST",
-        cache: "no-store",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          candidates: result.candidates,
-          screened: result.screened,
-          pass1Survivors: result.pass1Survivors,
-          pass2Results: result.pass2Results,
-          durationMs: result.durationMs,
-        }),
-      });
-      if (!rs.ok) {
-        const j = (await rs.json().catch(() => ({}))) as { error?: string };
-        console.warn("[swing-screen] save failed:", j.error ?? rs.status);
+      try {
+        await fetchPassJson<{ ok?: boolean }>(
+          "Save",
+          "/api/swings/screen/save",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              candidates: result.candidates,
+              screened: result.screened,
+              pass1Survivors: result.pass1Survivors,
+              pass2Results: result.pass2Results,
+              durationMs: result.durationMs,
+            }),
+          },
+        );
+      } catch (e) {
+        console.warn("[swing-screen] save failed:", e);
+        setRunWarning(
+          (prev) =>
+            prev ??
+            "Results shown but could not be saved — they won't survive a page reload.",
+        );
       }
 
       setData(result);
@@ -553,6 +603,11 @@ export function SwingScreenView() {
       {runError && (
         <div className="rounded border border-rose-500/40 bg-rose-500/10 p-3 text-base text-rose-300">
           {runError}
+        </div>
+      )}
+      {runWarning && (
+        <div className="rounded border border-amber-500/40 bg-amber-500/10 p-3 text-base text-amber-200">
+          {runWarning}
         </div>
       )}
       {toast && (

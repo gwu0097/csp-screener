@@ -75,7 +75,7 @@ function coerceSentiment(v: unknown): PerplexitySentiment {
 // there is no typed fallback: the caller decides what to do on failure.
 export async function askPerplexityRaw(
   prompt: string,
-  opts?: { maxTokens?: number; label?: string },
+  opts?: { maxTokens?: number; label?: string; timeoutMs?: number },
 ): Promise<{ text: string; citations: string[] } | null> {
   const label = opts?.label ?? "pplx";
   if (!PERPLEXITY_API_KEY) {
@@ -90,6 +90,10 @@ export async function askPerplexityRaw(
   });
   let res: Response;
   try {
+    // Hard per-call timeout. Without this a hung Perplexity request
+    // holds the route open until Vercel's 60s function ceiling kills
+    // it with a PLAIN-TEXT error body that breaks JSON-parsing
+    // clients. Callers on a tight route budget pass a lower value.
     res = await fetch(PERPLEXITY_URL, {
       method: "POST",
       headers: {
@@ -98,10 +102,11 @@ export async function askPerplexityRaw(
       },
       body,
       cache: "no-store",
+      signal: AbortSignal.timeout(opts?.timeoutMs ?? 45_000),
     });
   } catch (e) {
     console.warn(
-      `[perplexity] ${label} network error: ${e instanceof Error ? e.message : e}`,
+      `[perplexity] ${label} ${e instanceof Error && e.name === "TimeoutError" ? "timed out" : "network error"}: ${e instanceof Error ? e.message : e}`,
     );
     return null;
   }

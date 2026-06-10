@@ -11,10 +11,18 @@ export const maxDuration = 60;
 
 export async function POST(): Promise<NextResponse> {
   const started = Date.now();
-  const result = await pass1Filter(SWING_UNIVERSE);
-  const wire = serializePass1(result, SWING_UNIVERSE.length);
-  return NextResponse.json({
-    ...wire,
-    durationMs: Date.now() - started,
-  });
+  try {
+    const result = await pass1Filter(SWING_UNIVERSE);
+    const wire = serializePass1(result, SWING_UNIVERSE.length);
+    return NextResponse.json({
+      ...wire,
+      durationMs: Date.now() - started,
+    });
+  } catch (e) {
+    // Always JSON — an uncaught throw would otherwise surface as a
+    // plain-text body the client can't parse.
+    const msg = e instanceof Error ? e.message : "pass1 failed";
+    console.error("[swings/pass1] failed:", e);
+    return NextResponse.json({ error: `Pass 1: ${msg}` }, { status: 500 });
+  }
 }

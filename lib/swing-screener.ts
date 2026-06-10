@@ -562,6 +562,7 @@ export async function pass1Filter(symbols: string[]): Promise<{
   capitulation: Record<string, TabStats>;
   pullback: Record<string, TabStats>;
 }> {
+  const routeStarted = Date.now();
   const errors: string[] = [];
   const quotes = new Map<string, Pass1Quote>();
 
@@ -621,13 +622,31 @@ export async function pass1Filter(symbols: string[]): Promise<{
   const pullback: Record<string, TabStats> = {};
   const pregated = pregateTabSymbols(quotes);
   if (pregated.length > 0) {
-    let snaps: SymbolSnapshot[] = [];
-    try {
-      snaps = await batchRefreshSnapshots(pregated, 15);
-    } catch (e) {
-      errors.push(
-        `snapshots:${e instanceof Error ? e.message : "batch failed"}`,
-      );
+    // Chunked with a route-level deadline: the quote sweep above has
+    // already spent 15-30s of the 60s ceiling, so snapshot refreshes
+    // stop launching once the route has been running ~45s. Cached-
+    // fresh snapshots (15-min TTL) return instantly, so a warm run
+    // always covers the full pregated set.
+    const SNAPSHOT_DEADLINE_MS = 45_000;
+    const CHUNK = 10;
+    const snaps: SymbolSnapshot[] = [];
+    for (let i = 0; i < pregated.length; i += CHUNK) {
+      if (Date.now() - routeStarted > SNAPSHOT_DEADLINE_MS) {
+        errors.push(
+          `snapshots:deadline (${pregated.length - i} of ${pregated.length} pregated symbols skipped)`,
+        );
+        break;
+      }
+      try {
+        snaps.push(
+          ...(await batchRefreshSnapshots(pregated.slice(i, i + CHUNK), 15)),
+        );
+      } catch (e) {
+        errors.push(
+          `snapshots:${e instanceof Error ? e.message : "batch failed"}`,
+        );
+        break;
+      }
     }
     for (const snap of snaps) {
       const q = quotes.get(snap.symbol.toUpperCase());
@@ -898,7 +917,19 @@ export async function pass2Enrich(
 
   const candidates: SwingCandidate[] = [];
 
+  // Route-level deadline: stop picking up new symbols once ~45s have
+  // elapsed so a slow Finnhub/Schwab stretch degrades to a partial
+  // candidate list instead of a 60s Vercel timeout (which returns
+  // plain text and breaks the client's JSON parse).
+  const PASS2_DEADLINE_MS = 45_000;
+  const pass2Started = Date.now();
+  let deadlineSkipped = 0;
+
   await mapWithConcurrency(symbols, 5, async (symbol) => {
+    if (Date.now() - pass2Started > PASS2_DEADLINE_MS) {
+      deadlineSkipped += 1;
+      return null;
+    }
     const q = pass1Data.get(symbol);
     const tl = trades.get(symbol);
     if (!q || !tl) return null;
@@ -1079,6 +1110,11 @@ export async function pass2Enrich(
     return null;
   });
 
+  if (deadlineSkipped > 0) {
+    console.warn(
+      `[swing-screener] pass2 deadline hit — ${deadlineSkipped} of ${symbols.length} symbols skipped`,
+    );
+  }
   candidates.sort((a, b) => b.setupScore - a.setupScore);
   return candidates;
 }
@@ -1299,10 +1335,22 @@ export async function pass3CatalystDiscovery(
     );
   }
 
-  // Process in fixed-size batches with a 500ms inter-batch gap so we don't
-  // burst the Perplexity rate limit. Concurrency 3 = 3 simultaneous calls.
+  // Process in fixed-size batches with a 500ms inter-batch gap so we
+  // don't burst the Perplexity rate limit. Two layers of timeout
+  // protection keep the route under Vercel's 60s ceiling no matter
+  // how Perplexity behaves: a 20s per-call abort, and a 40s launch
+  // deadline after which remaining batches keep their defaults.
   const BATCH = 3;
+  const PASS3_DEADLINE_MS = 40_000;
+  const pass3Started = Date.now();
   for (let i = 0; i < toFetch.length; i += BATCH) {
+    if (Date.now() - pass3Started > PASS3_DEADLINE_MS) {
+      console.warn(
+        `[pass3] deadline hit — ${toFetch.length - i} catalyst lookups skipped`,
+      );
+      for (const idx of toFetch.slice(i)) out[idx] = candidates[idx];
+      break;
+    }
     const batch = toFetch.slice(i, i + BATCH);
     const results = await Promise.all(
       batch.map(async (idx) => {
@@ -1310,7 +1358,7 @@ export async function pass3CatalystDiscovery(
         try {
           const raw = await askPerplexityRaw(
             buildCatalystPrompt(c.symbol, c.companyName),
-            { label: `catalyst:${c.symbol}`, maxTokens: 600 },
+            { label: `catalyst:${c.symbol}`, maxTokens: 600, timeoutMs: 20_000 },
           );
           return applyCatalystResponse(c, raw);
         } catch (e) {
