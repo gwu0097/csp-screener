@@ -11,6 +11,7 @@ import {
   ScreenContext,
   ScreenerResult,
 } from "@/lib/screener";
+import { requireUserId, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -24,6 +25,12 @@ const YAHOO_FALLBACK_BUDGET = 10;
 type Body = { currentSymbols?: unknown };
 
 export async function POST(req: NextRequest) {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   let body: Body;
   try {
     body = (await req.json()) as Body;
@@ -35,7 +42,7 @@ export async function POST(req: NextRequest) {
     : [];
 
   const { connected } = await isSchwabConnected().catch(() => ({ connected: false }));
-  const { whitelist, blacklist } = await getWatchlistSymbols();
+  const { whitelist, blacklist } = await getWatchlistSymbols(userId);
   const currentSet = new Set(currentSymbols);
 
   // Symbols in the current list that are now blacklisted get removed.

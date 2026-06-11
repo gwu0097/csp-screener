@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
+import { requireUserId, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -37,6 +38,12 @@ function todayIso(): string {
 }
 
 export async function POST(req: NextRequest) {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   let body: Body;
   try {
     body = (await req.json()) as Body;
@@ -63,7 +70,8 @@ export async function POST(req: NextRequest) {
     .select(
       "id,symbol,broker,strike,expiry,total_contracts,avg_premium_sold,status",
     )
-    .in("id", ids);
+    .in("id", ids)
+    .eq("user_id", userId);
   if (lookup.error) {
     return NextResponse.json({ error: lookup.error.message }, { status: 500 });
   }
@@ -87,7 +95,8 @@ export async function POST(req: NextRequest) {
   const fillsRes = await sb
     .from("fills")
     .select("position_id, fill_type, contracts")
-    .in("position_id", ids);
+    .in("position_id", ids)
+    .eq("user_id", userId);
   type FillRow = {
     position_id: string;
     fill_type: string;
@@ -116,7 +125,8 @@ export async function POST(req: NextRequest) {
   const existRes = await sb
     .from("positions")
     .select("id,assignment_source_id")
-    .in("assignment_source_id", ids);
+    .in("assignment_source_id", ids)
+    .eq("user_id", userId);
   const alreadyCreated = new Set(
     ((existRes.data ?? []) as Array<{ assignment_source_id: string }>).map(
       (r) => r.assignment_source_id,
@@ -185,6 +195,7 @@ export async function POST(req: NextRequest) {
         position_type: "stock_long",
         assignment_source_id: p.id,
         entry_stock_price: costBasis,
+        user_id: userId,
       })
       .select()
       .single();
@@ -209,6 +220,7 @@ export async function POST(req: NextRequest) {
       contracts: shares,
       premium: costBasis,
       fill_date: today,
+      user_id: userId,
     });
     if (openFill.error) {
       skipped.push({

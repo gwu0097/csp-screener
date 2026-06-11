@@ -8,6 +8,7 @@ import { createServerClient } from "@/lib/supabase";
 import { askPerplexityRaw } from "@/lib/perplexity";
 import { getHistoricalPrices } from "@/lib/yahoo";
 import { getOrRefreshSnapshot } from "@/lib/market-snapshot";
+import { requireUserId, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -69,6 +70,12 @@ async function getPerplexityCatalyst(symbol: string, companyName: string, change
 }
 
 export async function GET() {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   const sb = createServerClient();
   const cacheKey = `weekly-${thisIsoWeekKey()}`;
 
@@ -89,7 +96,8 @@ export async function GET() {
   // 2. Pull every watchlist symbol.
   const wlRes = await sb
     .from("long_term_watchlist")
-    .select("symbol");
+    .select("symbol")
+    .eq("user_id", userId);
   if (wlRes.error) {
     return NextResponse.json({ error: wlRes.error.message }, { status: 500 });
   }
@@ -154,6 +162,13 @@ export async function GET() {
 }
 
 export async function DELETE() {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
+  void userId; // digest cache is shared (longterm_digest_cache is not a personal table)
   const sb = createServerClient();
   const cacheKey = `weekly-${thisIsoWeekKey()}`;
   const res = await sb

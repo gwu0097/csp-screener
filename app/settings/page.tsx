@@ -1,5 +1,6 @@
 import { isSchwabConnected } from "@/lib/schwab";
 import { SettingsView } from "@/components/settings-view";
+import { getSessionUser } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -8,6 +9,8 @@ type SearchParams = { schwab?: string; reason?: string };
 
 export default async function SettingsPage({ searchParams }: { searchParams: SearchParams }) {
   const { connected, lastRefresh } = await isSchwabConnected().catch(() => ({ connected: false, lastRefresh: null }));
+  const session = await getSessionUser();
+  const role = session?.role ?? "member";
 
   const envFlags = {
     SCHWAB_CLIENT_ID: Boolean(process.env.SCHWAB_CLIENT_ID),
@@ -27,6 +30,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Sea
       envFlags={envFlags}
       schwabFlash={searchParams.schwab ?? null}
       schwabReason={searchParams.reason ?? null}
+      role={role}
     />
   );
 }

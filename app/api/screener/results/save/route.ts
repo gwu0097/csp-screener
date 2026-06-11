@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
+import { requireUserId, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -28,6 +29,12 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 }
 
 export async function POST(req: NextRequest) {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   let body: Body;
   try {
     body = (await req.json()) as Body;
@@ -54,11 +61,13 @@ export async function POST(req: NextRequest) {
   const del = await sb
     .from("screener_results")
     .delete()
+    .eq("user_id", userId)
     .neq("id", "00000000-0000-0000-0000-000000000000");
   if (del.error) {
     console.warn(`[screener/results/save] truncate failed: ${del.error.message}`);
   }
   const ins = await sb.from("screener_results").insert({
+    user_id: userId,
     screened_at: screenedAt,
     vix,
     pass1_count: pass1Count,

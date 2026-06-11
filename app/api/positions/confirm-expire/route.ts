@@ -4,6 +4,7 @@ import {
   recordAssignment,
 } from "@/lib/expire-positions";
 import { createServerClient } from "@/lib/supabase";
+import { requireUserId, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -37,6 +38,12 @@ type Item = {
 type Body = { positionIds?: unknown; items?: unknown };
 
 export async function POST(req: NextRequest) {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   let body: Body;
   try {
     body = (await req.json()) as Body;
@@ -78,8 +85,39 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // Ownership gate — autoExpirePosition / recordAssignment operate on
+  // raw position ids, so verify every id belongs to this user before
+  // mutating. Unowned ids surface as per-row failures (not_found),
+  // matching the libs' own not_found shape.
+  const sb = createServerClient();
+  const ownedRes = await sb
+    .from("positions")
+    .select("id")
+    .in(
+      "id",
+      items.map((i) => i.positionId),
+    )
+    .eq("user_id", userId);
+  if (ownedRes.error) {
+    return NextResponse.json({ error: ownedRes.error.message }, { status: 500 });
+  }
+  const ownedIds = new Set(
+    ((ownedRes.data ?? []) as Array<{ id: string }>).map((r) => r.id),
+  );
+
   const results = await Promise.all(
     items.map(async ({ positionId, action, stockPrice }) => {
+      if (!ownedIds.has(positionId)) {
+        return {
+          positionId,
+          action,
+          ok: false,
+          realized_pnl: 0,
+          contracts_closed: 0,
+          stock_price_used: null,
+          reason: "not_found",
+        };
+      }
       try {
         if (action === "assigned" && stockPrice !== null && stockPrice > 0) {
           const r = await recordAssignment(positionId, stockPrice);
@@ -157,13 +195,13 @@ export async function POST(req: NextRequest) {
   };
   const assignments: AssignmentDetail[] = [];
   if (assignedIds.length > 0) {
-    const sb = createServerClient();
     const detailRes = await sb
       .from("positions")
       .select(
         "id,symbol,broker,strike,expiry,avg_premium_sold",
       )
-      .in("id", assignedIds);
+      .in("id", assignedIds)
+      .eq("user_id", userId);
     type Row = {
       id: string;
       symbol: string;

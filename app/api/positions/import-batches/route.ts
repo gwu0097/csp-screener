@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
 import { checkUndoEligibility, type FillLite, type PositionStateLite } from "@/lib/undo-batch";
+import { requireUserId, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -36,6 +37,12 @@ export type ImportBatchSummary = {
 };
 
 export async function GET() {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   const sb = createServerClient();
   // Fetch a window of recent stamped positions, then group in memory.
   // 200 rows is plenty to surface 5 batches even if a single batch
@@ -49,6 +56,7 @@ export async function GET() {
     .select(
       "id,symbol,strike,expiry,broker,total_contracts,status,realized_pnl,created_at,import_batch_id",
     )
+    .eq("user_id", userId)
     .order("created_at", { ascending: false })
     .limit(400);
   if (r.error) {
@@ -116,6 +124,7 @@ export async function GET() {
     const fr = await sb
       .from("fills")
       .select("position_id,import_batch_id,created_at")
+      .eq("user_id", userId)
       .in("import_batch_id", batchIds);
     if (!fr.error) {
       fillsInBatches.push(...((fr.data ?? []) as FillLite[]));
@@ -153,8 +162,13 @@ export async function GET() {
       sb
         .from("fills")
         .select("position_id,import_batch_id,created_at")
+        .eq("user_id", userId)
         .in("position_id", ids),
-      sb.from("positions").select("id,symbol,status").in("id", ids),
+      sb
+        .from("positions")
+        .select("id,symbol,status")
+        .eq("user_id", userId)
+        .in("id", ids),
     ]);
     if (!fillsRes.error) {
       for (const f of (fillsRes.data ?? []) as FillLite[]) {

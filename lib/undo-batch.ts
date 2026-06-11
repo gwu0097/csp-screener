@@ -99,15 +99,17 @@ export function checkUndoEligibility(
 // a circular import on lib/supabase.ts and to stay compatible with
 // supabase-js calls in tests.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export async function loadBatchEligibility(batchId: string, sb: any): Promise<
+export async function loadBatchEligibility(batchId: string, sb: any, userId: string): Promise<
   | { ok: true; ctx: EligibilityContext; batchPositionIds: string[]; batchFillPositionIds: string[] }
   | { ok: false; error: string }
 > {
-  // Positions created by the batch.
+  // Positions created by the batch — scoped to the requesting user so
+  // a guessed batch id can't expose or undo someone else's import.
   const posInBatch = await sb
     .from("positions")
     .select("id,symbol,status,created_at")
-    .eq("import_batch_id", batchId);
+    .eq("import_batch_id", batchId)
+    .eq("user_id", userId);
   if (posInBatch.error) {
     return { ok: false, error: posInBatch.error.message };
   }
@@ -122,7 +124,8 @@ export async function loadBatchEligibility(batchId: string, sb: any): Promise<
   const fillsInBatch = await sb
     .from("fills")
     .select("position_id,import_batch_id,created_at")
-    .eq("import_batch_id", batchId);
+    .eq("import_batch_id", batchId)
+    .eq("user_id", userId);
   if (fillsInBatch.error) {
     return { ok: false, error: fillsInBatch.error.message };
   }

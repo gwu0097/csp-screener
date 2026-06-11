@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
 import { checkUndoEligibility, loadBatchEligibility } from "@/lib/undo-batch";
 import { recalculatePositionFromFills } from "@/lib/positions";
+import { requireUserId, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -33,6 +34,12 @@ export async function DELETE(
   _req: NextRequest,
   { params }: { params: { batch_id: string } },
 ) {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   const batchId = (params.batch_id ?? "").trim();
   if (!UUID_RE.test(batchId)) {
     return NextResponse.json({ error: "Invalid batch_id" }, { status: 400 });
@@ -40,7 +47,7 @@ export async function DELETE(
   const sb = createServerClient();
 
   // 1. Build eligibility context + check.
-  const loaded = await loadBatchEligibility(batchId, sb);
+  const loaded = await loadBatchEligibility(batchId, sb, userId);
   if (!loaded.ok) {
     return NextResponse.json(
       { error: loaded.error },
@@ -75,11 +82,13 @@ export async function DELETE(
     const snapPre = await sb
       .from("position_snapshots")
       .select("id")
+      .eq("user_id", userId)
       .in("position_id", batchPositionIds);
     snapshotsCount = (snapPre.data ?? []).length;
     const sn = await sb
       .from("position_snapshots")
       .delete()
+      .eq("user_id", userId)
       .in("position_id", batchPositionIds);
     if (sn.error) {
       return NextResponse.json({ error: sn.error.message }, { status: 500 });
@@ -90,13 +99,15 @@ export async function DELETE(
   const fillsPre = await sb
     .from("fills")
     .select("id")
-    .eq("import_batch_id", batchId);
+    .eq("import_batch_id", batchId)
+    .eq("user_id", userId);
   const fillsCount = (fillsPre.data ?? []).length;
 
   const flDel = await sb
     .from("fills")
     .delete()
-    .eq("import_batch_id", batchId);
+    .eq("import_batch_id", batchId)
+    .eq("user_id", userId);
   if (flDel.error) {
     return NextResponse.json({ error: flDel.error.message }, { status: 500 });
   }
@@ -120,7 +131,8 @@ export async function DELETE(
     const ps = await sb
       .from("positions")
       .delete()
-      .eq("import_batch_id", batchId);
+      .eq("import_batch_id", batchId)
+      .eq("user_id", userId);
     if (ps.error) {
       return NextResponse.json({ error: ps.error.message }, { status: 500 });
     }

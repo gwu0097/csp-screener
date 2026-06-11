@@ -10,6 +10,7 @@ import {
 } from "@/lib/sec-edgar";
 import { geminiSummarize } from "@/lib/gemini";
 import { createServerClient } from "@/lib/supabase";
+import { requireUserId, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -97,6 +98,7 @@ type JournalNoteRow = {
 };
 
 async function buildSystemContext(
+  userId: string,
   symbol: string,
   type: string,
   quarter: string | undefined,
@@ -207,6 +209,7 @@ async function buildSystemContext(
     const r = await sb
       .from("filing_notes")
       .select("quarter, filing_type, notes, trade_relevance, created_at")
+      .eq("user_id", userId)
       .eq("symbol", symbol)
       .order("created_at", { ascending: false })
       .limit(2);
@@ -424,6 +427,12 @@ export async function POST(
   req: NextRequest,
   { params }: { params: { symbol: string } },
 ): Promise<NextResponse> {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   const symbol = (params.symbol ?? "").trim().toUpperCase();
   if (!validSymbol(symbol)) {
     return NextResponse.json({ error: "Invalid symbol" }, { status: 400 });
@@ -452,6 +461,7 @@ export async function POST(
   }
 
   const sysCtx = await buildSystemContext(
+    userId,
     symbol,
     type,
     body.quarter,

@@ -11,6 +11,7 @@ import {
   batchRefreshSnapshots,
   type SymbolSnapshot,
 } from "@/lib/market-snapshot";
+import { requireUserId, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -389,10 +390,17 @@ function buildAlerts(rows: EnrichedRow[]): Alert[] {
 }
 
 export async function GET() {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   const sb = createServerClient();
   const res = await sb
     .from("long_term_watchlist")
-    .select("id,symbol,allocation,notes,created_at,updated_at");
+    .select("id,symbol,allocation,notes,created_at,updated_at")
+    .eq("user_id", userId);
   if (res.error) {
     return NextResponse.json({ error: res.error.message }, { status: 500 });
   }
@@ -444,6 +452,12 @@ export async function GET() {
 type CreateBody = { symbol?: unknown; allocation?: unknown; notes?: unknown };
 
 export async function POST(req: NextRequest) {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   let body: CreateBody;
   try {
     body = (await req.json()) as CreateBody;
@@ -474,7 +488,7 @@ export async function POST(req: NextRequest) {
   const sb = createServerClient();
   const ins = await sb
     .from("long_term_watchlist")
-    .insert({ symbol, allocation: body.allocation as Allocation, notes })
+    .insert({ user_id: userId, symbol, allocation: body.allocation as Allocation, notes })
     .select()
     .single();
   if (ins.error) {
@@ -496,6 +510,12 @@ type PatchBody = {
 };
 
 export async function PATCH(req: NextRequest) {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   let body: PatchBody;
   try {
     body = (await req.json()) as PatchBody;
@@ -538,6 +558,7 @@ export async function PATCH(req: NextRequest) {
     .from("long_term_watchlist")
     .update(patch)
     .eq("id", id)
+    .eq("user_id", userId)
     .select()
     .single();
   if (res.error) {
@@ -547,6 +568,12 @@ export async function PATCH(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   const id = (req.nextUrl.searchParams.get("id") ?? "").trim();
   if (!id) {
     return NextResponse.json({ error: "Missing id" }, { status: 400 });
@@ -555,7 +582,8 @@ export async function DELETE(req: NextRequest) {
   const res = await sb
     .from("long_term_watchlist")
     .delete()
-    .eq("id", id);
+    .eq("id", id)
+    .eq("user_id", userId);
   if (res.error) {
     return NextResponse.json({ error: res.error.message }, { status: 400 });
   }

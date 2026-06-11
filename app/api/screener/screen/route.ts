@@ -12,6 +12,7 @@ import {
 } from "@/lib/screener";
 import { resolveScreenerFilters } from "@/lib/screener-config";
 import { getScreenerConfigOrDefault } from "@/lib/screener-configs-db";
+import { requireUserId, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -71,6 +72,12 @@ type ScreenResponse = {
 };
 
 export async function POST(req: NextRequest) {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   console.log(`[screen] handler called at ${new Date().toISOString()}`);
 
   // The selected named screener drives every gate below. Falls back
@@ -118,7 +125,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const { whitelist, blacklist } = await getWatchlistSymbols();
+    const { whitelist, blacklist } = await getWatchlistSymbols(userId);
     console.log(
       `[screen] watchlist: whitelist=${whitelist.size} blacklist=${blacklist.size}`,
     );

@@ -283,6 +283,9 @@ export async function analyzePositionPostEarnings(
   // collide on the constraint and UPDATE instead of INSERT.
   const payload = {
     position_id: position.id,
+    // Recommendation rows are personal — inherit the position's owner.
+    // Callers select user_id with the position (select("*") covers it).
+    user_id: (position as { user_id?: string }).user_id ?? null,
     earnings_history_id: history.id,
     analysis_date: new Date().toISOString(),
     move_ratio: history.move_ratio,

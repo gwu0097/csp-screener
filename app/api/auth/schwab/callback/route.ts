@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { exchangeCodeForTokens } from "@/lib/schwab";
+import { authErrorResponse, requireAdmin } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 // Single Schwab token-exchange round-trip — fast, but bump above the
@@ -7,6 +8,13 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 30;
 
 export async function GET(req: NextRequest) {
+  // Schwab redirects the ADMIN's browser here mid-OAuth — the session
+  // cookie rides along, so the role check applies normally.
+  try {
+    await requireAdmin();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   const params = Object.fromEntries(req.nextUrl.searchParams.entries());
   console.log("[schwab-callback] hit at", new Date().toISOString());
   console.log("[schwab-callback] url:", req.nextUrl.toString());

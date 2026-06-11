@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
+import { requireUserId, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -127,6 +128,12 @@ function validIsoDate(s: string | null): string | null {
 }
 
 export async function GET(req: NextRequest) {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   const params = req.nextUrl.searchParams;
   const todayIso = new Date().toISOString().slice(0, 10);
 
@@ -149,6 +156,7 @@ export async function GET(req: NextRequest) {
     .select(
       "id,symbol,strike,expiry,total_contracts,avg_premium_sold,opened_date,closed_date,realized_pnl,entry_final_grade,entry_crush_grade,entry_opportunity_grade,entry_iv_edge,entry_em_pct,entry_vix,status,broker,position_type,assignment_source_id,entry_stock_price,direction",
     )
+    .eq("user_id", userId)
     .in("status", ["closed", "expired_worthless", "assigned"])
     .order("closed_date", { ascending: true });
   if (broker) query = query.eq("broker", broker);
@@ -732,6 +740,7 @@ export async function GET(req: NextRequest) {
     .select(
       "id,symbol,strike,broker,position_type,realized_pnl,total_contracts,updated_at,closed_date",
     )
+    .eq("user_id", userId)
     .eq("status", "open");
   if (broker) partialQuery = partialQuery.eq("broker", broker);
   const partialRes = await partialQuery;

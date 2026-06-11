@@ -1458,15 +1458,20 @@ function gradeToL3Score(g: Grade): number {
 }
 
 // Returns closed-position stats for a ticker: count, win rate, avg ROC.
-// Used by Layer 2 of the three-layer grade. dataInsufficient=true when
-// we have fewer than 5 closed trades on the ticker — in that case the
-// grader treats Layer 2 as neutral rather than penalizing on noise.
-export async function getPersonalHistory(symbol: string): Promise<PersonalHistory> {
+// Used by Layer 2 of the three-layer grade — "personal" literally, so
+// it's scoped to the user running the analysis. dataInsufficient=true
+// when we have fewer than 5 closed trades on the ticker — in that case
+// the grader treats Layer 2 as neutral rather than penalizing on noise.
+export async function getPersonalHistory(
+  userId: string,
+  symbol: string,
+): Promise<PersonalHistory> {
   try {
     const supabase = createServerClient();
     const { data, error } = await supabase
       .from("positions")
       .select("avg_premium_sold, realized_pnl, total_contracts")
+      .eq("user_id", userId)
       .eq("symbol", symbol.toUpperCase())
       .eq("status", "closed");
     if (error || !data) {

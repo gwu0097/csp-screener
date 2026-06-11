@@ -1,9 +1,17 @@
 import { NextResponse } from "next/server";
 import { disconnectSchwab, getSchwabAuthUrl } from "@/lib/schwab";
+import { authErrorResponse, requireAdmin } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
+// The Schwab connection belongs to the admin — members consume the
+// shared market data but can't connect/disconnect/reconnect it.
 export async function GET() {
+  try {
+    await requireAdmin();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   const url = getSchwabAuthUrl();
   console.log("[schwab-auth] redirecting to authorize URL:", url);
   console.log("[schwab-auth] env check:", {
@@ -15,6 +23,11 @@ export async function GET() {
 }
 
 export async function DELETE() {
+  try {
+    await requireAdmin();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   try {
     await disconnectSchwab();
     return NextResponse.json({ ok: true });

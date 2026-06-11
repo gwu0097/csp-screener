@@ -8,7 +8,10 @@ export type WatchlistEntry = {
   added_at: string;
 };
 
-export async function getWatchlist(): Promise<{
+// All watchlist data is per-user (multi-tenancy) — every function
+// takes the owning user's id and scopes its queries to it.
+
+export async function getWatchlist(userId: string): Promise<{
   whitelist: WatchlistEntry[];
   blacklist: WatchlistEntry[];
 }> {
@@ -17,6 +20,7 @@ export async function getWatchlist(): Promise<{
     const { data, error } = await supabase
       .from("watchlist")
       .select("symbol, list_type, added_at")
+      .eq("user_id", userId)
       .order("added_at", { ascending: false });
     if (error) throw error;
     const rows = (data ?? []) as WatchlistEntry[];
@@ -30,18 +34,22 @@ export async function getWatchlist(): Promise<{
   }
 }
 
-export async function getWatchlistSymbols(): Promise<{
+export async function getWatchlistSymbols(userId: string): Promise<{
   whitelist: Set<string>;
   blacklist: Set<string>;
 }> {
-  const { whitelist, blacklist } = await getWatchlist();
+  const { whitelist, blacklist } = await getWatchlist(userId);
   return {
     whitelist: new Set(whitelist.map((r) => r.symbol.toUpperCase())),
     blacklist: new Set(blacklist.map((r) => r.symbol.toUpperCase())),
   };
 }
 
-export async function addToWatchlist(symbol: string, listType: WatchlistType): Promise<WatchlistEntry> {
+export async function addToWatchlist(
+  userId: string,
+  symbol: string,
+  listType: WatchlistType,
+): Promise<WatchlistEntry> {
   const norm = symbol.trim().toUpperCase();
   if (!/^[A-Z]{1,10}([.\-][A-Z]{1,2})?$/.test(norm)) {
     throw new Error(`Invalid symbol: ${symbol}`);
@@ -50,8 +58,13 @@ export async function addToWatchlist(symbol: string, listType: WatchlistType): P
   const { data, error } = await supabase
     .from("watchlist")
     .upsert(
-      { symbol: norm, list_type: listType, added_at: new Date().toISOString() },
-      { onConflict: "symbol" },
+      {
+        user_id: userId,
+        symbol: norm,
+        list_type: listType,
+        added_at: new Date().toISOString(),
+      },
+      { onConflict: "user_id,symbol" },
     )
     .select()
     .single();
@@ -59,9 +72,16 @@ export async function addToWatchlist(symbol: string, listType: WatchlistType): P
   return data as WatchlistEntry;
 }
 
-export async function removeFromWatchlist(symbol: string): Promise<void> {
+export async function removeFromWatchlist(
+  userId: string,
+  symbol: string,
+): Promise<void> {
   const norm = symbol.trim().toUpperCase();
   const supabase = createServerClient();
-  const { error } = await supabase.from("watchlist").delete().eq("symbol", norm);
+  const { error } = await supabase
+    .from("watchlist")
+    .delete()
+    .eq("user_id", userId)
+    .eq("symbol", norm);
   if (error) throw new Error(error.message);
 }

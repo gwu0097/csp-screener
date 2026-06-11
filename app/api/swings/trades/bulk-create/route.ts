@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
+import { requireUserId, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -42,6 +43,12 @@ function validTrade(t: unknown): ParsedStockTrade | null {
 }
 
 export async function POST(req: NextRequest) {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   let body: { trades?: unknown; broker?: unknown };
   try {
     body = (await req.json()) as { trades?: unknown; broker?: unknown };
@@ -75,6 +82,7 @@ export async function POST(req: NextRequest) {
   const ideasRes = await sb
     .from("swing_ideas")
     .select("id,symbol,status")
+    .eq("user_id", userId)
     .in("symbol", symbols);
   if (ideasRes.error) {
     return NextResponse.json({ error: ideasRes.error.message }, { status: 500 });
@@ -90,6 +98,7 @@ export async function POST(req: NextRequest) {
   const openRes = await sb
     .from("swing_trades")
     .select("id,symbol,shares,entry_price,entry_date,status,broker")
+    .eq("user_id", userId)
     .eq("status", "open")
     .in("symbol", symbols)
     .order("entry_date", { ascending: true });
@@ -129,7 +138,8 @@ export async function POST(req: NextRequest) {
         const upd = await sb
           .from("swing_ideas")
           .update({ status: "entered", updated_at: new Date().toISOString() })
-          .eq("id", existing.id);
+          .eq("id", existing.id)
+          .eq("user_id", userId);
         if (upd.error) {
           errors.push(`${symbol} idea promote: ${upd.error.message}`);
         } else {
@@ -143,6 +153,7 @@ export async function POST(req: NextRequest) {
     const ins = await sb
       .from("swing_ideas")
       .insert({
+        user_id: userId,
         symbol,
         status: "entered",
         price_at_discovery: entryPrice,
@@ -167,7 +178,8 @@ export async function POST(req: NextRequest) {
     const upd = await sb
       .from("swing_ideas")
       .update({ status: "exited", updated_at: new Date().toISOString() })
-      .eq("id", existing.id);
+      .eq("id", existing.id)
+      .eq("user_id", userId);
     if (upd.error) {
       errors.push(`${symbol} idea demote: ${upd.error.message}`);
       return;
@@ -182,6 +194,7 @@ export async function POST(req: NextRequest) {
     if (t.action === "buy") {
       const ideaId = await ensureIdeaForBuy(t.symbol, t.price);
       const insertRow = {
+        user_id: userId,
         swing_idea_id: ideaId,
         symbol: t.symbol,
         broker,
@@ -224,6 +237,7 @@ export async function POST(req: NextRequest) {
           updated_at: new Date().toISOString(),
         })
         .eq("id", match.id)
+        .eq("user_id", userId)
         .select()
         .single();
       if (upd.error) {
@@ -245,6 +259,7 @@ export async function POST(req: NextRequest) {
     // No open buy to close against — record as a closed trade with only
     // exit data. Link to any existing idea but don't force a status change.
     const orphanRow = {
+      user_id: userId,
       swing_idea_id: ideaBySymbol.get(t.symbol)?.id ?? null,
       symbol: t.symbol,
       broker,

@@ -22,6 +22,7 @@ import {
 } from "@/lib/positions";
 import { runAutoExpire, type AutoExpireReport } from "@/lib/expire-positions";
 import { buildSnapshotRow, shouldWriteSnapshot } from "@/lib/snapshots";
+import { requireUserId, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 // Loops over every open position to pull a Schwab options chain + Yahoo
@@ -290,6 +291,12 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T | n
 }
 
 export async function GET(req: NextRequest) {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   const opportunityAvailable =
     req.nextUrl.searchParams.get("opportunityAvailable") === "true";
   const live = req.nextUrl.searchParams.get("live") === "true";
@@ -322,6 +329,7 @@ export async function GET(req: NextRequest) {
   const { data: posRows, error: pErr } = await supabase
     .from<PositionRow>("positions")
     .select("*")
+    .eq("user_id", userId)
     .eq("status", "open")
     .order("opened_date", { ascending: true });
   if (pErr) {
@@ -349,6 +357,7 @@ export async function GET(req: NextRequest) {
     const { data: fillsRows } = await supabase
       .from<Fill & { position_id: string }>("fills")
       .select("id, position_id, fill_type, contracts, premium, fill_date")
+      .eq("user_id", userId)
       .in("position_id", positionIds);
     for (const f of (fillsRows ?? []) as Array<Fill & { position_id: string }>) {
       const arr = fillsByPosition.get(f.position_id) ?? [];
@@ -406,6 +415,7 @@ export async function GET(req: NextRequest) {
       const trRes = await supabase
         .from("tracked_tickers")
         .select("symbol,entry_final_grade,screened_date")
+        .eq("user_id", userId)
         .in("symbol", symbols)
         .order("screened_date", { ascending: false });
       const trRows = ((trRes.data ?? []) as Array<{
@@ -438,6 +448,7 @@ export async function GET(req: NextRequest) {
       .select(
         "position_id,snapshot_time,stock_price,option_price,current_delta,move_ratio,pct_premium_remaining",
       )
+      .eq("user_id", userId)
       .in("position_id", positionIds)
       .order("snapshot_time", { ascending: false });
     const snapRows = (snapRes.data ?? []) as Array<{
@@ -471,6 +482,7 @@ export async function GET(req: NextRequest) {
       .select(
         "position_id,analysis_date,move_ratio,iv_crushed,iv_crush_magnitude,breached_two_x_em,analyst_sentiment,recovery_likelihood,stock_pct_from_strike,recommendation,confidence,reasoning,rule_fired",
       )
+      .eq("user_id", userId)
       .in("position_id", positionIds)
       .order("analysis_date", { ascending: false });
     const allRecs = (recRes.data ?? []) as Array<{
@@ -907,7 +919,9 @@ export async function GET(req: NextRequest) {
             );
             snapshotResult = "skipped_no_data";
           } else {
-            const ins = await supabase.from("position_snapshots").insert(snapshotRow);
+            const ins = await supabase
+              .from("position_snapshots")
+              .insert({ ...snapshotRow, user_id: userId });
             if (ins.error) {
               console.warn(
                 `[positions:refresh-snapshot] ${p.symbol} insert failed: ${ins.error.message}`,

@@ -49,14 +49,22 @@ function fmtDays(d: number | null): string {
 export function SchwabTokenBanner() {
   const [status, setStatus] = useState<TokenStatus | null>(null);
   const [dismissed, setDismissed] = useState(false);
+  // The Schwab connection belongs to the admin — members get a
+  // "market data unavailable" note instead of a reconnect CTA.
+  const [isAdmin, setIsAdmin] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch("/api/schwab/token-status", {
-          cache: "no-store",
-        });
+        const [res, meRes] = await Promise.all([
+          fetch("/api/schwab/token-status", { cache: "no-store" }),
+          fetch("/api/auth/me", { cache: "no-store" }),
+        ]);
+        if (!cancelled && meRes.ok) {
+          const me = (await meRes.json()) as { user?: { role?: string } };
+          setIsAdmin(me.user?.role === "admin");
+        }
         if (!res.ok) return;
         const json = (await res.json()) as TokenStatus;
         if (!cancelled) setStatus(json);
@@ -91,8 +99,11 @@ export function SchwabTokenBanner() {
         ? "border-orange-500/40 bg-orange-500/10 text-orange-100"
         : "border-amber-500/40 bg-amber-500/10 text-amber-100";
 
-  const title =
-    kind === "expired"
+  const title = !isAdmin
+    ? kind === "expired" || kind === "refresh_failed"
+      ? "Live market data unavailable — the admin's broker connection is down."
+      : `Live market data may pause soon (broker token expires in ~${fmtDays(expiresInDays)}).`
+    : kind === "expired"
       ? "Schwab token expired — reconnect to restore options data."
       : kind === "refresh_failed"
         ? `Schwab auto-refresh failed${refreshError ? ` (${refreshError})` : ""}. Reconnect to restore live data.`
@@ -111,19 +122,21 @@ export function SchwabTokenBanner() {
         <span className="font-medium">{title}</span>
       </div>
       <div className="flex items-center gap-2">
-        <a
-          href="/api/auth/schwab"
-          className={`inline-flex items-center gap-1.5 rounded border px-2.5 py-1 text-sm font-semibold ${
-            tone === "red"
-              ? "border-rose-300/40 bg-rose-500/20 hover:bg-rose-500/30"
-              : tone === "orange"
-                ? "border-orange-300/40 bg-orange-500/20 hover:bg-orange-500/30"
-                : "border-amber-300/40 bg-amber-500/20 hover:bg-amber-500/30"
-          }`}
-        >
-          <RefreshCw className="h-3.5 w-3.5" />
-          Reconnect Schwab
-        </a>
+        {isAdmin && (
+          <a
+            href="/api/auth/schwab"
+            className={`inline-flex items-center gap-1.5 rounded border px-2.5 py-1 text-sm font-semibold ${
+              tone === "red"
+                ? "border-rose-300/40 bg-rose-500/20 hover:bg-rose-500/30"
+                : tone === "orange"
+                  ? "border-orange-300/40 bg-orange-500/20 hover:bg-orange-500/30"
+                  : "border-amber-300/40 bg-amber-500/20 hover:bg-amber-500/30"
+            }`}
+          >
+            <RefreshCw className="h-3.5 w-3.5" />
+            Reconnect Schwab
+          </a>
+        )}
         <button
           type="button"
           onClick={() => setDismissed(true)}

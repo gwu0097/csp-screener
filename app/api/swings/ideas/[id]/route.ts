@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
+import { requireUserId, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -32,6 +33,12 @@ export async function PATCH(
   req: NextRequest,
   { params }: { params: { id: string } },
 ) {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   const id = (params.id ?? "").trim();
   if (!id) return NextResponse.json({ error: "Missing id" }, { status: 400 });
 
@@ -109,7 +116,7 @@ export async function PATCH(
   }
 
   const sb = createServerClient();
-  const res = await sb.from("swing_ideas").update(patch).eq("id", id).select().single();
+  const res = await sb.from("swing_ideas").update(patch).eq("id", id).eq("user_id", userId).select().single();
   if (res.error) {
     return NextResponse.json({ error: res.error.message }, { status: 400 });
   }
@@ -120,10 +127,16 @@ export async function DELETE(
   _req: NextRequest,
   { params }: { params: { id: string } },
 ) {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   const id = (params.id ?? "").trim();
   if (!id) return NextResponse.json({ error: "Missing id" }, { status: 400 });
   const sb = createServerClient();
-  const res = await sb.from("swing_ideas").delete().eq("id", id);
+  const res = await sb.from("swing_ideas").delete().eq("id", id).eq("user_id", userId);
   if (res.error) {
     return NextResponse.json({ error: res.error.message }, { status: 400 });
   }

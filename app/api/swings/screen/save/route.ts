@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
 import type { SwingCandidate } from "@/lib/swing-screener";
+import { requireUserId, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 // Persist-only — fast (<1s). Replaces the most-recent row in
@@ -15,6 +16,12 @@ type SaveBody = {
 };
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   let body: SaveBody;
   try {
     body = (await req.json()) as SaveBody;
@@ -33,11 +40,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const del = await sb
     .from("swing_screen_results")
     .delete()
+    .eq("user_id", userId)
     .neq("id", "00000000-0000-0000-0000-000000000000");
   if (del.error) {
     console.warn(`[swings/screen/save] truncate failed: ${del.error.message}`);
   }
   const ins = await sb.from("swing_screen_results").insert({
+    user_id: userId,
     screened: body.screened,
     pass1_survivors: body.pass1Survivors,
     pass2_results: body.pass2Results,

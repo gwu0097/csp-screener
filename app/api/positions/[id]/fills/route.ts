@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
 import { recalculatePositionFromFills } from "@/lib/positions";
+import { requireUserId, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -29,6 +30,12 @@ export async function POST(
   req: NextRequest,
   { params }: { params: { id: string } },
 ) {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   const positionId = params.id;
   if (!positionId) {
     return NextResponse.json({ error: "Missing position id" }, { status: 400 });
@@ -70,7 +77,11 @@ export async function POST(
 
   const sb = createServerClient();
   // Sanity check: position must exist before we attach a fill to it.
-  const pos = await sb.from("positions").select("id").eq("id", positionId);
+  const pos = await sb
+    .from("positions")
+    .select("id")
+    .eq("id", positionId)
+    .eq("user_id", userId);
   if (pos.error) {
     return NextResponse.json({ error: pos.error.message }, { status: 500 });
   }
@@ -84,6 +95,7 @@ export async function POST(
     contracts,
     premium,
     fill_date,
+    user_id: userId,
   });
   if (ins.error) {
     return NextResponse.json(

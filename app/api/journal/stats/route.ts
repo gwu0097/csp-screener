@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
 import type { Fill, PositionRow } from "@/lib/positions";
+import { requireUserId, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -44,12 +45,19 @@ function median(sortedAsc: number[]): number {
 }
 
 export async function GET() {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   try {
     const supabase = createServerClient();
 
     const { data: posRows, error: pErr } = await supabase
       .from<PositionRow>("positions")
       .select("*")
+      .eq("user_id", userId)
       .eq("status", "closed")
       .order("closed_date", { ascending: true });
     if (pErr) {
@@ -63,6 +71,7 @@ export async function GET() {
       const { data: fillsRows } = await supabase
         .from<Fill & { position_id: string }>("fills")
         .select("position_id, fill_type, contracts, premium, fill_date")
+        .eq("user_id", userId)
         .in("position_id", ids);
       for (const f of (fillsRows ?? []) as Array<Fill & { position_id: string }>) {
         const arr = fillsByPosition.get(f.position_id) ?? [];

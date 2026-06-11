@@ -1,6 +1,8 @@
 import type { Metadata, Viewport } from "next";
+import { cookies } from "next/headers";
 import "./globals.css";
 import { Sidebar } from "@/components/sidebar";
+import { SESSION_COOKIE, verifySessionToken } from "@/lib/auth";
 
 export const metadata: Metadata = {
   title: "CSP Screener",
@@ -21,27 +23,36 @@ export const viewport: Viewport = {
   // scale.
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  // No valid session → no app shell. The middleware only lets /login
+  // through unauthenticated, and that page renders full-screen.
+  const token = cookies().get(SESSION_COOKIE)?.value;
+  const session = token ? await verifySessionToken(token) : null;
+
   return (
     <html lang="en" className="dark" suppressHydrationWarning>
       <body className="min-h-screen bg-background text-foreground antialiased">
-        {/* Two-column shell: fixed-width sidebar on the left, scrolling
-            main content on the right. On desktop the shell is locked
-            to viewport height and <main> scrolls inside so the
-            sidebar stays fixed. On mobile the shell grows with
-            content and the window scrolls naturally — a nested
-            overflow-y-auto on mobile fights iOS Safari's touch-scroll
-            and prevents the URL bar from auto-hiding. */}
-        <div className="flex min-h-screen md:h-screen">
-          <Sidebar />
-          <main className="flex-1 md:overflow-y-auto">
-            <div className="container py-6">{children}</div>
-          </main>
-        </div>
+        {session ? (
+          /* Two-column shell: fixed-width sidebar on the left, scrolling
+             main content on the right. On desktop the shell is locked
+             to viewport height and <main> scrolls inside so the
+             sidebar stays fixed. On mobile the shell grows with
+             content and the window scrolls naturally — a nested
+             overflow-y-auto on mobile fights iOS Safari's touch-scroll
+             and prevents the URL bar from auto-hiding. */
+          <div className="flex min-h-screen md:h-screen">
+            <Sidebar />
+            <main className="flex-1 md:overflow-y-auto">
+              <div className="container py-6">{children}</div>
+            </main>
+          </div>
+        ) : (
+          children
+        )}
       </body>
     </html>
   );

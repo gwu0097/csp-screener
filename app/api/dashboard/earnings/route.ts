@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getUpcomingEarnings } from "@/lib/earnings";
 import { isLikelyCommonEquity } from "@/lib/screener";
 import { createServerClient } from "@/lib/supabase";
+import { requireUserId, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -30,6 +31,12 @@ function easternDateOf(ts: string): string {
 }
 
 export async function GET() {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   const today = easternToday();
 
   const earningsRaw = await getUpcomingEarnings(3);
@@ -44,6 +51,7 @@ export async function GET() {
     const r = await sb
       .from("screener_results")
       .select("screened_at,candidates")
+      .eq("user_id", userId)
       .order("screened_at", { ascending: false })
       .limit(1);
     const row = ((r.data ?? []) as Array<{

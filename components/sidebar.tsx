@@ -23,6 +23,7 @@ import {
   Star,
   Telescope,
   TrendingUp,
+  LogOut,
   X,
   Zap,
 } from "lucide-react";
@@ -363,6 +364,7 @@ export function Sidebar() {
           <SidebarLink item={SETTINGS} pathname={pathname} mode={mode} />
         </nav>
 
+        <UserChip mode={mode} />
       </aside>
     </TooltipProvider>
   );
@@ -458,6 +460,77 @@ function CollapsibleGroup({
         </div>
       )}
     </>
+  );
+}
+
+// Signed-in identity + logout pinned to the sidebar bottom. Fetches
+// /api/auth/me once; a 401 here means the middleware will redirect on
+// the next navigation anyway, so the chip just hides itself.
+function UserChip({ mode }: { mode: "expanded" | "collapsed" }) {
+  const [user, setUser] = useState<{ name: string; role: string } | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/auth/me", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j: { user?: { name: string; role: string } } | null) => {
+        if (!cancelled && j?.user) setUser(j.user);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function logout() {
+    try {
+      await fetch("/api/auth/logout", { method: "POST", cache: "no-store" });
+    } finally {
+      window.location.href = "/login";
+    }
+  }
+
+  if (!user) return null;
+  if (mode === "collapsed") {
+    return (
+      <div className="border-t border-white/10 p-2">
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              onClick={logout}
+              className="flex w-full items-center justify-center rounded-md p-2 text-gray-400 hover:bg-white/5 hover:text-white"
+              aria-label={`Sign out ${user.name}`}
+            >
+              <LogOut className="h-4 w-4" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="right">
+            Sign out ({user.name})
+          </TooltipContent>
+        </Tooltip>
+      </div>
+    );
+  }
+  return (
+    <div className="flex items-center justify-between gap-2 border-t border-white/10 p-3">
+      <div className="min-w-0">
+        <div className="truncate text-sm font-medium text-gray-200">
+          {user.name || "Signed in"}
+        </div>
+        <div className="text-[10px] uppercase tracking-wide text-gray-500">
+          {user.role}
+        </div>
+      </div>
+      <button
+        type="button"
+        onClick={logout}
+        className="rounded-md p-1.5 text-gray-400 hover:bg-white/5 hover:text-white"
+        title="Sign out"
+        aria-label="Sign out"
+      >
+        <LogOut className="h-4 w-4" />
+      </button>
+    </div>
   );
 }
 

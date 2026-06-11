@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
+import { requireUserId, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -64,6 +65,12 @@ export async function GET(
   _req: NextRequest,
   { params }: { params: { symbol: string } },
 ): Promise<NextResponse> {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   const symbol = (params.symbol ?? "").trim().toUpperCase();
   if (!/^[A-Z][A-Z0-9.-]{0,9}$/.test(symbol)) {
     return NextResponse.json({ error: "Invalid symbol" }, { status: 400 });
@@ -74,6 +81,7 @@ export async function GET(
     .select(
       "id,symbol,strike,expiry,option_type,broker,total_contracts,avg_premium_sold,status,opened_date,closed_date,realized_pnl,notes",
     )
+    .eq("user_id", userId)
     .eq("symbol", symbol)
     .in("status", ["closed", "expired_worthless", "assigned"])
     .order("closed_date", { ascending: false });

@@ -10,6 +10,7 @@ import { createServerClient } from "@/lib/supabase";
 import { type Fill } from "@/lib/positions";
 import { buildSnapshotRow } from "@/lib/snapshots";
 import { runEncyclopediaMaintenance } from "@/lib/encyclopedia";
+import { requireUserId, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -37,10 +38,12 @@ async function writePositionSnapshots(): Promise<{ written: number; errors: stri
   let written = 0;
   try {
     const supabase = createServerClient();
+    // Maintenance sweep — covers all users' open positions; each
+    // snapshot row inherits its position's user_id (NOT NULL column).
     const { data: opens, error: pErr } = await supabase
       .from("positions")
       .select(
-        "id, symbol, strike, expiry, total_contracts, avg_premium_sold, opened_date, entry_stock_price, entry_em_pct",
+        "id, user_id, symbol, strike, expiry, total_contracts, avg_premium_sold, opened_date, entry_stock_price, entry_em_pct",
       )
       .eq("status", "open");
     if (pErr) {
@@ -48,6 +51,7 @@ async function writePositionSnapshots(): Promise<{ written: number; errors: stri
     }
     const positions = (opens ?? []) as Array<{
       id: string;
+      user_id: string;
       symbol: string;
       strike: number;
       expiry: string;
@@ -95,10 +99,13 @@ async function writePositionSnapshots(): Promise<{ written: number; errors: stri
     for (const p of positions) {
       const chain = chainCache.get(p.symbol) ?? null;
       const isExpiryDay = (p.expiry ?? "") <= todayStr;
-      const row = buildSnapshotRow(p, chain, fillsByPosition.get(p.id) ?? [], {
-        nowIso,
-        closeSnapshot: isExpiryDay,
-      });
+      const row = {
+        ...buildSnapshotRow(p, chain, fillsByPosition.get(p.id) ?? [], {
+          nowIso,
+          closeSnapshot: isExpiryDay,
+        }),
+        user_id: p.user_id,
+      };
       const { error: iErr } = await supabase.from("position_snapshots").insert(row);
       if (iErr) {
         errors.push(`${p.symbol}: ${iErr.message}`);
@@ -113,6 +120,7 @@ async function writePositionSnapshots(): Promise<{ written: number; errors: stri
 }
 
 async function upsertTrackedTickers(
+  userId: string,
   results: ScreenerResult[],
   tracked: Set<string>,
   vix: number | null,
@@ -127,6 +135,7 @@ async function upsertTrackedTickers(
       if (!tracked.has(r.symbol.toUpperCase())) continue;
       if (!r.threeLayer) continue;
       const row = {
+        user_id: userId,
         symbol: r.symbol.toUpperCase(),
         expiry: r.expiry,
         screened_date: screenedDate,
@@ -142,7 +151,7 @@ async function upsertTrackedTickers(
       };
       const { error: uErr } = await supabase
         .from("tracked_tickers")
-        .upsert(row, { onConflict: "symbol,expiry,screened_date" });
+        .upsert(row, { onConflict: "user_id,symbol,expiry,screened_date" });
       if (uErr) {
         errors.push(`${r.symbol}: ${uErr.message}`);
         continue;
@@ -156,6 +165,12 @@ async function upsertTrackedTickers(
 }
 
 export async function POST(req: NextRequest) {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   let body: Body;
   try {
     body = (await req.json()) as Body;
@@ -187,7 +202,7 @@ export async function POST(req: NextRequest) {
           sources: [],
           gradePenalty: 0,
         })),
-        getPersonalHistory(base.symbol).catch(() => ({
+        getPersonalHistory(userId, base.symbol).catch(() => ({
           tradeCount: 0,
           winRate: null,
           avgRoc: null,
@@ -268,7 +283,7 @@ export async function POST(req: NextRequest) {
 
   // Tracked + snapshots + encyclopedia in parallel after grading.
   const [trackedResult, snapshotResult, encyclopediaUpdates] = await Promise.all([
-    upsertTrackedTickers(results, tracked, vix),
+    upsertTrackedTickers(userId, results, tracked, vix),
     writePositionSnapshots(),
     (async () => {
       try {

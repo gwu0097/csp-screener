@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import type { ScreenerResult } from "@/lib/swing-screener";
 import { createServerClient } from "@/lib/supabase";
+import { requireUserId, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 // GET-only: returns the cached most-recent screen result. The actual
@@ -20,10 +21,17 @@ const EMPTY_CACHED: Cached = {
 };
 
 export async function GET(): Promise<NextResponse> {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   const sb = createServerClient();
   const res = await sb
     .from("swing_screen_results")
     .select("*")
+    .eq("user_id", userId)
     .order("screened_at", { ascending: false })
     .limit(1);
   if (res.error) {

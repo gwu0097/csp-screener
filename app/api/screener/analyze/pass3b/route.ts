@@ -6,6 +6,7 @@ import {
 } from "@/lib/screener";
 import { type PerplexityNewsResult } from "@/lib/perplexity";
 import { createServerClient } from "@/lib/supabase";
+import { requireUserId, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -47,6 +48,7 @@ function todayIso(): string {
 }
 
 async function upsertTrackedTickers(
+  userId: string,
   results: ScreenerResult[],
   tracked: Set<string>,
   vix: number | null,
@@ -61,6 +63,7 @@ async function upsertTrackedTickers(
       if (!tracked.has(r.symbol.toUpperCase())) continue;
       if (!r.threeLayer) continue;
       const row = {
+        user_id: userId,
         symbol: r.symbol.toUpperCase(),
         expiry: r.expiry,
         screened_date: screenedDate,
@@ -76,7 +79,7 @@ async function upsertTrackedTickers(
       };
       const { error: uErr } = await supabase
         .from("tracked_tickers")
-        .upsert(row, { onConflict: "symbol,expiry,screened_date" });
+        .upsert(row, { onConflict: "user_id,symbol,expiry,screened_date" });
       if (uErr) {
         errors.push(`${r.symbol}: ${uErr.message}`);
         continue;
@@ -90,6 +93,12 @@ async function upsertTrackedTickers(
 }
 
 export async function POST(req: NextRequest) {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   let body: Body;
   try {
     body = (await req.json()) as Body;
@@ -119,7 +128,7 @@ export async function POST(req: NextRequest) {
   const results = await Promise.all(
     candidates.map(async (base): Promise<ScreenerResult> => {
       if (!base.stageThree || !base.stageFour) return base;
-      const personal = await getPersonalHistory(base.symbol).catch(() => ({
+      const personal = await getPersonalHistory(userId, base.symbol).catch(() => ({
         tradeCount: 0,
         winRate: null,
         avgRoc: null,
@@ -146,7 +155,7 @@ export async function POST(req: NextRequest) {
   // candidate sort puts tracked symbols in the earliest batches — the
   // old final-batch-only gate meant tracked rows from earlier batches
   // never got their entry snapshot written.
-  const trackedResult = await upsertTrackedTickers(results, tracked, vix);
+  const trackedResult = await upsertTrackedTickers(userId, results, tracked, vix);
   if (trackedResult.errors.length > 0) {
     console.warn(
       `[analyze/pass3b] tracked upsert errors: ${trackedResult.errors.join("; ")}`,

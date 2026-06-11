@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { saveManualTokens } from "@/lib/schwab";
+import { authErrorResponse, requireAdmin } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 // Persists tokens to Supabase. No outbound API call but kept on a 30s
@@ -9,6 +10,11 @@ export const maxDuration = 30;
 type Body = { access_token?: unknown; refresh_token?: unknown };
 
 export async function POST(req: NextRequest) {
+  try {
+    await requireAdmin();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   let body: Body;
   try {
     body = (await req.json()) as Body;

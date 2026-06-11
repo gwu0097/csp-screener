@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
+import { requireUserId, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -42,6 +43,12 @@ export async function POST(
   req: NextRequest,
   { params }: { params: { symbol: string } },
 ): Promise<NextResponse> {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   const symbol = (params.symbol ?? "").trim().toUpperCase();
   if (!validSymbol(symbol)) {
     return NextResponse.json({ error: "Invalid symbol" }, { status: 400 });
@@ -80,6 +87,7 @@ export async function POST(
 
   const sb = createServerClient();
   const ins = await sb.from("filing_notes").insert({
+    user_id: userId,
     symbol,
     quarter,
     filing_type,

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
+import { requireUserId, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -17,6 +18,12 @@ export async function DELETE(
   _req: NextRequest,
   { params }: { params: { id: string } },
 ) {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   const id = params.id;
   if (!id || typeof id !== "string") {
     return NextResponse.json(
@@ -33,6 +40,7 @@ export async function DELETE(
     .from("positions")
     .select("id")
     .eq("id", id)
+    .eq("user_id", userId)
     .limit(1);
   if (exists.error) {
     return NextResponse.json(
@@ -52,7 +60,11 @@ export async function DELETE(
     "position_snapshots",
     "post_earnings_recommendations",
   ]) {
-    const r = await sb.from(table).delete().eq("position_id", id);
+    const r = await sb
+      .from(table)
+      .delete()
+      .eq("position_id", id)
+      .eq("user_id", userId);
     if (r.error) {
       console.warn(
         `[positions/delete] child cleanup ${table} for ${id} failed: ${r.error.message}`,
@@ -60,7 +72,11 @@ export async function DELETE(
     }
   }
 
-  const del = await sb.from("positions").delete().eq("id", id);
+  const del = await sb
+    .from("positions")
+    .delete()
+    .eq("id", id)
+    .eq("user_id", userId);
   if (del.error) {
     return NextResponse.json(
       { success: false, error: del.error.message },

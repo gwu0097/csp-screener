@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
+import { requireUserId, authErrorResponse } from "@/lib/auth";
 import {
   remainingContracts,
   type Fill,
@@ -69,6 +70,12 @@ type PositionRowFull = PositionRow & {
 };
 
 export async function GET() {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   const supabase = createServerClient();
 
   // Includes auto-expired-worthless and assigned positions so the
@@ -77,6 +84,7 @@ export async function GET() {
   const { data: posRows, error } = await supabase
     .from<PositionRowFull>("positions")
     .select("*")
+    .eq("user_id", userId)
     .in("status", ["closed", "expired_worthless", "assigned"])
     .order("closed_date", { ascending: false });
   if (error) {
@@ -93,6 +101,7 @@ export async function GET() {
   const { data: fillsRows } = await supabase
     .from<Fill & { position_id: string }>("fills")
     .select("position_id, fill_type, contracts, premium, fill_date")
+    .eq("user_id", userId)
     .in("position_id", positionIds);
   for (const f of (fillsRows ?? []) as Array<Fill & { position_id: string }>) {
     const arr = fillsByPosition.get(f.position_id) ?? [];
@@ -117,6 +126,7 @@ export async function GET() {
       const trRes = await supabase
         .from("tracked_tickers")
         .select("symbol,entry_final_grade,screened_date")
+        .eq("user_id", userId)
         .in("symbol", symbols)
         .order("screened_date", { ascending: false });
       const trRows = (trRes.data ?? []) as Array<{
@@ -138,6 +148,7 @@ export async function GET() {
     .select(
       "position_id,analysis_date,move_ratio,iv_crushed,iv_crush_magnitude,breached_two_x_em,analyst_sentiment,recovery_likelihood,stock_pct_from_strike,recommendation,confidence,reasoning,rule_fired",
     )
+    .eq("user_id", userId)
     .in("position_id", positionIds)
     .order("analysis_date", { ascending: false });
   for (const r of (recRes.data ?? []) as Array<{

@@ -9,6 +9,7 @@ import {
 } from "@/lib/screener";
 import { getEarningsNewsContext } from "@/lib/perplexity";
 import { getMarketContext } from "@/lib/market";
+import { requireUserId, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -40,6 +41,12 @@ function isCandidate(v: unknown): v is ScreenerResult {
 }
 
 export async function POST(req: NextRequest) {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   const { connected } = await isSchwabConnected().catch(() => ({ connected: false }));
   if (!connected) {
     return NextResponse.json(
@@ -105,7 +112,7 @@ export async function POST(req: NextRequest) {
       sources: [],
       gradePenalty: 0,
     })),
-    getPersonalHistory(upper).catch(() => ({
+    getPersonalHistory(userId, upper).catch(() => ({
       tradeCount: 0,
       winRate: null,
       avgRoc: null,

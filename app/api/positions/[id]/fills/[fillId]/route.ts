@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
 import { recalculatePositionFromFills } from "@/lib/positions";
+import { requireUserId, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -10,18 +11,39 @@ export async function DELETE(
   _req: NextRequest,
   { params }: { params: { id: string; fillId: string } },
 ) {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   const { id: positionId, fillId } = params;
   if (!positionId || !fillId) {
     return NextResponse.json({ error: "Missing id" }, { status: 400 });
   }
   const sb = createServerClient();
+  // Ownership gate — the recalc below writes position aggregates, so
+  // never run it against a position this user doesn't own.
+  const pos = await sb
+    .from("positions")
+    .select("id")
+    .eq("id", positionId)
+    .eq("user_id", userId)
+    .limit(1);
+  if (pos.error) {
+    return NextResponse.json({ error: pos.error.message }, { status: 500 });
+  }
+  if (!pos.data || (pos.data as Array<{ id: string }>).length === 0) {
+    return NextResponse.json({ error: "Position not found" }, { status: 404 });
+  }
   // Scope the delete to the parent position so a stale URL can't
   // wipe a fill belonging to someone else's position.
   const del = await sb
     .from("fills")
     .delete()
     .eq("id", fillId)
-    .eq("position_id", positionId);
+    .eq("position_id", positionId)
+    .eq("user_id", userId);
   if (del.error) {
     return NextResponse.json(
       { error: `fill delete failed — ${del.error.message}` },
@@ -44,6 +66,12 @@ export async function PATCH(
   req: NextRequest,
   { params }: { params: { id: string; fillId: string } },
 ) {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   const { id: positionId, fillId } = params;
   if (!positionId || !fillId) {
     return NextResponse.json({ error: "Missing id" }, { status: 400 });
@@ -59,11 +87,25 @@ export async function PATCH(
     return NextResponse.json({ error: "contracts must be > 0" }, { status: 400 });
   }
   const sb = createServerClient();
+  // Ownership gate — see DELETE above.
+  const pos = await sb
+    .from("positions")
+    .select("id")
+    .eq("id", positionId)
+    .eq("user_id", userId)
+    .limit(1);
+  if (pos.error) {
+    return NextResponse.json({ error: pos.error.message }, { status: 500 });
+  }
+  if (!pos.data || (pos.data as Array<{ id: string }>).length === 0) {
+    return NextResponse.json({ error: "Position not found" }, { status: 404 });
+  }
   const upd = await sb
     .from("fills")
     .update({ contracts })
     .eq("id", fillId)
-    .eq("position_id", positionId);
+    .eq("position_id", positionId)
+    .eq("user_id", userId);
   if (upd.error) {
     return NextResponse.json(
       { error: `fill update failed — ${upd.error.message}` },

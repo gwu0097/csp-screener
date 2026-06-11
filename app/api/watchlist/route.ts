@@ -1,10 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 import { addToWatchlist, getWatchlist, WatchlistType } from "@/lib/watchlist";
+import { requireUserId, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const { whitelist, blacklist } = await getWatchlist();
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
+  const { whitelist, blacklist } = await getWatchlist(userId);
   return NextResponse.json({
     whitelist: whitelist.map((r) => ({ symbol: r.symbol, addedAt: r.added_at })),
     blacklist: blacklist.map((r) => ({ symbol: r.symbol, addedAt: r.added_at })),
@@ -14,6 +21,12 @@ export async function GET() {
 type AddBody = { symbol?: unknown; list_type?: unknown };
 
 export async function POST(req: NextRequest) {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   let body: AddBody;
   try {
     body = (await req.json()) as AddBody;
@@ -27,7 +40,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "list_type must be 'whitelist' or 'blacklist'" }, { status: 400 });
   }
   try {
-    const entry = await addToWatchlist(body.symbol, body.list_type as WatchlistType);
+    const entry = await addToWatchlist(userId, body.symbol, body.list_type as WatchlistType);
     return NextResponse.json({ entry: { symbol: entry.symbol, addedAt: entry.added_at, listType: entry.list_type } });
   } catch (e) {
     const msg = e instanceof Error ? e.message : "failed";

@@ -11,6 +11,7 @@ import {
 } from "@/lib/positions";
 import { buildSnapshotRow, fetchChainWideSafe } from "@/lib/snapshots";
 import { recordPositionOutcome } from "@/lib/post-earnings";
+import { requireUserId, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -199,6 +200,12 @@ function normalizeExpiryToWeekday(expiry: string): {
 // Failures there log but don't roll the whole batch back — they're
 // observational records, not the trades themselves.
 export async function POST(req: NextRequest) {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   let body: BulkBody;
   try {
     body = (await req.json()) as BulkBody;
@@ -323,6 +330,7 @@ export async function POST(req: NextRequest) {
     const { data: findData, error: fErr } = await supabase
       .from("positions")
       .select("id,expiry")
+      .eq("user_id", userId)
       .eq("symbol", symbol)
       .eq("strike", input.strike)
       .eq("expiry", expiry)
@@ -338,6 +346,7 @@ export async function POST(req: NextRequest) {
       const { data: openCandidatesRaw, error: cErr } = await supabase
         .from("positions")
         .select("id,expiry")
+        .eq("user_id", userId)
         .eq("symbol", symbol)
         .eq("strike", input.strike)
         .eq("broker", broker)
@@ -455,6 +464,7 @@ export async function POST(req: NextRequest) {
       .select(
         "id,symbol,total_contracts,entry_stock_price,position_type,status,realized_pnl,notes",
       )
+      .eq("user_id", userId)
       .eq("symbol", symbol)
       .eq("broker", broker)
       .eq("position_type", "stock_long")
@@ -575,7 +585,8 @@ export async function POST(req: NextRequest) {
     const fDel = await supabase
       .from("fills")
       .delete()
-      .eq("import_batch_id", importBatchId);
+      .eq("import_batch_id", importBatchId)
+      .eq("user_id", userId);
     if (fDel.error) {
       console.error(
         `[bulk-create] rollback: fills delete failed — ${fDel.error.message}`,
@@ -585,7 +596,8 @@ export async function POST(req: NextRequest) {
     const pDel = await supabase
       .from("positions")
       .delete()
-      .eq("import_batch_id", importBatchId);
+      .eq("import_batch_id", importBatchId)
+      .eq("user_id", userId);
     if (pDel.error) {
       console.error(
         `[bulk-create] rollback: positions delete failed — ${pDel.error.message}`,
@@ -601,6 +613,7 @@ export async function POST(req: NextRequest) {
           .from("positions")
           .select("direction")
           .eq("id", id)
+          .eq("user_id", userId)
           .single();
         const dir =
           (dirRow as { direction?: string | null } | null)?.direction === "long"
@@ -609,7 +622,8 @@ export async function POST(req: NextRequest) {
         const { data: remainingRaw } = await supabase
           .from("fills")
           .select("fill_type, contracts, premium, fill_date")
-          .eq("position_id", id);
+          .eq("position_id", id)
+          .eq("user_id", userId);
         const remainingFills = (remainingRaw ?? []) as Fill[];
         const remaining = remainingContracts(remainingFills);
         const totalOpened = remainingFills
@@ -637,7 +651,8 @@ export async function POST(req: NextRequest) {
             realized_pnl: pnl,
             updated_at: new Date().toISOString(),
           })
-          .eq("id", id);
+          .eq("id", id)
+          .eq("user_id", userId);
       } catch (e) {
         console.error(
           `[bulk-create] rollback: recompute failed for ${id}: ${e instanceof Error ? e.message : e}`,
@@ -684,6 +699,7 @@ export async function POST(req: NextRequest) {
           opened_date: fillDate,
           notes: input.notes ?? null,
           import_batch_id: importBatchId,
+          user_id: userId,
         };
         if (input.direction === "long") positionInsert.direction = "long";
         const { data: insertedRaw, error: iErr } = await supabase
@@ -718,6 +734,7 @@ export async function POST(req: NextRequest) {
         fill_date: fillDate,
         fill_time: new Date().toISOString(),
         import_batch_id: importBatchId,
+        user_id: userId,
       });
       if (fillErr) {
         throw new Error(`${input.symbol}: fill insert failed — ${fillErr.message}`);
@@ -733,6 +750,7 @@ export async function POST(req: NextRequest) {
         .from("positions")
         .select("direction")
         .eq("id", positionId)
+        .eq("user_id", userId)
         .single();
       const dir =
         (dirRow as { direction?: string | null } | null)?.direction === "long"
@@ -741,7 +759,8 @@ export async function POST(req: NextRequest) {
       const { data: allFillsRaw, error: afErr } = await supabase
         .from("fills")
         .select("fill_type, contracts, premium, fill_date")
-        .eq("position_id", positionId);
+        .eq("position_id", positionId)
+        .eq("user_id", userId);
       if (afErr) {
         throw new Error(`${input.symbol}: refetch fills failed — ${afErr.message}`);
       }
@@ -773,7 +792,8 @@ export async function POST(req: NextRequest) {
           realized_pnl: pnl,
           updated_at: new Date().toISOString(),
         })
-        .eq("id", positionId);
+        .eq("id", positionId)
+        .eq("user_id", userId);
       if (uErr) {
         throw new Error(`${input.symbol}: position update failed — ${uErr.message}`);
       }
@@ -797,6 +817,7 @@ export async function POST(req: NextRequest) {
         fill_date: sp.date,
         fill_time: new Date().toISOString(),
         import_batch_id: importBatchId,
+        user_id: userId,
       });
       if (fillInsert.error) {
         throw new Error(
@@ -815,7 +836,8 @@ export async function POST(req: NextRequest) {
       const noteUpd = await supabase
         .from("positions")
         .update({ notes, updated_at: new Date().toISOString() })
-        .eq("id", stockRowId);
+        .eq("id", stockRowId)
+        .eq("user_id", userId);
       if (noteUpd.error) {
         throw new Error(
           `stock note update failed — ${noteUpd.error.message}`,
@@ -852,6 +874,7 @@ export async function POST(req: NextRequest) {
             "id, symbol, strike, expiry, avg_premium_sold, opened_date, entry_stock_price, entry_em_pct, option_type, direction",
           )
           .eq("id", positionId)
+          .eq("user_id", userId)
           .single();
         const position = posRow as {
           id: string;
@@ -869,7 +892,8 @@ export async function POST(req: NextRequest) {
           const { data: preFillsRaw } = await supabase
             .from("fills")
             .select("fill_type, contracts, premium, fill_date")
-            .eq("position_id", positionId);
+            .eq("position_id", positionId)
+            .eq("user_id", userId);
           const preFills = (preFillsRaw ?? []) as Fill[];
           const chain = await fetchChainWideSafe(
             position.symbol,
@@ -882,7 +906,7 @@ export async function POST(req: NextRequest) {
           });
           const { error: sErr } = await supabase
             .from("position_snapshots")
-            .insert(snapshotRow);
+            .insert({ ...snapshotRow, user_id: userId });
           if (sErr) {
             console.warn(
               `[bulk-create] close snapshot insert failed for ${input.symbol}: ${sErr.message}`,
@@ -904,6 +928,7 @@ export async function POST(req: NextRequest) {
           .from("positions")
           .select("entry_crush_grade")
           .eq("id", positionId)
+          .eq("user_id", userId)
           .single();
         const already = (posData as { entry_crush_grade?: string | null } | null)?.entry_crush_grade;
         if (!already) {
@@ -912,6 +937,7 @@ export async function POST(req: NextRequest) {
           const { data: trackedRaw } = await supabase
             .from("tracked_tickers")
             .select("*")
+            .eq("user_id", userId)
             .eq("symbol", symbol)
             .eq("expiry", plan.expiry)
             .in("screened_date", [fillDate, prevDay])
@@ -931,7 +957,8 @@ export async function POST(req: NextRequest) {
                 entry_news_summary: match.entry_news_summary ?? null,
                 entry_stock_price: match.entry_stock_price ?? null,
               })
-              .eq("id", positionId);
+              .eq("id", positionId)
+              .eq("user_id", userId);
             if (mErr) {
               console.warn(
                 `[bulk-create] merge tracked grades failed for ${input.symbol}: ${mErr.message}`,
@@ -955,6 +982,7 @@ export async function POST(req: NextRequest) {
           .from("positions")
           .select("status")
           .eq("id", positionId)
+          .eq("user_id", userId)
           .single();
         const status = (pRow as { status?: string } | null)?.status;
         if (status === "closed") {

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
 import { batchRefreshSnapshots } from "@/lib/market-snapshot";
 import { computeEntrySignal, computeSwingScore } from "@/lib/entry-signal";
+import { requireUserId, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -45,10 +46,17 @@ type TradeRow = {
 };
 
 export async function GET() {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   const sb = createServerClient();
   const ideasRes = await sb
     .from("swing_ideas")
     .select("*")
+    .eq("user_id", userId)
     .order("created_at", { ascending: false });
   if (ideasRes.error) {
     return NextResponse.json({ error: ideasRes.error.message }, { status: 500 });
@@ -67,6 +75,7 @@ export async function GET() {
       .select(
         "id,swing_idea_id,symbol,shares,entry_price,entry_date,exit_price,exit_date,realized_pnl,return_pct,exit_reason,status",
       )
+      .eq("user_id", userId)
       .in("swing_idea_id", ideaIds)
       .order("created_at", { ascending: false });
     if (tradesRes.error) {
@@ -150,6 +159,12 @@ function num(v: unknown): number | null {
 }
 
 export async function POST(req: NextRequest) {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   let body: CreateBody;
   try {
     body = (await req.json()) as CreateBody;
@@ -182,6 +197,7 @@ export async function POST(req: NextRequest) {
   })();
 
   const insertRow = {
+    user_id: userId,
     symbol,
     catalyst: typeof body.catalyst === "string" ? body.catalyst : null,
     user_thesis: typeof body.user_thesis === "string" ? body.user_thesis : null,

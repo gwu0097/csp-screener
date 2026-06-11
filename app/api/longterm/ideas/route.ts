@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
+import { requireUserId, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -29,10 +30,17 @@ type IdeaRow = {
 };
 
 export async function GET() {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   const sb = createServerClient();
   const res = await sb
     .from("longterm_ideas")
     .select("*")
+    .eq("user_id", userId)
     .order("created_at", { ascending: false });
   if (res.error) {
     return NextResponse.json({ error: res.error.message }, { status: 500 });
@@ -60,6 +68,12 @@ function num(v: unknown): number | null {
 }
 
 export async function POST(req: NextRequest) {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   let body: CreateBody;
   try {
     body = (await req.json()) as CreateBody;
@@ -92,6 +106,7 @@ export async function POST(req: NextRequest) {
   })();
 
   const insertRow = {
+    user_id: userId,
     symbol,
     catalyst: typeof body.catalyst === "string" ? body.catalyst : null,
     thesis: typeof body.thesis === "string" ? body.thesis : null,

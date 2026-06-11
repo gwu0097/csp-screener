@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
+import { requireUserId, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -12,6 +13,12 @@ export async function DELETE(
   _req: NextRequest,
   { params }: { params: { id: string } },
 ) {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   const id = (params.id ?? "").trim();
   if (!id) return NextResponse.json({ error: "Missing id" }, { status: 400 });
 
@@ -22,6 +29,7 @@ export async function DELETE(
     .from("swing_trades")
     .select("swing_idea_id,symbol")
     .eq("id", id)
+    .eq("user_id", userId)
     .maybeSingle();
   if (tradeRes.error) {
     return NextResponse.json({ error: tradeRes.error.message }, { status: 400 });
@@ -32,7 +40,7 @@ export async function DELETE(
   }
   const ideaId = trade.swing_idea_id;
 
-  const del = await sb.from("swing_trades").delete().eq("id", id);
+  const del = await sb.from("swing_trades").delete().eq("id", id).eq("user_id", userId);
   if (del.error) {
     return NextResponse.json({ error: del.error.message }, { status: 400 });
   }
@@ -45,6 +53,7 @@ export async function DELETE(
       .from("swing_trades")
       .select("id")
       .eq("swing_idea_id", ideaId)
+      .eq("user_id", userId)
       .limit(1);
     if (remainingRes.error) {
       console.warn(
@@ -61,6 +70,7 @@ export async function DELETE(
           .from("swing_ideas")
           .select("status")
           .eq("id", ideaId)
+          .eq("user_id", userId)
           .maybeSingle();
         const status = (ideaRes.data as { status: string } | null)?.status;
         if (status === "entered" || status === "exited") {
@@ -70,7 +80,8 @@ export async function DELETE(
               status: "setup_ready",
               updated_at: new Date().toISOString(),
             })
-            .eq("id", ideaId);
+            .eq("id", ideaId)
+            .eq("user_id", userId);
           if (upd.error) {
             console.warn(
               `[swings/trades/delete] idea revert failed for ${ideaId}: ${upd.error.message}`,

@@ -176,14 +176,20 @@ export async function fetchFreshExpirySnapshot(
 // and they legitimately store strike=0 + an `expiry` set to the
 // assignment day. Without this filter they'd surface in the modal
 // the day after assignment as a $0 strike row.
-export async function getExpiredPositions(): Promise<ExpiredOpenPosition[]> {
+// userId scopes the result to one user (the confirm-expire modal);
+// omit it for the cross-user maintenance sweep in runAutoExpire.
+export async function getExpiredPositions(
+  userId?: string,
+): Promise<ExpiredOpenPosition[]> {
   const sb = createServerClient();
-  const r = await sb
+  let q = sb
     .from("positions")
     .select(
       "id,symbol,strike,expiry,total_contracts,avg_premium_sold,status,opened_date,closed_date,notes,broker,position_type",
     )
     .eq("status", "open");
+  if (userId) q = q.eq("user_id", userId);
+  const r = await q;
   const all = (r.data ?? []) as ExpiredOpenPosition[];
   const todayEt = todayEasternIso();
   const afterClose = isAfterMarketCloseET();

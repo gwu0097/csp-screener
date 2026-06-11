@@ -368,10 +368,12 @@ export async function writeOpenPositionSnapshots(): Promise<{
   let written = 0;
   try {
     const supabase = createServerClient();
+    // Maintenance sweep across ALL users' open positions — each
+    // snapshot row inherits its position's user_id.
     const { data: opens, error: pErr } = await supabase
       .from("positions")
       .select(
-        "id, symbol, strike, expiry, total_contracts, avg_premium_sold, opened_date, entry_stock_price, entry_em_pct",
+        "id, user_id, symbol, strike, expiry, total_contracts, avg_premium_sold, opened_date, entry_stock_price, entry_em_pct",
       )
       .eq("status", "open");
     if (pErr) {
@@ -379,6 +381,7 @@ export async function writeOpenPositionSnapshots(): Promise<{
     }
     const positions = (opens ?? []) as Array<{
       id: string;
+      user_id: string;
       symbol: string;
       strike: number;
       expiry: string;
@@ -419,10 +422,13 @@ export async function writeOpenPositionSnapshots(): Promise<{
     for (const p of positions) {
       const chain = chainCache.get(p.symbol) ?? null;
       const isExpiryDay = (p.expiry ?? "") <= todayStr;
-      const row = buildSnapshotRow(p, chain, fillsByPosition.get(p.id) ?? [], {
-        nowIso,
-        closeSnapshot: isExpiryDay,
-      });
+      const row = {
+        ...buildSnapshotRow(p, chain, fillsByPosition.get(p.id) ?? [], {
+          nowIso,
+          closeSnapshot: isExpiryDay,
+        }),
+        user_id: p.user_id,
+      };
       const { error: iErr } = await supabase.from("position_snapshots").insert(row);
       if (iErr) {
         errors.push(`${p.symbol}: ${iErr.message}`);

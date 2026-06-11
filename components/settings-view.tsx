@@ -13,11 +13,15 @@ type Props = {
   envFlags: Record<string, boolean>;
   schwabFlash: string | null;
   schwabReason: string | null;
+  // Signed-in role: members get a status-only Schwab card (the broker
+  // connection belongs to the admin) and no maintenance/env tooling.
+  role: "admin" | "member";
 };
 
-export function SettingsView({ connected, lastRefresh, envFlags, schwabFlash, schwabReason }: Props) {
+export function SettingsView({ connected, lastRefresh, envFlags, schwabFlash, schwabReason, role }: Props) {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
+  const isAdmin = role === "admin";
 
   async function disconnect() {
     setBusy(true);
@@ -55,23 +59,44 @@ export function SettingsView({ connected, lastRefresh, envFlags, schwabFlash, sc
           <div className="text-base text-muted-foreground">
             Last refresh: {lastRefresh ? new Date(lastRefresh).toLocaleString() : "never"}
           </div>
-          <div className="flex gap-2">
-            {!connected && (
-              <Button asChild>
-                <a href="/api/auth/schwab">Connect Schwab</a>
-              </Button>
-            )}
-            {connected && (
-              <Button variant="destructive" onClick={disconnect} disabled={busy}>
-                {busy ? "Disconnecting…" : "Disconnect"}
-              </Button>
-            )}
-          </div>
+          {isAdmin ? (
+            <>
+              <div className="flex gap-2">
+                {!connected && (
+                  <Button asChild>
+                    <a href="/api/auth/schwab">Connect Schwab</a>
+                  </Button>
+                )}
+                {connected && (
+                  <Button variant="destructive" onClick={disconnect} disabled={busy}>
+                    {busy ? "Disconnecting…" : "Disconnect"}
+                  </Button>
+                )}
+              </div>
 
-          <ManualTokenSection onSaved={() => router.refresh()} />
+              <ManualTokenSection onSaved={() => router.refresh()} />
+            </>
+          ) : (
+            <p className="text-base text-muted-foreground">
+              The broker connection is managed by the admin.
+              {!connected &&
+                " Live market data is currently unavailable — it will come back when the admin reconnects."}
+            </p>
+          )}
         </CardContent>
       </Card>
 
+      <Card>
+        <CardHeader>
+          <CardTitle>Account</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <ChangePasswordSection />
+          {isAdmin && <InviteUserSection />}
+        </CardContent>
+      </Card>
+
+      {isAdmin && (
       <Card>
         <CardHeader>
           <CardTitle>Encyclopedia maintenance</CardTitle>
@@ -81,7 +106,9 @@ export function SettingsView({ connected, lastRefresh, envFlags, schwabFlash, sc
           <RekeySymbol />
         </CardContent>
       </Card>
+      )}
 
+      {isAdmin && (
       <Card>
         <CardHeader>
           <CardTitle>Environment variables</CardTitle>
@@ -108,6 +135,175 @@ export function SettingsView({ connected, lastRefresh, envFlags, schwabFlash, sc
           </p>
         </CardContent>
       </Card>
+      )}
+    </div>
+  );
+}
+
+// Change the signed-in user's password (current required).
+function ChangePasswordSection() {
+  const [current, setCurrent] = useState("");
+  const [next, setNext] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+
+  const inputCls =
+    "w-full max-w-sm rounded border border-border bg-background px-2 py-1.5 text-sm";
+
+  async function save() {
+    setBusy(true);
+    setMessage(null);
+    try {
+      const res = await fetch("/api/auth/change-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ currentPassword: current, newPassword: next }),
+        cache: "no-store",
+      });
+      const j = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!res.ok) {
+        setMessage({ kind: "err", text: j.error ?? `HTTP ${res.status}` });
+        return;
+      }
+      setMessage({ kind: "ok", text: "Password changed." });
+      setCurrent("");
+      setNext("");
+    } catch (e) {
+      setMessage({ kind: "err", text: e instanceof Error ? e.message : "Network error" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="font-medium">Change password</div>
+      <input
+        className={inputCls}
+        type="password"
+        placeholder="Current password"
+        autoComplete="current-password"
+        value={current}
+        onChange={(e) => setCurrent(e.target.value)}
+      />
+      <input
+        className={inputCls}
+        type="password"
+        placeholder="New password (10+ characters)"
+        autoComplete="new-password"
+        value={next}
+        onChange={(e) => setNext(e.target.value)}
+      />
+      <div className="flex items-center gap-2">
+        <Button
+          size="sm"
+          variant="secondary"
+          onClick={() => void save()}
+          disabled={busy || !current || next.length < 10}
+        >
+          {busy ? "Saving…" : "Change password"}
+        </Button>
+        {message && (
+          <span
+            className={`text-sm ${message.kind === "ok" ? "text-emerald-300" : "text-rose-300"}`}
+          >
+            {message.text}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Admin-only: invite a new member. Generates a one-time link to share
+// out-of-band; the invitee sets their password at the link.
+function InviteUserSection() {
+  const [email, setEmail] = useState("");
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [inviteUrl, setInviteUrl] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const inputCls =
+    "w-full max-w-sm rounded border border-border bg-background px-2 py-1.5 text-sm";
+
+  async function invite() {
+    setBusy(true);
+    setError(null);
+    setInviteUrl(null);
+    try {
+      const res = await fetch("/api/auth/invite", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, name }),
+        cache: "no-store",
+      });
+      const j = (await res.json().catch(() => ({}))) as {
+        inviteUrl?: string;
+        error?: string;
+      };
+      if (!res.ok || !j.inviteUrl) {
+        setError(j.error ?? `HTTP ${res.status}`);
+        return;
+      }
+      setInviteUrl(j.inviteUrl);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Network error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="space-y-2 border-t border-border pt-4">
+      <div className="font-medium">Invite a user</div>
+      <p className="text-sm text-muted-foreground">
+        Creates a member account with its own private watchlist, positions
+        and journal. Share the generated link — it expires in 7 days.
+      </p>
+      <input
+        className={inputCls}
+        type="email"
+        placeholder="email@example.com"
+        value={email}
+        onChange={(e) => setEmail(e.target.value)}
+      />
+      <input
+        className={inputCls}
+        type="text"
+        placeholder="Display name"
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+      />
+      <div className="flex items-center gap-2">
+        <Button
+          size="sm"
+          variant="secondary"
+          onClick={() => void invite()}
+          disabled={busy || !email}
+        >
+          {busy ? "Creating…" : "Create invite link"}
+        </Button>
+        {error && <span className="text-sm text-rose-300">{error}</span>}
+      </div>
+      {inviteUrl && (
+        <div className="flex flex-wrap items-center gap-2 rounded border border-emerald-500/40 bg-emerald-500/10 p-2">
+          <code className="break-all text-xs text-emerald-200">{inviteUrl}</code>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => {
+              void navigator.clipboard.writeText(inviteUrl).then(() => {
+                setCopied(true);
+                setTimeout(() => setCopied(false), 2000);
+              });
+            }}
+          >
+            {copied ? "Copied" : "Copy"}
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

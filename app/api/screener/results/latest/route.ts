@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
+import { requireUserId, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -31,10 +32,17 @@ function toNum(v: unknown): number | null {
 }
 
 export async function GET() {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   const sb = createServerClient();
   const r = await sb
     .from("screener_results")
     .select("*")
+    .eq("user_id", userId)
     .order("screened_at", { ascending: false })
     .limit(1);
   if (r.error) {

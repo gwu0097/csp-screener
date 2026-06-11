@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
+import { requireUserId, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -12,6 +13,12 @@ export const revalidate = 0;
 type Body = { ids?: unknown };
 
 export async function POST(req: NextRequest) {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   let body: Body;
   try {
     body = (await req.json()) as Body;
@@ -35,7 +42,11 @@ export async function POST(req: NextRequest) {
     "position_snapshots",
     "post_earnings_recommendations",
   ]) {
-    const r = await sb.from(table).delete().in("position_id", ids);
+    const r = await sb
+      .from(table)
+      .delete()
+      .in("position_id", ids)
+      .eq("user_id", userId);
     if (r.error) {
       console.warn(
         `[positions/bulk-delete] child cleanup ${table} failed: ${r.error.message}`,
@@ -43,7 +54,11 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  const del = await sb.from("positions").delete().in("id", ids);
+  const del = await sb
+    .from("positions")
+    .delete()
+    .in("id", ids)
+    .eq("user_id", userId);
   if (del.error) {
     return NextResponse.json({ error: del.error.message }, { status: 500 });
   }
