@@ -2688,11 +2688,11 @@ function FundStat({
   valueClass?: string;
 }) {
   return (
-    <div className="flex items-baseline gap-1.5 whitespace-nowrap">
-      <span className="text-[9px] font-semibold uppercase tracking-wide text-muted-foreground">
+    <div className="flex items-baseline gap-2 whitespace-nowrap">
+      <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
         {label}
       </span>
-      <span className={cn("font-mono text-xs", valueClass ?? "text-foreground")}>
+      <span className={cn("font-mono text-sm", valueClass ?? "text-foreground")}>
         {value}
       </span>
     </div>
@@ -2753,23 +2753,26 @@ function FundamentalsBar({ symbol }: { symbol: string }) {
   const vs200 = snap.vs_sma200_pct;
 
   return (
-    <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5 rounded-md border border-border bg-background/40 px-3 py-1.5">
+    // justify-between spreads the seven metrics across the full row
+    // width (same at-a-glance rhythm as the table headers above);
+    // generous gaps keep it readable when it wraps on narrow screens.
+    <div className="flex flex-wrap items-center justify-between gap-x-10 gap-y-2 rounded-md border border-border bg-background/40 px-4 py-2">
       <FundStat label="P/E" value={fmtRatio(snap.trailing_pe)} />
       <FundStat label="Fwd P/E" value={fmtRatio(snap.forward_pe)} />
       <FundStat label="PEG" value={fmtRatio(snap.peg_ratio)} />
       <FundStat label="Mkt cap" value={fmtMarketCap(snap.market_cap)} />
       <div
-        className="flex items-center gap-1.5 whitespace-nowrap"
+        className="flex items-center gap-2 whitespace-nowrap"
         title={
           rangePct !== null
             ? `Current ${fmtPrice(price)} — ${rangePct.toFixed(0)}% of the 52-week range`
             : undefined
         }
       >
-        <span className="text-[9px] font-semibold uppercase tracking-wide text-muted-foreground">
+        <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
           52W
         </span>
-        <span className="font-mono text-xs text-muted-foreground">
+        <span className="font-mono text-sm text-muted-foreground">
           {low !== null ? `$${fmtNum(low, 0)}` : "—"}
         </span>
         {rangePct !== null ? (
@@ -2782,7 +2785,7 @@ function FundamentalsBar({ symbol }: { symbol: string }) {
         ) : (
           <span className="inline-block h-1 w-20 rounded bg-muted/40" />
         )}
-        <span className="font-mono text-xs text-muted-foreground">
+        <span className="font-mono text-sm text-muted-foreground">
           {high !== null ? `$${fmtNum(high, 0)}` : "—"}
         </span>
       </div>
