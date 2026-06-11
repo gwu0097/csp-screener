@@ -3,7 +3,11 @@
 // through getOrRefreshSnapshot / batchRefreshSnapshots instead of
 // hitting Yahoo directly (see DATA-ARCHITECTURE-AUDIT.md).
 import { createServerClient } from "@/lib/supabase";
-import { getQuoteEnrichment, getHistoricalPrices } from "@/lib/yahoo";
+import {
+  getQuoteEnrichment,
+  getHistoricalPrices,
+  getResearchSnapshot,
+} from "@/lib/yahoo";
 import { computeRSI, computeSMA } from "@/lib/indicators";
 
 export type Price5d = { date: string; close: number; change_pct: number | null };
@@ -174,7 +178,18 @@ export async function refreshSymbolSnapshot(
   const sma50 = quote.fiftyDayAverage;
   const vs_sma50_pct =
     sma50 !== null && sma50 > 0 ? round(((price - sma50) / sma50) * 100) : null;
-  const analystTarget = quote.targetMeanPrice;
+  // Yahoo's lightweight /quote payload stopped carrying targetMeanPrice
+  // and pegRatio (late 2025) — when they're missing, one quoteSummary
+  // call (financialData + defaultKeyStatistics) backfills both.
+  let analystTarget = quote.targetMeanPrice;
+  let pegRatio = quote.pegRatio;
+  if (analystTarget === null || pegRatio === null) {
+    const research = await getResearchSnapshot(sym).catch(() => null);
+    if (research) {
+      analystTarget = analystTarget ?? research.targetMeanPrice;
+      pegRatio = pegRatio ?? research.pegRatio;
+    }
+  }
   const upsideToTarget =
     analystTarget !== null && price > 0
       ? round(((analystTarget - price) / price) * 100)
@@ -208,7 +223,7 @@ export async function refreshSymbolSnapshot(
     rsi14,
     trailing_pe: round(quote.trailingPE),
     forward_pe: round(quote.forwardPE),
-    peg_ratio: round(quote.pegRatio),
+    peg_ratio: round(pegRatio),
     market_cap: quote.marketCap,
     analyst_target: round(analystTarget),
     upside_to_target: upsideToTarget,

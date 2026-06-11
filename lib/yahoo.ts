@@ -209,6 +209,7 @@ export type ResearchSnapshot = {
   targetHighPrice: number | null;
   targetLowPrice: number | null;
   targetMeanPrice: number | null;
+  pegRatio: number | null;
   heldPercentInsiders: number | null;
   heldPercentInstitutions: number | null;
   shortPercentOfFloat: number | null;
@@ -253,6 +254,8 @@ export async function getResearchSnapshot(
       targetHighPrice: unwrapNumber(fd.targetHighPrice),
       targetLowPrice: unwrapNumber(fd.targetLowPrice),
       targetMeanPrice: unwrapNumber(fd.targetMeanPrice),
+      pegRatio:
+        unwrapNumber(dks.trailingPegRatio) ?? unwrapNumber(dks.pegRatio),
       heldPercentInsiders: unwrapNumber(dks.heldPercentInsiders),
       heldPercentInstitutions: unwrapNumber(dks.heldPercentInstitutions),
       shortPercentOfFloat: unwrapNumber(dks.shortPercentOfFloat),

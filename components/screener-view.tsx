@@ -2650,6 +2650,162 @@ type CustomStrikeAnalysis = {
   finalGradeNew: "A" | "B" | "C" | "F";
 };
 
+// Compact single-row fundamentals strip between the chart and the
+// layer cards. Reads the shared symbol_market_snapshot through the
+// snapshot API (server side: getOrRefreshSnapshot(symbol, 15)).
+type FundamentalsSnapshot = {
+  price: number | null;
+  trailing_pe: number | null;
+  forward_pe: number | null;
+  peg_ratio: number | null;
+  market_cap: number | null;
+  week52_low: number | null;
+  week52_high: number | null;
+  analyst_target: number | null;
+  upside_to_target: number | null;
+  vs_sma200_pct: number | null;
+};
+
+function fmtMarketCap(n: number | null): string {
+  if (n === null || !Number.isFinite(n) || n <= 0) return "—";
+  if (n >= 1e12) return `$${(n / 1e12).toFixed(2)}T`;
+  if (n >= 1e9) return `$${(n / 1e9).toFixed(1)}B`;
+  return `$${(n / 1e6).toFixed(0)}M`;
+}
+
+function fmtRatio(n: number | null): string {
+  if (n === null || !Number.isFinite(n)) return "—";
+  return n.toFixed(1);
+}
+
+function FundStat({
+  label,
+  value,
+  valueClass,
+}: {
+  label: string;
+  value: React.ReactNode;
+  valueClass?: string;
+}) {
+  return (
+    <div className="flex items-baseline gap-1.5 whitespace-nowrap">
+      <span className="text-[9px] font-semibold uppercase tracking-wide text-muted-foreground">
+        {label}
+      </span>
+      <span className={cn("font-mono text-xs", valueClass ?? "text-foreground")}>
+        {value}
+      </span>
+    </div>
+  );
+}
+
+function FundamentalsBar({ symbol }: { symbol: string }) {
+  const [snap, setSnap] = useState<FundamentalsSnapshot | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setSnap(null);
+    setFailed(false);
+    (async () => {
+      try {
+        const res = await fetch(
+          `/api/market/snapshot?symbol=${encodeURIComponent(symbol)}`,
+          { cache: "no-store" },
+        );
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = (await res.json()) as { snapshot?: FundamentalsSnapshot };
+        if (!cancelled) {
+          if (json.snapshot) setSnap(json.snapshot);
+          else setFailed(true);
+        }
+      } catch {
+        if (!cancelled) setFailed(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [symbol]);
+
+  // Fail silent — this row is data density, never a blocker.
+  if (failed) return null;
+  if (!snap) {
+    return <div className="h-8 w-full animate-pulse rounded-md bg-muted/30" />;
+  }
+
+  const low = snap.week52_low;
+  const high = snap.week52_high;
+  const price = snap.price;
+  const rangePct =
+    low !== null && high !== null && price !== null && high > low
+      ? Math.min(100, Math.max(0, ((price - low) / (high - low)) * 100))
+      : null;
+
+  const upside = snap.upside_to_target;
+  const target =
+    snap.analyst_target !== null
+      ? `$${fmtNum(snap.analyst_target, 0)}${
+          upside !== null ? ` · ${upside >= 0 ? "+" : ""}${upside.toFixed(0)}% upside` : ""
+        }`
+      : "—";
+
+  const vs200 = snap.vs_sma200_pct;
+
+  return (
+    <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5 rounded-md border border-border bg-background/40 px-3 py-1.5">
+      <FundStat label="P/E" value={fmtRatio(snap.trailing_pe)} />
+      <FundStat label="Fwd P/E" value={fmtRatio(snap.forward_pe)} />
+      <FundStat label="PEG" value={fmtRatio(snap.peg_ratio)} />
+      <FundStat label="Mkt cap" value={fmtMarketCap(snap.market_cap)} />
+      <div
+        className="flex items-center gap-1.5 whitespace-nowrap"
+        title={
+          rangePct !== null
+            ? `Current ${fmtPrice(price)} — ${rangePct.toFixed(0)}% of the 52-week range`
+            : undefined
+        }
+      >
+        <span className="text-[9px] font-semibold uppercase tracking-wide text-muted-foreground">
+          52W
+        </span>
+        <span className="font-mono text-xs text-muted-foreground">
+          {low !== null ? `$${fmtNum(low, 0)}` : "—"}
+        </span>
+        {rangePct !== null ? (
+          <span className="relative inline-block h-1 w-20 rounded bg-muted">
+            <span
+              className="absolute -top-[3px] h-[10px] w-[3px] -translate-x-1/2 rounded-sm bg-emerald-300"
+              style={{ left: `${rangePct}%` }}
+            />
+          </span>
+        ) : (
+          <span className="inline-block h-1 w-20 rounded bg-muted/40" />
+        )}
+        <span className="font-mono text-xs text-muted-foreground">
+          {high !== null ? `$${fmtNum(high, 0)}` : "—"}
+        </span>
+      </div>
+      <FundStat label="Target" value={target} valueClass={
+        upside !== null && upside > 0 ? "text-emerald-300" : undefined
+      } />
+      <FundStat
+        label="vs 200d"
+        value={
+          vs200 !== null ? `${vs200 >= 0 ? "+" : ""}${vs200.toFixed(1)}%` : "—"
+        }
+        valueClass={
+          vs200 === null
+            ? undefined
+            : vs200 >= 0
+              ? "text-emerald-300"
+              : "text-rose-300"
+        }
+      />
+    </div>
+  );
+}
+
 function ExpandedDetail({
   r,
   analyzing,
@@ -2751,47 +2907,48 @@ function ExpandedDetail({
 
   return (
     <div className="space-y-3 p-3">
-      {onAnalyze && (
-        <div className="flex items-center justify-end">
-          <button
-            type="button"
-            onClick={() => onAnalyze(r.symbol)}
-            disabled={analyzing}
-            className={cn(
-              "inline-flex items-center gap-1 rounded px-2 py-1 text-sm transition",
-              newsLooksFailed
-                ? "border border-amber-500/40 bg-amber-500/10 text-amber-200 hover:bg-amber-500/20"
-                : "text-muted-foreground hover:text-foreground",
-              analyzing && "opacity-60",
-            )}
-          >
-            {analyzing ? (
-              <>
-                <Loader2 className="h-3 w-3 animate-spin" />
-                Analyzing…
-              </>
-            ) : (
-              <>
-                <RefreshCcw className="h-3 w-3" />
-                {newsLooksFailed
-                  ? `Re-analyze ${r.symbol} (news context missing)`
-                  : `Refresh analysis`}
-              </>
-            )}
-          </button>
-        </div>
-      )}
       {/* Uncontrolled tabs: the detail row unmounts on collapse, so the
           tab resets to Overview on re-expand for free. forceMount keeps
           all three panes mounted (hidden via CSS) so tab switches don't
           refetch EM history or drop in-progress state — same lifecycle
-          as the old stacked layout. */}
+          as the old stacked layout. Refresh analysis shares the tab-bar
+          row, right-justified. */}
       <Tabs defaultValue="overview">
-        <TabsList>
-          <TabsTrigger value="overview">📋 Overview</TabsTrigger>
-          <TabsTrigger value="flow">🌊 Flow</TabsTrigger>
-          <TabsTrigger value="history">📅 History</TabsTrigger>
-        </TabsList>
+        <div className="flex items-center justify-between gap-2">
+          <TabsList>
+            <TabsTrigger value="overview">📋 Overview</TabsTrigger>
+            <TabsTrigger value="flow">🌊 Flow</TabsTrigger>
+            <TabsTrigger value="history">📅 History</TabsTrigger>
+          </TabsList>
+          {onAnalyze && (
+            <button
+              type="button"
+              onClick={() => onAnalyze(r.symbol)}
+              disabled={analyzing}
+              className={cn(
+                "inline-flex items-center gap-1 rounded px-2 py-1 text-sm transition",
+                newsLooksFailed
+                  ? "border border-amber-500/40 bg-amber-500/10 text-amber-200 hover:bg-amber-500/20"
+                  : "text-muted-foreground hover:text-foreground",
+                analyzing && "opacity-60",
+              )}
+            >
+              {analyzing ? (
+                <>
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                  Analyzing…
+                </>
+              ) : (
+                <>
+                  <RefreshCcw className="h-3 w-3" />
+                  {newsLooksFailed
+                    ? `Re-analyze ${r.symbol} (news context missing)`
+                    : `Refresh analysis`}
+                </>
+              )}
+            </button>
+          )}
+        </div>
 
         <TabsContent
           value="overview"
@@ -2799,6 +2956,7 @@ function ExpandedDetail({
           className="space-y-3 data-[state=inactive]:hidden"
         >
           <PriceChart symbol={r.symbol} />
+          <FundamentalsBar symbol={r.symbol} />
           <div className="grid gap-3 md:grid-cols-3">
         <LayerCard
           title="LAYER 1 — INDUSTRY STANDARD"
