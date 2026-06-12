@@ -150,6 +150,11 @@ type Props =
       // and the modal survives row re-renders from /api/positions/open
       // refreshes. Optional so the closed-list path can omit it.
       onCloseOption?: (target: import("./close-option-modal").CloseOptionTarget) => void;
+      // Early-assignment action — SHORT PUTS only (parent renders the
+      // confirmation modal). Optional like onCloseOption.
+      onMarkAssigned?: (
+        target: import("./mark-assigned-modal").MarkAssignedTarget,
+      ) => void;
     }
   | {
       kind: "closed";
@@ -745,8 +750,9 @@ export function PositionCard(props: Props) {
               stock_long "Sell" button in positions-view). Entry grade
               stays visible in the expanded detail view. Closed rows
               still render the grade letter here. */}
-        <div className="flex items-center justify-center">
+        <div className="flex flex-col items-center justify-center gap-0.5">
           {props.kind === "open" && props.onCloseOption ? (
+            <>
             <button
               type="button"
               onClick={(e) => {
@@ -772,6 +778,47 @@ export function PositionCard(props: Props) {
             >
               Close
             </button>
+            {/* Early assignment — only meaningful on a sold put.
+                span[role=button] (same pattern as the trash control)
+                because the collapsed row is itself a <button> and the
+                HTML parser ejects nested buttons, breaking hydration. */}
+            {props.onMarkAssigned &&
+              props.position.optionType === "put" &&
+              props.position.direction === "short" && (
+                <span
+                  role="button"
+                  tabIndex={0}
+                  aria-label="Mark as assigned"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    props.onMarkAssigned!({
+                      positionId: props.position.id,
+                      symbol: props.position.symbol,
+                      strike: props.position.strike,
+                      expiry: props.position.expiry,
+                      remainingContracts: props.position.remainingContracts,
+                    });
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      props.onMarkAssigned!({
+                        positionId: props.position.id,
+                        symbol: props.position.symbol,
+                        strike: props.position.strike,
+                        expiry: props.position.expiry,
+                        remainingContracts: props.position.remainingContracts,
+                      });
+                    }
+                  }}
+                  title="Mark as assigned — close the puts at $0.00 and receive shares at the strike"
+                  className="cursor-pointer rounded border border-amber-500/30 bg-amber-500/5 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-amber-300/80 hover:border-amber-400/50 hover:text-amber-200"
+                >
+                  Assigned
+                </span>
+              )}
+            </>
           ) : p.entryFinalGrade ? (
             <span
               className={cn(

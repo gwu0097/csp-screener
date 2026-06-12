@@ -25,6 +25,10 @@ import {
   type SellSharesTarget,
 } from "@/components/sell-shares-modal";
 import {
+  MarkAssignedModal,
+  type MarkAssignedTarget,
+} from "@/components/mark-assigned-modal";
+import {
   CloseOptionModal,
   type CloseOptionTarget,
 } from "@/components/close-option-modal";
@@ -675,6 +679,8 @@ export function PositionsView() {
   const [sellTarget, setSellTarget] = useState<SellSharesTarget | null>(null);
   const [closeOptionTarget, setCloseOptionTarget] =
     useState<CloseOptionTarget | null>(null);
+  const [markAssignedTarget, setMarkAssignedTarget] =
+    useState<MarkAssignedTarget | null>(null);
   const [best, setBest] = useState<BestOpportunity>(null);
   const [closedPositions, setClosedPositions] = useState<ClosedPositionClientView[] | null>(null);
   const [closedOpen, setClosedOpen] = useState(false);
@@ -1457,6 +1463,7 @@ export function PositionsView() {
                       marketState={data?.market?.marketState ?? null}
                       onCloseSubmitted={onImportSuccess}
                       onCloseOption={setCloseOptionTarget}
+                      onMarkAssigned={setMarkAssignedTarget}
                       onPositionRemoved={(id) => {
                         // Optimistic remove — drop the row from local state so
                         // the UI updates instantly. We don't refetch; the next
@@ -1648,6 +1655,17 @@ export function PositionsView() {
         onCancel={() => setCloseOptionTarget(null)}
         onConfirm={async (res) => {
           setCloseOptionTarget(null);
+          if (res.ok) onImportSuccess(res.message);
+        }}
+      />
+      <MarkAssignedModal
+        open={markAssignedTarget !== null}
+        target={markAssignedTarget}
+        onCancel={() => setMarkAssignedTarget(null)}
+        onConfirm={async (res) => {
+          setMarkAssignedTarget(null);
+          // onImportSuccess refetches /api/positions/open, so the put
+          // drops out and the new stock_long appears immediately.
           if (res.ok) onImportSuccess(res.message);
         }}
       />
