@@ -96,7 +96,10 @@ export default function ScreenerHistoryPage() {
         const json = (await res.json()) as { runs?: RunSummary[]; error?: string };
         if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
         if (!cancelled) {
-          const list = json.runs ?? [];
+          // 0-candidate rows are pre-analysis auto-saves (Screen Today
+          // fired with nothing passing, or background snapshot writes)
+          // — nothing to browse, so they're dropped from the list.
+          const list = (json.runs ?? []).filter((r) => r.candidateCount > 0);
           setRuns(list);
           // Most recent run selected by default.
           if (list.length > 0) setSelectedId(list[0].id);

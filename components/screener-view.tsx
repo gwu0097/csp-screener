@@ -1104,6 +1104,7 @@ export function ScreenerView({ connected }: Props) {
         graded: false,
         pass1Count: initialStats?.afterPriceFilter ?? null,
         pass2Count: finalResults.length,
+        vix: dailyContext?.market.vix ?? null,
       });
       setUnverifiedExcluded(unverifiedCount);
       setStatus("idle");
@@ -1166,6 +1167,7 @@ export function ScreenerView({ connected }: Props) {
         prices: mergedPrices,
         screenedAt: timestampIso,
         graded: false,
+        vix: dailyContext?.market.vix ?? null,
       });
       setScreenIsGraded(false);
       setResults(next);
@@ -1233,6 +1235,7 @@ export function ScreenerView({ connected }: Props) {
       prices: ctx.pricesForPersist,
       screenedAt: ctx.timestampIso,
       graded: fullyDone,
+      vix: ctx.vix ?? dailyContext?.market.vix ?? null,
     });
     if (fullyDone) setScreenIsGraded(true);
   }
@@ -1811,6 +1814,7 @@ export function ScreenerView({ connected }: Props) {
         prices,
         screenedAt: timestampIso,
         graded: screenIsGraded,
+        vix: analysisVix ?? dailyContext?.market.vix ?? null,
       });
       setResults(next);
       setMessage(`Analysis refreshed for ${upper}`);
