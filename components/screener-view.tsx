@@ -39,6 +39,7 @@ import type { MarketContext } from "@/lib/market";
 import { CrushHistoryTable } from "@/components/crush-history-table";
 import { OptionsFlowSection } from "@/components/options-flow-section";
 import { PriceChart } from "@/components/price-chart";
+import { TickerIntelligenceStrip } from "@/components/ticker-intelligence-strip";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { ErrorBanner } from "@/components/error-banner";
 import { SchwabTokenBanner } from "@/components/schwab-token-banner";
@@ -2959,6 +2960,7 @@ function ExpandedDetail({
           className="space-y-3 data-[state=inactive]:hidden"
         >
           <PriceChart symbol={r.symbol} />
+          <TickerIntelligenceStrip symbol={r.symbol} />
           <FundamentalsBar symbol={r.symbol} />
           <div className="grid gap-3 md:grid-cols-3">
         <LayerCard

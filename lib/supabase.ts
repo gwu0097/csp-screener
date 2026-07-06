@@ -102,17 +102,26 @@ class Query<T = any> implements PromiseLike<PgResult<T>> {
   }
 
   // ---- filters ----
-  eq(col: string, val: unknown): this {
-    this.filters.push(`${col}=eq.${encodeURIComponent(fvalue(val))}`);
+  // Scalar filters (eq/neq/gt/...) must NOT quote values: PostgREST's
+  // double-quote unwrapping only applies inside in.(...) lists, so a
+  // quoted scalar matches the literal quoted string. This bit the
+  // first time an eq() value contained a space ("Software -
+  // Infrastructure" industry lookups matched 0 rows). fvalue's quoting
+  // stays for in() where commas/parens genuinely need it.
+  private scalar(col: string, op: string, v: unknown): this {
+    const s =
+      v === null || v === undefined ? "null" : encodeURIComponent(String(v));
+    this.filters.push(`${col}=${op}.${s}`);
     return this;
+  }
+  eq(col: string, val: unknown): this {
+    return this.scalar(col, "eq", val);
   }
   neq(col: string, val: unknown): this {
-    this.filters.push(`${col}=neq.${encodeURIComponent(fvalue(val))}`);
-    return this;
+    return this.scalar(col, "neq", val);
   }
   is(col: string, val: unknown): this {
-    this.filters.push(`${col}=is.${encodeURIComponent(fvalue(val))}`);
-    return this;
+    return this.scalar(col, "is", val);
   }
   in(col: string, arr: readonly unknown[]): this {
     const inner = arr.map((v) => fvalue(v)).join(",");
@@ -120,20 +129,16 @@ class Query<T = any> implements PromiseLike<PgResult<T>> {
     return this;
   }
   gt(col: string, v: unknown): this {
-    this.filters.push(`${col}=gt.${encodeURIComponent(fvalue(v))}`);
-    return this;
+    return this.scalar(col, "gt", v);
   }
   gte(col: string, v: unknown): this {
-    this.filters.push(`${col}=gte.${encodeURIComponent(fvalue(v))}`);
-    return this;
+    return this.scalar(col, "gte", v);
   }
   lt(col: string, v: unknown): this {
-    this.filters.push(`${col}=lt.${encodeURIComponent(fvalue(v))}`);
-    return this;
+    return this.scalar(col, "lt", v);
   }
   lte(col: string, v: unknown): this {
-    this.filters.push(`${col}=lte.${encodeURIComponent(fvalue(v))}`);
-    return this;
+    return this.scalar(col, "lte", v);
   }
 
   // ---- modifiers ----

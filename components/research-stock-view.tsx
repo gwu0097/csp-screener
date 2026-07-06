@@ -20,6 +20,7 @@ import { SentimentTab } from "@/components/research-sentiment";
 import { RiskTab } from "@/components/research-risk";
 import { SecFilingsTab } from "@/components/research-sec-filings";
 import { PriceChart } from "@/components/price-chart";
+import { TickerIntelligenceStrip } from "@/components/ticker-intelligence-strip";
 
 // ---------- Types mirrored from the API routes ----------
 
@@ -284,6 +285,8 @@ export function ResearchStockView({ symbol }: { symbol: string }) {
       <Header stock={stock} symbol={symbol} stockError={stockError} />
 
       <PriceChart symbol={symbol} />
+
+      <TickerIntelligenceStrip symbol={symbol} />
 
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList className="flex flex-wrap">
