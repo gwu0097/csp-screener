@@ -74,6 +74,7 @@ const SCREENER_GROUP: NavGroup = {
   subItems: [
     { href: "/", label: "Candidates" },
     { href: "/watchlist", label: "CSP Watchlist" },
+    { href: "/screener/history", label: "History" },
   ],
 };
 
