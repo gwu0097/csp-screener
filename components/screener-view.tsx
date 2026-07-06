@@ -2046,6 +2046,8 @@ export function ScreenerView({ connected }: Props) {
           </div>
         </div>
 
+        <SandboxTester connected={connected} />
+
         {analysisError && (
           <AnalysisErrorBanner
             err={analysisError}
@@ -3890,3 +3892,193 @@ function CrushRow({
   );
 }
 
+
+// ================== Sandbox: Test any ticker ==================
+//
+// Runs the single-symbol analysis pipeline (/api/screener/analyze-single
+// — stages 3/4 + news + personal history + three-layer grade, which
+// persists NOTHING server-side) on an arbitrary ticker, bypassing the
+// earnings-window filter. Results render inline through the same
+// ExpandedDetail used by real candidates; when the chain/grade isn't
+// available (Schwab down, no options, market closed) it degrades to
+// chart + ticker intelligence + fundamentals with an explicit note.
+
+function sandboxNextFridayIso(): string {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() + 1);
+  while (d.getUTCDay() !== 5) d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
+function makeSandboxCandidate(symbol: string): ScreenerResult {
+  const today = new Date().toISOString().slice(0, 10);
+  const expiry = sandboxNextFridayIso();
+  const daysToExpiry = Math.max(
+    1,
+    Math.round(
+      (Date.parse(expiry + "T00:00:00Z") - Date.parse(today + "T00:00:00Z")) / 86400000,
+    ),
+  );
+  return {
+    symbol,
+    price: 0, // analyze-single refreshes the live price server-side
+    earningsDate: today,
+    earningsTiming: "AMC",
+    daysToExpiry,
+    expiry,
+    stoppedAt: null,
+    stageOne: {
+      pass: true,
+      reason: "Sandbox mode — earnings-window filter bypassed",
+      details: { mode: "sandbox" },
+    },
+    stageTwo: null,
+    stageThree: null,
+    stageFour: null,
+    recommendation: "Needs analysis",
+    errors: [],
+    isWhitelisted: true,
+    industryStatus: "unknown",
+    spreadTooWide: false,
+    threeLayer: null,
+  };
+}
+
+function SandboxTester({ connected }: { connected: boolean }) {
+  const [open, setOpen] = useState(false);
+  const [symbol, setSymbol] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState<ScreenerResult | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+
+  async function analyze() {
+    const sym = symbol.trim().toUpperCase();
+    if (!/^[A-Z][A-Z0-9.\-]{0,9}$/.test(sym)) {
+      setNote("Enter a valid ticker symbol.");
+      return;
+    }
+    setLoading(true);
+    setNote(null);
+    setResult(null);
+    const candidate = makeSandboxCandidate(sym);
+    if (!connected) {
+      setResult(candidate);
+      setNote(
+        "Schwab not connected — options chain, strike suggestions, grades and flow are unavailable. Showing chart, fundamentals, and your ticker intelligence.",
+      );
+      setLoading(false);
+      return;
+    }
+    try {
+      const res = await fetch("/api/screener/analyze-single", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ candidate, force: true, sandbox: true }),
+      });
+      const json = (await res.json()) as { result?: ScreenerResult; error?: string };
+      if (!res.ok || !json.result) throw new Error(json.error ?? `HTTP ${res.status}`);
+      setResult(json.result);
+      if (!json.result.stageThree || !json.result.stageFour) {
+        setNote(
+          "Options chain unavailable for this expiry (market closed or no listed options) — grades and strike suggestions can't be computed. Showing everything else.",
+        );
+      } else if (!json.result.threeLayer) {
+        setNote("Chain priced but the three-layer grade couldn't be computed — partial results below.");
+      }
+    } catch (e) {
+      // Full-pipeline failure (no options, chain 400, etc.) — fall back
+      // to the data-independent panels with an explicit reason.
+      setResult(candidate);
+      setNote(
+        `Analysis unavailable: ${e instanceof Error ? e.message : String(e)} — showing chart, fundamentals, and your ticker intelligence only.`,
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  if (!open) {
+    return (
+      <div>
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          className="text-sm text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+        >
+          Test any ticker →
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3 rounded-md border border-border bg-background/40 p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="rounded border border-indigo-500/40 bg-indigo-500/10 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wider text-indigo-300">
+          Sandbox
+        </span>
+        <input
+          type="text"
+          value={symbol}
+          onChange={(e) => setSymbol(e.target.value.toUpperCase())}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !loading) void analyze();
+          }}
+          placeholder="Ticker (e.g. AAPL)"
+          className="w-40 rounded border border-border bg-background px-2 py-1 font-mono uppercase placeholder:font-sans placeholder:normal-case"
+        />
+        <Button size="sm" onClick={() => void analyze()} disabled={loading || symbol.trim() === ""}>
+          {loading ? (
+            <>
+              <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+              Analyzing…
+            </>
+          ) : (
+            "Analyze"
+          )}
+        </Button>
+        <button
+          type="button"
+          onClick={() => {
+            setOpen(false);
+            setResult(null);
+            setNote(null);
+          }}
+          className="ml-auto text-sm text-muted-foreground hover:text-foreground"
+        >
+          ✕ Close
+        </button>
+      </div>
+
+      {result && (
+        <div className="space-y-3">
+          <div className="rounded border border-indigo-500/30 bg-indigo-500/5 px-3 py-1.5 text-sm text-indigo-200">
+            Sandbox — {result.symbol} is not a live earnings candidate. Nothing is
+            saved; the main candidates table is untouched.
+          </div>
+          {note && (
+            <div className="rounded border border-amber-500/30 bg-amber-500/5 px-3 py-1.5 text-sm text-amber-200">
+              {note}
+            </div>
+          )}
+          {result.threeLayer ? (
+            <div className="rounded border border-border">
+              <ExpandedDetail r={result} analyzing={false} onAnalyze={null} />
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <PriceChart symbol={result.symbol} />
+              <TickerIntelligenceStrip symbol={result.symbol} />
+              <FundamentalsBar symbol={result.symbol} />
+              <div className="text-[11px] text-muted-foreground">
+                Missing in this view: options chain metrics (IV, delta, strike,
+                premium, yield), three-layer grade, and options flow — these need
+                a live Schwab chain for {result.symbol}.
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}

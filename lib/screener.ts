@@ -1228,7 +1228,14 @@ export async function evaluateStagesOneTwo(
 
 // Takes an existing stage-1/2 ScreenerResult and fills in stages 3 + 4 using
 // fresh Schwab + Yahoo data. Returns a new ScreenerResult (does not mutate).
-export async function runStagesThreeFour(base: ScreenerResult): Promise<ScreenerResult> {
+// opts.skipPersist: sandbox/test callers set this so the pipeline's
+// market-data side writes (live implied move + flow snapshot into
+// earnings_history) are skipped — a sandbox candidate carries a fake
+// earnings date and would mint a bogus event row.
+export async function runStagesThreeFour(
+  base: ScreenerResult,
+  opts?: { skipPersist?: boolean },
+): Promise<ScreenerResult> {
   const candidate: EarningsCandidate = {
     symbol: base.symbol,
     price: base.price,
@@ -1340,7 +1347,7 @@ export async function runStagesThreeFour(base: ScreenerResult): Promise<Screener
   // per-quarter crush table downstream has a real EM column for this
   // event. Source 'schwab' marks the row as live-captured (vs the
   // 'perplexity' backfill source). Non-blocking on failure.
-  if (stageThree.details.expectedMovePct !== null) {
+  if (stageThree.details.expectedMovePct !== null && !opts?.skipPersist) {
     await persistLiveImpliedMove(
       candidate.symbol,
       candidate.earningsDate,
@@ -1377,7 +1384,7 @@ export async function runStagesThreeFour(base: ScreenerResult): Promise<Screener
   // upcoming event so future quarters can compare pre-print positioning
   // against the actual outcome. Same row that holds implied_move_pct;
   // upsert keys on (symbol, earnings_date). Non-blocking.
-  if (optionsFlow) {
+  if (optionsFlow && !opts?.skipPersist) {
     await persistFlowSnapshot(
       candidate.symbol,
       candidate.earningsDate,

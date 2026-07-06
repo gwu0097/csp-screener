@@ -22,6 +22,10 @@ export const maxDuration = 60;
 
 type Body = {
   candidate?: unknown;
+  // Sandbox ("Test any ticker") calls set this so the pipeline skips
+  // its earnings_history market-data writes — the sandbox candidate
+  // carries a synthetic earnings date. Nothing else here persists.
+  sandbox?: unknown;
   // When true, the user has opted into analyzing a symbol that the
   // Stage 2 quality floor would normally fail. The route-level
   // pipeline doesn't currently gate on Stage 2 (see lib/screener.ts
@@ -70,6 +74,7 @@ export async function POST(req: NextRequest) {
   const base = body.candidate;
   const upper = base.symbol.toUpperCase();
   const force = body.force === true;
+  const sandbox = body.sandbox === true;
   if (force) {
     console.log(`[analyze-single] ${upper} force=true — Stage 2 quality floor explicitly bypassed`);
   }
@@ -89,7 +94,7 @@ export async function POST(req: NextRequest) {
   // ---- Pass 2 — Schwab options + stages 3/4 ----
   let scored: ScreenerResult;
   try {
-    scored = await runStagesThreeFour({ ...base, price: refreshedPrice });
+    scored = await runStagesThreeFour({ ...base, price: refreshedPrice }, { skipPersist: sandbox });
   } catch (e) {
     return NextResponse.json(
       {
