@@ -2899,11 +2899,15 @@ function ExpandedDetail({
   // Derive the personal-history modifier (needed by the custom-strike
   // analyzer to re-run the rule cascade client-side).
   const pf = tl.personalFactors;
+  // Mirror of the server rule in calculateThreeLayerGrade. Legacy saved
+  // rows lack `scope` — they were always ticker-level evidence.
+  const pfScope = pf.scope ?? "ticker";
   const personalModifier: "boost" | "drop" | null = (() => {
     if (pf.dataInsufficient || pf.tickerWinRate === null) return null;
     const wr = pf.tickerWinRate;
     const roc = pf.tickerAvgRoc ?? 0;
-    if (wr > 80 && roc > 0.4) return "boost";
+    if (pfScope === "sector") return wr < 45 ? "drop" : null;
+    if (wr > 80 && roc > 0.3) return "boost";
     if (wr < 50) return "drop";
     return null;
   })();
@@ -3007,21 +3011,28 @@ function ExpandedDetail({
           tooltip={
             tl.personalFactors.dataInsufficient ? (
               <div>
-                Insufficient history — need 5+ closed trades on {r.symbol} (you have{" "}
-                {tl.personalFactors.tickerTradeCount}). No modifier applied.
+                Insufficient history — need 5+ trades on {r.symbol} (you have{" "}
+                {tl.personalFactors.tickerTradeCount}) or 10+ trades in its
+                sector. No modifier applied.
               </div>
             ) : (
               <div className="space-y-1">
                 <div className="font-semibold">
-                  Personal history
+                  {pfScope === "sector" ? "Sector evidence" : "Personal history"}
                   {personalModifier === "boost"
                     ? " → +1 grade"
                     : personalModifier === "drop"
                       ? " → −1 grade"
                       : ""}
                 </div>
+                {pfScope === "sector" && (
+                  <div className="text-muted-foreground">
+                    No direct {r.symbol} history — using your record across{" "}
+                    {tl.personalFactors.sectorIndustry ?? "its industry"}.
+                  </div>
+                )}
                 <div>
-                  {tl.personalFactors.tickerTradeCount} prior trades ·
+                  {tl.personalFactors.tickerTradeCount} trades ·
                   {" "}
                   {tl.personalFactors.tickerWinRate !== null
                     ? `${tl.personalFactors.tickerWinRate.toFixed(0)}% win rate`
@@ -3034,7 +3045,9 @@ function ExpandedDetail({
                     : "n/a"}
                 </div>
                 <div className="pt-1 text-muted-foreground">
-                  Boost if wr &gt;80% & roc &gt;0.4%. Drop if wr &lt;50%.
+                  {pfScope === "sector"
+                    ? "Sector evidence is drop-only: −1 grade if sector win rate <45%. Boosts require 5+ trades on the ticker itself."
+                    : "Boost if wr >80% & ROC >0.3% (on collateral). Drop if wr <50%."}
                 </div>
               </div>
             )
@@ -3042,11 +3055,21 @@ function ExpandedDetail({
         >
           {tl.personalFactors.dataInsufficient ? (
             <div className="text-sm text-muted-foreground">
-              Insufficient data — need 5+ trades on {r.symbol} (you have {tl.personalFactors.tickerTradeCount})
+              Insufficient data — need 5+ trades on {r.symbol} or 10+ in its
+              sector (you have {tl.personalFactors.tickerTradeCount} on the ticker)
             </div>
           ) : (
             <>
-              <Row k={`${r.symbol} trades logged`} v={String(tl.personalFactors.tickerTradeCount)} />
+              {pfScope === "sector" && (
+                <Row
+                  k="Evidence"
+                  v={`${tl.personalFactors.sectorIndustry ?? "sector"} (sector)`}
+                />
+              )}
+              <Row
+                k={pfScope === "sector" ? "Sector trades" : `${r.symbol} trades logged`}
+                v={String(tl.personalFactors.tickerTradeCount)}
+              />
               <Row
                 k="Win rate"
                 v={

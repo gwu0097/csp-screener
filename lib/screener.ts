@@ -26,6 +26,7 @@ import {
 } from "@/lib/classification";
 import {
   getCrushHistory,
+  gradeFromRatio,
   persistFlowSnapshot,
   persistLiveImpliedMove,
   type CrushHistoryEvent,
@@ -196,11 +197,15 @@ export type ThreeLayerGrade = {
   personalGrade: Grade | "INSUFFICIENT";
   personalScore: number | null;
   personalFactors: {
+    // At sector scope these three hold the SECTOR aggregates (scope
+    // field says which); the names are kept for saved-row compatibility.
     tickerWinRate: number | null;
     tickerTradeCount: number;
     tickerAvgRoc: number | null;
     tickerCrushAccuracy: number | null;
     dataInsufficient: boolean;
+    scope?: "ticker" | "sector" | "none";
+    sectorIndustry?: string | null;
   };
   regimeGrade: Grade;
   regimeScore: number;
@@ -222,8 +227,16 @@ export type ThreeLayerGrade = {
 export type PersonalHistory = {
   tradeCount: number;
   winRate: number | null;
-  avgRoc: number | null;
+  avgRoc: number | null; // percent, on strike-based capital (collateral)
   dataInsufficient: boolean;
+  // Evidence granularity. "ticker" = 5+ terminal trades on this symbol
+  // (winRate/avgRoc/tradeCount are ticker-level). "sector" = fallback
+  // to the user's history across the symbol's industry, 10+ trades
+  // (fields hold SECTOR aggregates). "none" = neither bar met.
+  // Optional so legacy cached rows (pre-2026-07-06) stay valid — treat
+  // missing as "ticker".
+  scope?: "ticker" | "sector" | "none";
+  sectorIndustry?: string | null;
 };
 
 // ---------- Helpers ----------
@@ -1336,6 +1349,43 @@ export async function runStagesThreeFour(
   );
 
   const stageThree = await runStageThree(candidate, chain, monthlyChain, historicalMoves);
+
+  // Encyclopedia crush fallback: when live history is too thin to grade
+  // the crush (insufficientData), substitute the batch-computed
+  // avg_move_ratio (actual/implied across all captured earnings pairs)
+  // through the same grade bands. Converts "Crush unproven" to a real
+  // letter for symbols with 3+ historical pairs. Score/pass semantics
+  // are untouched — only the letter that feeds the grade cascade.
+  if (stageThree.insufficientData) {
+    try {
+      const sb = createServerClient();
+      const encRes = await sb
+        .from("stock_encyclopedia")
+        .select("avg_move_ratio,total_earnings_records")
+        .eq("symbol", candidate.symbol.toUpperCase())
+        .limit(1);
+      const enc = ((encRes.data ?? []) as Array<{
+        avg_move_ratio: number | string | null;
+        total_earnings_records: number | null;
+      }>)[0];
+      if (enc && enc.avg_move_ratio !== null && Number(enc.total_earnings_records ?? 0) >= 3) {
+        const g = gradeFromRatio(Number(enc.avg_move_ratio));
+        if (g) {
+          // gradeFromRatio's D band maps to F in the 4-letter scale.
+          stageThree.crushGrade = (g === "D" ? "F" : g) as "A" | "B" | "C" | "F";
+          (stageThree.details as Record<string, unknown>).crushGradeSource = "encyclopedia";
+          console.log(
+            `[screener] ${candidate.symbol}: crush ${stageThree.crushGrade} from encyclopedia avg_move_ratio (live history thin)`,
+          );
+        }
+      }
+    } catch (e) {
+      console.warn(
+        `[screener] encyclopedia crush fallback failed for ${candidate.symbol}: ${e instanceof Error ? e.message : e}`,
+      );
+    }
+  }
+
   const stageFour = await runStageFour(
     candidate,
     chain,
@@ -1469,50 +1519,128 @@ function gradeToL3Score(g: Grade): number {
 // it's scoped to the user running the analysis. dataInsufficient=true
 // when we have fewer than 5 closed trades on the ticker — in that case
 // the grader treats Layer 2 as neutral rather than penalizing on noise.
+// Terminal statuses: expired_worthless and assigned ARE outcomes (the
+// most common winning outcome is expiry) — the old closed-only filter
+// hid a third of the user's history from Layer 2.
+const TERMINAL_STATUSES = ["closed", "expired_worthless", "assigned"];
+
+type PersonalRow = {
+  strike: number | null;
+  realized_pnl: number | null;
+  total_contracts: number | null;
+  position_type: string | null;
+};
+
+// Strike-based capital ROC (percent) — same denominator as the
+// Intelligence page and ticker strip. The old premium-capture
+// denominator made the boost threshold a no-op.
+function personalStats(rows: PersonalRow[]): {
+  tradeCount: number;
+  winRate: number | null;
+  avgRoc: number | null;
+} {
+  const options = rows.filter(
+    (r) => r.position_type !== "stock_long" && r.position_type !== "stock_short",
+  );
+  const tradeCount = options.length;
+  if (tradeCount === 0) return { tradeCount: 0, winRate: null, avgRoc: null };
+  const wins = options.filter((r) => Number(r.realized_pnl ?? 0) > 0).length;
+  const winRate = (wins / tradeCount) * 100;
+  const rocs = options
+    .map((r) => {
+      const strike = Number(r.strike ?? 0);
+      const contracts = Number(r.total_contracts ?? 0);
+      const pnl = Number(r.realized_pnl ?? 0);
+      const capital = strike * contracts * 100;
+      return capital > 0 ? (pnl / capital) * 100 : null;
+    })
+    .filter((r): r is number => r !== null);
+  const avgRoc = rocs.length > 0 ? rocs.reduce((a, b) => a + b, 0) / rocs.length : null;
+  return { tradeCount, winRate, avgRoc };
+}
+
+const NO_HISTORY: PersonalHistory = {
+  tradeCount: 0,
+  winRate: null,
+  avgRoc: null,
+  dataInsufficient: true,
+  scope: "none",
+  sectorIndustry: null,
+};
+
 export async function getPersonalHistory(
   userId: string,
   symbol: string,
 ): Promise<PersonalHistory> {
   try {
     const supabase = createServerClient();
+    const upper = symbol.toUpperCase();
     const { data, error } = await supabase
       .from("positions")
-      .select("avg_premium_sold, realized_pnl, total_contracts")
+      .select("strike, realized_pnl, total_contracts, position_type")
       .eq("user_id", userId)
-      .eq("symbol", symbol.toUpperCase())
-      .eq("status", "closed");
-    if (error || !data) {
-      return { tradeCount: 0, winRate: null, avgRoc: null, dataInsufficient: true };
+      .eq("symbol", upper)
+      .in("status", TERMINAL_STATUSES);
+    if (error || !data) return { ...NO_HISTORY };
+    const ticker = personalStats(data as PersonalRow[]);
+
+    if (ticker.tradeCount >= 5) {
+      return {
+        ...ticker,
+        dataInsufficient: false,
+        scope: "ticker",
+        sectorIndustry: null,
+      };
     }
-    const rows = data as Array<{
-      avg_premium_sold: number | null;
-      realized_pnl: number | null;
-      total_contracts: number | null;
-    }>;
-    const tradeCount = rows.length;
-    if (tradeCount === 0) {
-      return { tradeCount: 0, winRate: null, avgRoc: null, dataInsufficient: true };
+
+    // Sector fallback: the user's whole history across this symbol's
+    // industry (10+ trade bar). Coarser evidence — the caller applies
+    // it drop-only (see calculateThreeLayerGrade).
+    const profRes = await supabase
+      .from("stock_profiles")
+      .select("industry")
+      .eq("symbol", upper)
+      .limit(1);
+    const industry =
+      ((profRes.data ?? []) as Array<{ industry: string | null }>)[0]?.industry ?? null;
+    if (industry) {
+      const symsRes = await supabase
+        .from("stock_profiles")
+        .select("symbol")
+        .eq("industry", industry)
+        .limit(300);
+      const syms = ((symsRes.data ?? []) as Array<{ symbol: string }>).map((r) =>
+        r.symbol.toUpperCase(),
+      );
+      if (syms.length > 0) {
+        const secRes = await supabase
+          .from("positions")
+          .select("strike, realized_pnl, total_contracts, position_type")
+          .eq("user_id", userId)
+          .in("symbol", syms)
+          .in("status", TERMINAL_STATUSES);
+        if (!secRes.error) {
+          const sector = personalStats((secRes.data ?? []) as PersonalRow[]);
+          if (sector.tradeCount >= 10) {
+            return {
+              ...sector,
+              dataInsufficient: false,
+              scope: "sector",
+              sectorIndustry: industry,
+            };
+          }
+        }
+      }
     }
-    const wins = rows.filter((r) => Number(r.realized_pnl ?? 0) > 0).length;
-    const winRate = (wins / tradeCount) * 100;
-    const rocs = rows
-      .map((r) => {
-        const sold = Number(r.avg_premium_sold ?? 0);
-        const contracts = Number(r.total_contracts ?? 0);
-        const pnl = Number(r.realized_pnl ?? 0);
-        const capital = sold * contracts * 100;
-        return capital > 0 ? (pnl / capital) * 100 : null;
-      })
-      .filter((r): r is number => r !== null);
-    const avgRoc = rocs.length > 0 ? rocs.reduce((a, b) => a + b, 0) / rocs.length : null;
+
     return {
-      tradeCount,
-      winRate,
-      avgRoc,
-      dataInsufficient: tradeCount < 5,
+      ...ticker,
+      dataInsufficient: true,
+      scope: "none",
+      sectorIndustry: industry,
     };
   } catch {
-    return { tradeCount: 0, winRate: null, avgRoc: null, dataInsufficient: true };
+    return { ...NO_HISTORY };
   }
 }
 
@@ -1595,17 +1723,25 @@ export function calculateThreeLayerGrade(
   else if (vix !== null && vix >= 20) regimeGrade = "B";
   else regimeGrade = "A";
 
-  const history = personalHistory ?? {
+  const history: PersonalHistory = personalHistory ?? {
     tradeCount: 0,
     winRate: null,
     avgRoc: null,
     dataInsufficient: true,
+    scope: "none",
+    sectorIndustry: null,
   };
+  // Legacy PersonalHistory objects (pre-sector-fallback) carry no
+  // scope — they were always ticker-level.
+  const historyScope = history.scope ?? (history.dataInsufficient ? "none" : "ticker");
+  // Display grade for the Layer 2 card, at whatever evidence scope we
+  // have. ROC threshold is on strike-based capital (0.3%/trade is a
+  // real bar; the old 0.4 was on premium-capture and passed trivially).
   let personalGrade: Grade | "INSUFFICIENT" = "INSUFFICIENT";
   if (!history.dataInsufficient && history.winRate !== null) {
     const wr = history.winRate;
     const roc = history.avgRoc ?? 0;
-    if (wr > 80 && roc > 0.4) personalGrade = "A";
+    if (wr > 80 && roc > 0.3) personalGrade = "A";
     else if (wr >= 60) personalGrade = "B";
     else if (wr >= 50) personalGrade = "C";
     else personalGrade = "F";
@@ -1648,15 +1784,24 @@ export function calculateThreeLayerGrade(
     finalGrade = dropped;
   }
 
-  // Personal history modifier: only when we have 5+ trades.
+  // Personal history modifier — asymmetric by evidence scope:
+  //   ticker (5+ trades on THIS symbol): boost or drop.
+  //   sector (10+ trades across the industry): drop-only, stricter bar
+  //     (<45%). Sector evidence is diluted — a false boost costs real
+  //     capital, a false drop only costs a missed trade.
   let personalModifier: "boost" | "drop" | null = null;
   if (!history.dataInsufficient && history.winRate !== null && !hasOverhang) {
     const wr = history.winRate;
     const roc = history.avgRoc ?? 0;
-    if (wr > 80 && roc > 0.4) {
-      personalModifier = "boost";
-      finalGrade = boostGrade(finalGrade);
-    } else if (wr < 50) {
+    if (historyScope === "ticker") {
+      if (wr > 80 && roc > 0.3) {
+        personalModifier = "boost";
+        finalGrade = boostGrade(finalGrade);
+      } else if (wr < 50) {
+        personalModifier = "drop";
+        finalGrade = dropGrade(finalGrade);
+      }
+    } else if (historyScope === "sector" && wr < 45) {
       personalModifier = "drop";
       finalGrade = dropGrade(finalGrade);
     }
@@ -1755,18 +1900,28 @@ export function calculateThreeLayerGrade(
   if (!history.dataInsufficient && history.winRate !== null) {
     const wr = history.winRate;
     const roc = history.avgRoc ?? 0;
-    const mod =
-      personalModifier === "boost"
-        ? " → boosts grade one level (winRate >80% & avgRoc >0.4%)"
-        : personalModifier === "drop"
-          ? " → drops grade one level (winRate <50%)"
-          : " → no modifier (between boost/drop thresholds)";
-    historyLines.push(
-      `${history.tradeCount} prior trades: ${wr.toFixed(0)}% win rate, ${roc.toFixed(2)}% avg ROC${mod}.`,
-    );
+    if (historyScope === "sector") {
+      const mod =
+        personalModifier === "drop"
+          ? " → drops grade one level (sector win rate <45%)"
+          : " → no modifier (sector evidence can only drop, at <45% win)";
+      historyLines.push(
+        `No direct history on this ticker. Sector evidence — ${history.sectorIndustry ?? "industry"}: ${history.tradeCount} trades, ${wr.toFixed(0)}% win rate, ${roc.toFixed(2)}% avg ROC${mod}.`,
+      );
+    } else {
+      const mod =
+        personalModifier === "boost"
+          ? " → boosts grade one level (winRate >80% & avgRoc >0.3% on collateral)"
+          : personalModifier === "drop"
+            ? " → drops grade one level (winRate <50%)"
+            : " → no modifier (between boost/drop thresholds)";
+      historyLines.push(
+        `${history.tradeCount} prior trades on this ticker: ${wr.toFixed(0)}% win rate, ${roc.toFixed(2)}% avg ROC${mod}.`,
+      );
+    }
   } else {
     historyLines.push(
-      `Insufficient history — ${history.tradeCount} closed trades on this ticker (need 5+). No modifier applied.`,
+      `Insufficient history — ${history.tradeCount} terminal trades on this ticker (need 5+; sector fallback needs 10+ industry trades). No modifier applied.`,
     );
   }
 
@@ -1786,9 +1941,13 @@ export function calculateThreeLayerGrade(
     overrideBits.push(`VIX ${vix?.toFixed(1)} > 30 override → dropped one level.`);
   }
   if (personalModifier === "boost") {
-    overrideBits.push("Personal history boost (win rate >80%, avg ROC >0.4%) → +1 level.");
+    overrideBits.push("Personal history boost (ticker win rate >80%, avg ROC >0.3%) → +1 level.");
   } else if (personalModifier === "drop") {
-    overrideBits.push("Personal history drop (win rate <50%) → −1 level.");
+    overrideBits.push(
+      historyScope === "sector"
+        ? `Sector history drop (${history.sectorIndustry ?? "industry"} win rate <45%) → −1 level.`
+        : "Personal history drop (ticker win rate <50%) → −1 level.",
+    );
   }
 
   let bottomLine: string;
@@ -1832,6 +1991,8 @@ export function calculateThreeLayerGrade(
       tickerAvgRoc: history.avgRoc,
       tickerCrushAccuracy: null,
       dataInsufficient: history.dataInsufficient,
+      scope: historyScope,
+      sectorIndustry: history.sectorIndustry ?? null,
     },
     regimeGrade,
     regimeScore,
