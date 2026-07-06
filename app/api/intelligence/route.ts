@@ -27,6 +27,7 @@ type PositionRow = {
   assignment_source_id: string | null;
   entry_stock_price: number | null;
   direction: "short" | "long" | null;
+  entry_dte: number | null;
 };
 
 type RecRow = {
@@ -110,11 +111,37 @@ function addDaysIso(iso: string, days: number): string {
   return d.toISOString().slice(0, 10);
 }
 
-function vixBucket(vix: number | null): "calm" | "elevated" | "panic" | null {
+// Four buckets: the old calm/elevated/panic trichotomy put every trade
+// in this account's history (VIX 15-25 throughout) into one "elevated"
+// bar. Splitting 15-25 into 15-20 / 20-25 makes the panel actually
+// differentiate within the regime the user trades in.
+function vixBucket(
+  vix: number | null,
+): "calm" | "15-20" | "20-25" | "panic" | null {
   if (vix === null || !Number.isFinite(vix)) return null;
   if (vix > 25) return "panic";
-  if (vix >= 15) return "elevated";
+  if (vix >= 20) return "20-25";
+  if (vix >= 15) return "15-20";
   return "calm";
+}
+
+// Days-to-expiration at entry. Uses the stamped entry_dte when present
+// and derives from the dates otherwise, so all history participates.
+type DteBucketKey = "0-2d" | "3-5d" | "6-10d" | ">10d";
+function dteBucket(p: {
+  entry_dte: number | null;
+  opened_date: string;
+  expiry: string;
+}): DteBucketKey | null {
+  let dte = p.entry_dte;
+  if (dte === null || !Number.isFinite(dte)) {
+    dte = daysBetweenInclusive(p.opened_date, p.expiry);
+  }
+  if (dte === null || dte < 0) return null;
+  if (dte <= 2) return "0-2d";
+  if (dte <= 5) return "3-5d";
+  if (dte <= 10) return "6-10d";
+  return ">10d";
 }
 
 // ISO YYYY-MM-DD validation — anything else is ignored and we fall back.
@@ -154,7 +181,7 @@ export async function GET(req: NextRequest) {
   let query = sb
     .from("positions")
     .select(
-      "id,symbol,strike,expiry,total_contracts,avg_premium_sold,opened_date,closed_date,realized_pnl,entry_final_grade,entry_crush_grade,entry_opportunity_grade,entry_iv_edge,entry_em_pct,entry_vix,status,broker,position_type,assignment_source_id,entry_stock_price,direction",
+      "id,symbol,strike,expiry,total_contracts,avg_premium_sold,opened_date,closed_date,realized_pnl,entry_final_grade,entry_crush_grade,entry_opportunity_grade,entry_iv_edge,entry_em_pct,entry_vix,status,broker,position_type,assignment_source_id,entry_stock_price,direction,entry_dte",
     )
     .eq("user_id", userId)
     .in("status", ["closed", "expired_worthless", "assigned"])
@@ -463,7 +490,12 @@ export async function GET(req: NextRequest) {
   }
 
   const allPositionIds = Array.from(bySymbol.values()).flatMap((b) => b.positionIds);
-  const recsBySymbol = new Map<string, { aligned: number; total: number }>();
+  // aligned/total count only SCORED recs (was_system_aligned set, i.e.
+  // an actionable CLOSE/HOLD verdict whose outcome resolved). count is
+  // every rec including DATA_GATE/MONITOR — the UI uses it to show
+  // "n recs · unscored" instead of a bare "—" so a wired-but-not-yet-
+  // scoreable engine is distinguishable from "no recs at all".
+  const recsBySymbol = new Map<string, { aligned: number; total: number; count: number }>();
   if (allPositionIds.length > 0) {
     const recsRes = await sb
       .from("post_earnings_recommendations")
@@ -475,12 +507,14 @@ export async function GET(req: NextRequest) {
       for (const pid of b.positionIds) positionIdToSymbol.set(pid, sym);
     }
     for (const r of allRecs) {
-      if (r.was_system_aligned === null) continue;
       const sym = positionIdToSymbol.get(r.position_id);
       if (!sym) continue;
-      const cur = recsBySymbol.get(sym) ?? { aligned: 0, total: 0 };
-      cur.total += 1;
-      if (r.was_system_aligned === true) cur.aligned += 1;
+      const cur = recsBySymbol.get(sym) ?? { aligned: 0, total: 0, count: 0 };
+      cur.count += 1;
+      if (r.was_system_aligned !== null) {
+        cur.total += 1;
+        if (r.was_system_aligned === true) cur.aligned += 1;
+      }
       recsBySymbol.set(sym, cur);
     }
   }
@@ -502,6 +536,7 @@ export async function GET(req: NextRequest) {
         top_grade: mostCommonGrade === "?" ? null : mostCommonGrade,
         rec_aligned: recInfo?.aligned ?? null,
         rec_total: recInfo?.total ?? null,
+        rec_count: recInfo?.count ?? null,
         closed_trades: b.closedTrades.sort((a, b2) =>
           (b2.closed_date ?? "").localeCompare(a.closed_date ?? ""),
         ),
@@ -555,8 +590,46 @@ export async function GET(req: NextRequest) {
   const by_vix_regime = bucket(
     allClosed,
     (p) => vixBucket(p.entry_vix),
-    ["calm", "elevated", "panic"],
+    ["calm", "15-20", "20-25", "panic"],
   );
+  const by_dte = bucket(allClosed, (p) => dteBucket(p), [
+    "0-2d",
+    "3-5d",
+    "6-10d",
+    ">10d",
+  ]);
+
+  // Win rate / ROC by industry via stock_profiles (shared table, 689
+  // symbols with industry + market cap). Industries with <2 trades are
+  // dropped — one trade tells you nothing about the industry.
+  const industryBySymbol = new Map<string, string>();
+  {
+    const symbols = Array.from(new Set(allClosed.map((p) => p.symbol)));
+    if (symbols.length > 0) {
+      const profRes = await sb
+        .from("stock_profiles")
+        .select("symbol,industry")
+        .in("symbol", symbols);
+      for (const r of (profRes.data ?? []) as Array<{ symbol: string; industry: string | null }>) {
+        if (r.industry) industryBySymbol.set(r.symbol.toUpperCase(), r.industry);
+      }
+    }
+  }
+  const industryKeys = Array.from(
+    new Set(
+      allClosed
+        .map((p) => industryBySymbol.get(p.symbol) ?? null)
+        .filter((v): v is string => v !== null),
+    ),
+  );
+  const by_industry = bucket(
+    allClosed,
+    (p) => (industryBySymbol.get(p.symbol) ?? null) as string | null,
+    industryKeys,
+  )
+    .filter((b) => b.trades >= 2)
+    .sort((x, y) => y.trades - x.trades)
+    .slice(0, 10);
 
   const gradeLookup = new Map(by_grade.map((g) => [g.key, g]));
   const a = gradeLookup.get("A");
@@ -591,6 +664,84 @@ export async function GET(req: NextRequest) {
         hold_total: hold.length,
         overall_pct: correct / allRecs.length,
       };
+    }
+  }
+
+  // ---------- Section: earnings implied-move calibration ----------
+  // The core edge of the strategy, measured: for every symbol with 3+
+  // (implied, actual) move pairs in earnings_history, how does the
+  // options market's priced-in move compare with what actually printed?
+  // avg_ratio < 1 ⇒ the market systematically overprices this symbol's
+  // earnings move ⇒ its pre-earnings premium is systematically rich —
+  // exactly what a CSP seller wants. Shared market data, not user-scoped;
+  // `traded` marks symbols in the caller's own closed history.
+  type EmCalRow = {
+    symbol: string;
+    events: number;
+    avg_ratio: number;
+    within_implied_pct: number;
+    avg_implied_pct: number;
+    avg_actual_pct: number;
+    last_event: string;
+    traded: boolean;
+  };
+  let em_calibration: EmCalRow[] = [];
+  {
+    const emRes = await sb
+      .from("earnings_history")
+      .select("symbol,earnings_date,implied_move_pct,actual_move_pct")
+      .gt("implied_move_pct", 0);
+    if (emRes.error) {
+      console.warn(`[intelligence] em calibration fetch failed: ${emRes.error.message}`);
+    } else {
+      const pairs = ((emRes.data ?? []) as Array<{
+        symbol: string;
+        earnings_date: string;
+        implied_move_pct: number | string;
+        actual_move_pct: number | string | null;
+      }>).filter((r) => r.actual_move_pct !== null);
+      type Acc = {
+        ratios: number[];
+        within: number;
+        implieds: number[];
+        actuals: number[];
+        last: string;
+      };
+      const bySym = new Map<string, Acc>();
+      for (const r of pairs) {
+        const implied = Number(r.implied_move_pct);
+        const actual = Math.abs(Number(r.actual_move_pct));
+        if (!Number.isFinite(implied) || implied <= 0 || !Number.isFinite(actual)) continue;
+        const sym = r.symbol.toUpperCase();
+        const acc = bySym.get(sym) ?? {
+          ratios: [],
+          within: 0,
+          implieds: [],
+          actuals: [],
+          last: r.earnings_date,
+        };
+        acc.ratios.push(actual / implied);
+        if (actual < implied) acc.within += 1;
+        acc.implieds.push(implied);
+        acc.actuals.push(actual);
+        if (r.earnings_date > acc.last) acc.last = r.earnings_date;
+        bySym.set(sym, acc);
+      }
+      const tradedSymbols = new Set(allClosed.map((p) => p.symbol));
+      em_calibration = Array.from(bySym.entries())
+        .filter(([, a]) => a.ratios.length >= 3)
+        .map(([symbol, a]) => ({
+          symbol,
+          events: a.ratios.length,
+          avg_ratio: a.ratios.reduce((s, v) => s + v, 0) / a.ratios.length,
+          within_implied_pct: a.within / a.ratios.length,
+          avg_implied_pct: a.implieds.reduce((s, v) => s + v, 0) / a.implieds.length,
+          avg_actual_pct: a.actuals.reduce((s, v) => s + v, 0) / a.actuals.length,
+          last_event: a.last,
+          traded: tradedSymbols.has(symbol),
+        }))
+        .sort((x, y) => x.avg_ratio - y.avg_ratio)
+        .slice(0, 60);
     }
   }
 
@@ -655,7 +806,15 @@ export async function GET(req: NextRequest) {
               .reduce((best, g) => (g.win_rate > best.win_rate ? g : best)).key
           : null,
       vix_calm_win_rate: vixMap.get("calm")?.win_rate ?? null,
-      vix_elevated_win_rate: vixMap.get("elevated")?.win_rate ?? null,
+      // Combined 15-25 band, preserving the old export field's meaning
+      // after the bucket split.
+      vix_elevated_win_rate: (() => {
+        const lo = vixMap.get("15-20");
+        const hi = vixMap.get("20-25");
+        const trades = (lo?.trades ?? 0) + (hi?.trades ?? 0);
+        const wins = (lo?.wins ?? 0) + (hi?.wins ?? 0);
+        return trades > 0 ? wins / trades : null;
+      })(),
       vix_panic_win_rate: vixMap.get("panic")?.win_rate ?? null,
     },
   };
@@ -862,6 +1021,8 @@ export async function GET(req: NextRequest) {
       by_grade,
       by_day_of_week,
       by_vix_regime,
+      by_dte,
+      by_industry,
       calibration: {
         drift: calibrationDrift,
         summary: calibrationDrift
@@ -872,6 +1033,7 @@ export async function GET(req: NextRequest) {
       },
       rec_accuracy,
     },
+    em_calibration,
     paired_assignments,
     partial_closes,
     total_partial_pnl,

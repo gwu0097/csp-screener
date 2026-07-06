@@ -3,6 +3,7 @@
 import { useState } from "react";
 import {
   DateRangeControls,
+  EmCalibrationSection,
   IntelligencePageShell,
   PatternIntelligenceSection,
   presetToRange,
@@ -31,7 +32,12 @@ export default function PatternsPage() {
       loading={loading}
       data={data}
     >
-      {data && <PatternIntelligenceSection patterns={data.patterns} />}
+      {data && (
+        <div className="space-y-8">
+          <PatternIntelligenceSection patterns={data.patterns} />
+          <EmCalibrationSection rows={data.em_calibration ?? []} />
+        </div>
+      )}
     </IntelligencePageShell>
   );
 }
