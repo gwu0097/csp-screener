@@ -92,6 +92,7 @@ const INTELLIGENCE_GROUP: NavGroup = {
   subItems: [
     { href: "/intelligence/efficiency", label: "Efficiency" },
     { href: "/intelligence/patterns", label: "Patterns" },
+    { href: "/intelligence/research-log", label: "Research Log" },
   ],
 };
 
