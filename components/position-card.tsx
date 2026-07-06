@@ -1359,7 +1359,7 @@ function ClosePositionInline({
   const [submitting, setSubmitting] = useState<"all" | "partial" | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  async function submitClose(qty: number, price: string) {
+  async function submitClose(qty: number, price: string, confirmDuplicates = false) {
     const premium = Number(price);
     if (!Number.isFinite(premium) || premium < 0) {
       setError("Enter a valid price");
@@ -1388,9 +1388,35 @@ function ClosePositionInline({
               broker: p.broker,
             },
           ],
+          confirmDuplicates,
         }),
       });
-      const json = (await res.json()) as { error?: string };
+      const json = (await res.json()) as {
+        error?: string;
+        errors?: string[];
+        skipped?: string[];
+        duplicates?: string[];
+        requires_confirmation?: boolean;
+        fills_inserted?: number;
+      };
+      // Server flagged this close as identical to an already-logged
+      // fill. Nothing was written — confirm and resubmit if it's real.
+      if (res.status === 409 && json.requires_confirmation) {
+        setSubmitting(null);
+        const detail = (json.duplicates ?? []).join("\n");
+        if (
+          window.confirm(
+            `Possible duplicate fill — nothing logged yet:\n\n${detail}\n\nLog it anyway?`,
+          )
+        ) {
+          await submitClose(qty, price, true);
+        }
+        return;
+      }
+      if (json.errors && json.errors.length > 0) throw new Error(json.errors.join("; "));
+      if (json.skipped && json.skipped.length > 0 && (json.fills_inserted ?? 0) === 0) {
+        throw new Error(json.skipped.join("; "));
+      }
       if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
       onCloseSubmitted(`Closed ${qty} ${p.symbol} @ ${fmtDollars(premium)}`);
     } catch (e) {

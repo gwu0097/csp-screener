@@ -79,14 +79,41 @@ export async function POST(
   // Sanity check: position must exist before we attach a fill to it.
   const pos = await sb
     .from("positions")
-    .select("id")
+    .select("id,symbol,strike")
     .eq("id", positionId)
     .eq("user_id", userId);
   if (pos.error) {
     return NextResponse.json({ error: pos.error.message }, { status: 500 });
   }
-  if (!pos.data || (pos.data as Array<{ id: string }>).length === 0) {
+  const posRow = ((pos.data ?? []) as Array<{ id: string; symbol: string; strike: number }>)[0];
+  if (!posRow) {
     return NextResponse.json({ error: "Position not found" }, { status: 404 });
+  }
+
+  // Over-close guard: closing more contracts than remain open would
+  // drive remaining negative — the position could then never reach
+  // "closed" and its P&L would be silently wrong.
+  if (fill_type === "close") {
+    const fillsRes = await sb
+      .from("fills")
+      .select("fill_type, contracts")
+      .eq("position_id", positionId)
+      .eq("user_id", userId);
+    if (fillsRes.error) {
+      return NextResponse.json({ error: fillsRes.error.message }, { status: 500 });
+    }
+    const rows = (fillsRes.data ?? []) as Array<{ fill_type: string; contracts: number }>;
+    const remaining =
+      rows.filter((f) => f.fill_type === "open").reduce((s, f) => s + f.contracts, 0) -
+      rows.filter((f) => f.fill_type === "close").reduce((s, f) => s + f.contracts, 0);
+    if (contracts > remaining) {
+      return NextResponse.json(
+        {
+          error: `${posRow.symbol} $${posRow.strike}: close of ${contracts} contract${contracts === 1 ? "" : "s"} exceeds the ${Math.max(0, remaining)} remaining — overage of ${contracts - remaining}`,
+        },
+        { status: 422 },
+      );
+    }
   }
 
   const ins = await sb.from("fills").insert({

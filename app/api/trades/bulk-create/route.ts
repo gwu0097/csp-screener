@@ -60,6 +60,13 @@ type BulkBody = {
   // timezone. Defaults to "PT" (no conversion when user's normal
   // timezone is PT).
   sourceTimezone?: string;
+  // When suspected duplicate fills are detected (identical rows within
+  // this batch, or a fill identical to one already imported), the route
+  // returns 409 { requires_confirmation: true, duplicates } WITHOUT
+  // writing. Resubmitting with confirmDuplicates=true imports them —
+  // the user may legitimately have filled the same contract twice at
+  // the same price, or be re-importing a corrected screenshot.
+  confirmDuplicates?: boolean;
 };
 
 // Code → IANA timezone identifier. Add new codes to both this map
@@ -162,6 +169,34 @@ function normalizeBroker(b?: string | null): string {
   return (b ?? "schwab").toLowerCase();
 }
 
+// Whole days between two YYYY-MM-DD strings (a − b).
+function daysBetween(a: string, b: string): number {
+  return Math.round(
+    (Date.parse(a + "T00:00:00Z") - Date.parse(b + "T00:00:00Z")) / 86_400_000,
+  );
+}
+
+// A fill date is invalid when it lands on a weekend (US markets
+// closed), is in the future, or is more than 30 days before the
+// import date — the time-as-date screenshot bug produced dates months
+// in the past (e.g. "3:26" → 2026-03-26) that the future-only check
+// never caught. Returns the rejection reason, or null when valid.
+// The import date itself can be any day; only the FILL date must be
+// a plausible trading day.
+function fillDateProblem(fillDate: string, importDate: string): string | null {
+  const dow = new Date(fillDate + "T00:00:00Z").getUTCDay();
+  if (dow === 6 || dow === 0) {
+    return `falls on a ${dow === 6 ? "Saturday" : "Sunday"} — markets are closed`;
+  }
+  if (fillDate > importDate) {
+    return "is in the future";
+  }
+  if (daysBetween(importDate, fillDate) > 30) {
+    return "is more than 30 days before this import — likely a misparsed date";
+  }
+  return null;
+}
+
 // Options never expire on Sat/Sun. Broker screenshots (ThinkOrSwim, etc.)
 // sometimes display weekly settlement dates (the Sunday after expiry) or
 // the model parses "APR 24 '26" ambiguously and lands on 04-26. Snap any
@@ -231,6 +266,37 @@ export async function POST(req: NextRequest) {
 
   const supabase = createServerClient();
   const errors: string[] = [];
+  // Per-row date rejections. Unlike `errors` these do NOT gate the
+  // batch — the offending row is skipped and everything else imports.
+  const skipped: string[] = [];
+  // Suspected duplicate fills (intra-batch + cross-batch). Warnings,
+  // not rejections — see BulkBody.confirmDuplicates.
+  const duplicateWarnings: string[] = [];
+  const confirmDuplicates = body.confirmDuplicates === true;
+
+  // Fills of every pre-existing position touched by this batch, fetched
+  // once per position. Feeds the over-close guard and the cross-batch
+  // duplicate check.
+  const fillsCache = new Map<string, Fill[]>();
+  async function getPositionFills(positionId: string): Promise<Fill[] | null> {
+    const hit = fillsCache.get(positionId);
+    if (hit) return hit;
+    const r = await supabase
+      .from("fills")
+      .select("fill_type, contracts, premium, fill_date")
+      .eq("position_id", positionId)
+      .eq("user_id", userId);
+    if (r.error) return null;
+    const fills = (r.data ?? []) as Fill[];
+    fillsCache.set(positionId, fills);
+    return fills;
+  }
+  // Net contracts (opens − closes) already planned in this batch, per
+  // existing position id / per new-position batch key. Items are sorted
+  // opens-first, so a close always validates against every open that
+  // will precede it in Phase 2.
+  const plannedDeltaByPosition = new Map<string, number>();
+  const plannedDeltaByKey = new Map<string, number>();
 
   // One batch_id per bulk-create call. Stamped on every NEW position
   // and EVERY fill we insert below so the "Undo last import" flow on
@@ -302,14 +368,16 @@ export async function POST(req: NextRequest) {
     const rawFillDate = input.timePlaced ?? input.trade_date ?? null;
     const fillDate = rawFillDate ? toPstDate(rawFillDate, sourceTimezone) : todayPst();
 
-    // Reject future fill dates. closed_date is derived from
-    // max(close fill_date) downstream, so a stray future date here
-    // permanently corrupts the position's closed_date — see the
-    // SHOP/PLTR/DUOL 2026-05-26 incident.
+    // Per-fill date validation (weekend / future / >30d stale). Bad
+    // dates corrupt opened_date/closed_date and monthly P&L attribution
+    // permanently — see the SHOP/PLTR/DUOL 2026-05-26 incident and the
+    // time-as-date screenshot bug cleaned up 2026-07-06. Skips just
+    // this row; the rest of the batch imports.
     const todayP = todayPst();
-    if (fillDate > todayP) {
-      errors.push(
-        `${symbol}: fill date ${fillDate} is in the future — check the date entered`,
+    const dateProblem = fillDateProblem(fillDate, todayP);
+    if (dateProblem) {
+      skipped.push(
+        `${symbol} ${input.action} ${input.contracts} @ $${input.premium}: fill date ${fillDate} ${dateProblem} — row skipped, correct the date and re-import it`,
       );
       continue;
     }
@@ -405,6 +473,61 @@ export async function POST(req: NextRequest) {
       createsNewPosition = true;
     }
 
+    // ---- Over-close guard + cross-batch duplicate warning ----
+    const positionLabel = `${symbol} $${input.strike}${(input.optionType ?? "put") === "call" ? "C" : "P"} ${expiry} (${broker})`;
+    if (existingPositionId) {
+      const posFills = await getPositionFills(existingPositionId);
+      if (!posFills) {
+        errors.push(`${positionLabel}: fills lookup failed — cannot validate close balance`);
+        continue;
+      }
+      // Cross-batch duplicate: an identical fill already exists on this
+      // position from a previous import. Warning only — the user may be
+      // re-importing a corrected screenshot on purpose.
+      const alreadyImported = posFills.some(
+        (f) =>
+          f.fill_type === input.action &&
+          Number(f.contracts) === Number(input.contracts) &&
+          Math.abs(Number(f.premium) - Number(input.premium)) < 0.005 &&
+          f.fill_date === fillDate,
+      );
+      if (alreadyImported) {
+        duplicateWarnings.push(
+          `${positionLabel}: an identical ${input.action} fill (${input.contracts} @ $${input.premium}, ${fillDate}) already exists from a previous import`,
+        );
+      }
+      if (input.action === "close") {
+        const available =
+          remainingContracts(posFills) +
+          (plannedDeltaByPosition.get(existingPositionId) ?? 0);
+        if (input.contracts > available) {
+          errors.push(
+            `${positionLabel}: close of ${input.contracts} contract${input.contracts === 1 ? "" : "s"} exceeds the ${available} remaining — overage of ${input.contracts - available}. Check for a wrong quantity or a close matched to the wrong position.`,
+          );
+          continue;
+        }
+      }
+      plannedDeltaByPosition.set(
+        existingPositionId,
+        (plannedDeltaByPosition.get(existingPositionId) ?? 0) +
+          (input.action === "open" ? input.contracts : -input.contracts),
+      );
+    } else {
+      // Position is created by an earlier open in this same batch —
+      // validate closes against the in-batch running balance.
+      const available = plannedDeltaByKey.get(keyForBatch) ?? 0;
+      if (input.action === "close" && input.contracts > available) {
+        errors.push(
+          `${positionLabel}: close of ${input.contracts} contract${input.contracts === 1 ? "" : "s"} exceeds the ${available} opened in this import — overage of ${input.contracts - available}`,
+        );
+        continue;
+      }
+      plannedDeltaByKey.set(
+        keyForBatch,
+        available + (input.action === "open" ? input.contracts : -input.contracts),
+      );
+    }
+
     optionPlans.push({
       input,
       symbol,
@@ -415,6 +538,37 @@ export async function POST(req: NextRequest) {
       createsNewPosition,
       keyForBatch,
     });
+  }
+
+  // ---- Intra-batch duplicate warning ----
+  // Two or more rows identical on (symbol, strike, expiry, premium,
+  // contracts, direction, action, broker) within this import. Warning,
+  // not rejection — same-price partial fills in one session are real.
+  {
+    const groups = new Map<string, { count: number; plan: OptionPlan }>();
+    for (const plan of optionPlans) {
+      const i = plan.input;
+      const k = [
+        plan.symbol,
+        i.strike,
+        plan.expiry,
+        i.premium,
+        i.contracts,
+        i.direction ?? "short",
+        i.action,
+        plan.broker,
+      ].join("|");
+      const g = groups.get(k);
+      if (g) g.count += 1;
+      else groups.set(k, { count: 1, plan });
+    }
+    for (const { count, plan } of Array.from(groups.values())) {
+      if (count > 1) {
+        duplicateWarnings.push(
+          `${plan.symbol} $${plan.input.strike} ${plan.expiry} (${plan.broker}): ${count} identical ${plan.input.action} fills (${plan.input.contracts} @ $${plan.input.premium}) in this import — remove the extras or confirm they are separate executions`,
+        );
+      }
+    }
   }
 
   // ---- Phase 1 stock validation ----
@@ -451,10 +605,10 @@ export async function POST(req: NextRequest) {
       errors.push(`stock ${symbol}: price must be ≥ 0`);
       continue;
     }
-    const todayPForStock = todayPst();
-    if (date > todayPForStock) {
-      errors.push(
-        `stock ${symbol}: fill date ${date} is in the future — check the date entered`,
+    const stockDateProblem = fillDateProblem(date, todayPst());
+    if (stockDateProblem) {
+      skipped.push(
+        `stock ${symbol} sell ${shares} @ $${price}: fill date ${date} ${stockDateProblem} — row skipped, correct the date and re-import it`,
       );
       continue;
     }
@@ -547,8 +701,33 @@ export async function POST(req: NextRequest) {
         stocks_closed: 0,
         stocks_partial: 0,
         errors,
+        skipped,
+        duplicates: duplicateWarnings,
       },
       { status: 422 },
+    );
+  }
+
+  // Duplicate-confirmation gate — suspected duplicates found and the
+  // caller hasn't confirmed. Nothing is written; the client shows the
+  // list and resubmits with confirmDuplicates=true (or removes rows).
+  if (duplicateWarnings.length > 0 && !confirmDuplicates) {
+    console.log(
+      `[bulk-create] DUPLICATE CONFIRMATION REQUIRED — ${duplicateWarnings.length} suspected duplicate group(s), no writes performed`,
+    );
+    return NextResponse.json(
+      {
+        requires_confirmation: true,
+        duplicates: duplicateWarnings,
+        positions_created: 0,
+        positions_updated: 0,
+        fills_inserted: 0,
+        stocks_closed: 0,
+        stocks_partial: 0,
+        errors: [],
+        skipped,
+      },
+      { status: 409 },
     );
   }
 
@@ -667,6 +846,7 @@ export async function POST(req: NextRequest) {
         stocks_closed: 0,
         stocks_partial: 0,
         errors: [`Import rolled back — ${reason}`],
+        skipped,
       },
       { status: 500 },
     );
@@ -1010,5 +1190,8 @@ export async function POST(req: NextRequest) {
     stocks_closed: stocksClosed,
     stocks_partial: stocksPartial,
     errors: [],
+    skipped,
+    // Duplicates the caller confirmed past — echoed back for the record.
+    warnings: duplicateWarnings,
   });
 }

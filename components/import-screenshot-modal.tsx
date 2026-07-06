@@ -129,6 +129,14 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
   // 422 with structured per-row errors. The render path turns each
   // entry into a bullet so the user sees which trade(s) need fixing.
   const [errorList, setErrorList] = useState<string[]>([]);
+  // Suspected duplicate fills from the route's 409 confirmation gate.
+  // While non-empty, the footer swaps to an "Import anyway" button
+  // that resubmits with confirmDuplicates=true; the user can instead
+  // delete rows from the table above and confirm normally.
+  const [duplicates, setDuplicates] = useState<string[]>([]);
+  // Rows the server skipped for invalid fill dates (weekend / future /
+  // >30d stale). The rest of the batch DID import.
+  const [skippedList, setSkippedList] = useState<string[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const reset = useCallback(() => {
@@ -137,6 +145,9 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
     setParsedStocks(null);
     setRejections([]);
     setError(null);
+    setErrorList([]);
+    setDuplicates([]);
+    setSkippedList([]);
     setParsing(false);
     setConfirming(false);
   }, []);
@@ -245,13 +256,15 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
     }
   }
 
-  async function confirm() {
+  async function confirm(confirmDuplicates = false) {
     const optionCount = parsed?.length ?? 0;
     const stockCount = parsedStocks?.length ?? 0;
     if (optionCount === 0 && stockCount === 0) return;
     setConfirming(true);
     setError(null);
     setErrorList([]);
+    setDuplicates([]);
+    setSkippedList([]);
     try {
       const res = await fetch("/api/trades/bulk-create", {
         method: "POST",
@@ -260,6 +273,7 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
           trades: parsed ?? [],
           stockTrades: parsedStocks ?? [],
           sourceTimezone: timezone,
+          confirmDuplicates,
         }),
       });
       const json = (await res.json()) as {
@@ -269,8 +283,18 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
         stocks_closed?: number;
         stocks_partial?: number;
         errors?: string[];
+        skipped?: string[];
+        duplicates?: string[];
+        requires_confirmation?: boolean;
         error?: string;
       };
+      // 409 = suspected duplicates, nothing written. Show them and let
+      // the user delete rows above or click "Import anyway".
+      if (res.status === 409 && json.requires_confirmation) {
+        setDuplicates(json.duplicates ?? []);
+        setConfirming(false);
+        return;
+      }
       // Phase 1 (422) returns { errors: [...] } — surface every row's
       // reason so the user can fix the screenshot before retrying. Only
       // fall back to a generic "HTTP N" when the body carries no
@@ -280,6 +304,7 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
         setError(
           `${json.errors.length} trade${json.errors.length === 1 ? "" : "s"} failed validation`,
         );
+        if (json.skipped && json.skipped.length > 0) setSkippedList(json.skipped);
         setConfirming(false);
         return;
       }
@@ -301,6 +326,19 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
           ? `${json.stocks_partial} stock partial sale${json.stocks_partial === 1 ? "" : "s"}`
           : null,
       ].filter(Boolean);
+      const skippedRows = json.skipped ?? [];
+      if (skippedRows.length > 0) {
+        // Some rows were rejected for invalid fill dates. Keep the
+        // modal open so the reasons stay visible; anything that DID
+        // import is toasted so the positions view refreshes.
+        setSkippedList(skippedRows);
+        setError(
+          `${skippedRows.length} row${skippedRows.length === 1 ? "" : "s"} skipped — invalid fill date${parts.length > 0 ? "; everything else imported" : ""}`,
+        );
+        if (parts.length > 0) onSuccess(parts.join(", "));
+        setConfirming(false);
+        return;
+      }
       onSuccess(parts.join(", ") || "Import complete");
       onOpenChange(false);
     } catch (e) {
@@ -311,9 +349,14 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
   }
 
   function updateRow(idx: number, patch: Partial<ParsedTrade>) {
+    // Any edit invalidates a pending duplicate confirmation — the
+    // server recomputes duplicates on the next submit anyway; this
+    // just flips the footer button back to the normal confirm.
+    setDuplicates([]);
     setParsed((prev) => prev && prev.map((t, i) => (i === idx ? { ...t, ...patch } : t)));
   }
   function removeRow(idx: number) {
+    setDuplicates([]);
     setParsed((prev) => (prev ? prev.filter((_, i) => i !== idx) : prev));
   }
   function updateStockRow(idx: number, patch: Partial<ParsedStockTrade>) {
@@ -685,6 +728,36 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
           </div>
         )}
 
+        {duplicates.length > 0 && (
+          <div className="mt-2 space-y-1 rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-sm text-amber-100">
+            <div className="font-semibold uppercase tracking-wide text-amber-200">
+              Possible duplicate fills — nothing imported yet
+            </div>
+            {duplicates.map((d, i) => (
+              <div key={i} className="font-mono text-[11px]">
+                ⚠️ {d}
+              </div>
+            ))}
+            <div className="pt-0.5 text-[11px] text-amber-200/80">
+              Delete the extra rows above, or use “Import anyway” if these are
+              real separate executions (or an intentional re-import).
+            </div>
+          </div>
+        )}
+
+        {skippedList.length > 0 && (
+          <div className="mt-2 space-y-1 rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-sm text-amber-100">
+            <div className="font-semibold uppercase tracking-wide text-amber-200">
+              {skippedList.length} row{skippedList.length === 1 ? "" : "s"} skipped — invalid fill date
+            </div>
+            {skippedList.map((s, i) => (
+              <div key={i} className="font-mono text-[11px]">
+                ⚠️ {s}
+              </div>
+            ))}
+          </div>
+        )}
+
         {error && (
           <div className="mt-2 rounded border border-rose-500/40 bg-rose-500/10 px-2 py-1 text-sm text-rose-200">
             <div className="font-semibold">{error}</div>
@@ -705,18 +778,30 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
             Cancel
           </Button>
           {((parsed && parsed.length > 0) ||
-            (parsedStocks && parsedStocks.length > 0)) && (
-            <Button onClick={confirm} disabled={confirming}>
-              {confirming ? (
-                <>
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  Logging…
-                </>
-              ) : (
-                `Confirm & log all (${(parsed?.length ?? 0) + (parsedStocks?.length ?? 0)})`
-              )}
-            </Button>
-          )}
+            (parsedStocks && parsedStocks.length > 0)) &&
+            (duplicates.length > 0 ? (
+              <Button onClick={() => confirm(true)} disabled={confirming}>
+                {confirming ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    Logging…
+                  </>
+                ) : (
+                  "Import anyway (accept duplicates)"
+                )}
+              </Button>
+            ) : (
+              <Button onClick={() => confirm(false)} disabled={confirming}>
+                {confirming ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    Logging…
+                  </>
+                ) : (
+                  `Confirm & log all (${(parsed?.length ?? 0) + (parsedStocks?.length ?? 0)})`
+                )}
+              </Button>
+            ))}
         </DialogFooter>
       </DialogContent>
     </Dialog>

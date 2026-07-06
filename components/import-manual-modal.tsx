@@ -72,9 +72,14 @@ export function ImportManualModal({ open, onOpenChange, onSuccess, prefill }: Pr
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Non-empty after the server's 409 duplicate gate: this exact fill
+  // already exists (or repeats within the payload). The submit button
+  // becomes "Log anyway", which resubmits with confirmDuplicates=true.
+  const [dupWarnings, setDupWarnings] = useState<string[]>([]);
 
-  async function submit() {
+  async function submit(confirmDuplicates = false) {
     setError(null);
+    if (!confirmDuplicates) setDupWarnings([]);
     if (!symbol) {
       setError("Symbol required");
       return;
@@ -130,6 +135,7 @@ export function ImportManualModal({ open, onOpenChange, onSuccess, prefill }: Pr
                   trade_date: date,
                 },
               ],
+              confirmDuplicates,
             }
           : {
               stockTrades: [
@@ -142,6 +148,7 @@ export function ImportManualModal({ open, onOpenChange, onSuccess, prefill }: Pr
                   broker,
                 },
               ],
+              confirmDuplicates,
             };
       const res = await fetch("/api/trades/bulk-create", {
         method: "POST",
@@ -155,11 +162,25 @@ export function ImportManualModal({ open, onOpenChange, onSuccess, prefill }: Pr
         stocks_closed?: number;
         stocks_partial?: number;
         errors?: string[];
+        skipped?: string[];
+        duplicates?: string[];
+        requires_confirmation?: boolean;
         error?: string;
       };
+      // 409 = this fill looks identical to one already logged. Nothing
+      // was written; show the warning and let the user log it anyway.
+      if (res.status === 409 && json.requires_confirmation) {
+        setDupWarnings(json.duplicates ?? []);
+        setSubmitting(false);
+        return;
+      }
       // Phase-1 422 returns structured errors[]; surface them all.
       if (json.errors && json.errors.length > 0) {
         throw new Error(json.errors.join("; "));
+      }
+      // Per-row date rejection (weekend / future / >30d old).
+      if (json.skipped && json.skipped.length > 0 && (json.fills_inserted ?? 0) === 0) {
+        throw new Error(json.skipped.join("; "));
       }
       if (!res.ok || json.error) {
         throw new Error(json.error ?? `HTTP ${res.status}`);
@@ -398,6 +419,18 @@ export function ImportManualModal({ open, onOpenChange, onSuccess, prefill }: Pr
           </div>
         )}
 
+        {dupWarnings.length > 0 && (
+          <div className="mt-2 space-y-1 rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-sm text-amber-100">
+            <div className="font-semibold uppercase tracking-wide text-amber-200">
+              Possible duplicate — nothing logged yet
+            </div>
+            {dupWarnings.map((d, i) => (
+              <div key={i} className="font-mono text-[11px]">
+                ⚠️ {d}
+              </div>
+            ))}
+          </div>
+        )}
         {error && (
           <div className="mt-2 rounded border border-rose-500/40 bg-rose-500/10 px-2 py-1 text-sm text-rose-200">
             {error}
@@ -411,8 +444,15 @@ export function ImportManualModal({ open, onOpenChange, onSuccess, prefill }: Pr
           >
             Cancel
           </Button>
-          <Button onClick={submit} disabled={submitting || date > today}>
-            {submitting ? "Logging…" : "Log trade"}
+          <Button
+            onClick={() => submit(dupWarnings.length > 0)}
+            disabled={submitting || date > today}
+          >
+            {submitting
+              ? "Logging…"
+              : dupWarnings.length > 0
+                ? "Log anyway (accept duplicate)"
+                : "Log trade"}
           </Button>
         </DialogFooter>
       </DialogContent>

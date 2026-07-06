@@ -103,6 +103,7 @@ export function SellSharesModal({ open, target, onCancel, onConfirm }: Props) {
         stocks_closed?: number;
         stocks_partial?: number;
         errors?: string[];
+        skipped?: string[];
         error?: string;
       };
       if (!res.ok) {
@@ -110,6 +111,12 @@ export function SellSharesModal({ open, target, onCancel, onConfirm }: Props) {
       }
       if (json.errors && json.errors.length > 0) {
         throw new Error(json.errors.join("; "));
+      }
+      // Date-rejected rows are skipped (weekend / future / >30d old)
+      // rather than batch-failed — for this single-sale modal that
+      // means nothing was logged.
+      if (json.skipped && json.skipped.length > 0) {
+        throw new Error(json.skipped.join("; "));
       }
       const message =
         (json.stocks_closed ?? 0) > 0
