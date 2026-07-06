@@ -176,8 +176,9 @@ export async function fetchFreshExpirySnapshot(
 // and they legitimately store strike=0 + an `expiry` set to the
 // assignment day. Without this filter they'd surface in the modal
 // the day after assignment as a $0 strike row.
-// userId scopes the result to one user (the confirm-expire modal);
-// omit it for the cross-user maintenance sweep in runAutoExpire.
+// userId scopes the result to one user. Every production caller
+// (confirm-expire modal, runAutoExpire) passes it — omitting it is
+// only for dev probe scripts.
 export async function getExpiredPositions(
   userId?: string,
 ): Promise<ExpiredOpenPosition[]> {
@@ -245,15 +246,22 @@ export async function classifyExpiredPosition(
 
 export async function autoExpirePosition(
   positionId: string,
+  userId: string,
 ): Promise<{ ok: boolean; realized_pnl: number; contracts_closed: number; reason?: string }> {
   const sb = createServerClient();
   const posRes = await sb
     .from("positions")
-    .select("id,symbol,strike,expiry,total_contracts,avg_premium_sold,notes,direction")
+    .select("id,symbol,strike,expiry,total_contracts,avg_premium_sold,notes,direction,status")
     .eq("id", positionId)
+    .eq("user_id", userId)
     .limit(1);
   const pos = ((posRes.data ?? []) as Array<ExpiredOpenPosition & { direction?: string | null }>)[0];
   if (!pos) return { ok: false, realized_pnl: 0, contracts_closed: 0, reason: "not_found" };
+  if (pos.status !== "open") {
+    // Already terminal (double-click, or assign raced this expire) —
+    // never overwrite a recorded outcome.
+    return { ok: false, realized_pnl: 0, contracts_closed: 0, reason: `already_${pos.status}` };
+  }
   const direction: "long" | "short" =
     pos.direction === "long" ? "long" : "short";
 
@@ -263,7 +271,8 @@ export async function autoExpirePosition(
   const fillsRes = await sb
     .from("fills")
     .select("fill_type, contracts, premium, fill_date")
-    .eq("position_id", positionId);
+    .eq("position_id", positionId)
+    .eq("user_id", userId);
   const priorFills = ((fillsRes.data ?? []) as Fill[]) ?? [];
   const opened = priorFills
     .filter((f) => f.fill_type === "open")
@@ -317,10 +326,32 @@ export async function autoExpirePosition(
       notes,
       updated_at: new Date().toISOString(),
     })
-    .eq("id", positionId);
+    .eq("id", positionId)
+    .eq("user_id", userId);
   if (u.error) {
     console.warn(`[expire] autoExpirePosition(${positionId}) failed: ${u.error.message}`);
     return { ok: false, realized_pnl, contracts_closed: remaining, reason: u.error.message };
+  }
+
+  // Persist the synthetic $0 close so the fills ledger balances with
+  // the position row (matching mark-assigned). Without it, a later
+  // fill edit would recompute remaining>0. Insert AFTER the status
+  // update: if this fails the row is terminal-without-close-fill,
+  // which recalculatePositionFromFills now handles, and a retry of
+  // this function is blocked by the status guard above (correct —
+  // the outcome is already recorded).
+  const closeFill = await sb.from("fills").insert({
+    position_id: positionId,
+    user_id: userId,
+    fill_type: "close",
+    contracts: remaining,
+    premium: 0,
+    fill_date: pos.expiry,
+  });
+  if (closeFill.error) {
+    console.warn(
+      `[expire] autoExpirePosition(${positionId}) close-fill insert failed: ${closeFill.error.message}`,
+    );
   }
 
   try {
@@ -337,15 +368,22 @@ export async function autoExpirePosition(
 export async function recordAssignment(
   positionId: string,
   stockPriceAtExpiry: number,
+  userId: string,
 ): Promise<{ ok: boolean; realized_pnl: number; contracts_closed: number; reason?: string }> {
   const sb = createServerClient();
   const posRes = await sb
     .from("positions")
-    .select("id,symbol,strike,expiry,total_contracts,avg_premium_sold,notes,direction")
+    .select("id,symbol,strike,expiry,total_contracts,avg_premium_sold,notes,direction,status")
     .eq("id", positionId)
+    .eq("user_id", userId)
     .limit(1);
   const pos = ((posRes.data ?? []) as Array<ExpiredOpenPosition & { direction?: string | null }>)[0];
   if (!pos) return { ok: false, realized_pnl: 0, contracts_closed: 0, reason: "not_found" };
+  if (pos.status !== "open") {
+    // Already terminal (double-click, or expire raced this assign) —
+    // never overwrite a recorded outcome.
+    return { ok: false, realized_pnl: 0, contracts_closed: 0, reason: `already_${pos.status}` };
+  }
   const direction: "long" | "short" =
     pos.direction === "long" ? "long" : "short";
 
@@ -353,7 +391,8 @@ export async function recordAssignment(
   const fillsRes = await sb
     .from("fills")
     .select("fill_type, contracts, premium, fill_date")
-    .eq("position_id", positionId);
+    .eq("position_id", positionId)
+    .eq("user_id", userId);
   const priorFills = ((fillsRes.data ?? []) as Fill[]) ?? [];
   const opened = priorFills
     .filter((f) => f.fill_type === "open")
@@ -404,10 +443,27 @@ export async function recordAssignment(
       notes,
       updated_at: new Date().toISOString(),
     })
-    .eq("id", positionId);
+    .eq("id", positionId)
+    .eq("user_id", userId);
   if (u.error) {
     console.warn(`[expire] recordAssignment(${positionId}) failed: ${u.error.message}`);
     return { ok: false, realized_pnl, contracts_closed: remaining, reason: u.error.message };
+  }
+
+  // Persist the synthetic $0 close (see autoExpirePosition for the
+  // ordering rationale).
+  const closeFill = await sb.from("fills").insert({
+    position_id: positionId,
+    user_id: userId,
+    fill_type: "close",
+    contracts: remaining,
+    premium: 0,
+    fill_date: pos.expiry,
+  });
+  if (closeFill.error) {
+    console.warn(
+      `[expire] recordAssignment(${positionId}) close-fill insert failed: ${closeFill.error.message}`,
+    );
   }
 
   try {
@@ -487,7 +543,10 @@ export type AutoExpireReport = {
 // post-expiration view, which correctly returns null option_price
 // for past-expiry contracts. The deep-OTM rule (>5%) closes the
 // position from stock_price alone in that case.
-export async function runAutoExpire(): Promise<AutoExpireReport> {
+// Scoped to a single user: the report feeds the caller's confirm
+// modal, and leaking other tenants' positions (ids, strikes, premiums)
+// through it would also hand out the ids needed to mutate them.
+export async function runAutoExpire(userId: string): Promise<AutoExpireReport> {
   const empty: AutoExpireReport = {
     auto_expired: [],
     needs_verification: [],
@@ -498,7 +557,7 @@ export async function runAutoExpire(): Promise<AutoExpireReport> {
 
   let positions: ExpiredOpenPosition[];
   try {
-    positions = await getExpiredPositions();
+    positions = await getExpiredPositions(userId);
   } catch (e) {
     console.log(
       `[expire] ERROR getExpiredPositions: ${e instanceof Error ? e.message : e}`,

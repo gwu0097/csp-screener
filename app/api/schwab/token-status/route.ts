@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
 import { getValidAccessToken } from "@/lib/schwab";
+import { requireAdmin, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -39,6 +40,13 @@ type StatusKind =
 const DAY_MS = 86_400_000;
 
 export async function GET(): Promise<NextResponse> {
+  // Admin-only, like every other Schwab route: the response carries
+  // token lifecycle metadata and can trigger a live token refresh.
+  try {
+    await requireAdmin();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   const sb = createServerClient();
   const r = await sb
     .from("schwab_tokens")

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { recordAssignment } from "@/lib/expire-positions";
+import { requireUserId, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -7,6 +8,12 @@ export const revalidate = 0;
 type Body = { positionId?: unknown; stockPriceAtExpiry?: unknown };
 
 export async function POST(req: NextRequest) {
+  let userId: string;
+  try {
+    userId = await requireUserId();
+  } catch (e) {
+    return authErrorResponse(e);
+  }
   let body: Body;
   try {
     body = (await req.json()) as Body;
@@ -24,9 +31,10 @@ export async function POST(req: NextRequest) {
       { status: 400 },
     );
   }
-  const r = await recordAssignment(positionId, stockPrice);
+  const r = await recordAssignment(positionId, stockPrice, userId);
   if (!r.ok) {
-    return NextResponse.json({ error: r.reason ?? "assignment failed" }, { status: 500 });
+    const status = r.reason === "not_found" ? 404 : 500;
+    return NextResponse.json({ error: r.reason ?? "assignment failed" }, { status });
   }
   return NextResponse.json({ ok: true, realized_pnl: r.realized_pnl });
 }

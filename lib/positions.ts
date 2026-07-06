@@ -121,7 +121,12 @@ export async function recalculatePositionFromFills(
   positionId: string,
   sb: RecalcClient,
 ): Promise<
-  | { ok: true; status: "open" | "closed"; totalOpened: number; remaining: number }
+  | {
+      ok: true;
+      status: "open" | "closed" | "expired_worthless" | "assigned";
+      totalOpened: number;
+      remaining: number;
+    }
   | { ok: false; error: string }
 > {
   // Fetch direction first so the realized-P&L formula picks the right
@@ -130,23 +135,37 @@ export async function recalculatePositionFromFills(
   // missing") — falling back to 'short' keeps existing CSP math intact.
   // position_type drives the share-vs-contract math below; entry_stock_price
   // is the cost-basis fallback for stock positions whose `open` fill predates
-  // the open-fill-on-assignment fix.
+  // the open-fill-on-assignment fix. status/closed_date/expiry feed the
+  // terminal-status guard below.
   let direction: PositionDirection = "short";
   let positionType: string | null = null;
   let entryStockPrice: number | null = null;
+  let currentStatus: string | null = null;
+  let existingClosedDate: string | null = null;
+  let expiry: string | null = null;
   const posRes = await sb
     .from("positions")
-    .select("direction, position_type, entry_stock_price")
+    .select("direction, position_type, entry_stock_price, status, closed_date, expiry")
     .eq("id", positionId)
     .limit(1);
   if (!posRes.error) {
     const row = (posRes.data ?? [])[0] as
-      | { direction?: string | null; position_type?: string | null; entry_stock_price?: number | null }
+      | {
+          direction?: string | null;
+          position_type?: string | null;
+          entry_stock_price?: number | null;
+          status?: string | null;
+          closed_date?: string | null;
+          expiry?: string | null;
+        }
       | undefined;
     if (row?.direction === "long") direction = "long";
     positionType = row?.position_type ?? null;
     entryStockPrice =
       typeof row?.entry_stock_price === "number" ? row.entry_stock_price : null;
+    currentStatus = row?.status ?? null;
+    existingClosedDate = row?.closed_date ?? null;
+    expiry = row?.expiry ?? null;
   }
 
   const fetched = await sb
@@ -202,6 +221,46 @@ export async function recalculatePositionFromFills(
   }
 
   const sold = avgPremiumSold(fills);
+
+  // Terminal-status guard: expired_worthless / assigned positions were
+  // closed by expiry accounting. Newer rows have the synthetic $0 close
+  // in the ledger; legacy ones don't (the expire flow used to only
+  // UPDATE the position row). Either way, never flip them back to
+  // "open" — that would resurface them in the expiry modal and wipe
+  // the recorded outcome. Any ledger remainder is treated as closed at
+  // $0 on the recorded close date, matching lib/expire-positions.
+  if (currentStatus === "expired_worthless" || currentStatus === "assigned") {
+    const augmented: Fill[] =
+      remaining > 0
+        ? [
+            ...fills,
+            {
+              fill_type: "close",
+              contracts: remaining,
+              premium: 0,
+              fill_date: existingClosedDate ?? expiry ?? lastCloseDate ?? "",
+            },
+          ]
+        : fills;
+    const terminalPnl =
+      Math.round(realizedPnl(augmented, direction) * 100) / 100;
+    const upd = await sb
+      .from("positions")
+      .update({
+        total_contracts: totalOpened,
+        avg_premium_sold: totalOpened > 0 ? sold : null,
+        status: currentStatus,
+        closed_date: existingClosedDate ?? expiry ?? lastCloseDate,
+        realized_pnl: terminalPnl,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", positionId);
+    if (upd.error) {
+      return { ok: false, error: `position update failed — ${upd.error.message}` };
+    }
+    return { ok: true, status: currentStatus, totalOpened, remaining: 0 };
+  }
+
   const status: "open" | "closed" =
     remaining === 0 && totalOpened > 0 ? "closed" : "open";
   const closedDate = status === "closed" ? lastCloseDate : null;

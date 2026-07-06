@@ -120,7 +120,7 @@ export async function POST(req: NextRequest) {
       }
       try {
         if (action === "assigned" && stockPrice !== null && stockPrice > 0) {
-          const r = await recordAssignment(positionId, stockPrice);
+          const r = await recordAssignment(positionId, stockPrice, userId);
           return {
             positionId,
             action: "assigned" as const,
@@ -135,7 +135,7 @@ export async function POST(req: NextRequest) {
         // assignment P&L. Fall back to expire-worthless so we don't
         // silently produce a wrong number; the user will see this
         // row as expired_worthless and can correct manually.
-        const r = await autoExpirePosition(positionId);
+        const r = await autoExpirePosition(positionId, userId);
         return {
           positionId,
           action:

@@ -308,7 +308,7 @@ export async function GET(req: NextRequest) {
   // names and surface the remaining needs_verification positions.
   let expireReport: AutoExpireReport;
   try {
-    expireReport = await runAutoExpire();
+    expireReport = await runAutoExpire(userId);
   } catch (e) {
     console.warn(
       `[positions] runAutoExpire failed: ${e instanceof Error ? e.message : e}`,

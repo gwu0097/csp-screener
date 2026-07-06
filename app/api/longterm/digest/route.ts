@@ -77,7 +77,10 @@ export async function GET() {
     return authErrorResponse(e);
   }
   const sb = createServerClient();
-  const cacheKey = `weekly-${thisIsoWeekKey()}`;
+  // Per-user cache key: the digest is built from the caller's personal
+  // watchlist, so a shared weekly key would serve one user's movers +
+  // catalysts to everyone.
+  const cacheKey = `weekly-${thisIsoWeekKey()}-${userId}`;
 
   // 1. Cache lookup.
   const cached = await sb
@@ -168,9 +171,9 @@ export async function DELETE() {
   } catch (e) {
     return authErrorResponse(e);
   }
-  void userId; // digest cache is shared (longterm_digest_cache is not a personal table)
   const sb = createServerClient();
-  const cacheKey = `weekly-${thisIsoWeekKey()}`;
+  // Same per-user key as GET — clearing only affects the caller's digest.
+  const cacheKey = `weekly-${thisIsoWeekKey()}-${userId}`;
   const res = await sb
     .from("longterm_digest_cache")
     .delete()
