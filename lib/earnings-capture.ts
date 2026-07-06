@@ -18,6 +18,8 @@ import {
   recalculateStats,
 } from "@/lib/encyclopedia";
 import { getTodayEarnings } from "@/lib/earnings";
+import { analyzePositionPostEarnings } from "@/lib/post-earnings";
+import type { PositionRow } from "@/lib/positions";
 
 // Leave headroom inside Vercel Hobby's 60s ceiling for the response to
 // flush. Chain fetches are 1-3s each, so this covers ~15-25 symbols —
@@ -55,6 +57,13 @@ export type CaptureItem = {
   iv_crushed?: boolean;
   // positions stamped with earnings_history_id for this event
   positions_linked?: string[];
+  // post-earnings recommendations generated for linked positions (T1)
+  recommendations?: Array<{
+    position_id: string;
+    recommendation: string;
+    confidence: string;
+    rule_fired: string;
+  }>;
 };
 
 export type CaptureReport = {
@@ -247,6 +256,70 @@ export async function runT0Capture(opts?: {
   return report;
 }
 
+// After a T1 capture lands, run the post-earnings rec engine for every
+// OPEN position linked to the event via earnings_history_id (stamped at
+// T0 / at entry). analyzePositionPostEarnings reads the fresh
+// move_ratio / iv_crushed off earnings_history, applies the rule
+// cascade, and upserts one rec per (position, day) — this was the
+// audit's "orphaned engine with zero call sites."
+async function generatePostEarningsRecs(
+  symbol: string,
+  earningsDate: string,
+  dryRun: boolean,
+): Promise<CaptureItem["recommendations"]> {
+  const sb = createServerClient();
+  const ev = await sb
+    .from("earnings_history")
+    .select("id")
+    .eq("symbol", symbol.toUpperCase())
+    .eq("earnings_date", earningsDate)
+    .limit(1);
+  const eventId = ((ev.data ?? []) as Array<{ id: string }>)[0]?.id ?? null;
+  if (!eventId) return [];
+
+  const posRes = await sb
+    .from("positions")
+    .select("*")
+    .eq("earnings_history_id", eventId)
+    .eq("status", "open");
+  if (posRes.error) {
+    console.warn(
+      `[earnings-capture:T1] linked-position lookup(${symbol}) failed: ${posRes.error.message}`,
+    );
+    return [];
+  }
+  const positions = (posRes.data ?? []) as PositionRow[];
+  if (positions.length === 0) return [];
+  if (dryRun) {
+    return positions.map((p) => ({
+      position_id: p.id,
+      recommendation: "DRY_RUN",
+      confidence: "-",
+      rule_fired: "-",
+    }));
+  }
+
+  const out: NonNullable<CaptureItem["recommendations"]> = [];
+  for (const p of positions) {
+    try {
+      const rec = await analyzePositionPostEarnings(p);
+      if (rec) {
+        out.push({
+          position_id: p.id,
+          recommendation: rec.recommendation,
+          confidence: rec.confidence,
+          rule_fired: rec.rule_fired,
+        });
+      }
+    } catch (e) {
+      console.warn(
+        `[earnings-capture:T1] rec generation failed for position ${p.id}: ${e instanceof Error ? e.message : e}`,
+      );
+    }
+  }
+  return out;
+}
+
 // T1 candidates: earnings_history rows with a T0 capture (iv_before
 // set) and no T1 yet, dated within the last 4 days — the window
 // tolerates weekends and a missed cron without ever scanning the
@@ -309,6 +382,14 @@ export async function runT1Capture(opts?: {
       const r = await captureEarningsT1(c.symbol, c.earnings_date, { dryRun });
       if (r.captured) {
         recalcSymbols.add(c.symbol.toUpperCase());
+        // Post-earnings recommendation engine: every position linked to
+        // this event (the T0 spine stamp) gets a verdict computed from
+        // the crush data that just landed. Best-effort per position.
+        const recommendations = await generatePostEarningsRecs(
+          c.symbol,
+          c.earnings_date,
+          dryRun,
+        );
         report.captured.push({
           symbol: c.symbol,
           earnings_date: c.earnings_date,
@@ -317,6 +398,7 @@ export async function runT1Capture(opts?: {
           iv_crush_magnitude: r.iv_crush_magnitude,
           move_ratio: r.move_ratio,
           iv_crushed: r.iv_crushed,
+          recommendations,
         });
       } else {
         report.skipped.push({

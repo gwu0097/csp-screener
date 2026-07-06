@@ -89,14 +89,16 @@ function parsePerplexity(raw: string | null): PerplexityPayloadRelevant | null {
 }
 
 // Finds the earnings_history row most relevant to an open position:
-// same symbol, earnings_date within the last 48 hours. Phase 1 quarter-end
+// same symbol, earnings_date within the last 4 days — wide enough that
+// a Friday-AMC print analyzed at Monday's T1 capture still matches
+// (the old 48h window missed the weekend gap). Phase 1 quarter-end
 // rows won't match this window — we only pick up Phase 2A live-captured
 // announcement-date rows.
 async function findRecentEarningsRow(
   symbol: string,
 ): Promise<EarningsHistoryRow | null> {
   const sb = createServerClient();
-  const windowStart = addDaysIso(todayIso(), -2);
+  const windowStart = addDaysIso(todayIso(), -4);
   const r = await sb
     .from("earnings_history")
     .select(

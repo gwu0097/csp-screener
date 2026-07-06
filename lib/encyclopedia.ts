@@ -1306,6 +1306,17 @@ function atmLegs(
 // a nonexistent weekly. Chain keys look like "2026-07-10:4". Both T0
 // and T1 apply this same deterministic rule over the same minIso, so
 // the crush comparison always measures the same contract.
+// Schwab's chains endpoint 400s on weekend fromDate values (see the
+// debug-schwab-400 incident scripts). Expiries never land on weekends,
+// so rolling Sat/Sun forward to Monday is semantics-preserving.
+function nextWeekdayOnOrAfterIso(iso: string): string {
+  const d = new Date(iso + "T00:00:00Z");
+  const day = d.getUTCDay();
+  if (day === 6) d.setUTCDate(d.getUTCDate() + 2);
+  else if (day === 0) d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
 function earliestChainExpiryOnOrAfter(
   chain: SchwabOptionsChain,
   minIso: string,
@@ -1365,7 +1376,7 @@ export async function captureEarningsT0(
   // Earliest LISTED expiry on or after earningsDate+1. Weekly symbols:
   // the same-week Friday. Monthly-only symbols: the next monthly. A
   // 16-day range window covers both without assuming weeklies exist.
-  const minExpiryIso = addDaysIso(earningsDate, 1);
+  const minExpiryIso = nextWeekdayOnOrAfterIso(addDaysIso(earningsDate, 1));
   let chain: SchwabOptionsChain;
   try {
     chain = await getOptionsChainRange(sym, minExpiryIso, addDaysIso(minExpiryIso, 15), "ALL");
@@ -1470,7 +1481,7 @@ export async function captureEarningsT1(
 
   // Same deterministic expiry rule as T0 (earliest listed expiry on or
   // after earningsDate+1) so the crush compares the same contract.
-  const minExpiryIso = addDaysIso(earningsDate, 1);
+  const minExpiryIso = nextWeekdayOnOrAfterIso(addDaysIso(earningsDate, 1));
   let chain: SchwabOptionsChain;
   try {
     chain = await getOptionsChainRange(sym, minExpiryIso, addDaysIso(minExpiryIso, 15), "ALL");

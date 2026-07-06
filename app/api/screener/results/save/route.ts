@@ -5,10 +5,12 @@ import { requireUserId, authErrorResponse } from "@/lib/auth";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-// Persist the latest CSP-screener results so a scan on one device
-// shows up on another. Truncate-and-replace — table only ever holds
-// the most-recent run. Mirrors the swing screener's
-// /api/swings/screen/save pattern.
+// Persist CSP-screener results so a scan on one device shows up on
+// another. APPEND-ONLY as of 2026-07-06: every run is a new row so the
+// history (grade drift, repeat candidates, screener→trade conversion)
+// is preserved — /latest orders by screened_at desc so "load previous"
+// behaves exactly as before. Retention: the newest KEEP_RUNS rows per
+// user are kept; older ones are pruned on save.
 
 type Body = {
   candidates?: unknown;
@@ -57,16 +59,21 @@ export async function POST(req: NextRequest) {
   const pass2Count = typeof body.pass2Count === "number" ? body.pass2Count : null;
   const graded = body.graded === true;
 
+  const KEEP_RUNS = 100;
+
   const sb = createServerClient();
-  const del = await sb
+  // Run Analysis re-saves the same run with graded=true a few minutes
+  // after Screen Today saved it graded=false. Treat an identical
+  // screenedAt as an update of that run, not a new history entry.
+  const existing = await sb
     .from("screener_results")
-    .delete()
+    .select("id")
     .eq("user_id", userId)
-    .neq("id", "00000000-0000-0000-0000-000000000000");
-  if (del.error) {
-    console.warn(`[screener/results/save] truncate failed: ${del.error.message}`);
-  }
-  const ins = await sb.from("screener_results").insert({
+    .eq("screened_at", screenedAt)
+    .limit(1);
+  const existingId = ((existing.data ?? []) as Array<{ id: string }>)[0]?.id ?? null;
+
+  const rowPayload = {
     user_id: userId,
     screened_at: screenedAt,
     vix,
@@ -75,15 +82,38 @@ export async function POST(req: NextRequest) {
     candidates: body.candidates,
     prices,
     graded,
-  });
-  if (ins.error) {
+  };
+  const write = existingId
+    ? await sb.from("screener_results").update(rowPayload).eq("id", existingId).eq("user_id", userId)
+    : await sb.from("screener_results").insert(rowPayload);
+  if (write.error) {
     console.error(
-      `[screener] save FAILED: ${ins.error.message} (likely migration 010_screener_results.sql not applied)`,
+      `[screener] save FAILED: ${write.error.message} (likely migration 010_screener_results.sql not applied)`,
     );
-    return NextResponse.json({ error: ins.error.message }, { status: 500 });
+    return NextResponse.json({ error: write.error.message }, { status: 500 });
   }
+
+  // Retention: prune everything past the newest KEEP_RUNS rows.
+  const idsRes = await sb
+    .from("screener_results")
+    .select("id,screened_at")
+    .eq("user_id", userId)
+    .order("screened_at", { ascending: false })
+    .limit(KEEP_RUNS + 50);
+  const ids = ((idsRes.data ?? []) as Array<{ id: string }>).map((r) => r.id);
+  if (!idsRes.error && ids.length > KEEP_RUNS) {
+    const prune = await sb
+      .from("screener_results")
+      .delete()
+      .eq("user_id", userId)
+      .in("id", ids.slice(KEEP_RUNS));
+    if (prune.error) {
+      console.warn(`[screener/results/save] prune failed: ${prune.error.message}`);
+    }
+  }
+
   console.log(
-    `[screener] saved results to DB: count=${(body.candidates as unknown[]).length} graded=${graded} screenedAt=${screenedAt}`,
+    `[screener] saved results to DB: count=${(body.candidates as unknown[]).length} graded=${graded} screenedAt=${screenedAt} mode=${existingId ? "update" : "append"}`,
   );
   return NextResponse.json({ ok: true, screenedAt, graded });
 }

@@ -12,8 +12,12 @@ import {
 import { buildSnapshotRow, fetchChainWideSafe } from "@/lib/snapshots";
 import { recordPositionOutcome } from "@/lib/post-earnings";
 import { requireUserId, authErrorResponse } from "@/lib/auth";
+import { buildStampContext, stampEntryContext } from "@/lib/entry-context";
 
 export const dynamic = "force-dynamic";
+// Phase 2b entry-context stamping adds a VIX + snapshot + chain fetch
+// per newly-opened position — keep headroom past the 10s default.
+export const maxDuration = 60;
 
 // Shape the screenshot parser and manual-add modal send us.
 export type TradeInput = {
@@ -1171,6 +1175,50 @@ export async function POST(req: NextRequest) {
       } catch (e) {
         console.warn(
           `[bulk-create] recordPositionOutcome(${positionId}) failed: ${e instanceof Error ? e.message : e}`,
+        );
+      }
+    }
+  }
+
+  // Entry-context stamping — every position that received an OPEN fill
+  // in this batch gets VIX / spot / EM% / IV / delta / DTE / market cap
+  // / earnings linkage filled in (nulls only — the tracked_tickers
+  // merge above already ran and its richer values win). Best-effort:
+  // stampEntryContext never throws.
+  {
+    const openMeta = new Map<
+      string,
+      { symbol: string; strike: number; expiry: string; optionType: "put" | "call"; openedDate: string }
+    >();
+    for (const rec of optionFillRecords) {
+      if (rec.plan.input.action !== "open") continue;
+      if (openMeta.has(rec.positionId)) continue;
+      openMeta.set(rec.positionId, {
+        symbol: rec.plan.symbol,
+        strike: Number(rec.plan.input.strike),
+        expiry: rec.plan.expiry,
+        optionType: rec.plan.input.optionType ?? "put",
+        openedDate: rec.plan.fillDate,
+      });
+    }
+    if (openMeta.size > 0) {
+      try {
+        const stampCtx = await buildStampContext();
+        for (const [positionId, meta] of Array.from(openMeta.entries())) {
+          const r = await stampEntryContext(stampCtx, {
+            id: positionId,
+            userId,
+            ...meta,
+          });
+          if (r.stamped.length > 0 || r.earningsLinked) {
+            console.log(
+              `[bulk-create] entry context ${meta.symbol}: stamped=[${r.stamped.join(",")}] earningsLinked=${r.earningsLinked}`,
+            );
+          }
+        }
+      } catch (e) {
+        console.warn(
+          `[bulk-create] entry-context pass failed: ${e instanceof Error ? e.message : e}`,
         );
       }
     }
