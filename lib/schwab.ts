@@ -243,10 +243,15 @@ export type SchwabOptionsChain = {
 export async function getOptionsChain(
   symbol: string,
   expirationDate?: string,
+  // Default PUT preserves every existing call site. The earnings T0/T1
+  // capture passes "ALL" — the ATM straddle needs BOTH legs, and the
+  // PUT-only default left callExpDateMap empty, which made atmLegs()
+  // return null and every capture attempt skip with no_options_data.
+  contractType: "PUT" | "CALL" | "ALL" = "PUT",
 ): Promise<SchwabOptionsChain> {
   const params: Record<string, string | number | boolean> = {
     symbol,
-    contractType: "PUT",
+    contractType,
     strikeCount: 30,
     includeUnderlyingQuote: true,
     strategy: "SINGLE",
@@ -347,10 +352,13 @@ export async function getOptionsChainRange(
   symbol: string,
   fromDate: string,
   toDate: string,
+  // PUT default preserves existing call sites; earnings T0/T1 passes
+  // "ALL" for the ATM straddle (needs both legs).
+  contractType: "PUT" | "CALL" | "ALL" = "PUT",
 ): Promise<SchwabOptionsChain> {
   return schwabGet<SchwabOptionsChain>(`${MARKETDATA_BASE}/chains`, {
     symbol,
-    contractType: "PUT",
+    contractType,
     strikeCount: 30,
     includeUnderlyingQuote: true,
     strategy: "SINGLE",

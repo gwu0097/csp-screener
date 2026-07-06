@@ -22,6 +22,7 @@ import { finnhubGet, getTodayEarnings } from "@/lib/earnings";
 import { getHistoricalPrices } from "@/lib/yahoo";
 import {
   getOptionsChain,
+  getOptionsChainRange,
   isSchwabConnected,
   type SchwabOptionContract,
   type SchwabOptionsChain,
@@ -430,6 +431,12 @@ export async function recalculateStats(symbol: string): Promise<StockEncyclopedi
     )
     .eq("symbol", sym)
     .eq("is_complete", true);
+  // A transient read error must NOT recompute aggregates from an empty
+  // set — that would zero out crush_rate/avg_move_ratio for everyone.
+  if (res.error) {
+    console.warn(`[encyclopedia] recalculateStats(${sym}) read failed: ${res.error.message}`);
+    return null;
+  }
   const rows = (res.data ?? []) as Array<
     Pick<
       EarningsHistory,
@@ -1292,6 +1299,28 @@ function atmLegs(
   return { call, put, strike: atm, spot };
 }
 
+// Earliest expiry actually LISTED in the chain on/after minIso. Weekly
+// symbols resolve to the same-week Friday (what the old
+// nextFridayOnOrAfterIso computation assumed); monthly-only symbols
+// (e.g. GWRE) resolve to the next listed monthly instead of skipping on
+// a nonexistent weekly. Chain keys look like "2026-07-10:4". Both T0
+// and T1 apply this same deterministic rule over the same minIso, so
+// the crush comparison always measures the same contract.
+function earliestChainExpiryOnOrAfter(
+  chain: SchwabOptionsChain,
+  minIso: string,
+): string | null {
+  const keys = [
+    ...Object.keys(chain.putExpDateMap ?? {}),
+    ...Object.keys(chain.callExpDateMap ?? {}),
+  ];
+  const dates = keys
+    .map((k) => k.slice(0, 10))
+    .filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d) && d >= minIso)
+    .sort();
+  return dates[0] ?? null;
+}
+
 // ---------- T0: pre-earnings capture ----------
 
 export type T0Result =
@@ -1307,12 +1336,22 @@ export type T0Result =
 export async function captureEarningsT0(
   symbol: string,
   earningsDate: string,
+  opts?: { dryRun?: boolean },
 ): Promise<T0Result> {
   const sym = symbol.toUpperCase();
-  await upsertHistoryStub(sym, earningsDate);
+  const dryRun = opts?.dryRun === true;
+  if (!dryRun) await upsertHistoryStub(sym, earningsDate);
   const row = await readHistoryRow(sym, earningsDate);
-  if (!row) return { captured: false, skipped: true, reason: "row_not_found" };
-  if (row.implied_move_pct !== null) {
+  if (!row && !dryRun) {
+    return { captured: false, skipped: true, reason: "row_not_found" };
+  }
+  // Gate on iv_before, NOT implied_move_pct: the live-EM tracker
+  // (lib/earnings-history-table) pre-stamps implied_move_pct on
+  // upcoming events days before the print, and gating on it silently
+  // blocked IV capture forever. iv_before is the true T0 marker; the
+  // T0 straddle re-measures implied_move_pct at the canonical moment
+  // (15:45 ET on report day) and overwrites the earlier estimate.
+  if (row && row.iv_before !== null) {
     return { captured: false, skipped: true, reason: "already_captured" };
   }
 
@@ -1323,18 +1362,22 @@ export async function captureEarningsT0(
     return { captured: false, skipped: true, reason: "schwab_disconnected" };
   }
 
-  // Nearest weekly expiry on or after earningsDate+1. For an AMC today,
-  // that lands on the same-week Friday; for a pre-weekend announcement,
-  // the following Friday.
-  const expiryIso = nextFridayOnOrAfterIso(addDaysIso(earningsDate, 1));
+  // Earliest LISTED expiry on or after earningsDate+1. Weekly symbols:
+  // the same-week Friday. Monthly-only symbols: the next monthly. A
+  // 16-day range window covers both without assuming weeklies exist.
+  const minExpiryIso = addDaysIso(earningsDate, 1);
   let chain: SchwabOptionsChain;
   try {
-    chain = await getOptionsChain(sym, expiryIso);
+    chain = await getOptionsChainRange(sym, minExpiryIso, addDaysIso(minExpiryIso, 15), "ALL");
   } catch (e) {
     console.warn(
-      `[encyclopedia:T0] chain(${sym}, ${expiryIso}) failed: ${e instanceof Error ? e.message : e}`,
+      `[encyclopedia:T0] chain(${sym}, ≥${minExpiryIso}) failed: ${e instanceof Error ? e.message : e}`,
     );
     return { captured: false, skipped: true, reason: "chain_fetch_failed" };
+  }
+  const expiryIso = earliestChainExpiryOnOrAfter(chain, minExpiryIso);
+  if (!expiryIso) {
+    return { captured: false, skipped: true, reason: "no_options_data" };
   }
 
   const legs = atmLegs(chain, expiryIso);
@@ -1362,12 +1405,17 @@ export async function captureEarningsT0(
   }
   const two_x_em_strike = price_before * (1 - 2 * implied_move_pct);
 
+  if (dryRun) {
+    return { captured: true, implied_move_pct, iv_before, price_before, two_x_em_strike };
+  }
+
   const sb = createServerClient();
   const up = await sb
     .from("earnings_history")
     .update({
       price_before,
       implied_move_pct,
+      implied_move_source: "schwab_t0",
       iv_before,
       two_x_em_strike,
     })
@@ -1396,6 +1444,7 @@ export type T1Result =
 export async function captureEarningsT1(
   symbol: string,
   earningsDate: string,
+  opts?: { dryRun?: boolean },
 ): Promise<T1Result> {
   const sym = symbol.toUpperCase();
   const row = await readHistoryRow(sym, earningsDate);
@@ -1419,15 +1468,21 @@ export async function captureEarningsT1(
     return { captured: false, skipped: true, reason: "schwab_disconnected" };
   }
 
-  const expiryIso = nextFridayOnOrAfterIso(addDaysIso(earningsDate, 1));
+  // Same deterministic expiry rule as T0 (earliest listed expiry on or
+  // after earningsDate+1) so the crush compares the same contract.
+  const minExpiryIso = addDaysIso(earningsDate, 1);
   let chain: SchwabOptionsChain;
   try {
-    chain = await getOptionsChain(sym, expiryIso);
+    chain = await getOptionsChainRange(sym, minExpiryIso, addDaysIso(minExpiryIso, 15), "ALL");
   } catch (e) {
     console.warn(
-      `[encyclopedia:T1] chain(${sym}, ${expiryIso}) failed: ${e instanceof Error ? e.message : e}`,
+      `[encyclopedia:T1] chain(${sym}, ≥${minExpiryIso}) failed: ${e instanceof Error ? e.message : e}`,
     );
     return { captured: false, skipped: true, reason: "chain_fetch_failed" };
+  }
+  const expiryIso = earliestChainExpiryOnOrAfter(chain, minExpiryIso);
+  if (!expiryIso) {
+    return { captured: false, skipped: true, reason: "no_options_data" };
   }
   const legs = atmLegs(chain, expiryIso);
   if (!legs) {
@@ -1453,6 +1508,17 @@ export async function captureEarningsT1(
   const iv_crushed = iv_after < iv_before * 0.7;
   const iv_crush_magnitude = (iv_before - iv_after) / iv_before;
   const breached_two_x_em = price_after < two_x_em_strike;
+
+  if (opts?.dryRun === true) {
+    return {
+      captured: true,
+      actual_move_pct,
+      move_ratio,
+      iv_crushed,
+      iv_crush_magnitude,
+      breached_two_x_em,
+    };
+  }
 
   const sb = createServerClient();
   const up = await sb
@@ -1799,7 +1865,7 @@ export type MaintenanceReport = {
 //              FILTER for the event-driven steps (T0/T1/expiry/
 //              Perplexity backfill), which are bounded by actual recent
 //              events rather than table size.
-async function buildMaintenanceSymbolSets(): Promise<{
+export async function buildMaintenanceSymbolSets(): Promise<{
   active: Set<string>;
   relevant: Set<string>;
 }> {

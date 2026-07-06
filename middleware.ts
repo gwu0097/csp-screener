@@ -15,6 +15,10 @@ const PUBLIC_PATHS = new Set([
   "/login",
   "/api/auth/login",
   "/api/auth/accept-invite",
+  // Cron capture endpoints — no session cookie; each route fails closed
+  // on its own CRON_SECRET bearer check (lib/cron-auth.ts).
+  "/api/earnings/capture-t0",
+  "/api/earnings/capture-t1",
 ]);
 
 function secret(): Uint8Array {
