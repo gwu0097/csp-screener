@@ -161,6 +161,27 @@ export function buildChains(
     }
   }
 
+  // 3. Assignment-wheel sweep: a put re-sold while the assignment
+  //    stock lot is still HELD (or within the roll window of its sale)
+  //    belongs to the same campaign as the stock — and therefore, via
+  //    the assignment link in step 1, to the ORIGIN put that got
+  //    assigned. Roll adjacency alone misses the still-held case
+  //    because it only links off a member's close date.
+  for (const group of Array.from(byGroup.values())) {
+    for (const stock of group) {
+      if (!isStock(stock) || !stock.assignment_source_id) continue;
+      const heldUntil = stock.closed_date;
+      for (const b of group) {
+        if (isStock(b) || b.id === stock.id) continue;
+        if (b.opened_date < stock.opened_date) continue;
+        const withinHold = heldUntil === null || b.opened_date <= heldUntil;
+        const withinRollOfSale =
+          heldUntil !== null && rollAdjacent(heldUntil, b.opened_date);
+        if (withinHold || withinRollOfSale) uf.union(stock.id, b.id);
+      }
+    }
+  }
+
   // 3. Materialize chains.
   const membersByRoot = new Map<string, ChainPosition[]>();
   for (const p of positions) {
