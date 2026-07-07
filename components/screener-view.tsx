@@ -2825,6 +2825,14 @@ function ExpandedDetail({
   analyzing: boolean;
   onAnalyze: ((symbol: string, opts?: { force?: boolean }) => Promise<void>) | null;
 }) {
+  // Live campaign data — hooks must run unconditionally, so this sits
+  // above the pre-analysis early return. The Layer 2 card's "your
+  // history" section renders from this, NOT from the cached analysis
+  // payload, so stale rows (saved before trade chains / tickerLevel
+  // existed) still show correct ticker context. Grade + modifier still
+  // come from the payload; a re-analyze refreshes those.
+  const { campaigns: chainCampaigns, failed: chainCampaignsFailed } =
+    useChainCampaigns(r.symbol);
   const tl = r.threeLayer;
   if (!tl) {
     // Before Run Analysis has populated threeLayer, fall back to the
@@ -2899,6 +2907,29 @@ function ExpandedDetail({
   // Derive the personal-history modifier (needed by the custom-strike
   // analyzer to re-run the rule cascade client-side).
   const pf = tl.personalFactors;
+  const liveTicker = (() => {
+    if (!chainCampaigns) return null;
+    const countable = chainCampaigns.filter(
+      (c) => c.trade_type !== "recovery_play" && !c.still_open,
+    );
+    const recovery = chainCampaigns.filter(
+      (c) => c.trade_type === "recovery_play" && !c.still_open,
+    ).length;
+    const clean = countable.filter((c) => c.trade_type !== "rolled").length;
+    const rolled = countable.length - clean;
+    const wins = countable.filter((c) => c.pnl > 0).length;
+    const rocs = countable
+      .map((c) => c.roc)
+      .filter((v): v is number => v !== null);
+    return {
+      campaigns: countable.length,
+      clean,
+      rolled,
+      recovery,
+      winRate: countable.length > 0 ? (wins / countable.length) * 100 : null,
+      avgRoc: rocs.length > 0 ? rocs.reduce((a, b) => a + b, 0) / rocs.length : null,
+    };
+  })();
   // Mirror of the graduated evidence ladder in calculateThreeLayerGrade.
   // Legacy saved rows lack scope/sampleWeight — they were ticker-level
   // 5+ evidence, so both default to full weight.
@@ -3086,49 +3117,76 @@ function ExpandedDetail({
           }
         >
           {(() => {
-            const t = pf.tickerLevel;
-            const hasTicker = (t?.campaigns ?? 0) > 0 && pfScope === "ticker";
-            const sec = pf.sector ?? null;
+            // Live campaign data first; payload tickerLevel as fallback
+            // while the fetch is in flight or if it failed.
+            const t = liveTicker ?? (pf.tickerLevel
+              ? {
+                  campaigns: pf.tickerLevel.campaigns,
+                  clean: pf.tickerLevel.clean,
+                  rolled: pf.tickerLevel.rolled,
+                  recovery: pf.tickerLevel.recovery,
+                  winRate: pfScope === "ticker" ? pf.tickerWinRate : null,
+                  avgRoc: pfScope === "ticker" ? pf.tickerAvgRoc : null,
+                }
+              : null);
+            const loading = t === null && !chainCampaignsFailed;
+            // Sector: new payloads carry pf.sector; legacy sector-scope
+            // payloads carried the aggregates at the top level.
+            const sec =
+              pf.sector ??
+              (pfScope === "sector"
+                ? {
+                    industry: pf.sectorIndustry ?? "sector",
+                    campaigns: pf.tickerTradeCount,
+                    winRate: pf.tickerWinRate,
+                    avgRoc: pf.tickerAvgRoc,
+                    dropWinRate: null,
+                    recoveryCount: pf.recoveryCount ?? 0,
+                  }
+                : null);
+            const caveat =
+              t && t.campaigns > 0 && t.campaigns < 5
+                ? t.campaigns >= 2
+                  ? "small sample — half weight"
+                  : "very limited data — quarter weight"
+                : null;
             return (
               <>
                 {/* ---- Section 1: this ticker, always ---- */}
                 <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
                   Your {r.symbol} history
                 </div>
-                {hasTicker ? (
+                {loading ? (
+                  <div className="h-4 w-2/3 animate-pulse rounded bg-muted/40" />
+                ) : t && t.campaigns > 0 ? (
                   <>
                     <div className="text-sm">
-                      {t!.clean} clean
-                      {t!.rolled > 0 ? ` · ${t!.rolled} rolled` : ""}
-                      {" · "}
-                      <span
-                        className={
-                          (tl.personalFactors.tickerWinRate ?? 0) >= 70
-                            ? "text-emerald-300"
-                            : "text-rose-300"
-                        }
-                      >
-                        {tl.personalFactors.tickerWinRate !== null
-                          ? `${tl.personalFactors.tickerWinRate.toFixed(0)}% win`
-                          : "win —"}
-                      </span>
-                      {" · "}
-                      {tl.personalFactors.tickerAvgRoc !== null
-                        ? `${tl.personalFactors.tickerAvgRoc.toFixed(2)}% ROC`
-                        : "ROC —"}
+                      {t.clean} clean
+                      {t.rolled > 0 ? ` · ${t.rolled} rolled` : ""}
+                      {t.winRate !== null && (
+                        <>
+                          {" · "}
+                          <span
+                            className={
+                              t.winRate >= 70 ? "text-emerald-300" : "text-rose-300"
+                            }
+                          >
+                            {t.winRate.toFixed(0)}% win
+                          </span>
+                        </>
+                      )}
+                      {t.avgRoc !== null && (
+                        <span> · {t.avgRoc.toFixed(2)}% ROC</span>
+                      )}
                     </div>
-                    {t!.recovery > 0 && (
+                    {t.recovery > 0 && (
                       <div className="text-[11px] text-amber-300/90">
-                        {t!.recovery} recovery play{t!.recovery === 1 ? "" : "s"}{" "}
-                        excluded from CSP grading
+                        {t.recovery} recovery play{t.recovery === 1 ? "" : "s"} on{" "}
+                        {r.symbol} excluded from CSP grading
                       </div>
                     )}
-                    {pfSampleW > 0 && pfSampleW < 1 && (
-                      <div className="text-[11px] text-amber-300">
-                        {pfSampleW >= 0.5
-                          ? "small sample — half weight"
-                          : "very limited data — quarter weight"}
-                      </div>
+                    {caveat && (
+                      <div className="text-[11px] text-amber-300">{caveat}</div>
                     )}
                   </>
                 ) : (
@@ -3295,7 +3353,11 @@ function ExpandedDetail({
           forceMount
           className="space-y-4 data-[state=inactive]:hidden"
         >
-          <TickerTradeHistory symbol={r.symbol} />
+          <TickerTradeHistory
+            symbol={r.symbol}
+            campaigns={chainCampaigns}
+            failed={chainCampaignsFailed}
+          />
           <CrushHistoryTable
             events={r.stageThree?.details?.crushHistory}
             todayEmPct={r.stageThree?.details?.expectedMovePct ?? null}
@@ -4219,10 +4281,15 @@ function fmtCampaignDate(iso: string | null): string {
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
 }
 
-function TickerTradeHistory({ symbol }: { symbol: string }) {
+// Shared fetch for a symbol's campaign history — consumed by the
+// Layer 2 card (live ticker context, independent of stale cached
+// analysis payloads) and the History tab table.
+function useChainCampaigns(symbol: string): {
+  campaigns: ChainCampaign[] | null;
+  failed: boolean;
+} {
   const [campaigns, setCampaigns] = useState<ChainCampaign[] | null>(null);
   const [failed, setFailed] = useState(false);
-
   useEffect(() => {
     let cancelled = false;
     setCampaigns(null);
@@ -4244,7 +4311,18 @@ function TickerTradeHistory({ symbol }: { symbol: string }) {
       cancelled = true;
     };
   }, [symbol]);
+  return { campaigns, failed };
+}
 
+function TickerTradeHistory({
+  campaigns,
+  failed,
+  symbol,
+}: {
+  campaigns: ChainCampaign[] | null;
+  failed: boolean;
+  symbol: string;
+}) {
   if (failed) return null;
 
   return (
