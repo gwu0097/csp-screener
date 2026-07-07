@@ -2899,16 +2899,32 @@ function ExpandedDetail({
   // Derive the personal-history modifier (needed by the custom-strike
   // analyzer to re-run the rule cascade client-side).
   const pf = tl.personalFactors;
-  // Mirror of the server rule in calculateThreeLayerGrade. Legacy saved
-  // rows lack `scope` — they were always ticker-level evidence.
+  // Mirror of the graduated evidence ladder in calculateThreeLayerGrade.
+  // Legacy saved rows lack scope/sampleWeight — they were ticker-level
+  // 5+ evidence, so both default to full weight.
   const pfScope = pf.scope ?? "ticker";
+  const pfSampleW = pf.sampleWeight ?? (pfScope === "ticker" ? 1.0 : 0);
   const personalModifier: "boost" | "drop" | null = (() => {
     if (pf.dataInsufficient || pf.tickerWinRate === null) return null;
     const wr = pf.tickerWinRate;
     const roc = pf.tickerAvgRoc ?? 0;
+    const sec = pf.sector ?? null;
     if (pfScope === "sector") return wr < 45 ? "drop" : null;
-    if (wr > 80 && roc > 0.3) return "boost";
-    if (wr < 50) return "drop";
+    if (pfSampleW >= 1.0) {
+      if (wr > 80 && roc > 0.3) return "boost";
+      if (wr < 50) return "drop";
+      return null;
+    }
+    if (pfSampleW >= 0.5) {
+      if (wr > 80 && roc > 0.3 && sec && (sec.winRate ?? 0) >= 60 && sec.campaigns >= 10)
+        return "boost";
+      if (wr < 50) return "drop";
+      return null;
+    }
+    if (pfSampleW >= 0.25) {
+      if (wr < 50 && sec && (sec.dropWinRate ?? 100) < 50) return "drop";
+      return null;
+    }
     return null;
   })();
 
@@ -3009,7 +3025,9 @@ function ExpandedDetail({
           title={
             pfScope === "sector"
               ? "LAYER 2 — YOUR INTELLIGENCE (SECTOR)"
-              : "LAYER 2 — YOUR INTELLIGENCE"
+              : pfSampleW > 0 && pfSampleW < 1
+                ? "LAYER 2 — YOUR INTELLIGENCE (SMALL SAMPLE)"
+                : "LAYER 2 — YOUR INTELLIGENCE"
           }
           grade={tl.personalGrade === "INSUFFICIENT" ? "?" : tl.personalGrade}
           tooltip={
@@ -3067,120 +3085,92 @@ function ExpandedDetail({
             )
           }
         >
-          {tl.personalFactors.dataInsufficient ? (
-            <div className="text-sm text-muted-foreground">
-              Insufficient data — need 5+ campaigns on {r.symbol} or 10+ in its
-              sector (you have{" "}
-              {pf.tickerLevel?.campaigns ?? tl.personalFactors.tickerTradeCount}{" "}
-              countable)
-              {(pf.tickerLevel?.recovery ?? pf.recoveryCount ?? 0) > 0 && (
-                <div className="mt-0.5 text-[11px] text-amber-300/90">
-                  {pf.tickerLevel?.recovery ?? pf.recoveryCount} recovery play
-                  {(pf.tickerLevel?.recovery ?? pf.recoveryCount ?? 0) === 1
-                    ? ""
-                    : "s"}{" "}
-                  on {r.symbol} excluded from CSP grading
-                </div>
-              )}
-            </div>
-          ) : (
-            pfScope === "sector" ? (
+          {(() => {
+            const t = pf.tickerLevel;
+            const hasTicker = (t?.campaigns ?? 0) > 0 && pfScope === "ticker";
+            const sec = pf.sector ?? null;
+            return (
               <>
-                {/* Ticker's own history first, clearly separated from the
-                    sector aggregates the grade is actually derived from. */}
-                <Row
-                  k={`${r.symbol} history`}
-                  v={
-                    pf.tickerLevel
-                      ? `${pf.tickerLevel.clean} clean${pf.tickerLevel.rolled > 0 ? ` · ${pf.tickerLevel.rolled} rolled` : ""} (need 5+)`
-                      : "none"
-                  }
-                />
-                {pf.tickerLevel && pf.tickerLevel.recovery > 0 && (
-                  <div className="text-[11px] text-amber-300/90">
-                    {pf.tickerLevel.recovery} recovery play
-                    {pf.tickerLevel.recovery === 1 ? "" : "s"} on {r.symbol}{" "}
-                    excluded from CSP grading
+                {/* ---- Section 1: this ticker, always ---- */}
+                <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Your {r.symbol} history
+                </div>
+                {hasTicker ? (
+                  <>
+                    <div className="text-sm">
+                      {t!.clean} clean
+                      {t!.rolled > 0 ? ` · ${t!.rolled} rolled` : ""}
+                      {" · "}
+                      <span
+                        className={
+                          (tl.personalFactors.tickerWinRate ?? 0) >= 70
+                            ? "text-emerald-300"
+                            : "text-rose-300"
+                        }
+                      >
+                        {tl.personalFactors.tickerWinRate !== null
+                          ? `${tl.personalFactors.tickerWinRate.toFixed(0)}% win`
+                          : "win —"}
+                      </span>
+                      {" · "}
+                      {tl.personalFactors.tickerAvgRoc !== null
+                        ? `${tl.personalFactors.tickerAvgRoc.toFixed(2)}% ROC`
+                        : "ROC —"}
+                    </div>
+                    {t!.recovery > 0 && (
+                      <div className="text-[11px] text-amber-300/90">
+                        {t!.recovery} recovery play{t!.recovery === 1 ? "" : "s"}{" "}
+                        excluded from CSP grading
+                      </div>
+                    )}
+                    {pfSampleW > 0 && pfSampleW < 1 && (
+                      <div className="text-[11px] text-amber-300">
+                        {pfSampleW >= 0.5
+                          ? "small sample — half weight"
+                          : "very limited data — quarter weight"}
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <div className="text-sm text-muted-foreground">
+                    No trades yet
+                    {(t?.recovery ?? 0) > 0 && (
+                      <span className="ml-1 text-[11px] text-amber-300/90">
+                        ({t!.recovery} recovery play{t!.recovery === 1 ? "" : "s"}{" "}
+                        excluded)
+                      </span>
+                    )}
                   </div>
                 )}
-                <Row
-                  k="Sector evidence"
-                  v={tl.personalFactors.sectorIndustry ?? "—"}
-                />
-                <Row
-                  k="Sector campaigns"
-                  v={[
-                    String(tl.personalFactors.tickerTradeCount),
-                    (pf.recoveryCount ?? 0) > 0
-                      ? `(+${pf.recoveryCount} recovery excl.)`
-                      : null,
-                  ]
-                    .filter(Boolean)
-                    .join(" ")}
-                />
-                <Row
-                  k="Sector win rate"
-                  v={
-                    tl.personalFactors.tickerWinRate !== null
-                      ? `${tl.personalFactors.tickerWinRate.toFixed(0)}%`
-                      : "—"
-                  }
-                />
-                <Row
-                  k="Sector avg ROC"
-                  v={
-                    tl.personalFactors.tickerAvgRoc !== null
-                      ? `${tl.personalFactors.tickerAvgRoc.toFixed(2)}%`
-                      : "—"
-                  }
-                />
-                <div className="pt-0.5 text-[11px] text-muted-foreground">
-                  Sector evidence is drop-only — no boost possible
+
+                {/* ---- Section 2: sector evidence, whenever it exists ---- */}
+                <div className="mt-2 border-t border-border/60 pt-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Sector{sec ? ` (${sec.industry})` : ""}
                 </div>
-              </>
-            ) : (
-              <>
-                <Row
-                  k={`${r.symbol} campaigns`}
-                  v={String(tl.personalFactors.tickerTradeCount)}
-                />
-                {((pf.rolledCount ?? 0) > 0 || (pf.recoveryCount ?? 0) > 0) && (
-                  <Row
-                    k="Breakdown"
-                    v={[
-                      `${pf.cleanCount ?? tl.personalFactors.tickerTradeCount} clean`,
-                      (pf.rolledCount ?? 0) > 0 ? `${pf.rolledCount} rolled` : null,
-                      (pf.recoveryCount ?? 0) > 0
-                        ? `${pf.recoveryCount} recovery (excl.)`
-                        : null,
-                    ]
-                      .filter(Boolean)
-                      .join(" · ")}
-                  />
+                {sec ? (
+                  <>
+                    <div className="text-sm">
+                      {sec.campaigns} campaigns ·{" "}
+                      <span
+                        className={
+                          (sec.winRate ?? 0) >= 70 ? "text-emerald-300" : "text-rose-300"
+                        }
+                      >
+                        {sec.winRate !== null ? `${sec.winRate.toFixed(0)}% win` : "win —"}
+                      </span>
+                      {" · "}
+                      {sec.avgRoc !== null ? `${sec.avgRoc.toFixed(2)}% ROC` : "ROC —"}
+                    </div>
+                    <div className="text-[11px] text-muted-foreground">
+                      Drop-only evidence — no boost from sector alone
+                    </div>
+                  </>
+                ) : (
+                  <div className="text-sm text-muted-foreground">No sector data</div>
                 )}
-                <Row
-                  k="Win rate"
-                  v={
-                    tl.personalFactors.tickerWinRate !== null
-                      ? `${tl.personalFactors.tickerWinRate.toFixed(0)}%`
-                      : "—"
-                  }
-                />
-                <Row
-                  k="Avg ROC"
-                  v={
-                    tl.personalFactors.tickerAvgRoc !== null
-                      ? `${tl.personalFactors.tickerAvgRoc.toFixed(2)}%`
-                      : "—"
-                  }
-                />
-                <Row
-                  k="Sample"
-                  v={tl.personalFactors.tickerTradeCount >= 20 ? "robust" : "small"}
-                />
               </>
-            )
-          )}
+            );
+          })()}
         </LayerCard>
 
         <LayerCard
@@ -3303,8 +3293,9 @@ function ExpandedDetail({
         <TabsContent
           value="history"
           forceMount
-          className="data-[state=inactive]:hidden"
+          className="space-y-4 data-[state=inactive]:hidden"
         >
+          <TickerTradeHistory symbol={r.symbol} />
           <CrushHistoryTable
             events={r.stageThree?.details?.crushHistory}
             todayEmPct={r.stageThree?.details?.expectedMovePct ?? null}
@@ -4191,6 +4182,139 @@ function SandboxTester({ connected }: { connected: boolean }) {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// ================== History tab: your campaigns on this ticker ==================
+//
+// One row per trade chain from /api/positions/chain-history — the
+// campaign view (chain P&L INCLUDES assignment stock lots), so a
+// recovery play that lost money shows its real number next to the
+// earnings-history table when deciding whether to trade the name again.
+
+type ChainCampaign = {
+  start: string;
+  end: string | null;
+  trade_type: string;
+  contracts: number;
+  pnl: number;
+  roc: number | null;
+  peak_capital: number | null;
+  notes: string;
+  still_open: boolean;
+};
+
+function tradeTypeBadge(t: string): { label: string; cls: string } {
+  if (t === "recovery_play")
+    return { label: "Recovery Play", cls: "border-rose-500/40 bg-rose-500/10 text-rose-300" };
+  if (t === "rolled")
+    return { label: "Rolled", cls: "border-amber-500/40 bg-amber-500/10 text-amber-300" };
+  return { label: "Clean", cls: "border-emerald-500/40 bg-emerald-500/10 text-emerald-300" };
+}
+
+function fmtCampaignDate(iso: string | null): string {
+  if (!iso) return "open";
+  const d = new Date(iso + "T00:00:00Z");
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+}
+
+function TickerTradeHistory({ symbol }: { symbol: string }) {
+  const [campaigns, setCampaigns] = useState<ChainCampaign[] | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setCampaigns(null);
+    setFailed(false);
+    (async () => {
+      try {
+        const res = await fetch(
+          `/api/positions/chain-history?symbol=${encodeURIComponent(symbol)}`,
+          { cache: "no-store" },
+        );
+        const json = (await res.json()) as { campaigns?: ChainCampaign[]; error?: string };
+        if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
+        if (!cancelled) setCampaigns(json.campaigns ?? []);
+      } catch {
+        if (!cancelled) setFailed(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [symbol]);
+
+  if (failed) return null;
+
+  return (
+    <div className="space-y-2">
+      <div className="text-base font-semibold">
+        Your trade history on {symbol}
+      </div>
+      {campaigns === null ? (
+        <div className="flex h-10 animate-pulse items-center rounded border border-border bg-background/40 px-3">
+          <div className="h-3 w-1/3 rounded bg-muted/40" />
+        </div>
+      ) : campaigns.length === 0 ? (
+        <div className="rounded border border-border bg-background/40 px-3 py-2 text-sm text-muted-foreground">
+          No trades on this ticker yet
+        </div>
+      ) : (
+        <div className="overflow-x-auto rounded border border-border">
+          <table className="w-full text-sm">
+            <thead className="bg-muted/30 text-left text-muted-foreground">
+              <tr>
+                <th className="px-2 py-1.5">Dates</th>
+                <th className="px-2 py-1.5">Type</th>
+                <th className="px-2 py-1.5 text-right">Contracts</th>
+                <th className="px-2 py-1.5 text-right">P&L</th>
+                <th className="px-2 py-1.5 text-right">Chain ROC</th>
+                <th className="px-2 py-1.5">Notes</th>
+              </tr>
+            </thead>
+            <tbody>
+              {campaigns.map((c, i) => {
+                const badge = tradeTypeBadge(c.trade_type);
+                return (
+                  <tr key={i} className="border-t border-border">
+                    <td className="whitespace-nowrap px-2 py-1.5">
+                      {fmtCampaignDate(c.start)} – {fmtCampaignDate(c.end)}
+                    </td>
+                    <td className="px-2 py-1.5">
+                      <span
+                        className={cn(
+                          "inline-block rounded border px-1.5 py-0.5 text-[11px] font-medium",
+                          badge.cls,
+                        )}
+                      >
+                        {badge.label}
+                      </span>
+                    </td>
+                    <td className="px-2 py-1.5 text-right font-mono">{c.contracts}</td>
+                    <td
+                      className={cn(
+                        "px-2 py-1.5 text-right font-mono",
+                        c.pnl >= 0 ? "text-emerald-300" : "text-rose-300",
+                      )}
+                    >
+                      {c.pnl >= 0 ? "+" : "−"}${Math.abs(c.pnl).toLocaleString("en-US", { maximumFractionDigits: 0 })}
+                    </td>
+                    <td className="px-2 py-1.5 text-right font-mono">
+                      {c.roc !== null ? `${c.roc.toFixed(2)}%` : "—"}
+                    </td>
+                    <td className="px-2 py-1.5 text-muted-foreground">{c.notes}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <div className="text-[11px] text-muted-foreground">
+        Campaign-level view — rolled and recovery chains include their
+        assignment stock lots in P&L.
+      </div>
     </div>
   );
 }

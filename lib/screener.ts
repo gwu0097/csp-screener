@@ -215,6 +215,15 @@ export type ThreeLayerGrade = {
       rolled: number;
       recovery: number;
     };
+    sampleWeight?: number;
+    sector?: {
+      industry: string;
+      campaigns: number;
+      winRate: number | null;
+      avgRoc: number | null;
+      dropWinRate: number | null;
+      recoveryCount: number;
+    } | null;
   };
   regimeGrade: Grade;
   regimeScore: number;
@@ -265,6 +274,21 @@ export type PersonalHistory = {
     rolled: number;
     recovery: number;
   };
+  // Sample-size confidence for the ticker evidence: 1.0 (5+ campaigns),
+  // 0.5 (2-4, "small sample"), 0.25 (1, "very limited data"), 0 (none).
+  // Small samples are SHOWN, never hidden — the weight only limits how
+  // much they can move the grade (see calculateThreeLayerGrade).
+  sampleWeight?: number;
+  // Sector aggregates, carried alongside ticker stats whenever the
+  // symbol's industry has 10+ of the user's campaigns.
+  sector?: {
+    industry: string;
+    campaigns: number;
+    winRate: number | null;
+    avgRoc: number | null;
+    dropWinRate: number | null;
+    recoveryCount: number;
+  } | null;
 };
 
 // ---------- Helpers ----------
@@ -1701,20 +1725,14 @@ export async function getPersonalHistory(
       rolled: ticker.rolledCount,
       recovery: ticker.recoveryCount,
     };
+    const sampleWeight =
+      ticker.tradeCount >= 5 ? 1.0 : ticker.tradeCount >= 2 ? 0.5 : ticker.tradeCount === 1 ? 0.25 : 0;
 
-    if (ticker.tradeCount >= 5) {
-      return {
-        ...ticker,
-        dataInsufficient: false,
-        scope: "ticker",
-        sectorIndustry: null,
-        tickerLevel,
-      };
-    }
-
-    // Sector fallback: the user's whole history across this symbol's
-    // industry (10+ trade bar). Coarser evidence — the caller applies
-    // it drop-only (see calculateThreeLayerGrade).
+    // Sector aggregates are fetched regardless of ticker sample size —
+    // they corroborate small-sample ticker evidence and are the sole
+    // evidence when the ticker has no campaigns.
+    let sector: PersonalHistory["sector"] = null;
+    let sectorStatsFull: PersonalStats | null = null;
     const profRes = await supabase
       .from("stock_profiles")
       .select("industry")
@@ -1739,26 +1757,62 @@ export async function getPersonalHistory(
           .in("symbol", syms)
           .in("status", TERMINAL_STATUSES);
         if (!secRes.error) {
-          const sector = personalStats((secRes.data ?? []) as PersonalRow[]);
-          if (sector.tradeCount >= 10) {
-            return {
-              ...sector,
-              dataInsufficient: false,
-              scope: "sector",
-              sectorIndustry: industry,
-              tickerLevel,
+          const sec = personalStats((secRes.data ?? []) as PersonalRow[]);
+          if (sec.tradeCount >= 10) {
+            sector = {
+              industry,
+              campaigns: sec.tradeCount,
+              winRate: sec.winRate,
+              avgRoc: sec.avgRoc,
+              dropWinRate: sec.dropWinRate,
+              recoveryCount: sec.recoveryCount,
             };
+            sectorStatsFull = sec;
           }
         }
       }
     }
 
+    // Ticker evidence is NEVER hidden: with 1+ campaigns the top-level
+    // stats are ticker-level (caveated by sampleWeight downstream).
+    // Zero campaigns → sector aggregates carry the top level (scope
+    // "sector"), or scope "none" when neither exists.
+    if (ticker.tradeCount >= 1) {
+      return {
+        ...ticker,
+        dataInsufficient: false,
+        scope: "ticker",
+        sectorIndustry: industry,
+        tickerLevel,
+        sampleWeight,
+        sector,
+      };
+    }
+    if (sector && sectorStatsFull) {
+      return {
+        tradeCount: sector.campaigns,
+        winRate: sector.winRate,
+        avgRoc: sector.avgRoc,
+        dropWinRate: sector.dropWinRate,
+        cleanCount: sectorStatsFull.cleanCount,
+        rolledCount: sectorStatsFull.rolledCount,
+        recoveryCount: sector.recoveryCount,
+        dataInsufficient: false,
+        scope: "sector",
+        sectorIndustry: industry,
+        tickerLevel,
+        sampleWeight: 0,
+        sector,
+      };
+    }
     return {
       ...ticker,
       dataInsufficient: true,
       scope: "none",
       sectorIndustry: industry,
       tickerLevel,
+      sampleWeight: 0,
+      sector: null,
     };
   } catch {
     return { ...NO_HISTORY };
@@ -1910,23 +1964,49 @@ export function calculateThreeLayerGrade(
   //   sector (10+ trades across the industry): drop-only, stricter bar
   //     (<45%). Sector evidence is diluted — a false boost costs real
   //     capital, a false drop only costs a missed trade.
+  // Graduated evidence ladder — small samples are shown but their power
+  // to move the grade shrinks with sample size (sampleWeight 1.0 / 0.5
+  // / 0.25). Sector evidence corroborates or, with zero ticker
+  // campaigns, stands alone (drop-only).
+  //   w=1.0 (5+):  boost (wr>80 & roc>0.3) or drop (dropWr<50)
+  //   w=0.5 (2-4): drop at <50; boost only if the ticker bar is met AND
+  //                the sector corroborates (win ≥60 over 10+ campaigns)
+  //   w=0.25 (1):  no boost; drop only if the campaign lost AND the
+  //                sector corroborates (sector dropWin <50)
+  //   w=0 (none):  sector-only drop at <45
   let personalModifier: "boost" | "drop" | null = null;
+  const sampleW = history.sampleWeight ?? (historyScope === "ticker" ? 1.0 : 0);
   if (!history.dataInsufficient && history.winRate !== null && !hasOverhang) {
     const wr = history.winRate; // boost-side weighted (rolled at 0.5)
     const dropWr = history.dropWinRate ?? wr; // rolled at full weight
     const roc = history.avgRoc ?? 0;
+    const sec = history.sector ?? null;
     if (historyScope === "ticker") {
-      if (wr > 80 && roc > 0.3) {
-        personalModifier = "boost";
-        finalGrade = boostGrade(finalGrade);
-      } else if (dropWr < 50) {
-        personalModifier = "drop";
-        finalGrade = dropGrade(finalGrade);
+      if (sampleW >= 1.0) {
+        if (wr > 80 && roc > 0.3) personalModifier = "boost";
+        else if (dropWr < 50) personalModifier = "drop";
+      } else if (sampleW >= 0.5) {
+        if (
+          wr > 80 &&
+          roc > 0.3 &&
+          sec !== null &&
+          (sec.winRate ?? 0) >= 60 &&
+          sec.campaigns >= 10
+        ) {
+          personalModifier = "boost";
+        } else if (dropWr < 50) {
+          personalModifier = "drop";
+        }
+      } else if (sampleW >= 0.25) {
+        if (dropWr < 50 && sec !== null && (sec.dropWinRate ?? 100) < 50) {
+          personalModifier = "drop";
+        }
       }
     } else if (historyScope === "sector" && dropWr < 45) {
       personalModifier = "drop";
-      finalGrade = dropGrade(finalGrade);
     }
+    if (personalModifier === "boost") finalGrade = boostGrade(finalGrade);
+    else if (personalModifier === "drop") finalGrade = dropGrade(finalGrade);
   }
 
   // Derived illustrative scores (for sort order + display compatibility).
@@ -2037,17 +2117,28 @@ export function calculateThreeLayerGrade(
     } else {
       const mod =
         personalModifier === "boost"
-          ? " → boosts grade one level (winRate >80% & avgRoc >0.3% on collateral)"
+          ? " → boosts grade one level"
           : personalModifier === "drop"
-            ? " → drops grade one level (winRate <50%)"
-            : " → no modifier (between boost/drop thresholds)";
+            ? " → drops grade one level"
+            : " → no modifier";
+      const caveat =
+        sampleW >= 1.0
+          ? ""
+          : sampleW >= 0.5
+            ? " (small sample — half weight; boost needs sector corroboration)"
+            : " (very limited data — quarter weight; can only corroborate a drop)";
       const breakdown =
         (history.rolledCount ?? 0) > 0 || (history.recoveryCount ?? 0) > 0
           ? ` [${history.cleanCount ?? history.tradeCount} clean${(history.rolledCount ?? 0) > 0 ? ` · ${history.rolledCount} rolled (half-weight)` : ""}${(history.recoveryCount ?? 0) > 0 ? ` · ${history.recoveryCount} recovery play${(history.recoveryCount ?? 0) === 1 ? "" : "s"} excluded` : ""}]`
           : "";
       historyLines.push(
-        `${history.tradeCount} prior campaign${history.tradeCount === 1 ? "" : "s"} on this ticker: ${wr.toFixed(0)}% win rate, ${roc.toFixed(2)}% avg ROC${breakdown}${mod}.`,
+        `${history.tradeCount} campaign${history.tradeCount === 1 ? "" : "s"} on this ticker: ${wr.toFixed(0)}% win rate, ${roc.toFixed(2)}% avg ROC${breakdown}${caveat}${mod}.`,
       );
+      if (history.sector) {
+        historyLines.push(
+          `Sector (${history.sector.industry}): ${history.sector.campaigns} campaigns, ${history.sector.winRate !== null ? history.sector.winRate.toFixed(0) : "—"}% win — drop-only evidence.`,
+        );
+      }
     }
   } else {
     const excluded =
@@ -2131,6 +2222,8 @@ export function calculateThreeLayerGrade(
       rolledCount: history.rolledCount,
       recoveryCount: history.recoveryCount,
       tickerLevel: history.tickerLevel,
+      sampleWeight: history.sampleWeight,
+      sector: history.sector ?? null,
     },
     regimeGrade,
     regimeScore,
