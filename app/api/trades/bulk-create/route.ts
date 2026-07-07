@@ -13,6 +13,7 @@ import { buildSnapshotRow, fetchChainWideSafe } from "@/lib/snapshots";
 import { recordPositionOutcome } from "@/lib/post-earnings";
 import { requireUserId, authErrorResponse } from "@/lib/auth";
 import { buildStampContext, stampEntryContext } from "@/lib/entry-context";
+import { classifyUserChains, persistChains } from "@/lib/trade-chains";
 
 export const dynamic = "force-dynamic";
 // Phase 2b entry-context stamping adds a VIX + snapshot + chain fetch
@@ -1219,6 +1220,37 @@ export async function POST(req: NextRequest) {
       } catch (e) {
         console.warn(
           `[bulk-create] entry-context pass failed: ${e instanceof Error ? e.message : e}`,
+        );
+      }
+    }
+  }
+
+  // Trade-chain detection — re-classify every symbol that received an
+  // OPEN fill this batch (runs AFTER entry-context stamping so the
+  // deep-ITM test can use entry_stock_price). User-confirmed rows are
+  // never clobbered. The positions page shows a confirmation chip for
+  // auto-detected rolled / recovery_play positions.
+  {
+    const symbolsWithOpens = Array.from(
+      new Set(
+        optionFillRecords
+          .filter((rec) => rec.plan.input.action === "open")
+          .map((rec) => rec.plan.symbol),
+      ),
+    );
+    for (const sym of symbolsWithOpens) {
+      try {
+        const chains = await classifyUserChains(userId, sym);
+        await persistChains(chains, "auto", { skipConfirmed: true });
+        const flagged = chains.filter((c) => c.tradeType !== "clean");
+        if (flagged.length > 0) {
+          console.log(
+            `[bulk-create] chain detection ${sym}: ${flagged.map((c) => `${c.tradeType} (${c.optionCount} legs, $${c.chainPnl})`).join("; ")}`,
+          );
+        }
+      } catch (e) {
+        console.warn(
+          `[bulk-create] chain detection failed for ${sym}: ${e instanceof Error ? e.message : e}`,
         );
       }
     }

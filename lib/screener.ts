@@ -206,6 +206,9 @@ export type ThreeLayerGrade = {
     dataInsufficient: boolean;
     scope?: "ticker" | "sector" | "none";
     sectorIndustry?: string | null;
+    cleanCount?: number;
+    rolledCount?: number;
+    recoveryCount?: number;
   };
   regimeGrade: Grade;
   regimeScore: number;
@@ -237,6 +240,15 @@ export type PersonalHistory = {
   // missing as "ticker".
   scope?: "ticker" | "sector" | "none";
   sectorIndustry?: string | null;
+  // Chain-aware breakdown (2026-07-06): stats are computed over trade
+  // CHAINS, not positions. winRate/avgRoc are boost-side weighted
+  // (clean 1.0, rolled 0.5, recovery_play excluded); dropWinRate
+  // weights rolled at 1.0 (recovery still excluded). tradeCount is the
+  // number of counted chains (clean + rolled).
+  dropWinRate?: number | null;
+  cleanCount?: number;
+  rolledCount?: number;
+  recoveryCount?: number;
 };
 
 // ---------- Helpers ----------
@@ -1525,38 +1537,115 @@ function gradeToL3Score(g: Grade): number {
 const TERMINAL_STATUSES = ["closed", "expired_worthless", "assigned"];
 
 type PersonalRow = {
+  id: string;
   strike: number | null;
   realized_pnl: number | null;
   total_contracts: number | null;
   position_type: string | null;
+  trade_chain_id: string | null;
+  trade_type: string | null;
+  chain_pnl: number | null;
+  peak_capital: number | null;
 };
 
-// Strike-based capital ROC (percent) — same denominator as the
-// Intelligence page and ticker strip. The old premium-capture
-// denominator made the boost threshold a no-op.
-function personalStats(rows: PersonalRow[]): {
+type PersonalStats = {
   tradeCount: number;
   winRate: number | null;
   avgRoc: number | null;
-} {
-  const options = rows.filter(
-    (r) => r.position_type !== "stock_long" && r.position_type !== "stock_short",
-  );
-  const tradeCount = options.length;
-  if (tradeCount === 0) return { tradeCount: 0, winRate: null, avgRoc: null };
-  const wins = options.filter((r) => Number(r.realized_pnl ?? 0) > 0).length;
-  const winRate = (wins / tradeCount) * 100;
-  const rocs = options
-    .map((r) => {
-      const strike = Number(r.strike ?? 0);
-      const contracts = Number(r.total_contracts ?? 0);
-      const pnl = Number(r.realized_pnl ?? 0);
-      const capital = strike * contracts * 100;
-      return capital > 0 ? (pnl / capital) * 100 : null;
-    })
-    .filter((r): r is number => r !== null);
-  const avgRoc = rocs.length > 0 ? rocs.reduce((a, b) => a + b, 0) / rocs.length : null;
-  return { tradeCount, winRate, avgRoc };
+  dropWinRate: number | null;
+  cleanCount: number;
+  rolledCount: number;
+  recoveryCount: number;
+};
+
+// Chain-aware stats. Positions are grouped into trade chains
+// (lib/trade-chains classification); each chain is ONE outcome with
+// chain_pnl (includes assignment stock legs) over peak_capital.
+// Weights per trade type:
+//   clean          — 1.0 toward boost, 1.0 toward drop
+//   rolled         — 0.5 toward boost, 1.0 toward drop (patience, not edge)
+//   recovery_play  — excluded entirely (deep ITM = synthetic long, not a CSP)
+// Unclassified rows fall back to per-position clean semantics with
+// strike-based capital ROC.
+function personalStats(rows: PersonalRow[]): PersonalStats {
+  type ChainAgg = {
+    type: string;
+    pnl: number;
+    capital: number | null;
+    fallbackPnl: number;
+    fallbackCapital: number;
+  };
+  const chains = new Map<string, ChainAgg>();
+  for (const r of rows) {
+    const isStock =
+      r.position_type === "stock_long" || r.position_type === "stock_short";
+    // Stock rows only participate through their chain's chain_pnl;
+    // an unchained stock row is not a CSP outcome.
+    if (isStock && !r.trade_chain_id) continue;
+    const key = r.trade_chain_id ?? `solo:${r.id}`;
+    const agg = chains.get(key) ?? {
+      type: r.trade_type ?? "clean",
+      pnl: r.chain_pnl !== null ? Number(r.chain_pnl) : NaN,
+      capital: r.peak_capital !== null ? Number(r.peak_capital) : null,
+      fallbackPnl: 0,
+      fallbackCapital: 0,
+    };
+    if (r.trade_type) agg.type = r.trade_type;
+    if (r.chain_pnl !== null) agg.pnl = Number(r.chain_pnl);
+    if (r.peak_capital !== null) agg.capital = Number(r.peak_capital);
+    if (!isStock) {
+      agg.fallbackPnl += Number(r.realized_pnl ?? 0);
+      agg.fallbackCapital += Number(r.strike ?? 0) * Number(r.total_contracts ?? 0) * 100;
+    }
+    chains.set(key, agg);
+  }
+
+  let cleanCount = 0;
+  let rolledCount = 0;
+  let recoveryCount = 0;
+  let wBoost = 0;
+  let winBoost = 0;
+  let wDrop = 0;
+  let winDrop = 0;
+  const rocW: Array<{ roc: number; w: number }> = [];
+  for (const agg of Array.from(chains.values())) {
+    const pnl = Number.isFinite(agg.pnl) ? agg.pnl : agg.fallbackPnl;
+    const capital =
+      agg.capital !== null && agg.capital > 0 ? agg.capital : agg.fallbackCapital;
+    const win = pnl > 0 ? 1 : 0;
+    const roc = capital > 0 ? (pnl / capital) * 100 : null;
+    if (agg.type === "recovery_play") {
+      recoveryCount += 1;
+      continue; // excluded from CSP grading entirely
+    }
+    const boostW = agg.type === "rolled" ? 0.5 : 1.0;
+    if (agg.type === "rolled") rolledCount += 1;
+    else cleanCount += 1;
+    wBoost += boostW;
+    winBoost += boostW * win;
+    wDrop += 1.0;
+    winDrop += win;
+    if (roc !== null) rocW.push({ roc, w: boostW });
+  }
+
+  const tradeCount = cleanCount + rolledCount;
+  if (tradeCount === 0) {
+    return {
+      tradeCount: 0,
+      winRate: null,
+      avgRoc: null,
+      dropWinRate: null,
+      cleanCount,
+      rolledCount,
+      recoveryCount,
+    };
+  }
+  const winRate = wBoost > 0 ? (winBoost / wBoost) * 100 : null;
+  const dropWinRate = wDrop > 0 ? (winDrop / wDrop) * 100 : null;
+  const wSum = rocW.reduce((s, x) => s + x.w, 0);
+  const avgRoc =
+    wSum > 0 ? rocW.reduce((s, x) => s + x.roc * x.w, 0) / wSum : null;
+  return { tradeCount, winRate, avgRoc, dropWinRate, cleanCount, rolledCount, recoveryCount };
 }
 
 const NO_HISTORY: PersonalHistory = {
@@ -1566,7 +1655,14 @@ const NO_HISTORY: PersonalHistory = {
   dataInsufficient: true,
   scope: "none",
   sectorIndustry: null,
+  dropWinRate: null,
+  cleanCount: 0,
+  rolledCount: 0,
+  recoveryCount: 0,
 };
+
+const PERSONAL_COLS =
+  "id, strike, realized_pnl, total_contracts, position_type, trade_chain_id, trade_type, chain_pnl, peak_capital";
 
 export async function getPersonalHistory(
   userId: string,
@@ -1577,7 +1673,7 @@ export async function getPersonalHistory(
     const upper = symbol.toUpperCase();
     const { data, error } = await supabase
       .from("positions")
-      .select("strike, realized_pnl, total_contracts, position_type")
+      .select(PERSONAL_COLS)
       .eq("user_id", userId)
       .eq("symbol", upper)
       .in("status", TERMINAL_STATUSES);
@@ -1615,7 +1711,7 @@ export async function getPersonalHistory(
       if (syms.length > 0) {
         const secRes = await supabase
           .from("positions")
-          .select("strike, realized_pnl, total_contracts, position_type")
+          .select(PERSONAL_COLS)
           .eq("user_id", userId)
           .in("symbol", syms)
           .in("status", TERMINAL_STATUSES);
@@ -1791,17 +1887,18 @@ export function calculateThreeLayerGrade(
   //     capital, a false drop only costs a missed trade.
   let personalModifier: "boost" | "drop" | null = null;
   if (!history.dataInsufficient && history.winRate !== null && !hasOverhang) {
-    const wr = history.winRate;
+    const wr = history.winRate; // boost-side weighted (rolled at 0.5)
+    const dropWr = history.dropWinRate ?? wr; // rolled at full weight
     const roc = history.avgRoc ?? 0;
     if (historyScope === "ticker") {
       if (wr > 80 && roc > 0.3) {
         personalModifier = "boost";
         finalGrade = boostGrade(finalGrade);
-      } else if (wr < 50) {
+      } else if (dropWr < 50) {
         personalModifier = "drop";
         finalGrade = dropGrade(finalGrade);
       }
-    } else if (historyScope === "sector" && wr < 45) {
+    } else if (historyScope === "sector" && dropWr < 45) {
       personalModifier = "drop";
       finalGrade = dropGrade(finalGrade);
     }
@@ -1915,13 +2012,21 @@ export function calculateThreeLayerGrade(
           : personalModifier === "drop"
             ? " → drops grade one level (winRate <50%)"
             : " → no modifier (between boost/drop thresholds)";
+      const breakdown =
+        (history.rolledCount ?? 0) > 0 || (history.recoveryCount ?? 0) > 0
+          ? ` [${history.cleanCount ?? history.tradeCount} clean${(history.rolledCount ?? 0) > 0 ? ` · ${history.rolledCount} rolled (half-weight)` : ""}${(history.recoveryCount ?? 0) > 0 ? ` · ${history.recoveryCount} recovery play${(history.recoveryCount ?? 0) === 1 ? "" : "s"} excluded` : ""}]`
+          : "";
       historyLines.push(
-        `${history.tradeCount} prior trades on this ticker: ${wr.toFixed(0)}% win rate, ${roc.toFixed(2)}% avg ROC${mod}.`,
+        `${history.tradeCount} prior campaign${history.tradeCount === 1 ? "" : "s"} on this ticker: ${wr.toFixed(0)}% win rate, ${roc.toFixed(2)}% avg ROC${breakdown}${mod}.`,
       );
     }
   } else {
+    const excluded =
+      (history.recoveryCount ?? 0) > 0
+        ? ` ${history.recoveryCount} recovery play${(history.recoveryCount ?? 0) === 1 ? "" : "s"} on this ticker excluded from CSP grading.`
+        : "";
     historyLines.push(
-      `Insufficient history — ${history.tradeCount} terminal trades on this ticker (need 5+; sector fallback needs 10+ industry trades). No modifier applied.`,
+      `Insufficient history — ${history.tradeCount} countable campaign${history.tradeCount === 1 ? "" : "s"} on this ticker (need 5+; sector fallback needs 10+ industry campaigns).${excluded} No modifier applied.`,
     );
   }
 
@@ -1993,6 +2098,9 @@ export function calculateThreeLayerGrade(
       dataInsufficient: history.dataInsufficient,
       scope: historyScope,
       sectorIndustry: history.sectorIndustry ?? null,
+      cleanCount: history.cleanCount,
+      rolledCount: history.rolledCount,
+      recoveryCount: history.recoveryCount,
     },
     regimeGrade,
     regimeScore,

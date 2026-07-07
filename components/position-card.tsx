@@ -82,6 +82,8 @@ export type OpenPositionClientView = {
   badgeTooltip: string;
   ruleFired: string;
   postEarningsRec: PostEarningsRecView | null;
+  tradeType?: "clean" | "rolled" | "recovery_play" | null;
+  tradeTypeSource?: "auto" | "user" | null;
   fills: Fill[];
   expiryStatus: "active" | "needs_verification" | "pending";
   expiryPctFromStrike: number | null;
@@ -331,6 +333,32 @@ export function PositionCard(props: Props) {
   // refresh the parent list, and edits should ideally happen before
   // a position is closed out anyway).
   const [editsOpen, setEditsOpen] = useState(false);
+  // Trade-type confirmation chip. Auto-detected rolled / recovery_play
+  // classifications surface a non-blocking strip until the user
+  // confirms, reclassifies, or dismisses (dismiss = session-local).
+  const [typeDismissed, setTypeDismissed] = useState(false);
+  const [typeSaving, setTypeSaving] = useState(false);
+  const [localTradeType, setLocalTradeType] = useState<string | null>(null);
+  const [localTypeSource, setLocalTypeSource] = useState<string | null>(null);
+
+  async function classifyTradeType(tradeType: string) {
+    setTypeSaving(true);
+    try {
+      const res = await fetch(`/api/positions/${props.position.id}/classify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ trade_type: tradeType }),
+      });
+      if (res.ok) {
+        setLocalTradeType(tradeType);
+        setLocalTypeSource("user");
+      }
+    } catch {
+      /* chip stays; user can retry */
+    } finally {
+      setTypeSaving(false);
+    }
+  }
 
   const onRemoveClick = (e: React.MouseEvent | React.KeyboardEvent) => {
     e.stopPropagation();
@@ -902,6 +930,62 @@ export function PositionCard(props: Props) {
       {/* Inline remove-confirmation strip — sits between the collapsed
           row and the expanded detail so the user keeps visual context
           of which row they're about to delete. */}
+      {props.kind === "open" &&
+        !typeDismissed &&
+        (localTypeSource ?? props.position.tradeTypeSource) === "auto" &&
+        ["rolled", "recovery_play"].includes(
+          (localTradeType ?? props.position.tradeType) ?? "",
+        ) && (
+          <div className="flex flex-wrap items-center gap-2 border-t border-indigo-500/40 bg-indigo-500/10 px-3 py-2 text-sm">
+            <span className="text-indigo-200">
+              Detected:{" "}
+              <span className="font-semibold">
+                {(localTradeType ?? props.position.tradeType) === "rolled"
+                  ? "rolled recovery"
+                  : "recovery play (excluded from CSP intelligence)"}
+              </span>{" "}
+              — confirm or reclassify
+            </span>
+            <Button
+              size="sm"
+              disabled={typeSaving}
+              onClick={(e) => {
+                e.stopPropagation();
+                void classifyTradeType(
+                  (localTradeType ?? props.position.tradeType) as string,
+                );
+              }}
+            >
+              {typeSaving ? <Loader2 className="h-3 w-3 animate-spin" /> : "Confirm"}
+            </Button>
+            <select
+              defaultValue=""
+              disabled={typeSaving}
+              onClick={(e) => e.stopPropagation()}
+              onChange={(e) => {
+                if (e.target.value) void classifyTradeType(e.target.value);
+              }}
+              className="rounded border border-border bg-background px-2 py-1 text-sm"
+            >
+              <option value="" disabled>
+                Change type…
+              </option>
+              <option value="clean">Clean CSP</option>
+              <option value="rolled">Rolled recovery</option>
+              <option value="recovery_play">Recovery play</option>
+            </select>
+            <button
+              type="button"
+              className="ml-auto text-sm text-muted-foreground hover:text-foreground"
+              onClick={(e) => {
+                e.stopPropagation();
+                setTypeDismissed(true);
+              }}
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
       {removeOpen && props.kind === "open" && (
         <div className="flex flex-wrap items-center gap-2 border-t border-rose-500/40 bg-rose-500/10 px-3 py-2 text-sm">
           <span className="font-medium text-rose-200">

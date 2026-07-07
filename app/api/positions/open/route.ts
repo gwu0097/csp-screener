@@ -113,6 +113,10 @@ type OpenPosition = {
   // three-layer grade. Used by the expanded position card for the
   // left-column "what did we see at entry" panel.
   entryFinalGrade: string | null;
+  // Trade-chain classification (lib/trade-chains). source 'auto' with a
+  // non-clean type drives the confirmation chip on the position card.
+  tradeType: "clean" | "rolled" | "recovery_play" | null;
+  tradeTypeSource: "auto" | "user" | null;
   entryCrushGrade: string | null;
   entryOpportunityGrade: string | null;
   entryIndustryGrade: string | null;
@@ -858,6 +862,10 @@ export async function GET(req: NextRequest) {
         (p as unknown as { entry_final_grade?: string | null }).entry_final_grade ??
         gradeFallbackBySymbol.get(p.symbol.toUpperCase()) ??
         null,
+      tradeType: ((p as unknown as { trade_type?: string | null }).trade_type ??
+        null) as OpenPosition["tradeType"],
+      tradeTypeSource: ((p as unknown as { trade_type_source?: string | null })
+        .trade_type_source ?? null) as OpenPosition["tradeTypeSource"],
       entryCrushGrade: (p as unknown as { entry_crush_grade?: string | null }).entry_crush_grade ?? null,
       entryOpportunityGrade:
         (p as unknown as { entry_opportunity_grade?: string | null }).entry_opportunity_grade ?? null,

@@ -3055,8 +3055,15 @@ function ExpandedDetail({
         >
           {tl.personalFactors.dataInsufficient ? (
             <div className="text-sm text-muted-foreground">
-              Insufficient data — need 5+ trades on {r.symbol} or 10+ in its
-              sector (you have {tl.personalFactors.tickerTradeCount} on the ticker)
+              Insufficient data — need 5+ campaigns on {r.symbol} or 10+ in its
+              sector (you have {tl.personalFactors.tickerTradeCount} countable)
+              {(pf.recoveryCount ?? 0) > 0 && (
+                <div className="mt-0.5 text-[11px]">
+                  {pf.recoveryCount} recovery play
+                  {(pf.recoveryCount ?? 0) === 1 ? "" : "s"} on {r.symbol} excluded
+                  from CSP grading
+                </div>
+              )}
             </div>
           ) : (
             <>
@@ -3067,9 +3074,23 @@ function ExpandedDetail({
                 />
               )}
               <Row
-                k={pfScope === "sector" ? "Sector trades" : `${r.symbol} trades logged`}
+                k={pfScope === "sector" ? "Sector campaigns" : `${r.symbol} campaigns`}
                 v={String(tl.personalFactors.tickerTradeCount)}
               />
+              {((pf.rolledCount ?? 0) > 0 || (pf.recoveryCount ?? 0) > 0) && (
+                <Row
+                  k="Breakdown"
+                  v={[
+                    `${pf.cleanCount ?? tl.personalFactors.tickerTradeCount} clean`,
+                    (pf.rolledCount ?? 0) > 0 ? `${pf.rolledCount} rolled` : null,
+                    (pf.recoveryCount ?? 0) > 0
+                      ? `${pf.recoveryCount} recovery (excl.)`
+                      : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")}
+                />
+              )}
               <Row
                 k="Win rate"
                 v={
