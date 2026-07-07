@@ -209,6 +209,12 @@ export type ThreeLayerGrade = {
     cleanCount?: number;
     rolledCount?: number;
     recoveryCount?: number;
+    tickerLevel?: {
+      campaigns: number;
+      clean: number;
+      rolled: number;
+      recovery: number;
+    };
   };
   regimeGrade: Grade;
   regimeScore: number;
@@ -249,6 +255,16 @@ export type PersonalHistory = {
   cleanCount?: number;
   rolledCount?: number;
   recoveryCount?: number;
+  // THIS symbol's own campaign counts, present at every scope. At
+  // sector scope the top-level fields hold SECTOR aggregates — the UI
+  // needs both to attribute numbers correctly (a sector count labelled
+  // "ZS trades logged" was exactly the bug this fixes).
+  tickerLevel?: {
+    campaigns: number;
+    clean: number;
+    rolled: number;
+    recovery: number;
+  };
 };
 
 // ---------- Helpers ----------
@@ -1679,6 +1695,12 @@ export async function getPersonalHistory(
       .in("status", TERMINAL_STATUSES);
     if (error || !data) return { ...NO_HISTORY };
     const ticker = personalStats(data as PersonalRow[]);
+    const tickerLevel = {
+      campaigns: ticker.tradeCount,
+      clean: ticker.cleanCount,
+      rolled: ticker.rolledCount,
+      recovery: ticker.recoveryCount,
+    };
 
     if (ticker.tradeCount >= 5) {
       return {
@@ -1686,6 +1708,7 @@ export async function getPersonalHistory(
         dataInsufficient: false,
         scope: "ticker",
         sectorIndustry: null,
+        tickerLevel,
       };
     }
 
@@ -1723,6 +1746,7 @@ export async function getPersonalHistory(
               dataInsufficient: false,
               scope: "sector",
               sectorIndustry: industry,
+              tickerLevel,
             };
           }
         }
@@ -1734,6 +1758,7 @@ export async function getPersonalHistory(
       dataInsufficient: true,
       scope: "none",
       sectorIndustry: industry,
+      tickerLevel,
     };
   } catch {
     return { ...NO_HISTORY };
@@ -2002,8 +2027,12 @@ export function calculateThreeLayerGrade(
         personalModifier === "drop"
           ? " → drops grade one level (sector win rate <45%)"
           : " → no modifier (sector evidence can only drop, at <45% win)";
+      const t = history.tickerLevel;
+      const tickerBit = t
+        ? `${t.clean} clean campaign${t.clean === 1 ? "" : "s"} on this ticker (need 5+)${t.recovery > 0 ? `, ${t.recovery} recovery play${t.recovery === 1 ? "" : "s"} excluded from CSP grading` : ""}. `
+        : "";
       historyLines.push(
-        `No direct history on this ticker. Sector evidence — ${history.sectorIndustry ?? "industry"}: ${history.tradeCount} trades, ${wr.toFixed(0)}% win rate, ${roc.toFixed(2)}% avg ROC${mod}.`,
+        `${tickerBit}Sector evidence — ${history.sectorIndustry ?? "industry"}: ${history.tradeCount} campaigns, ${wr.toFixed(0)}% win rate, ${roc.toFixed(2)}% avg ROC${mod}.`,
       );
     } else {
       const mod =
@@ -2101,6 +2130,7 @@ export function calculateThreeLayerGrade(
       cleanCount: history.cleanCount,
       rolledCount: history.rolledCount,
       recoveryCount: history.recoveryCount,
+      tickerLevel: history.tickerLevel,
     },
     regimeGrade,
     regimeScore,

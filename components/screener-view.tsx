@@ -3006,7 +3006,11 @@ function ExpandedDetail({
         </LayerCard>
 
         <LayerCard
-          title="LAYER 2 — YOUR INTELLIGENCE"
+          title={
+            pfScope === "sector"
+              ? "LAYER 2 — YOUR INTELLIGENCE (SECTOR)"
+              : "LAYER 2 — YOUR INTELLIGENCE"
+          }
           grade={tl.personalGrade === "INSUFFICIENT" ? "?" : tl.personalGrade}
           tooltip={
             tl.personalFactors.dataInsufficient ? (
@@ -3031,15 +3035,25 @@ function ExpandedDetail({
                     {tl.personalFactors.sectorIndustry ?? "its industry"}.
                   </div>
                 )}
+                {pfScope === "sector" && pf.tickerLevel && (
+                  <div className="text-muted-foreground">
+                    {r.symbol} itself: {pf.tickerLevel.clean} clean campaign
+                    {pf.tickerLevel.clean === 1 ? "" : "s"} (need 5+)
+                    {pf.tickerLevel.recovery > 0
+                      ? ` · ${pf.tickerLevel.recovery} recovery play${pf.tickerLevel.recovery === 1 ? "" : "s"} excluded`
+                      : ""}
+                  </div>
+                )}
                 <div>
-                  {tl.personalFactors.tickerTradeCount} trades ·
-                  {" "}
+                  {pfScope === "sector" ? "Sector: " : ""}
+                  {tl.personalFactors.tickerTradeCount} campaign
+                  {tl.personalFactors.tickerTradeCount === 1 ? "" : "s"} ·{" "}
                   {tl.personalFactors.tickerWinRate !== null
                     ? `${tl.personalFactors.tickerWinRate.toFixed(0)}% win rate`
                     : "win rate n/a"}
                 </div>
                 <div>
-                  Avg ROC{" "}
+                  {pfScope === "sector" ? "Sector avg ROC" : "Avg ROC"}{" "}
                   {tl.personalFactors.tickerAvgRoc !== null
                     ? `${tl.personalFactors.tickerAvgRoc.toFixed(2)}%`
                     : "n/a"}
@@ -3056,62 +3070,116 @@ function ExpandedDetail({
           {tl.personalFactors.dataInsufficient ? (
             <div className="text-sm text-muted-foreground">
               Insufficient data — need 5+ campaigns on {r.symbol} or 10+ in its
-              sector (you have {tl.personalFactors.tickerTradeCount} countable)
-              {(pf.recoveryCount ?? 0) > 0 && (
-                <div className="mt-0.5 text-[11px]">
-                  {pf.recoveryCount} recovery play
-                  {(pf.recoveryCount ?? 0) === 1 ? "" : "s"} on {r.symbol} excluded
-                  from CSP grading
+              sector (you have{" "}
+              {pf.tickerLevel?.campaigns ?? tl.personalFactors.tickerTradeCount}{" "}
+              countable)
+              {(pf.tickerLevel?.recovery ?? pf.recoveryCount ?? 0) > 0 && (
+                <div className="mt-0.5 text-[11px] text-amber-300/90">
+                  {pf.tickerLevel?.recovery ?? pf.recoveryCount} recovery play
+                  {(pf.tickerLevel?.recovery ?? pf.recoveryCount ?? 0) === 1
+                    ? ""
+                    : "s"}{" "}
+                  on {r.symbol} excluded from CSP grading
                 </div>
               )}
             </div>
           ) : (
-            <>
-              {pfScope === "sector" && (
+            pfScope === "sector" ? (
+              <>
+                {/* Ticker's own history first, clearly separated from the
+                    sector aggregates the grade is actually derived from. */}
                 <Row
-                  k="Evidence"
-                  v={`${tl.personalFactors.sectorIndustry ?? "sector"} (sector)`}
+                  k={`${r.symbol} history`}
+                  v={
+                    pf.tickerLevel
+                      ? `${pf.tickerLevel.clean} clean${pf.tickerLevel.rolled > 0 ? ` · ${pf.tickerLevel.rolled} rolled` : ""} (need 5+)`
+                      : "none"
+                  }
                 />
-              )}
-              <Row
-                k={pfScope === "sector" ? "Sector campaigns" : `${r.symbol} campaigns`}
-                v={String(tl.personalFactors.tickerTradeCount)}
-              />
-              {((pf.rolledCount ?? 0) > 0 || (pf.recoveryCount ?? 0) > 0) && (
+                {pf.tickerLevel && pf.tickerLevel.recovery > 0 && (
+                  <div className="text-[11px] text-amber-300/90">
+                    {pf.tickerLevel.recovery} recovery play
+                    {pf.tickerLevel.recovery === 1 ? "" : "s"} on {r.symbol}{" "}
+                    excluded from CSP grading
+                  </div>
+                )}
                 <Row
-                  k="Breakdown"
+                  k="Sector evidence"
+                  v={tl.personalFactors.sectorIndustry ?? "—"}
+                />
+                <Row
+                  k="Sector campaigns"
                   v={[
-                    `${pf.cleanCount ?? tl.personalFactors.tickerTradeCount} clean`,
-                    (pf.rolledCount ?? 0) > 0 ? `${pf.rolledCount} rolled` : null,
+                    String(tl.personalFactors.tickerTradeCount),
                     (pf.recoveryCount ?? 0) > 0
-                      ? `${pf.recoveryCount} recovery (excl.)`
+                      ? `(+${pf.recoveryCount} recovery excl.)`
                       : null,
                   ]
                     .filter(Boolean)
-                    .join(" · ")}
+                    .join(" ")}
                 />
-              )}
-              <Row
-                k="Win rate"
-                v={
-                  tl.personalFactors.tickerWinRate !== null
-                    ? `${tl.personalFactors.tickerWinRate.toFixed(0)}%`
-                    : "—"
-                }
-              />
-              <Row
-                k="Avg ROC"
-                v={
-                  tl.personalFactors.tickerAvgRoc !== null
-                    ? `${tl.personalFactors.tickerAvgRoc.toFixed(2)}%`
-                    : "—"
-                }
-              />
-              <Row
-                k="Sample"
-                v={tl.personalFactors.tickerTradeCount >= 20 ? "robust" : "small"}
-              />
-            </>
+                <Row
+                  k="Sector win rate"
+                  v={
+                    tl.personalFactors.tickerWinRate !== null
+                      ? `${tl.personalFactors.tickerWinRate.toFixed(0)}%`
+                      : "—"
+                  }
+                />
+                <Row
+                  k="Sector avg ROC"
+                  v={
+                    tl.personalFactors.tickerAvgRoc !== null
+                      ? `${tl.personalFactors.tickerAvgRoc.toFixed(2)}%`
+                      : "—"
+                  }
+                />
+                <div className="pt-0.5 text-[11px] text-muted-foreground">
+                  Sector evidence is drop-only — no boost possible
+                </div>
+              </>
+            ) : (
+              <>
+                <Row
+                  k={`${r.symbol} campaigns`}
+                  v={String(tl.personalFactors.tickerTradeCount)}
+                />
+                {((pf.rolledCount ?? 0) > 0 || (pf.recoveryCount ?? 0) > 0) && (
+                  <Row
+                    k="Breakdown"
+                    v={[
+                      `${pf.cleanCount ?? tl.personalFactors.tickerTradeCount} clean`,
+                      (pf.rolledCount ?? 0) > 0 ? `${pf.rolledCount} rolled` : null,
+                      (pf.recoveryCount ?? 0) > 0
+                        ? `${pf.recoveryCount} recovery (excl.)`
+                        : null,
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")}
+                  />
+                )}
+                <Row
+                  k="Win rate"
+                  v={
+                    tl.personalFactors.tickerWinRate !== null
+                      ? `${tl.personalFactors.tickerWinRate.toFixed(0)}%`
+                      : "—"
+                  }
+                />
+                <Row
+                  k="Avg ROC"
+                  v={
+                    tl.personalFactors.tickerAvgRoc !== null
+                      ? `${tl.personalFactors.tickerAvgRoc.toFixed(2)}%`
+                      : "—"
+                  }
+                />
+                <Row
+                  k="Sample"
+                  v={tl.personalFactors.tickerTradeCount >= 20 ? "robust" : "small"}
+                />
+              </>
+            )
           )}
         </LayerCard>
 
