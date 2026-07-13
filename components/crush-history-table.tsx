@@ -131,7 +131,7 @@ export function CrushHistoryTable({
 
   const liveEvents = refreshed ?? events ?? [];
 
-  // Sort newest first; today's pending row goes at the bottom.
+  // Sort newest first; TODAY's pending row is pinned above these in the table.
   const sorted = [...liveEvents].sort((a, b) => b.earningsDate.localeCompare(a.earningsDate));
 
   async function handleFetchEmHistory() {
@@ -291,6 +291,24 @@ export function CrushHistoryTable({
             </tr>
           </thead>
           <tbody>
+            <tr className="border-t border-border bg-amber-500/[0.04]">
+              <td className="px-2 py-1 font-mono font-semibold text-amber-200">
+                TODAY
+              </td>
+              <td className="px-2 py-1 text-right font-mono text-amber-200">
+                {fmtPct(todayEmPct)}
+              </td>
+              <td className="px-2 py-1 text-right font-mono text-muted-foreground">
+                ???
+              </td>
+              <td className="px-2 py-1 text-right font-mono text-muted-foreground">
+                ???
+              </td>
+              <td className="px-2 py-1 text-center text-muted-foreground">???</td>
+              <td className="px-2 py-1 text-[10px] text-muted-foreground">
+                pending
+              </td>
+            </tr>
             {sorted.map((e) => {
               const isSimilar =
                 todayEmPct !== null &&
@@ -376,24 +394,6 @@ export function CrushHistoryTable({
                 </tr>
               );
             })}
-            <tr className="border-t border-border bg-amber-500/[0.04]">
-              <td className="px-2 py-1 font-mono font-semibold text-amber-200">
-                TODAY
-              </td>
-              <td className="px-2 py-1 text-right font-mono text-amber-200">
-                {fmtPct(todayEmPct)}
-              </td>
-              <td className="px-2 py-1 text-right font-mono text-muted-foreground">
-                ???
-              </td>
-              <td className="px-2 py-1 text-right font-mono text-muted-foreground">
-                ???
-              </td>
-              <td className="px-2 py-1 text-center text-muted-foreground">???</td>
-              <td className="px-2 py-1 text-[10px] text-muted-foreground">
-                pending
-              </td>
-            </tr>
           </tbody>
         </table>
       </div>
