@@ -68,11 +68,24 @@ export async function POST() {
   }
 
   const prompt =
-    `Brief market summary for today ${today}. What happened overnight, ` +
-    "key pre-market movers, and anything relevant to tech/growth stocks " +
-    "and options traders. 3-4 sentences max.";
+    `Market brief for today ${today}. Structure the response as markdown ` +
+    "with exactly these four bold section headings, each followed by a " +
+    "short paragraph (no citations):\n\n" +
+    "**Market Overnight** — what happened globally overnight: macro moves, " +
+    "geopolitical events, oil, rates, Asian/European markets.\n\n" +
+    "**Pre-Market** — where US futures are pointing, notable pre-market " +
+    "movers and why.\n\n" +
+    "**Sector Watch** — which sectors are leading or lagging and why: " +
+    "rotation themes, headwinds.\n\n" +
+    "**Options Traders** — what this means specifically for options " +
+    "traders today: volatility environment, key events, anything that " +
+    "affects IV or premium pricing.\n\n" +
+    "Write each section as its own paragraph with a blank line before and " +
+    "after the heading, so the sections are clearly separated. Cover each " +
+    "topic as thoroughly as the day's news warrants — do not artificially " +
+    "shorten sections.";
   const r = await askPerplexityRaw(prompt, {
-    maxTokens: 400,
+    maxTokens: 1200,
     label: "morning-brief",
   });
   if (!r || !r.text.trim()) {
