@@ -8,8 +8,10 @@ export const maxDuration = 60;
 
 // Morning AI brief, cached one-per-day in morning_brief_cache with a
 // 4-hour freshness window. GET returns the cached brief if fresh (else
-// null); POST generates a new brief via Perplexity (returning the
-// cached one if still fresh, so a double-click doesn't double-spend).
+// null) for page load. POST is the explicit "Regenerate" action — it
+// always calls Perplexity and overwrites the cache; the frontend
+// button disables itself while loading, so no server-side debounce
+// is needed here.
 
 const CACHE_TTL_MS = 4 * 60 * 60 * 1000;
 
@@ -61,11 +63,6 @@ export async function GET() {
 export async function POST() {
   const sb = createServerClient();
   const today = easternToday();
-
-  const fresh = await getFresh(sb);
-  if (fresh) {
-    return NextResponse.json({ ...fresh, cached: true });
-  }
 
   const prompt =
     `Market brief for today ${today}. Structure the response as markdown ` +
