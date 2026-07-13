@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   Activity,
   AlertTriangle,
@@ -15,6 +17,33 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { EntrySignalBadge } from "@/components/swing-ideas-board";
+
+// Markdown body for the AI morning brief — mirrors the styling used for
+// filing analyses (components/filing-analysis.tsx) without a typography plugin.
+function BriefMarkdownBody({ text }: { text: string }) {
+  return (
+    <div
+      className={cn(
+        "text-foreground/90",
+        "[&_h1]:mt-3 [&_h1]:text-sm [&_h1]:font-bold [&_h1]:text-foreground",
+        "[&_h2]:mt-3 [&_h2]:text-[13px] [&_h2]:font-semibold [&_h2]:text-foreground",
+        "[&_h3]:mt-2 [&_h3]:text-[13px] [&_h3]:font-semibold [&_h3]:text-foreground",
+        "[&_p]:my-1.5",
+        "[&_ul]:my-1.5 [&_ul]:list-disc [&_ul]:pl-5",
+        "[&_ol]:my-1.5 [&_ol]:list-decimal [&_ol]:pl-5",
+        "[&_li]:my-0.5",
+        "[&_strong]:font-semibold [&_strong]:text-foreground",
+        "[&_a]:text-sky-300 [&_a]:underline",
+        "[&_code]:rounded [&_code]:bg-muted/60 [&_code]:px-1 [&_code]:font-mono [&_code]:text-[12px]",
+        "[&_blockquote]:my-1.5 [&_blockquote]:border-l-2 [&_blockquote]:border-border [&_blockquote]:pl-2 [&_blockquote]:text-muted-foreground",
+        "[&_hr]:my-3 [&_hr]:border-border",
+      )}
+      style={{ fontSize: "13px", lineHeight: 1.6 }}
+    >
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+    </div>
+  );
+}
 
 // ---------- Response shapes (minimal subsets) ----------
 type Position = {
@@ -882,12 +911,7 @@ export function DashboardView() {
           )}
           {brief ? (
             <div>
-              <p
-                className="text-foreground/90"
-                style={{ fontSize: "13px", lineHeight: 1.6 }}
-              >
-                {brief}
-              </p>
+              <BriefMarkdownBody text={brief} />
               <button
                 type="button"
                 onClick={() => void generateBrief()}
