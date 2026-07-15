@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getTodayEarnings } from "@/lib/earnings";
+import { getTodayEarnings, getSupplementalWhitelistEarnings } from "@/lib/earnings";
 import { getBatchPrices } from "@/lib/price";
 import { isSchwabConnected } from "@/lib/schwab";
 import { getWatchlistSymbols } from "@/lib/watchlist";
@@ -67,6 +67,10 @@ type ScreenResponse = {
     // because Schwab returned null/error/empty. They're still in the
     // result set; downstream stages will retry the chain fetch.
     unverifiedChain?: string[];
+    // Whitelist symbols the bulk Finnhub calendar pull missed (e.g. ADRs
+    // filed under a foreign primary listing) but a per-symbol fallback
+    // query confirmed do have earnings in today's window.
+    whitelistSupplemented: string[];
   };
   error?: string;
 };
@@ -109,26 +113,47 @@ export async function POST(req: NextRequest) {
     droppedByQuality: [],
     droppedByChain: [],
     unverifiedChain: [],
+    whitelistSupplemented: [],
   };
 
   try {
     const { connected } = await isSchwabConnected().catch(() => ({ connected: false }));
     console.log(`[screen] schwab connected=${connected}`);
 
-    const earnings = await getTodayEarnings();
-    stats.finnhub = earnings.length;
-    console.log(`[screen] earnings from Finnhub: ${earnings.length}`);
-    if (earnings.length === 0) {
+    const { whitelist, blacklist } = await getWatchlistSymbols(userId);
+    console.log(
+      `[screen] watchlist: whitelist=${whitelist.size} blacklist=${blacklist.size}`,
+    );
+
+    const bulkEarnings = await getTodayEarnings();
+    stats.finnhub = bulkEarnings.length;
+    console.log(`[screen] earnings from Finnhub (bulk): ${bulkEarnings.length}`);
+    if (bulkEarnings.length === 0) {
       console.warn(
         "[screen] Finnhub returned 0 eligible earnings for today-AMC or tomorrow-BMO. " +
           "Check [finnhub] and [earnings] log lines above for the exact URL, date window, and raw row breakdown.",
       );
     }
 
-    const { whitelist, blacklist } = await getWatchlistSymbols(userId);
-    console.log(
-      `[screen] watchlist: whitelist=${whitelist.size} blacklist=${blacklist.size}`,
-    );
+    // Whitelist symbols the bulk calendar pull missed — e.g. ADRs
+    // Finnhub files under a foreign primary listing (TSM -> 2330.TW)
+    // never surface in the bulk range query at all. A whitelist entry
+    // is an explicit user opt-in, so check each missing one directly by
+    // symbol rather than silently dropping it.
+    const bulkSymbols = new Set(bulkEarnings.map((e) => e.symbol.toUpperCase()));
+    const missingWhitelist = Array.from(whitelist).filter((s) => !bulkSymbols.has(s));
+    const supplemental =
+      missingWhitelist.length > 0
+        ? await getSupplementalWhitelistEarnings(missingWhitelist)
+        : [];
+    stats.whitelistSupplemented = supplemental.map((e) => e.symbol.toUpperCase());
+    if (supplemental.length > 0) {
+      console.log(
+        `[screen] whitelist supplemental earnings found: ${stats.whitelistSupplemented.join(", ")}`,
+      );
+    }
+
+    const earnings = [...bulkEarnings, ...supplemental];
 
     // Step 2: hard kill ETFs + blacklist. Also narrow the timing type to BMO|AMC.
     // Whitelist tickers bypass the ETF/fund classifier (which has false

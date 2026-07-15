@@ -95,6 +95,64 @@ export async function getTodayEarnings(): Promise<EarningsCalendarItem[]> {
   }
 }
 
+// Finnhub's bulk /calendar/earnings range query silently excludes some
+// ADRs whose earnings record is filed under a foreign primary listing
+// (e.g. TSM is filed as 2330.TW) — the bulk endpoint doesn't return
+// them under any symbol. A per-symbol query for the same endpoint does
+// return the event, just keyed to the foreign symbol. Whitelisted
+// tickers are an explicit user opt-in, so for any whitelist symbol the
+// bulk call didn't surface, fall back to a direct per-symbol lookup —
+// this is the only way ADR earnings like TSM's are found at all.
+export async function getSupplementalWhitelistEarnings(
+  symbols: string[],
+): Promise<EarningsCalendarItem[]> {
+  const today = todayInEastern();
+  const tomorrow = addOneDayIso(today);
+  const out: EarningsCalendarItem[] = [];
+
+  for (const symbol of symbols) {
+    try {
+      const data = await finnhubGet<{ earningsCalendar: FinnhubCalendarEntry[] }>(
+        "/calendar/earnings",
+        { from: today, to: tomorrow, symbol },
+      );
+      const rows = data.earningsCalendar ?? [];
+      for (const r of rows) {
+        const hour = (r.hour ?? "").toLowerCase();
+        const timing: EarningsCalendarItem["timing"] | null =
+          hour === "bmo" ? "BMO" : hour === "amc" ? "AMC" : hour === "dmh" ? "DMH" : null;
+        if (!timing) continue;
+        if (
+          !(
+            (r.date === today && timing === "AMC") ||
+            (r.date === tomorrow && timing === "BMO")
+          )
+        ) {
+          continue;
+        }
+        // Finnhub may key this row to a foreign primary listing (e.g.
+        // 2330.TW) — stamp back the whitelist symbol the user actually
+        // opted in on so downstream price/chain lookups match.
+        out.push({
+          symbol,
+          date: r.date,
+          timing,
+          estimatedEPS: r.epsEstimate ?? null,
+          actualEPS: r.epsActual ?? null,
+        });
+        break;
+      }
+    } catch (e) {
+      console.warn(
+        `[earnings] getSupplementalWhitelistEarnings(${symbol}) failed:`,
+        e instanceof Error ? e.message : e,
+      );
+    }
+  }
+
+  return out;
+}
+
 // Earnings across the next `days` calendar days (today inclusive),
 // BMO/AMC only (DMH dropped — a mid-session print isn't a clean
 // before/after-the-bell event). Dates compared in US Eastern. Powers

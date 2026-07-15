@@ -137,6 +137,7 @@ type ScreenStats = {
   droppedByBlacklist: string[];
   droppedByPrice: string[];
   droppedByChain: string[];
+  whitelistSupplemented: string[];
 };
 
 type SortKey =
@@ -2178,6 +2179,9 @@ export function ScreenerView({ connected }: Props) {
             <div className="space-y-1 font-mono text-sm text-muted-foreground">
               <div>
                 Finnhub raw: <span className="text-foreground">{lastStats.finnhub}</span>
+                {lastStats.whitelistSupplemented.length > 0 && (
+                  <> · whitelist supplemented: {lastStats.whitelistSupplemented.join(", ")}</>
+                )}
               </div>
               <div>
                 After ETF / blacklist: <span className="text-foreground">{lastStats.afterEtfAndBlacklist}</span>
