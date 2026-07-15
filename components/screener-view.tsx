@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import {
   Play,
   AlertTriangle,
@@ -459,6 +460,12 @@ export function ScreenerView({ connected }: Props) {
   // Schwab outage, etc.). Surfaced as a small note below the table
   // so the user knows the screen isn't necessarily exhaustive.
   const [unverifiedExcluded, setUnverifiedExcluded] = useState<number>(0);
+  // Set when every single Stage-2 chain-verification failure came back
+  // reason=schwab_error/schwab_disconnected — i.e. a systemic Schwab
+  // outage or expired token, not per-symbol chain issues. Drives a
+  // dedicated "reconnect Schwab" banner instead of the generic empty
+  // state. Never set on partial failures (some candidates verified OK).
+  const [schwabDown, setSchwabDown] = useState<boolean>(false);
   // Two-stream Pass 3 state. After Pass 2 lands, the client kicks
   // off an independent News stream (Perplexity, /api/screener/
   // analyze/pass3a) and a Grade stream (personal history + three-
@@ -905,6 +912,7 @@ export function ScreenerView({ connected }: Props) {
     setLastStats(null);
     setChainProgress(null);
     setUnverifiedExcluded(0);
+    setSchwabDown(false);
     try {
       // ---- Stream A: calendar + filters + Stage 1+2 scoring ----
       // Fast — 2-5s typical. Returns the full survivor list with
@@ -1007,6 +1015,12 @@ export function ScreenerView({ connected }: Props) {
       let presentCount = 0;
       let absentCount = 0;
       let unverifiedCount = 0;
+      // One entry per unverified drop — "schwab_error"/"schwab_disconnected"
+      // from the server, or a client-side placeholder ("client_timeout",
+      // "fetch_failed") when we never got a per-row reason. Used after
+      // the loop to tell "Schwab is systemically down" apart from
+      // per-symbol chain issues.
+      const unverifiedReasons: string[] = [];
       const workingResults = [...initialResults];
       const isLatestRunRef = { current: true }; // guards against double-run races
 
@@ -1024,6 +1038,7 @@ export function ScreenerView({ connected }: Props) {
             for (const c of batches[r]) {
               dropSymbols.add(c.symbol.toUpperCase());
               unverifiedCount += 1;
+              unverifiedReasons.push("client_timeout");
             }
           }
           break;
@@ -1045,6 +1060,7 @@ export function ScreenerView({ connected }: Props) {
           for (const c of batch) {
             dropSymbols.add(c.symbol.toUpperCase());
             unverifiedCount += 1;
+            unverifiedReasons.push("fetch_failed");
           }
         } else {
           const byKey = new Map(
@@ -1056,6 +1072,7 @@ export function ScreenerView({ connected }: Props) {
               // Schwab couldn't verify this row — drop, surface in count.
               dropSymbols.add(c.symbol.toUpperCase());
               unverifiedCount += 1;
+              unverifiedReasons.push(v?.reason ?? "unknown");
             } else if (v.status === "absent") {
               // Verified absent — drop unless whitelisted.
               absentCount += 1;
@@ -1089,6 +1106,25 @@ export function ScreenerView({ connected }: Props) {
         (r) => !dropSymbols.has(r.symbol.toUpperCase()),
       );
       setResults(finalResults);
+
+      // Systemic-failure detection: every candidate got dropped, and
+      // every single one of them was unverified specifically because
+      // Schwab itself is broken (expired/revoked token or a full
+      // outage) — not a mix of "some passed" or "some failed for an
+      // unrelated/unknown reason". Partial failures keep using the
+      // small amber note below the table instead.
+      const SCHWAB_DOWN_REASONS = new Set(["schwab_error", "schwab_disconnected"]);
+      const allUnverifiedAreSchwabDown =
+        unverifiedCount > 0 &&
+        unverifiedReasons.length === unverifiedCount &&
+        unverifiedReasons.every((r) => SCHWAB_DOWN_REASONS.has(r));
+      const schwabSystemicFailure =
+        initialResults.length > 0 &&
+        finalResults.length === 0 &&
+        presentCount === 0 &&
+        absentCount === 0 &&
+        allUnverifiedAreSchwabDown;
+      setSchwabDown(schwabSystemicFailure);
       setChainProgress({
         done: initialResults.length,
         total: initialResults.length,
@@ -2173,7 +2209,27 @@ export function ScreenerView({ connected }: Props) {
           </div>
         )}
 
-        {emptyAfterScreen && lastStats && (
+        {emptyAfterScreen && schwabDown && (
+          <div className="rounded-lg border border-rose-500/40 bg-rose-500/10 p-4 text-base text-rose-100">
+            <div className="mb-1 flex items-center gap-2 font-semibold text-rose-200">
+              <AlertTriangle className="h-4 w-4" />
+              Schwab connection lost
+            </div>
+            <p className="mb-3 text-sm text-rose-200/90">
+              All candidates failed chain verification — Schwab&apos;s access token is
+              expired or revoked and every chain lookup is failing the same way.
+              Reconnect Schwab in Settings to run the screener.
+            </p>
+            <Link
+              href="/settings"
+              className="inline-flex items-center gap-1 rounded-md border border-rose-400/50 bg-rose-500/20 px-3 py-1.5 text-sm font-semibold text-rose-100 hover:bg-rose-500/30"
+            >
+              Reconnect Schwab →
+            </Link>
+          </div>
+        )}
+
+        {emptyAfterScreen && !schwabDown && lastStats && (
           <div className="rounded-lg border border-border bg-background/40 p-4 text-base">
             <div className="mb-2 font-medium">No candidates survived the filters.</div>
             <div className="space-y-1 font-mono text-sm text-muted-foreground">

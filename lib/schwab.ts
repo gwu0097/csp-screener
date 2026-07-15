@@ -35,6 +35,18 @@ function basicAuthHeader(): string {
   return `Basic ${encoded}`;
 }
 
+// Carries the HTTP status so callers can tell an auth rejection
+// (400/401 — the token itself is bad) apart from a transient failure
+// (network blip, 5xx) that shouldn't mark the token invalid.
+export class SchwabAuthError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "SchwabAuthError";
+    this.status = status;
+  }
+}
+
 async function postTokenRequest(body: URLSearchParams): Promise<TokenResponse> {
   const grantType = body.get("grant_type");
   console.log("[schwab-token] POST", `${OAUTH_BASE}/token`, {
@@ -56,7 +68,7 @@ async function postTokenRequest(body: URLSearchParams): Promise<TokenResponse> {
   console.log("[schwab-token] response status:", res.status, "body length:", text.length);
   if (!res.ok) {
     console.error("[schwab-token] error body:", text);
-    throw new Error(`Schwab token request failed: ${res.status} ${text}`);
+    throw new SchwabAuthError(res.status, `Schwab token request failed: ${res.status} ${text}`);
   }
   try {
     return JSON.parse(text) as TokenResponse;
@@ -156,6 +168,32 @@ export async function isSchwabConnected(): Promise<{ connected: boolean; lastRef
   return { connected: refreshExpiry > Date.now(), lastRefresh: row.updated_at };
 }
 
+// isSchwabConnected() only checks a locally-computed expiry timestamp,
+// not live validity — Schwab can revoke/rotate a refresh token
+// server-side (e.g. single-use refresh tokens) well before that local
+// timestamp says it expires. Any call site that gets invalid_grant/401
+// back from Schwab should call this so isSchwabConnected() flips to
+// false immediately, without waiting for the stale local timestamp to
+// catch up or for a page refresh to re-check. Backdates
+// refresh_token_expires_at rather than adding a new column — that's
+// the only field isSchwabConnected() reads.
+export async function invalidateSchwabToken(): Promise<void> {
+  const row = await loadLatestTokenRow();
+  if (!row) return;
+  const supabase = createServerClient();
+  const { error } = await supabase
+    .from("schwab_tokens")
+    .update({ refresh_token_expires_at: new Date(0).toISOString() })
+    .eq("id", row.id);
+  if (error) {
+    console.error("[schwab] invalidateSchwabToken failed:", error.message);
+  } else {
+    console.warn(
+      "[schwab] token marked invalid — isSchwabConnected() will report disconnected until reconnect at /settings",
+    );
+  }
+}
+
 export async function disconnectSchwab(): Promise<void> {
   const supabase = createServerClient();
   await supabase.from("schwab_tokens").delete().neq("id", "00000000-0000-0000-0000-000000000000");
@@ -176,7 +214,15 @@ export async function getValidAccessToken(): Promise<string> {
     throw new Error("Schwab refresh token expired. Reconnect at /settings.");
   }
 
-  const fresh = await refreshAccessToken(row.refresh_token);
+  let fresh: TokenResponse;
+  try {
+    fresh = await refreshAccessToken(row.refresh_token);
+  } catch (e) {
+    if (e instanceof SchwabAuthError && (e.status === 400 || e.status === 401)) {
+      await invalidateSchwabToken();
+    }
+    throw e;
+  }
   await persistTokens(fresh);
   return fresh.access_token;
 }
@@ -199,6 +245,12 @@ export async function schwabGet<T>(path: string, params?: Record<string, string 
   });
   if (!res.ok) {
     const text = await res.text();
+    if (res.status === 401) {
+      // The token we just used looked fresh locally but Schwab
+      // rejected it live — mark it invalid so the banner shows up
+      // immediately instead of waiting on the stale local timestamp.
+      await invalidateSchwabToken();
+    }
     throw new Error(`Schwab GET ${url.pathname} failed: ${res.status} ${text}`);
   }
   return (await res.json()) as T;
