@@ -42,6 +42,53 @@ type CrushHistoryEvent = {
 
 const SIMILAR_EM_TOLERANCE = 0.02; // ±2pp from today's EM
 
+// Quarter label from earnings date — same convention as
+// lib/earnings-history-table.ts quarterLabel (not imported: that module
+// pulls the server-only supabase client into this client bundle).
+function quarterLabel(dateIso: string): string {
+  const [y, m] = dateIso.split("-").map(Number);
+  if (!y || !m) return "—";
+  if (m <= 3) return `Q4 ${y - 1}`;
+  if (m <= 6) return `Q1 ${y}`;
+  if (m <= 9) return `Q2 ${y}`;
+  return `Q3 ${y}`;
+}
+
+function todayEasternIso(): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
+
+// Badge + note wording for the pinned upcoming-event row.
+function upcomingTiming(earningsIso: string, todayIso: string): {
+  badge: string;
+  note: string;
+} {
+  if (!earningsIso || earningsIso === todayIso) {
+    return { badge: "TODAY", note: "pending · reports today" };
+  }
+  const days = Math.round(
+    (Date.parse(earningsIso + "T00:00:00Z") - Date.parse(todayIso + "T00:00:00Z")) /
+      86_400_000,
+  );
+  if (days === 1) return { badge: "TOMORROW", note: "pending · reports tomorrow" };
+  if (days > 1) {
+    const label = new Intl.DateTimeFormat("en-US", {
+      month: "short",
+      day: "numeric",
+      timeZone: "UTC",
+    }).format(new Date(earningsIso + "T00:00:00Z"));
+    return { badge: label.toUpperCase(), note: `pending · reports ${label}` };
+  }
+  // Report already happened but the actual move hasn't landed yet
+  // (T1 capture runs the morning after).
+  return { badge: "LATEST", note: "pending · awaiting post-earnings price" };
+}
+
 // Em-dash on missing data — communicates "not available" rather than
 // "?" which previously looked like a parse failure. Per-cell tooltips
 // in the table explain the specific reason (no implied-move data, etc.).
@@ -131,8 +178,29 @@ export function CrushHistoryTable({
 
   const liveEvents = refreshed ?? events ?? [];
 
-  // Sort newest first; TODAY's pending row is pinned above these in the table.
-  const sorted = [...liveEvents].sort((a, b) => b.earningsDate.localeCompare(a.earningsDate));
+  // The upcoming event now exists in earnings_history too (seeded by the
+  // screener / T0 capture with a live EM), so it must NOT render as a
+  // second history row alongside the pinned row — match it by the
+  // screener's earnings date (fallback: any not-yet-past event) and merge
+  // it into the pinned row instead.
+  const todayIso = todayEasternIso();
+  const upcoming =
+    liveEvents.find((e) => e.earningsDate === todayEarningsDate) ??
+    liveEvents.find((e) => e.earningsDate >= todayIso) ??
+    null;
+
+  // Sort newest first; the merged upcoming row is pinned above these.
+  const sorted = liveEvents
+    .filter((e) => e !== upcoming && e.earningsDate < todayIso)
+    .sort((a, b) => b.earningsDate.localeCompare(a.earningsDate));
+
+  const pinnedDate = todayEarningsDate || upcoming?.earningsDate || todayIso;
+  const pinnedQtr = quarterLabel(pinnedDate);
+  const pinnedEm = todayEmPct ?? upcoming?.impliedMovePct ?? null;
+  const pinnedActual = upcoming?.actualMovePct ?? null;
+  const pinnedRatio = upcoming?.ratio ?? null;
+  const pinnedGrade = upcoming?.grade ?? null;
+  const timing = upcomingTiming(pinnedDate, todayIso);
 
   async function handleFetchEmHistory() {
     console.log("[fetch-em] starting for:", todaySymbol);
@@ -292,21 +360,36 @@ export function CrushHistoryTable({
           </thead>
           <tbody>
             <tr className="border-t border-border bg-amber-500/[0.04]">
-              <td className="px-2 py-1 font-mono font-semibold text-amber-200">
-                TODAY
+              <td className="px-2 py-1 font-mono font-semibold">
+                {pinnedQtr}
+                <span className="ml-1.5 rounded bg-amber-500/15 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-amber-200">
+                  {timing.badge}
+                </span>
               </td>
               <td className="px-2 py-1 text-right font-mono text-amber-200">
-                {fmtPct(todayEmPct)}
+                {fmtPct(pinnedEm)}
+              </td>
+              <td
+                className={`px-2 py-1 text-right font-mono ${pinnedActual === null ? "text-muted-foreground" : signedPctCls(pinnedActual)}`}
+              >
+                {pinnedActual === null ? "???" : fmtSignedPct(pinnedActual)}
               </td>
               <td className="px-2 py-1 text-right font-mono text-muted-foreground">
-                ???
+                {pinnedRatio === null ? "???" : fmtRatio(pinnedRatio)}
               </td>
-              <td className="px-2 py-1 text-right font-mono text-muted-foreground">
-                ???
+              <td className="px-2 py-1 text-center text-muted-foreground">
+                {pinnedGrade === null ? (
+                  "???"
+                ) : (
+                  <span
+                    className={`inline-flex items-center gap-0.5 rounded px-1 py-0.5 font-mono font-semibold ${gradeBadgeCls(pinnedGrade)}`}
+                  >
+                    {pinnedGrade}
+                  </span>
+                )}
               </td>
-              <td className="px-2 py-1 text-center text-muted-foreground">???</td>
               <td className="px-2 py-1 text-[10px] text-muted-foreground">
-                pending
+                {pinnedActual === null ? timing.note : "just reported"}
               </td>
             </tr>
             {sorted.map((e) => {
