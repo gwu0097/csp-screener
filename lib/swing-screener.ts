@@ -22,11 +22,12 @@ import {
   type SchwabOptionContract,
   type SchwabOptionsChain,
 } from "./schwab";
-import { getResearchSnapshot } from "./yahoo";
+import { getResearchSnapshot, getHistoricalPrices } from "./yahoo";
 import {
   batchRefreshSnapshots,
   type SymbolSnapshot,
 } from "./market-snapshot";
+import { computeATR } from "./indicators";
 import YahooFinance from "yahoo-finance2";
 
 // Reuse the same yahoo-finance2 instance pattern as lib/yahoo.ts.
@@ -143,6 +144,12 @@ export type SwingCandidate = {
   insiderTransactions: InsiderTransaction[];
   insiderSignal: "strong_bullish" | "bullish" | "neutral" | "bearish";
   executiveBuys: InsiderTransaction[];
+  // Open-market (code P) purchase breakdown — the raw numbers
+  // scoreInsiderConviction ranks on, surfaced so the Insider tab's row
+  // can show them directly instead of just the derived score.
+  insiderBuyDollars: number;
+  insiderBuyerCount: number;
+  insiderLastBuyDaysAgo: number | null;
 
   unusualOptionsActivity: boolean;
   callVolumeOiRatio: number | null;
@@ -179,6 +186,16 @@ export type SwingCandidate = {
   setupTabs: SetupTab[];
   tabScores: Partial<Record<SetupTab, number>>;
   tabStats: TabStats | null;
+  // Kept separate (unlike tabStats, which collapses to one of the two)
+  // so a confluence candidate shown from either tab gets that tab's own
+  // stats, not whichever qualified first.
+  capitulationStats: TabStats | null;
+  pullbackStats: TabStats | null;
+
+  // 14-day Average True Range — the volatility basis for entry/target/
+  // stop (see computeStructuralLevels). Null when Yahoo's daily history
+  // didn't return enough bars (e.g. a recent IPO).
+  atr14: number | null;
 };
 
 // ---------- Pass 1 helpers ----------
@@ -317,6 +334,11 @@ export type TradeLevels = {
   rr: number;
 };
 
+// Pass-1-only rough geometry (52w-low based). Used purely as a cheap
+// pre-filter before Finnhub/Schwab enrichment (see pass1Filter) — never
+// what's shown to the user. Pass 2 replaces it with computeStructuralLevels
+// (ATR + real support/resistance) once a symbol has survived to become an
+// actual candidate.
 function computeTradeLevels(q: Pass1Quote): TradeLevels | null {
   const entryPrice = q.currentPrice;
   const recoveryTarget = q.week52Low + (q.week52High - q.week52Low) * 0.6;
@@ -472,8 +494,10 @@ export function scorePullback(stats: TabStats, q: Pass1Quote): number {
   return Math.min(10, Math.round(trend3m + trend1y + tight + orderly));
 }
 
-// Levels for tab candidates that don't clear the legacy R/R funnel —
-// swing-sized stop/target anchored to the live price instead of the
+// Pass-1-only fallback for tab candidates that don't clear the legacy R/R
+// funnel — like computeTradeLevels above, this is a cheap pre-filter
+// geometry, superseded for display by computeStructuralLevels in pass 2.
+// Swing-sized stop/target anchored to the live price instead of the
 // 52w-low geometry (which is meaningless mid-capitulation).
 function fallbackLevels(q: Pass1Quote): TradeLevels {
   const entryPrice = q.currentPrice;
@@ -493,6 +517,79 @@ function fallbackLevels(q: Pass1Quote): TradeLevels {
     risk,
     rr: risk > 0 ? reward / risk : 0,
   };
+}
+
+// ~40 calendar days back covers ~26-28 trading bars — enough for a
+// 14-period ATR (needs 15) with a few bars of margin for holidays/gaps.
+const ATR_LOOKBACK_DAYS = 40;
+
+async function fetchAtr14(symbol: string): Promise<number | null> {
+  const to = new Date();
+  const from = new Date(to.getTime() - ATR_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
+  try {
+    const bars = await getHistoricalPrices(symbol, from, to);
+    // computeATR needs oldest-first, like computeRSI/computeSMA — Yahoo's
+    // historical pull isn't guaranteed sorted (see market-snapshot.ts's
+    // sortedCloses), so sort + drop any bar with a non-positive price
+    // defensively before computing.
+    const sorted = [...bars]
+      .filter((b) => b.high > 0 && b.low > 0 && b.close > 0 && b.date)
+      .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    return computeATR(sorted, 14);
+  } catch {
+    return null;
+  }
+}
+
+// Real trade geometry, replacing both computeTradeLevels and
+// fallbackLevels above for what's actually displayed to the user (those
+// two remain as pass-1's cheap pre-filter — see pass1Filter).
+//
+// Stop: 1.5x ATR14 below entry (volatility-sized risk), but never
+// placed above the structural level the setup is actually defending —
+// the 50d MA for anything trading above it (pullback/insider/options
+// theses all rest on the 50d holding), or the 52-week low for anything
+// still below its 50d (capitulation). We take the wider (lower) of the
+// two so the stop sits below both "normal chop" and the level being
+// tested, then clamp to a 3-15% risk band so a near-zero-ATR name
+// doesn't produce a stop basically at entry and a wild name doesn't
+// blow past a sane swing-trade risk budget.
+//
+// Target: the nearer of analyst consensus and real overhead structure
+// (52-week high, or a 3x-ATR projection when price is already above its
+// 52w high) — never a fixed percentage. A close target is a more
+// realistic multi-week swing objective than a distant one.
+function computeStructuralLevels(
+  q: Pass1Quote,
+  atr14: number | null,
+): TradeLevels | null {
+  const entryPrice = q.currentPrice;
+  if (!Number.isFinite(entryPrice) || entryPrice <= 0) return null;
+
+  const atrStop = atr14 !== null && atr14 > 0 ? entryPrice - 1.5 * atr14 : Infinity;
+  const structuralFloor =
+    entryPrice > q.ma50 ? q.ma50 * 0.985 : q.week52Low * 0.97;
+  let stopPrice = Math.min(atrStop, structuralFloor);
+  stopPrice = Math.min(stopPrice, entryPrice * 0.97); // floor: at least 3% risk
+  stopPrice = Math.max(stopPrice, entryPrice * 0.85); // ceiling: at most 15% risk
+
+  const atrProjection = atr14 !== null && atr14 > 0 ? entryPrice + 3 * atr14 : null;
+  const structuralResistance =
+    q.week52High > entryPrice ? q.week52High : atrProjection;
+  const targetCandidates = [q.analystTarget, structuralResistance].filter(
+    (v): v is number => v !== null && Number.isFinite(v) && v > entryPrice,
+  );
+  const targetPrice =
+    targetCandidates.length > 0
+      ? Math.min(...targetCandidates)
+      : (atrProjection ?? entryPrice * 1.1);
+
+  const reward = targetPrice - entryPrice;
+  const risk = entryPrice - stopPrice;
+  if (!Number.isFinite(reward) || !Number.isFinite(risk) || risk <= 0) {
+    return null;
+  }
+  return { entryPrice, targetPrice, stopPrice, reward, risk, rr: reward / risk };
 }
 
 // Cheap quote-only pre-gates so we only refresh snapshots (3 Yahoo
@@ -835,6 +932,27 @@ function daysFromTodayUtc(dateIso: string): number | null {
   return Math.round((b - a) / (24 * 60 * 60 * 1000));
 }
 
+// Raw open-market (code P) purchase numbers scoreInsiderConviction ranks
+// on — split out so the Insider tab's row can display the actual $,
+// buyer count, and recency instead of just the derived score.
+export function insiderPurchaseBreakdown(transactions: InsiderTransaction[]): {
+  dollars: number;
+  distinctBuyers: number;
+  newestBuyDaysAgo: number | null;
+} {
+  const buys = transactions.filter((t) => t.transactionCode === "P");
+  const dollars = buys.reduce((s, t) => s + t.dollarValue, 0);
+  const distinctBuyers = new Set(buys.map((t) => t.name)).size;
+  let newestBuyDaysAgo: number | null = null;
+  for (const t of buys) {
+    const d = t.date ? daysFromTodayUtc(t.date) : null;
+    if (d === null) continue;
+    const age = -d; // past dates are negative days-ahead
+    if (newestBuyDaysAgo === null || age < newestBuyDaysAgo) newestBuyDaysAgo = age;
+  }
+  return { dollars, distinctBuyers, newestBuyDaysAgo };
+}
+
 // Insider conviction (0-10): open-market purchase dollars + number of
 // distinct buyers + recency of the latest buy.
 export function scoreInsiderConviction(
@@ -842,24 +960,17 @@ export function scoreInsiderConviction(
 ): number {
   const buys = transactions.filter((t) => t.transactionCode === "P");
   if (buys.length === 0) return 0;
-  const dollars = buys.reduce((s, t) => s + t.dollarValue, 0);
-  const distinct = new Set(buys.map((t) => t.name)).size;
-  let newestDays: number | null = null;
-  for (const t of buys) {
-    const d = t.date ? daysFromTodayUtc(t.date) : null;
-    if (d === null) continue;
-    const age = -d; // past dates are negative days-ahead
-    if (newestDays === null || age < newestDays) newestDays = age;
-  }
+  const { dollars, distinctBuyers, newestBuyDaysAgo } =
+    insiderPurchaseBreakdown(transactions);
   const size =
     dollars >= 1_000_000 ? 4 : dollars >= 250_000 ? 3 : dollars >= 100_000 ? 2 : 1;
-  const breadth = distinct >= 3 ? 3 : distinct === 2 ? 2 : 1;
+  const breadth = distinctBuyers >= 3 ? 3 : distinctBuyers === 2 ? 2 : 1;
   const recency =
-    newestDays !== null && newestDays <= 7
+    newestBuyDaysAgo !== null && newestBuyDaysAgo <= 7
       ? 3
-      : newestDays !== null && newestDays <= 14
+      : newestBuyDaysAgo !== null && newestBuyDaysAgo <= 14
         ? 2
-        : newestDays !== null && newestDays <= 30
+        : newestBuyDaysAgo !== null && newestBuyDaysAgo <= 30
           ? 1
           : 0;
   return Math.min(10, size + breadth + recency);
@@ -951,16 +1062,17 @@ export async function pass2Enrich(
       nextEarn = null;
     }
 
-    let optionsChain: SchwabOptionsChain | null = null;
-    if (schwabAvailable) {
-      try {
-        optionsChain = await getCallOptionsChainRange(symbol, fromIso, toIso);
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        console.warn(`[swing-screener] schwab calls(${symbol}) failed: ${msg}`);
-        optionsChain = null;
-      }
-    }
+    // Schwab options + ATR history hit different hosts — run concurrently.
+    const [optionsChain, atr14] = await Promise.all([
+      schwabAvailable
+        ? getCallOptionsChainRange(symbol, fromIso, toIso).catch((e) => {
+            const msg = e instanceof Error ? e.message : String(e);
+            console.warn(`[swing-screener] schwab calls(${symbol}) failed: ${msg}`);
+            return null;
+          })
+        : Promise.resolve(null),
+      fetchAtr14(symbol),
+    ]);
 
     const insider = classifyInsiderTxs(insiderRows);
     const opts = analyzeCallChain(optionsChain, q.currentPrice);
@@ -1028,23 +1140,41 @@ export async function pass2Enrich(
     }
     if (setupTabs.length === 0) return null;
 
+    // Red-flag scoring policy: EARNINGS_TOO_SOON gates (handled above).
+    // INSIDER_SELLING is the inverse of the INSIDER_BUYING tier-1 signal
+    // (which is worth +2 to a candidate's legacy score) — on a
+    // bullish-only screener a bearish insider read against the setup's
+    // own thesis, so it costs every tab this candidate qualifies for 2
+    // points, floored at 0, rather than sitting purely as a label with
+    // no effect on rank. HIGH_SHORT_* stays informational-only below:
+    // elevated short interest is genuinely ambiguous (squeeze fuel vs.
+    // bearish crowd conviction), so there's no defensible direction to
+    // score it.
+    const insiderSellingPenalty = insider.signal === "bearish" ? 2 : 0;
+    for (const t of setupTabs) {
+      tabScores[t] = Math.max(0, (tabScores[t] ?? 0) - insiderSellingPenalty);
+    }
+
     // Score (out of 10). Catalyst points (+2/+1/0) are added in pass 3.
     //   +2 strong_bullish insider (P-code purchase >$100K)
     //   +1 bullish insider (net P buyer, no $100K trade)
     //   +2 unusual options activity (was +1; promoted now that earnings
     //      no longer occupies the +2 slot)
     //   +1 volume spike (>2x avg + price up)
-    //   +1 R/R >= 3.0
     //   +1 short float >15% (squeeze potential)
     //   +1 within ±2% of 50d MA
+    //   -2 insider selling (see policy note above)
+    // R/R is deliberately NOT in this list — trade geometry (can you
+    // place a sane order) and setup quality (should you take the trade)
+    // are separate questions; R/R stays a displayed sanity check only.
     let setupScore = 0;
     if (insider.signal === "strong_bullish") setupScore += 2;
     else if (insider.signal === "bullish") setupScore += 1;
     if (opts.unusualOptionsActivity) setupScore += 2;
     if (volumeRatio > 2.0 && q.priceChange1d > 0) setupScore += 1;
-    if (tl.rr >= 3.0) setupScore += 1;
     if (q.shortPercentFloat !== null && q.shortPercentFloat > 0.15) setupScore += 1;
     if (vsMA50 >= -0.02 && vsMA50 <= 0.02) setupScore += 1;
+    setupScore = Math.max(0, setupScore - insiderSellingPenalty);
     setupScore = Math.min(10, setupScore);
     // Pure capitulation/pullback candidates have no tier-1 signals, so
     // the legacy additive score would read ~0 — the overall score is
@@ -1053,6 +1183,14 @@ export async function pass2Enrich(
     setupScore = Math.min(10, Math.max(setupScore, bestTabScore));
 
     const tier2Signals = tier2ByCandidate.get(symbol) ?? [];
+
+    // Real trade geometry for display — replaces pass 1's rough tl
+    // (which only exists to gate pass-1 survival cheaply, before any of
+    // this enrichment). Falls back to tl if a symbol somehow produces a
+    // degenerate structural level (e.g. entry <= 0).
+    const structural = computeStructuralLevels(q, atr14) ?? tl;
+
+    const insiderBreakdown = insiderPurchaseBreakdown(insider.transactions);
 
     candidates.push({
       symbol: q.symbol,
@@ -1075,15 +1213,18 @@ export async function pass2Enrich(
       vsMA50,
       vsMA200,
       volumeRatio,
-      rr: tl.rr,
-      entryPrice: tl.entryPrice,
-      targetPrice: tl.targetPrice,
-      stopPrice: tl.stopPrice,
+      rr: structural.rr,
+      entryPrice: structural.entryPrice,
+      targetPrice: structural.targetPrice,
+      stopPrice: structural.stopPrice,
       nextEarningsDate: nextEarn?.date ?? null,
       daysToEarnings: daysToEarn,
       insiderTransactions: insider.transactions,
       insiderSignal: insider.signal,
       executiveBuys: insider.executiveBuys,
+      insiderBuyDollars: insiderBreakdown.dollars,
+      insiderBuyerCount: insiderBreakdown.distinctBuyers,
+      insiderLastBuyDaysAgo: insiderBreakdown.newestBuyDaysAgo,
       unusualOptionsActivity: opts.unusualOptionsActivity,
       callVolumeOiRatio: opts.callVolumeOiRatio,
       optionsSignal: opts.signal,
@@ -1106,6 +1247,9 @@ export async function pass2Enrich(
       setupTabs,
       tabScores,
       tabStats: capStats ?? pullStats,
+      capitulationStats: capStats,
+      pullbackStats: pullStats,
+      atr14,
     });
     return null;
   });

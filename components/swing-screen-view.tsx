@@ -114,6 +114,11 @@ type SwingCandidate = {
   insiderTransactions: InsiderTransaction[];
   insiderSignal: "strong_bullish" | "bullish" | "neutral" | "bearish";
   executiveBuys: InsiderTransaction[];
+  // Open-market purchase breakdown. Optional — rows persisted before
+  // this field existed fall back to deriving from insiderTransactions.
+  insiderBuyDollars?: number;
+  insiderBuyerCount?: number;
+  insiderLastBuyDaysAgo?: number | null;
   unusualOptionsActivity: boolean;
   callVolumeOiRatio: number | null;
   optionsSignal: "bullish" | "neutral" | "bearish";
@@ -135,14 +140,24 @@ type SwingCandidate = {
   // lack them and get backfilled by normalizeCandidate().
   setupTabs?: SetupTab[];
   tabScores?: Partial<Record<SetupTab, number>>;
-  tabStats?: {
-    redDayCount: number;
-    move5dPct: number;
-    rsi14: number | null;
-    sma20: number | null;
-    return3m: number | null;
-    return1y: number | null;
-  } | null;
+  tabStats?: TabStats | null;
+  // Kept separate from tabStats so a confluence row shown under either
+  // tab gets that tab's own stats. Optional for pre-redesign rows.
+  capitulationStats?: TabStats | null;
+  pullbackStats?: TabStats | null;
+  // 14-day ATR — the volatility basis for entry/target/stop. Optional/
+  // null for rows saved before the real-levels redesign or when Yahoo
+  // didn't return enough daily history.
+  atr14?: number | null;
+};
+
+type TabStats = {
+  redDayCount: number;
+  move5dPct: number;
+  rsi14: number | null;
+  sma20: number | null;
+  return3m: number | null;
+  return1y: number | null;
 };
 
 type SetupTab = "capitulation" | "pullback" | "insider" | "options_flow";
@@ -240,11 +255,6 @@ type SortState = { key: SortKey; dir: SortDir };
 
 const DEFAULT_SORT: SortState = { key: "setupScore", dir: "desc" };
 
-// 10-column desktop grid + 5-column mobile grid. Mobile-only cells
-// get `hidden md:block`/`hidden md:flex` to drop out of the grid.
-const ROW_GRID =
-  "grid w-full items-center gap-2 px-3 grid-cols-[minmax(60px,1fr)_70px_60px_60px_minmax(80px,1fr)] md:grid-cols-[minmax(60px,80px)_minmax(120px,1.5fr)_80px_70px_80px_80px_70px_70px_minmax(120px,1fr)_130px]";
-
 function fmtMoney(n: number | null | undefined, digits = 2): string {
   if (n === null || n === undefined || !Number.isFinite(n)) return "—";
   return `$${n.toFixed(digits)}`;
@@ -256,6 +266,34 @@ function fmtPct(n: number | null | undefined, digits = 1): string {
   return `${sign}${(n * 100).toFixed(digits)}%`;
 }
 
+// Same as fmtPct but for fields that are ALREADY percent-scaled
+// (TabStats.return3m/return1y come out of the snapshot cache as e.g.
+// 12.5, not 0.125 — unlike move5dPct/vsMA50/pctFromHigh, which are
+// decimal fractions).
+function fmtPctNumber(n: number | null | undefined, digits = 1): string {
+  if (n === null || n === undefined || !Number.isFinite(n)) return "—";
+  const sign = n > 0 ? "+" : "";
+  return `${sign}${n.toFixed(digits)}%`;
+}
+
+function fmtRatio(n: number | null | undefined, digits = 2): string {
+  if (n === null || n === undefined || !Number.isFinite(n)) return "—";
+  return `${n.toFixed(digits)}x`;
+}
+
+function fmtCompactMoney(n: number | null | undefined): string {
+  if (n === null || n === undefined || !Number.isFinite(n) || n <= 0) return "—";
+  if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `$${Math.round(n / 1000)}K`;
+  return `$${Math.round(n)}`;
+}
+
+function fmtDaysAgo(n: number | null | undefined): string {
+  if (n === null || n === undefined || !Number.isFinite(n)) return "—";
+  if (n <= 0) return "today";
+  return `${n}d ago`;
+}
+
 function fmtRr(rr: number | null): { text: string; cls: string } {
   if (rr === null || !Number.isFinite(rr)) {
     return { text: "—", cls: "text-muted-foreground" };
@@ -263,6 +301,254 @@ function fmtRr(rr: number | null): { text: string; cls: string } {
   const cls =
     rr >= 3 ? "text-emerald-300" : rr >= 2 ? "text-amber-300" : "text-rose-300";
   return { text: `${rr.toFixed(1)}:1`, cls };
+}
+
+// Insider $ / buyer-count / recency for rows saved before those fields
+// existed on the candidate — derived client-side from the raw
+// transaction list the same way lib/swing-screener.ts's
+// insiderPurchaseBreakdown does server-side.
+function insiderBreakdownOf(c: SwingCandidate): {
+  dollars: number;
+  buyers: number;
+  lastBuyDaysAgo: number | null;
+} {
+  if (
+    c.insiderBuyDollars !== undefined &&
+    c.insiderBuyerCount !== undefined &&
+    c.insiderLastBuyDaysAgo !== undefined
+  ) {
+    return {
+      dollars: c.insiderBuyDollars,
+      buyers: c.insiderBuyerCount,
+      lastBuyDaysAgo: c.insiderLastBuyDaysAgo,
+    };
+  }
+  const buys = c.insiderTransactions.filter((t) => t.transactionCode === "P");
+  const dollars = buys.reduce((s, t) => s + t.dollarValue, 0);
+  const buyers = new Set(buys.map((t) => t.name)).size;
+  let lastBuyDaysAgo: number | null = null;
+  for (const t of buys) {
+    if (!t.date) continue;
+    const days = Math.round(
+      (Date.now() - new Date(t.date).getTime()) / (24 * 60 * 60 * 1000),
+    );
+    if (Number.isFinite(days) && (lastBuyDaysAgo === null || days < lastBuyDaysAgo)) {
+      lastBuyDaysAgo = days;
+    }
+  }
+  return { dollars, buyers, lastBuyDaysAgo };
+}
+
+// How far OTM the hottest call strike is positioned, as a % of price.
+function strikeSkewPct(c: SwingCandidate): number | null {
+  if (c.topOptionsStrike === null || c.currentPrice <= 0) return null;
+  return (c.topOptionsStrike - c.currentPrice) / c.currentPrice;
+}
+
+type MetricColumn = {
+  key: string;
+  label: string;
+  width: string;
+  tooltip?: string;
+  render: (c: SwingCandidate) => React.ReactNode;
+};
+
+const mutedRight = "text-right text-foreground";
+
+// Every column here is something that tab's own qualifier or scorer
+// reads (see lib/swing-screener.ts qualifiesCapitulation/qualifiesPullback/
+// scoreInsiderConviction/scoreOptionsFlow) — the row should read as
+// evidence for why the setup is on this tab, not a generic quote strip.
+const TAB_COLUMNS: Record<SetupTab, MetricColumn[]> = {
+  capitulation: [
+    {
+      key: "move5d",
+      label: "5D Move",
+      width: "70px",
+      tooltip: "Cumulative move over ~5 trading days. Qualifies at ≤ -12%.",
+      render: (c) => (
+        <span className={mutedRight}>
+          {fmtPct(c.capitulationStats?.move5dPct ?? c.tabStats?.move5dPct, 0)}
+        </span>
+      ),
+    },
+    {
+      key: "rsi14",
+      label: "RSI14",
+      width: "60px",
+      tooltip: "14-day RSI. Qualifies below 40 — lower reads more oversold.",
+      render: (c) => {
+        const rsi = c.capitulationStats?.rsi14 ?? c.tabStats?.rsi14 ?? null;
+        const cls =
+          rsi !== null && rsi < 30
+            ? "text-emerald-300"
+            : rsi !== null && rsi < 40
+              ? "text-amber-300"
+              : "text-foreground";
+        return (
+          <span className={`text-right ${cls}`}>
+            {rsi !== null ? rsi.toFixed(0) : "—"}
+          </span>
+        );
+      },
+    },
+    {
+      key: "vsma50cap",
+      label: "vs 50MA",
+      width: "70px",
+      tooltip:
+        "% below the 50d MA — the trend break this setup is capitulating out of.",
+      render: (c) => (
+        <span
+          className={`text-right ${c.vsMA50 < 0 ? "text-rose-300" : "text-foreground"}`}
+        >
+          {fmtPct(c.vsMA50, 1)}
+        </span>
+      ),
+    },
+    {
+      key: "volratiocap",
+      label: "Vol×Avg",
+      width: "70px",
+      tooltip:
+        "Today's volume ÷ 10-day average. >1.5x scores as seller-exhaustion.",
+      render: (c) => (
+        <span
+          className={`text-right ${c.volumeRatio > 1.5 ? "text-emerald-300" : "text-foreground"}`}
+        >
+          {fmtRatio(c.volumeRatio, 1)}
+        </span>
+      ),
+    },
+  ],
+  pullback: [
+    {
+      key: "ret3m",
+      label: "3M Ret",
+      width: "70px",
+      tooltip: "3-month return. Stronger trend scores higher (≥20% is top tier).",
+      render: (c) => (
+        <span className={mutedRight}>
+          {fmtPctNumber(c.pullbackStats?.return3m ?? c.tabStats?.return3m)}
+        </span>
+      ),
+    },
+    {
+      key: "vsma50pb",
+      label: "vs 50MA",
+      width: "70px",
+      tooltip: "Tightness of the pullback to the 50d MA — the support being tested.",
+      render: (c) => (
+        <span
+          className={`text-right ${Math.abs(c.vsMA50) <= 0.02 ? "text-emerald-300" : "text-foreground"}`}
+        >
+          {fmtPct(c.vsMA50, 1)}
+        </span>
+      ),
+    },
+    {
+      key: "fromhighpb",
+      label: "From High",
+      width: "80px",
+      tooltip: "Depth off the 52-week high. Qualifies at -5% to -12% — an orderly dip.",
+      render: (c) => <span className={mutedRight}>{fmtPct(c.pctFromHigh, 0)}</span>,
+    },
+  ],
+  insider: [
+    {
+      key: "buydollars",
+      label: "Buy $",
+      width: "80px",
+      tooltip: "Total open-market (Form 4 code P) purchase dollars.",
+      render: (c) => (
+        <span className={mutedRight}>{fmtCompactMoney(insiderBreakdownOf(c).dollars)}</span>
+      ),
+    },
+    {
+      key: "buyers",
+      label: "Buyers",
+      width: "60px",
+      tooltip: "Distinct insiders who bought. 3+ scores as broad conviction.",
+      render: (c) => <span className={mutedRight}>{insiderBreakdownOf(c).buyers || "—"}</span>,
+    },
+    {
+      key: "lastbuy",
+      label: "Last Buy",
+      width: "80px",
+      tooltip: "Days since the most recent open-market buy. Within 7d scores highest.",
+      render: (c) => (
+        <span className={mutedRight}>{fmtDaysAgo(insiderBreakdownOf(c).lastBuyDaysAgo)}</span>
+      ),
+    },
+    {
+      key: "vsma200ins",
+      label: "vs 200MA",
+      width: "70px",
+      tooltip:
+        "Trend sanity gate: insider buying below -25% vs the 200d MA is excluded (averaging down, not a swing setup).",
+      render: (c) => (
+        <span
+          className={`text-right ${c.vsMA200 < -0.25 ? "text-rose-300" : "text-foreground"}`}
+        >
+          {fmtPct(c.vsMA200, 1)}
+        </span>
+      ),
+    },
+  ],
+  options_flow: [
+    {
+      key: "voloi",
+      label: "Vol/OI",
+      width: "70px",
+      tooltip: "Hottest call strike's volume ÷ open interest. >0.5x qualifies as unusual.",
+      render: (c) => <span className={mutedRight}>{fmtRatio(c.callVolumeOiRatio)}</span>,
+    },
+    {
+      key: "skew",
+      label: "Strike Skew",
+      width: "90px",
+      tooltip: "How far OTM the hottest strike sits, as % of price.",
+      render: (c) => <span className={mutedRight}>{fmtPct(strikeSkewPct(c), 1)}</span>,
+    },
+    {
+      key: "voloptions",
+      label: "Vol×Avg",
+      width: "70px",
+      tooltip: "Today's share volume ÷ 10-day average.",
+      render: (c) => <span className={mutedRight}>{fmtRatio(c.volumeRatio, 1)}</span>,
+    },
+    {
+      key: "expiry",
+      label: "Expiry",
+      width: "90px",
+      tooltip: "Expiration date of the hottest call contract.",
+      render: (c) => (
+        <span className={mutedRight}>{fmtCalendarDate(c.topOptionsExpiry)}</span>
+      ),
+    },
+  ],
+};
+
+// Mobile stays a fixed 5-col strip (Symbol/Price/Chg%/Score/Actions) —
+// same across tabs. Desktop column count varies by tab (3-4 metric
+// columns), so each tab gets its own literal grid-cols class: Tailwind's
+// scanner needs the full class text present in source, not assembled
+// from a runtime template string.
+const ROW_GRID_MOBILE =
+  "grid-cols-[minmax(60px,1fr)_70px_60px_60px_minmax(80px,1fr)]";
+const ROW_GRID_DESKTOP: Record<SetupTab, string> = {
+  capitulation:
+    "md:grid-cols-[minmax(60px,80px)_minmax(120px,1.5fr)_80px_70px_70px_60px_70px_70px_70px_minmax(120px,1fr)_130px]",
+  pullback:
+    "md:grid-cols-[minmax(60px,80px)_minmax(120px,1.5fr)_80px_70px_70px_70px_80px_70px_minmax(120px,1fr)_130px]",
+  insider:
+    "md:grid-cols-[minmax(60px,80px)_minmax(120px,1.5fr)_80px_70px_80px_60px_80px_70px_70px_minmax(120px,1fr)_130px]",
+  options_flow:
+    "md:grid-cols-[minmax(60px,80px)_minmax(120px,1.5fr)_80px_70px_70px_90px_70px_90px_70px_minmax(120px,1fr)_130px]",
+};
+
+function rowGridClass(tab: SetupTab): string {
+  return `grid w-full items-center gap-2 px-3 ${ROW_GRID_MOBILE} ${ROW_GRID_DESKTOP[tab]}`;
 }
 
 function fmtRelDate(iso: string | null): string {
@@ -859,7 +1145,7 @@ function ResultsTable({
 }) {
   return (
     <div className="space-y-1">
-      <TableHeader sort={sort} onSort={onSort} />
+      <TableHeader sort={sort} onSort={onSort} activeTab={activeTab} />
       <div className="space-y-1">
         {candidates.map((c) => (
           <CandidateRow
@@ -877,13 +1163,15 @@ function ResultsTable({
 function TableHeader({
   sort,
   onSort,
+  activeTab,
 }: {
   sort: SortState;
   onSort: (key: SortKey) => void;
+  activeTab: SetupTab;
 }) {
   return (
     <div
-      className={`${ROW_GRID} border-b border-border/60 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground`}
+      className={`${rowGridClass(activeTab)} border-b border-border/60 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground`}
     >
       <SortHeader label="Symbol" />
       <SortHeader label="Company" className="hidden md:block" />
@@ -901,51 +1189,15 @@ function TableHeader({
         onSort={onSort}
         align="right"
       />
-      <SortHeader
-        label="From High"
-        sortKey="pctFromHigh"
-        sort={sort}
-        onSort={onSort}
-        align="right"
-        className="hidden md:block"
-        tooltip={
-          "How far below the 52-week high.\n" +
-          "Formula: (Price − 52w High) / 52w High\n\n" +
-          "Best swing setups: −20% to −60%.\n" +
-          "Too little = no room to recover.\n" +
-          "Too much = may be fundamentally broken."
-        }
-      />
-      <SortHeader
-        label="vs 50MA"
-        sortKey="vsMA50"
-        sort={sort}
-        onSort={onSort}
-        align="right"
-        className="hidden md:block"
-        tooltip={
-          "% difference from the 50-day moving average.\n" +
-          "Formula: (Price − 50d MA) / 50d MA\n\n" +
-          "Below 0% = price in downtrend.\n" +
-          "Above 0% = price in uptrend.\n" +
-          "Near 0% = potential momentum shift."
-        }
-      />
-      <SortHeader
-        label="R/R"
-        sortKey="rr"
-        sort={sort}
-        onSort={onSort}
-        align="right"
-        className="hidden md:block"
-        tooltip={
-          "Risk/Reward ratio.\n" +
-          "Formula: (Target − Entry) / (Entry − Stop)\n\n" +
-          "Minimum useful threshold: 2.0:1\n" +
-          "At 2:1 you need to be right 34% of the time to be profitable long-term.\n" +
-          "At 5:1 you only need to be right 17%."
-        }
-      />
+      {TAB_COLUMNS[activeTab].map((col) => (
+        <SortHeader
+          key={col.key}
+          label={col.label}
+          align="right"
+          className="hidden md:block"
+          tooltip={col.tooltip}
+        />
+      ))}
       <SortHeader
         label="Score"
         sortKey="setupScore"
@@ -953,15 +1205,17 @@ function TableHeader({
         onSort={onSort}
         align="center"
         tooltip={
-          "Setup score out of 10.\n\n" +
+          "Setup score out of 10 — this tab's own ranking (see the tab blurb above).\n\n" +
           "+2 open-market insider purchase >$100K\n" +
           "+2 unusual options activity (vol/OI >0.5x)\n" +
           "+2 high-confidence near-term catalyst (Perplexity)\n" +
           "+1 medium-confidence catalyst\n" +
           "+1 volume spike (>2× average, price up)\n" +
-          "+1 R/R ≥ 3.0:1\n" +
           "+1 short float >15%\n" +
-          "+1 within 2% of 50d MA\n\n" +
+          "+1 within 2% of 50d MA\n" +
+          "-2 insider selling (bearish signal on a bullish-only screener)\n\n" +
+          "R/R is shown separately as a trade-geometry sanity check — it does " +
+          "not feed this score.\n\n" +
           "7–10 = strong · 4–6 = decent · <4 = marginal"
         }
       />
@@ -1096,23 +1350,9 @@ function CandidateRow({
       : c.priceChange1d >= 0
         ? "text-emerald-300"
         : "text-rose-300";
-  const rr = fmtRr(c.rr);
-  const fromHighCls =
-    c.pctFromHigh < -0.3
-      ? "text-rose-300"
-      : c.pctFromHigh < -0.15
-        ? "text-amber-300"
-        : "text-foreground";
-  const vsMaCls =
-    Math.abs(c.vsMA50) <= 0.02
-      ? "text-emerald-300"
-      : c.vsMA50 < 0
-        ? "text-rose-300"
-        : "text-foreground";
-
   return (
     <div className="overflow-hidden rounded-md border border-border bg-background/30">
-      <div className={`${ROW_GRID} pt-2 text-sm`}>
+      <div className={`${rowGridClass(activeTab)} pt-2 text-sm`}>
         {/* 1. Symbol */}
         <div className="truncate text-left font-mono text-base font-semibold text-foreground">
           {c.symbol}
@@ -1131,28 +1371,29 @@ function CandidateRow({
             ? `${c.priceChange1d >= 0 ? "▲" : "▼"}${Math.abs(c.priceChange1d).toFixed(2)}%`
             : "—"}
         </div>
-        {/* 5. From High */}
-        <div className={`hidden text-right md:block ${fromHighCls}`}>
-          {fmtPct(c.pctFromHigh, 0)}
-        </div>
-        {/* 6. vs 50MA */}
-        <div className={`hidden text-right md:block ${vsMaCls}`}>
-          {fmtPct(c.vsMA50, 1)}
-        </div>
-        {/* 7. R/R */}
-        <div className={`hidden text-right md:block ${rr.cls}`}>{rr.text}</div>
-        {/* 8. Score — the ACTIVE TAB's score (each tab ranks its own way) */}
+        {/* 5+. Tab-specific metric columns — whatever this tab's own
+            qualifier/scorer reads (see TAB_COLUMNS). */}
+        {TAB_COLUMNS[activeTab].map((col) => (
+          <div key={col.key} className="hidden md:block">
+            {col.render(c)}
+          </div>
+        ))}
+        {/* Score — the ACTIVE TAB's score (each tab ranks its own way) */}
         <div className="flex justify-center">
           <ScoreBadge score={tabScoreOf(c, activeTab)} />
         </div>
-        {/* 9. Signals */}
-        <div className="hidden flex-wrap justify-start gap-1 md:flex">
+        {/* Signals — R/R rides along here as a muted sanity-check badge,
+            not a ranked column: it's a trade-geometry check, not part of
+            any tab's score. */}
+        <div className="hidden flex-wrap items-center justify-start gap-1 md:flex">
           <SignalBadges
             tier1={c.tier1Signals}
             insiderSignal={c.insiderSignal}
             catalystConfidence={c.catalystConfidence}
+            catalystDescription={c.catalystDescription}
           />
           <ConfluenceBadge candidate={c} activeTab={activeTab} />
+          <RrBadge rr={c.rr} />
         </div>
         {/* 10. Actions */}
         <div
@@ -1180,6 +1421,7 @@ function CandidateRow({
       </div>
       <Line2
         candidate={c}
+        activeTab={activeTab}
         expanded={expanded}
         onToggle={() => setExpanded((v) => !v)}
       />
@@ -1216,6 +1458,31 @@ function ConfluenceBadge({
   );
 }
 
+// Trade-geometry sanity check, deliberately styled muted/secondary (not
+// score-colored like ScoreBadge) — R/R does not feed any tab's score, it
+// only tells you whether the entry/target/stop are worth placing an
+// order against.
+function RrBadge({ rr }: { rr: number | null }) {
+  const { text, cls } = fmtRr(rr);
+  return (
+    <Tipped
+      content={
+        "Risk/Reward — trade geometry only, does NOT affect the score.\n" +
+        "Formula: (Target − Entry) / (Entry − Stop)\n\n" +
+        "Entry/target/stop are structural: stop = 1.5x ATR14 (or the 50d " +
+        "MA / 52w low being defended, whichever is wider), target = the " +
+        "nearer of analyst consensus and the 52-week high."
+      }
+    >
+      <span
+        className={`inline-flex items-center gap-1 rounded border border-border/60 bg-white/5 px-1 py-0.5 text-[9px] font-medium ${cls}`}
+      >
+        R/R {text}
+      </span>
+    </Tipped>
+  );
+}
+
 function ScoreBadge({ score }: { score: number }) {
   const cls =
     score >= 7
@@ -1236,10 +1503,12 @@ function SignalBadges({
   tier1,
   insiderSignal,
   catalystConfidence,
+  catalystDescription,
 }: {
   tier1: string[];
   insiderSignal: SwingCandidate["insiderSignal"];
   catalystConfidence: SwingCandidate["catalystConfidence"];
+  catalystDescription: string | null;
 }) {
   return (
     <>
@@ -1265,23 +1534,10 @@ function SignalBadges({
           OPTIONS
         </span>
       )}
-      {(catalystConfidence === "high" || catalystConfidence === "medium") && (
-        <span
-          className={`inline-flex items-center gap-1 rounded border px-1 py-0.5 text-[9px] font-medium ${
-            catalystConfidence === "high"
-              ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
-              : "border-amber-500/40 bg-amber-500/10 text-amber-300"
-          }`}
-          title={
-            catalystConfidence === "high"
-              ? "High-confidence near-term catalyst identified"
-              : "Medium-confidence catalyst identified"
-          }
-        >
-          <Target className="h-3 w-3" />
-          CATALYST
-        </span>
-      )}
+      <CatalystBadge
+        confidence={catalystConfidence}
+        description={catalystDescription}
+      />
       {tier1.includes("VOLUME_SPIKE") && (
         <span
           className="inline-flex items-center gap-1 rounded border border-orange-500/40 bg-orange-500/10 px-1 py-0.5 text-[9px] font-medium text-orange-300"
@@ -1292,6 +1548,51 @@ function SignalBadges({
         </span>
       )}
     </>
+  );
+}
+
+// Always renders — the point is that "no catalyst found" (most rows) is
+// as visible at a glance as "found, high confidence" (a handful of
+// rows), instead of a two-line prose block that only shows up for the
+// found ones and dominates the row for everyone else. Full text (when
+// there is any) lives in the tooltip, not inline.
+function CatalystBadge({
+  confidence,
+  description,
+}: {
+  confidence: SwingCandidate["catalystConfidence"];
+  description: string | null;
+}) {
+  const cls =
+    confidence === "high"
+      ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
+      : confidence === "medium"
+        ? "border-amber-500/40 bg-amber-500/10 text-amber-300"
+        : confidence === "low"
+          ? "border-zinc-500/40 bg-zinc-500/10 text-zinc-400"
+          : "border-border/60 bg-white/5 text-muted-foreground/70";
+  const label =
+    confidence === "high"
+      ? "CATALYST: HIGH"
+      : confidence === "medium"
+        ? "CATALYST: MED"
+        : confidence === "low"
+          ? "CATALYST: LOW"
+          : "NO CATALYST";
+  const tooltip = description
+    ? description
+    : confidence === "low"
+      ? "Perplexity found nothing specific enough to call a real catalyst — treat as unconfirmed."
+      : "Not researched, or Perplexity found no near-term catalyst (earnings alone doesn't count). +0 to score.";
+  return (
+    <Tipped content={tooltip}>
+      <span
+        className={`inline-flex items-center gap-1 rounded border px-1 py-0.5 text-[9px] font-medium ${cls}`}
+      >
+        <Target className="h-3 w-3" />
+        {label}
+      </span>
+    </Tipped>
   );
 }
 
@@ -1339,25 +1640,44 @@ function tier2Tooltip(sig: string, c: SwingCandidate): string {
   return sig;
 }
 
+// Tier-1 presence is the qualifying criterion for Insider/Options Flow
+// (that's literally what puts a candidate on those tabs), but
+// Capitulation/Pullback qualify on price/technical criteria that have
+// nothing to do with tier-1 signals — so "No tier-1 signals" there is
+// empty by construction on nearly every row and reads as a permanent
+// unresolved warning rather than useful information. Only show the line
+// when there's something to say, or when its absence is actually
+// meaningful (Insider/Options Flow).
+function showsTier1Line(activeTab: SetupTab, tier1Text: string): boolean {
+  return tier1Text.length > 0 || activeTab === "insider" || activeTab === "options_flow";
+}
+
 function Line2({
   candidate: c,
+  activeTab,
   expanded,
   onToggle,
 }: {
   candidate: SwingCandidate;
+  activeTab: SetupTab;
   expanded: boolean;
   onToggle: () => void;
 }) {
   const tier1Text = c.tier1Signals.map(tier1Label).join(" · ");
+  const showTier1 = showsTier1Line(activeTab, tier1Text);
+  const stopBasis = c.currentPrice > c.ma50 ? "50d MA" : "52-week low";
+  const atrText =
+    c.atr14 !== null && c.atr14 !== undefined ? fmtMoney(c.atr14) : "unavailable";
   const tradeTooltip =
     `Entry:  ${fmtMoney(c.entryPrice)} (current price)\n` +
-    `Target: ${fmtMoney(c.targetPrice)}\n` +
-    `  = lower of analyst mean (${fmtMoney(c.analystTarget)})\n` +
-    `    and 60% recovery to 52w high\n` +
     `Stop:   ${fmtMoney(c.stopPrice)}\n` +
-    `  = 3% below 52w low (${fmtMoney(c.week52Low)})\n\n` +
+    `  = tighter of 1.5x ATR14 (ATR ${atrText}) and just under the ${stopBasis}\n` +
+    `  clamped to a 3-15% risk band\n` +
+    `Target: ${fmtMoney(c.targetPrice)}\n` +
+    `  = nearer of analyst mean (${fmtMoney(c.analystTarget)}) and 52w high (${fmtMoney(c.week52High)})\n\n` +
     `R/R = (${fmtMoney(c.targetPrice)} − ${fmtMoney(c.entryPrice)}) / ` +
-    `(${fmtMoney(c.entryPrice)} − ${fmtMoney(c.stopPrice)}) = ${(c.rr ?? 0).toFixed(2)}:1`;
+    `(${fmtMoney(c.entryPrice)} − ${fmtMoney(c.stopPrice)}) = ${(c.rr ?? 0).toFixed(2)}:1 ` +
+    `(sanity check only — not part of the score)`;
   return (
     <div
       role="button"
@@ -1379,10 +1699,16 @@ function Line2({
         )}
       </span>
       <div className="min-w-0 flex-1 line-clamp-2">
-        <span className="text-foreground/90">📡 {tier1Text || "No tier-1 signals"}</span>
+        {showTier1 && (
+          <>
+            <span className="text-foreground/90">
+              📡 {tier1Text || "No tier-1 signals"}
+            </span>
+            <span className="px-1.5 text-muted-foreground/60">·</span>
+          </>
+        )}
         {c.tier2Signals.length > 0 && (
           <>
-            <span className="px-1.5 text-muted-foreground/60">·</span>
             {c.tier2Signals.map((sig, i) => (
               <Fragment key={sig}>
                 {i > 0 && (
@@ -1393,48 +1719,53 @@ function Line2({
                 </Tipped>
               </Fragment>
             ))}
+            <span className="px-1.5 text-muted-foreground/60">|</span>
           </>
         )}
-        <span className="px-1.5 text-muted-foreground/60">|</span>
         <Tipped content={tradeTooltip}>
           Entry {fmtMoney(c.entryPrice)} → Target {fmtMoney(c.targetPrice)} →
           Stop {fmtMoney(c.stopPrice)}
         </Tipped>
-        <span className="px-1.5 text-muted-foreground/60">|</span>
-        {c.catalystConfidence === "high" || c.catalystConfidence === "medium" ? (
-          <>
-            <Target
-              className={`mr-1 inline h-3 w-3 align-text-bottom ${
-                c.catalystConfidence === "high"
-                  ? "text-emerald-300"
-                  : "text-amber-300"
-              }`}
-            />
-            <span
-              className={
-                c.catalystConfidence === "high"
-                  ? "text-emerald-200"
-                  : "text-amber-200"
-              }
-            >
-              {c.catalystDescription ?? "Catalyst identified"}
-            </span>
-          </>
-        ) : (
-          <>
-            <AlertTriangle className="mr-1 inline h-3 w-3 align-text-bottom text-muted-foreground" />
-            <span>No specific catalyst identified</span>
-          </>
-        )}
-        {c.redFlags.length > 0 && (
-          <>
-            <span className="px-1.5 text-muted-foreground/60">|</span>
-            <AlertTriangle className="mr-1 inline h-3 w-3 align-text-bottom text-amber-400" />
-            <span>{c.redFlags.join(" · ")}</span>
-          </>
-        )}
+        <RedFlagBadges redFlags={c.redFlags} />
       </div>
     </div>
+  );
+}
+
+// EARNINGS_TOO_SOON never reaches here (it's a hard exclude in pass 2,
+// see lib/swing-screener.ts) — of the flags that do, INSIDER_SELLING now
+// costs real score (see the -2 penalty note on the Score header), so it's
+// styled as a penalty. HIGH_SHORT_* is genuinely ambiguous (squeeze fuel
+// vs. bearish crowd conviction) and stays purely informational — styled
+// to look distinctly less alarming than the flag that actually moves rank.
+function RedFlagBadges({ redFlags }: { redFlags: string[] }) {
+  if (redFlags.length === 0) return null;
+  return (
+    <>
+      {redFlags.map((flag) => {
+        const isPenalty = flag === "INSIDER_SELLING";
+        const cls = isPenalty
+          ? "border-rose-500/50 bg-rose-500/15 text-rose-300"
+          : "border-border/60 bg-white/5 text-muted-foreground";
+        const tooltip = isPenalty
+          ? "Net insider selling — the inverse of the INSIDER_BUYING tier-1 " +
+            "signal. -2 to every tab score this candidate qualifies for."
+          : "Informational only — does not affect score or rank. Elevated " +
+            "short interest is ambiguous: could mean squeeze fuel or bearish " +
+            "crowd conviction, so there's no defensible direction to score it.";
+        return (
+          <Tipped key={flag} content={tooltip}>
+            <span
+              className={`ml-1.5 inline-flex items-center gap-1 rounded border px-1 py-0.5 text-[10px] font-medium ${cls}`}
+            >
+              <AlertTriangle className="h-3 w-3" />
+              {flag}
+              {isPenalty ? " (-2)" : ""}
+            </span>
+          </Tipped>
+        );
+      })}
+    </>
   );
 }
 
@@ -2008,8 +2339,8 @@ function computeScoreBreakdown(c: SwingCandidate): ScoreComponent[] {
   // ---- Unusual options ----
   out.push({
     label: "Unusual call activity",
-    earned: c.unusualOptionsActivity ? 1 : 0,
-    max: 1,
+    earned: c.unusualOptionsActivity ? 2 : 0,
+    max: 2,
     detail: c.unusualOptionsActivity
       ? `${(c.callVolumeOiRatio ?? 0).toFixed(2)}x vol/OI on $${c.topOptionsStrike} strike${
           c.topOptionsExpiry ? ` (exp ${fmtCalendarDate(c.topOptionsExpiry)})` : ""
@@ -2046,26 +2377,10 @@ function computeScoreBreakdown(c: SwingCandidate): ScoreComponent[] {
           : "✗ Normal volume — no unusual activity"),
   });
 
-  // ---- R/R bonus ----
-  const rrHit = (c.rr ?? 0) >= 3.0;
-  const levels = `entry ${fmtMoney(c.entryPrice)} → target ${fmtMoney(c.targetPrice)} → stop ${fmtMoney(c.stopPrice)}`;
-  const rewardPct = c.entryPrice > 0 ? ((c.targetPrice - c.entryPrice) / c.entryPrice) * 100 : 0;
-  const riskPct = c.entryPrice > 0 ? ((c.entryPrice - c.stopPrice) / c.entryPrice) * 100 : 0;
-  out.push({
-    label: "R/R bonus (≥3:1)",
-    earned: rrHit ? 1 : 0,
-    max: 1,
-    detail: rrHit
-      ? `${(c.rr ?? 0).toFixed(2)}:1 ratio · ${levels}`
-      : `${(c.rr ?? 0).toFixed(2)}:1 ratio · ${levels} — meets 2:1 minimum, below 3:1 ideal`,
-    tooltip:
-      `Entry:  ${fmtMoney(c.entryPrice)}\n` +
-      `Target: ${fmtMoney(c.targetPrice)} (+${rewardPct.toFixed(1)}%)\n` +
-      `Stop:   ${fmtMoney(c.stopPrice)}  (−${riskPct.toFixed(1)}%)\n` +
-      `R/R = ${(c.rr ?? 0).toFixed(2)}:1\n\n` +
-      `Threshold for point: ≥3.0:1\n` +
-      (rrHit ? "✅ Qualifies" : "✗ Below 3.0 — still a valid setup at 2:1+"),
-  });
+  // R/R is deliberately NOT a score component — see the R/R badge next to
+  // Signals for the trade-geometry sanity check. Setup quality (this
+  // breakdown) and trade geometry (can you place a sane order) are kept
+  // separate on purpose.
 
   // ---- Short squeeze ----
   const squeezeHit = c.shortPercentFloat !== null && c.shortPercentFloat > 0.15;
@@ -2110,6 +2425,22 @@ function computeScoreBreakdown(c: SwingCandidate): ScoreComponent[] {
         : "✗ Not at MA level"),
   });
 
+  // ---- Insider selling penalty ---- (only shown when it applies — see
+  // the -2 policy note in lib/swing-screener.ts pass2Enrich)
+  if (c.redFlags.includes("INSIDER_SELLING")) {
+    out.push({
+      label: "Insider selling penalty",
+      earned: -2,
+      max: 0,
+      detail: "Net insider selling on the open market — inverse of the insider-buying tier-1 signal",
+      tooltip:
+        "Insiders sold more than 2x what they bought on the open market.\n\n" +
+        "-2 to every tab score this candidate qualifies for, floored at 0. " +
+        "On a bullish-only screener, bearish insider activity works against " +
+        "the setup's own thesis rather than sitting as a label with no effect.",
+    });
+  }
+
   return out;
 }
 
@@ -2130,14 +2461,17 @@ function ScoreBreakdown({ candidate: c }: { candidate: SwingCandidate }) {
       </div>
       <div className="grid grid-cols-1 gap-1 text-[11px] md:grid-cols-2">
         {components.map((comp, i) => {
+          const negative = comp.earned < 0;
           const ok = comp.earned > 0;
           const partial = comp.earned > 0 && comp.earned < comp.max;
-          const icon = ok ? (partial ? "⚠" : "✓") : "✗";
-          const cls = ok
-            ? partial
-              ? "text-amber-300"
-              : "text-emerald-300"
-            : "text-muted-foreground";
+          const icon = negative ? "−" : ok ? (partial ? "⚠" : "✓") : "✗";
+          const cls = negative
+            ? "text-rose-300"
+            : ok
+              ? partial
+                ? "text-amber-300"
+                : "text-emerald-300"
+              : "text-muted-foreground";
           return (
             <div key={i} className="flex items-start gap-2">
               <span className={`mt-0.5 w-3 shrink-0 ${cls}`}>{icon}</span>

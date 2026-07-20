@@ -51,3 +51,41 @@ export function computeSMA(prices: number[], period: number): number | null {
   const sum = slice.reduce((a, b) => a + b, 0);
   return sum / period;
 }
+
+// 14-period Average True Range via Wilder smoothing — the standard
+// volatility measure for setting a stop that's wide enough to survive
+// this symbol's normal daily noise instead of a flat percentage that's
+// too tight for a wild name and too loose for a calm one.
+//   bars: daily OHLC, OLDEST FIRST. Needs >= period+1 bars (one prior
+//   close to seed the first true range).
+export function computeATR(
+  bars: Array<{ high: number; low: number; close: number }>,
+  period = 14,
+): number | null {
+  if (!Array.isArray(bars) || bars.length < period + 1) return null;
+
+  const trueRanges: number[] = [];
+  for (let i = 1; i < bars.length; i += 1) {
+    const { high, low } = bars[i];
+    const prevClose = bars[i - 1].close;
+    if (
+      !Number.isFinite(high) ||
+      !Number.isFinite(low) ||
+      !Number.isFinite(prevClose)
+    ) {
+      continue;
+    }
+    trueRanges.push(
+      Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose)),
+    );
+  }
+  if (trueRanges.length < period) return null;
+
+  // Seed with a simple average of the first `period` true ranges, then
+  // Wilder-smooth the rest — same shape as computeRSI above.
+  let atr = trueRanges.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  for (let i = period; i < trueRanges.length; i += 1) {
+    atr = (atr * (period - 1) + trueRanges[i]) / period;
+  }
+  return atr;
+}
