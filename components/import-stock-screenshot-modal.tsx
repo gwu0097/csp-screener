@@ -22,6 +22,13 @@ type ParsedStockTrade = {
 
 type Props = {
   open: boolean;
+  // The symbol this Enter click was for, when opened from a specific
+  // screener/idea row — null for the generic "Import" entry point
+  // elsewhere in the app. Purely a UX/validation hint: linking to an
+  // existing Kanban idea already happens by matching whatever symbol
+  // the OCR reads off the screenshot (see /api/swings/trades/bulk-create),
+  // regardless of this prop.
+  symbol?: string | null;
   onOpenChange: (v: boolean) => void;
   onSuccess: (msg: string) => void;
 };
@@ -56,7 +63,12 @@ function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-export function ImportStockScreenshotModal({ open, onOpenChange, onSuccess }: Props) {
+export function ImportStockScreenshotModal({
+  open,
+  symbol = null,
+  onOpenChange,
+  onSuccess,
+}: Props) {
   const [broker, setBroker] = useState<(typeof BROKERS)[number]>("schwab");
   const [dataUrl, setDataUrl] = useState<string | null>(null);
   const [parsing, setParsing] = useState(false);
@@ -196,7 +208,9 @@ export function ImportStockScreenshotModal({ open, onOpenChange, onSuccess }: Pr
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-3xl">
         <DialogHeader>
-          <DialogTitle>Import stock trades from screenshot</DialogTitle>
+          <DialogTitle>
+            {symbol ? `Import fill for ${symbol}` : "Import stock trades from screenshot"}
+          </DialogTitle>
         </DialogHeader>
 
         <div className="flex items-center gap-3 text-base">
@@ -268,6 +282,12 @@ export function ImportStockScreenshotModal({ open, onOpenChange, onSuccess }: Pr
             <div className="text-base text-muted-foreground">
               Found {parsed.length} trade{parsed.length === 1 ? "" : "s"} — review and confirm
             </div>
+            {symbol && !parsed.some((t) => t.symbol.toUpperCase() === symbol.toUpperCase()) && (
+              <div className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-sm text-amber-200">
+                None of the parsed rows are {symbol} — this was opened to log a fill for{" "}
+                {symbol}. Double check this is the right screenshot before confirming.
+              </div>
+            )}
             <div className="max-h-96 overflow-auto rounded border border-border">
               <table className="w-full table-fixed">
                 <colgroup>

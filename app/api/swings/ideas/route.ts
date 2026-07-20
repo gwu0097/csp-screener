@@ -8,6 +8,14 @@ export const dynamic = "force-dynamic";
 
 const ALLOWED_TIMEFRAMES = ["1month", "3months", "6months"] as const;
 const ALLOWED_SENTIMENTS = ["bullish", "bearish", "mixed", "neutral"] as const;
+const ALLOWED_SOURCES = ["manual", "screener_track"] as const;
+const ALLOWED_SOURCE_TABS = [
+  "capitulation",
+  "pullback",
+  "insider",
+  "options_flow",
+] as const;
+const ALLOWED_CATALYST_CONFIDENCE = ["high", "medium", "low", "none"] as const;
 
 type IdeaRow = {
   id: string;
@@ -28,6 +36,21 @@ type IdeaRow = {
   discovered_at: string;
   updated_at: string;
   created_at: string;
+  // Screener setup context — frozen at track time, see
+  // migrations/2026-07-20-add-screener-context-to-swing-ideas.sql.
+  source: string;
+  source_tab: string | null;
+  source_score: number | null;
+  entry_price: number | null;
+  target_price: number | null;
+  stop_price: number | null;
+  rr: number | null;
+  atr14: number | null;
+  tier1_signals: string[];
+  tier2_signals: string[];
+  red_flags: string[];
+  catalyst_type: string | null;
+  catalyst_confidence: string | null;
 };
 
 type TradeRow = {
@@ -150,12 +173,32 @@ type CreateBody = {
   analyst_target?: unknown;
   price_at_discovery?: unknown;
   forward_pe?: unknown;
+  // Screener setup context (all optional — omitted entirely by the
+  // manual Add Idea dialog, which relies on the DB defaults).
+  source?: unknown;
+  source_tab?: unknown;
+  source_score?: unknown;
+  entry_price?: unknown;
+  target_price?: unknown;
+  stop_price?: unknown;
+  rr?: unknown;
+  atr14?: unknown;
+  tier1_signals?: unknown;
+  tier2_signals?: unknown;
+  red_flags?: unknown;
+  catalyst_type?: unknown;
+  catalyst_confidence?: unknown;
 };
 
 function num(v: unknown): number | null {
   if (v === null || v === undefined || v === "") return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
+}
+
+function strArray(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  return v.filter((x): x is string => typeof x === "string");
 }
 
 export async function POST(req: NextRequest) {
@@ -196,6 +239,33 @@ export async function POST(req: NextRequest) {
     return i >= 1 && i <= 5 ? i : null;
   })();
 
+  const source =
+    typeof body.source === "string" &&
+    (ALLOWED_SOURCES as readonly string[]).includes(body.source)
+      ? body.source
+      : "manual";
+
+  const sourceTab =
+    typeof body.source_tab === "string" &&
+    (ALLOWED_SOURCE_TABS as readonly string[]).includes(body.source_tab)
+      ? body.source_tab
+      : null;
+
+  const catalystConfidence =
+    typeof body.catalyst_confidence === "string" &&
+    (ALLOWED_CATALYST_CONFIDENCE as readonly string[]).includes(
+      body.catalyst_confidence,
+    )
+      ? body.catalyst_confidence
+      : null;
+
+  const sourceScore = (() => {
+    const n = num(body.source_score);
+    if (n === null) return null;
+    const i = Math.round(n);
+    return i >= 0 && i <= 10 ? i : null;
+  })();
+
   const insertRow = {
     user_id: userId,
     symbol,
@@ -208,6 +278,21 @@ export async function POST(req: NextRequest) {
     price_at_discovery: num(body.price_at_discovery),
     forward_pe: num(body.forward_pe),
     status: "setup_ready",
+    // Screener setup context — frozen here, never touched again after
+    // insert (no PATCH path exposes these, see [id]/route.ts).
+    source,
+    source_tab: sourceTab,
+    source_score: sourceScore,
+    entry_price: num(body.entry_price),
+    target_price: num(body.target_price),
+    stop_price: num(body.stop_price),
+    rr: num(body.rr),
+    atr14: num(body.atr14),
+    tier1_signals: strArray(body.tier1_signals),
+    tier2_signals: strArray(body.tier2_signals),
+    red_flags: strArray(body.red_flags),
+    catalyst_type: typeof body.catalyst_type === "string" ? body.catalyst_type : null,
+    catalyst_confidence: catalystConfidence,
   };
 
   const sb = createServerClient();

@@ -46,6 +46,22 @@ export type SwingIdea = {
   discovered_at: string;
   updated_at: string;
   created_at: string;
+  // Screener setup context, frozen at "Track" time — see
+  // migrations/2026-07-20-add-screener-context-to-swing-ideas.sql. All
+  // null/empty for manually-created ideas (source === "manual").
+  source: string;
+  source_tab: "capitulation" | "pullback" | "insider" | "options_flow" | null;
+  source_score: number | null;
+  entry_price: number | null;
+  target_price: number | null;
+  stop_price: number | null;
+  rr: number | null;
+  atr14: number | null;
+  tier1_signals: string[];
+  tier2_signals: string[];
+  red_flags: string[];
+  catalyst_type: string | null;
+  catalyst_confidence: string | null;
   // Populated by /api/swings/ideas when the idea is in a trade-driven stage
   // (ENTERED → latest open trade, EXITED → latest closed trade). null for
   // WATCHING / CONVICTION and when no linked trade exists.

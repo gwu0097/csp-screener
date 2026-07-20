@@ -4,6 +4,8 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   AlertTriangle,
+  Bookmark,
+  BookmarkCheck,
   BookSearch,
   ChevronDown,
   ChevronRight,
@@ -538,13 +540,13 @@ const ROW_GRID_MOBILE =
   "grid-cols-[minmax(60px,1fr)_70px_60px_60px_minmax(80px,1fr)]";
 const ROW_GRID_DESKTOP: Record<SetupTab, string> = {
   capitulation:
-    "md:grid-cols-[minmax(60px,80px)_minmax(120px,1.5fr)_80px_70px_70px_60px_70px_70px_70px_minmax(120px,1fr)_130px]",
+    "md:grid-cols-[minmax(60px,80px)_minmax(120px,1.5fr)_80px_70px_70px_60px_70px_70px_70px_minmax(120px,1fr)_190px]",
   pullback:
-    "md:grid-cols-[minmax(60px,80px)_minmax(120px,1.5fr)_80px_70px_70px_70px_80px_70px_minmax(120px,1fr)_130px]",
+    "md:grid-cols-[minmax(60px,80px)_minmax(120px,1.5fr)_80px_70px_70px_70px_80px_70px_minmax(120px,1fr)_190px]",
   insider:
-    "md:grid-cols-[minmax(60px,80px)_minmax(120px,1.5fr)_80px_70px_80px_60px_80px_70px_70px_minmax(120px,1fr)_130px]",
+    "md:grid-cols-[minmax(60px,80px)_minmax(120px,1.5fr)_80px_70px_80px_60px_80px_70px_70px_minmax(120px,1fr)_190px]",
   options_flow:
-    "md:grid-cols-[minmax(60px,80px)_minmax(120px,1.5fr)_80px_70px_70px_90px_70px_90px_70px_minmax(120px,1fr)_130px]",
+    "md:grid-cols-[minmax(60px,80px)_minmax(120px,1.5fr)_80px_70px_70px_90px_70px_90px_70px_minmax(120px,1fr)_190px]",
 };
 
 function rowGridClass(tab: SetupTab): string {
@@ -683,7 +685,15 @@ export function SwingScreenView() {
   const [runWarning, setRunWarning] = useState<string | null>(null);
   const [sort, setSort] = useState<SortState>(DEFAULT_SORT);
   const [importOpen, setImportOpen] = useState(false);
+  // Which symbol Enter was clicked for, so the import modal opens
+  // knowing what it's importing a fill for instead of blank/generic.
+  const [importSymbol, setImportSymbol] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  // Symbols tracked to the Kanban this session — lets the Track button
+  // flip to a disabled "Tracked" state without re-fetching the ideas
+  // list just to check membership.
+  const [trackedSymbols, setTrackedSymbols] = useState<Set<string>>(new Set());
+  const [trackingSymbol, setTrackingSymbol] = useState<string | null>(null);
   // One Run Screen populates all four setup tabs; Capitulation is the
   // default view. Tab membership is baked into each candidate
   // (setupTabs) so the split survives reload via the saved run.
@@ -833,6 +843,57 @@ export function SwingScreenView() {
     }
   }
 
+  // Save the candidate to the Swing Ideas Kanban as setup_ready, carrying
+  // everything the screener knows — levels, the tab + its score, signals,
+  // and the catalyst text as the initial thesis. Frozen at this moment:
+  // nothing here gets recomputed later as the stock moves.
+  async function handleTrack(c: SwingCandidate, tab: SetupTab) {
+    setTrackingSymbol(c.symbol);
+    try {
+      const score = tabScoreOf(c, tab);
+      const body = {
+        symbol: c.symbol,
+        catalyst: c.catalystType !== "none" ? catalystTypeLabel(c.catalystType) : null,
+        user_thesis:
+          c.catalystDescription ??
+          `Tracked from Discover → ${TAB_LABEL[tab]} (score ${score}/10).`,
+        analyst_sentiment: "bullish",
+        analyst_target: c.analystTarget,
+        price_at_discovery: c.currentPrice,
+        source: "screener_track",
+        source_tab: tab,
+        source_score: score,
+        entry_price: c.entryPrice,
+        target_price: c.targetPrice,
+        stop_price: c.stopPrice,
+        rr: c.rr,
+        atr14: c.atr14 ?? null,
+        tier1_signals: c.tier1Signals,
+        tier2_signals: c.tier2Signals,
+        red_flags: c.redFlags,
+        catalyst_type: c.catalystType,
+        catalyst_confidence: c.catalystConfidence,
+      };
+      const res = await fetch("/api/swings/ideas", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const json = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+      setTrackedSymbols((prev) => new Set(prev).add(c.symbol));
+      setToast(`Tracked ${c.symbol} to Setup Ready`);
+      setTimeout(() => setToast(null), 5000);
+    } catch (e) {
+      setToast(
+        `Failed to track ${c.symbol}: ${e instanceof Error ? e.message : "unknown error"}`,
+      );
+      setTimeout(() => setToast(null), 5000);
+    } finally {
+      setTrackingSymbol(null);
+    }
+  }
+
   const tabCounts = useMemo(() => {
     const counts: Record<SetupTab, number> = {
       capitulation: 0,
@@ -927,7 +988,13 @@ export function SwingScreenView() {
               sort={sort}
               activeTab={activeTab}
               onSort={handleHeaderClick}
-              onEnterTrade={() => setImportOpen(true)}
+              onEnterTrade={(symbol) => {
+                setImportSymbol(symbol);
+                setImportOpen(true);
+              }}
+              onTrack={handleTrack}
+              trackedSymbols={trackedSymbols}
+              trackingSymbol={trackingSymbol}
             />
           )}
         </>
@@ -935,7 +1002,11 @@ export function SwingScreenView() {
 
       <ImportStockScreenshotModal
         open={importOpen}
-        onOpenChange={setImportOpen}
+        symbol={importSymbol}
+        onOpenChange={(v) => {
+          setImportOpen(v);
+          if (!v) setImportSymbol(null);
+        }}
         onSuccess={(msg) => {
           setToast(msg);
           setTimeout(() => setToast(null), 5000);
@@ -1136,12 +1207,18 @@ function ResultsTable({
   activeTab,
   onSort,
   onEnterTrade,
+  onTrack,
+  trackedSymbols,
+  trackingSymbol,
 }: {
   candidates: SwingCandidate[];
   sort: SortState;
   activeTab: SetupTab;
   onSort: (key: SortKey) => void;
-  onEnterTrade: () => void;
+  onEnterTrade: (symbol: string) => void;
+  onTrack: (candidate: SwingCandidate, tab: SetupTab) => void;
+  trackedSymbols: Set<string>;
+  trackingSymbol: string | null;
 }) {
   return (
     <div className="space-y-1">
@@ -1152,7 +1229,10 @@ function ResultsTable({
             key={c.symbol}
             candidate={c}
             activeTab={activeTab}
-            onEnterTrade={onEnterTrade}
+            onEnterTrade={() => onEnterTrade(c.symbol)}
+            onTrack={() => onTrack(c, activeTab)}
+            tracked={trackedSymbols.has(c.symbol)}
+            tracking={trackingSymbol === c.symbol}
           />
         ))}
       </div>
@@ -1287,10 +1367,16 @@ function CandidateRow({
   candidate: c,
   activeTab,
   onEnterTrade,
+  onTrack,
+  tracked,
+  tracking,
 }: {
   candidate: SwingCandidate;
   activeTab: SetupTab;
   onEnterTrade: () => void;
+  onTrack: () => void;
+  tracked: boolean;
+  tracking: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
   // Chart state lives at the row level (not in ExpandedDetail) so collapsing
@@ -1400,6 +1486,30 @@ function CandidateRow({
           className="flex items-center justify-end gap-1"
           onClick={(e) => e.stopPropagation()}
         >
+          <button
+            type="button"
+            onClick={onTrack}
+            disabled={tracked || tracking}
+            className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-medium ${
+              tracked
+                ? "cursor-default border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
+                : "border-border text-muted-foreground hover:bg-white/5 hover:text-foreground"
+            }`}
+            title={
+              tracked
+                ? `${c.symbol} is on the Setup Ready board`
+                : `Save this setup — entry ${fmtMoney(c.entryPrice)}, target ${fmtMoney(c.targetPrice)}, stop ${fmtMoney(c.stopPrice)} — to the Swing Ideas Kanban as Setup Ready, before any money moves`
+            }
+          >
+            {tracking ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : tracked ? (
+              <BookmarkCheck className="h-3 w-3" />
+            ) : (
+              <Bookmark className="h-3 w-3" />
+            )}
+            {tracked ? "Tracked" : "Track"}
+          </button>
           <Link
             href={`/research/${encodeURIComponent(c.symbol)}`}
             className="inline-flex items-center gap-1 rounded border border-border px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground hover:bg-white/5 hover:text-foreground"
@@ -1412,7 +1522,7 @@ function CandidateRow({
             type="button"
             onClick={onEnterTrade}
             className="inline-flex items-center gap-1 rounded border border-border bg-white/5 px-1.5 py-0.5 text-[10px] font-medium text-foreground hover:bg-white/10"
-            title="Import broker screenshot to log this trade"
+            title={`Import a broker fill screenshot for ${c.symbol} — links to the tracked idea if one exists`}
           >
             <Upload className="h-3 w-3" />
             Enter

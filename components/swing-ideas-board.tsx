@@ -48,6 +48,20 @@ function fmtPct(n: number | null, digits = 1): string {
   return `${sign}${(n * 100).toFixed(digits)}%`;
 }
 
+const SOURCE_TAB_LABEL: Record<string, string> = {
+  capitulation: "Capitulation",
+  pullback: "Pullback",
+  insider: "Insider",
+  options_flow: "Options Flow",
+};
+
+function scoreColor(score: number | null): string {
+  if (score === null) return "text-muted-foreground";
+  if (score >= 7) return "text-emerald-300";
+  if (score >= 4) return "text-amber-300";
+  return "text-zinc-400";
+}
+
 function exitReasonLabel(r: string | null): string {
   if (r === "target_hit") return "Target hit";
   if (r === "stop_loss") return "Stop loss";
@@ -395,6 +409,97 @@ function CardHeader({ idea }: { idea: SwingIdea }) {
   );
 }
 
+// A setup_ready idea whose price has traded through its recorded stop
+// invalidated before it was ever entered — current price comes from
+// idea.snapshot.price, already batched by the GET /api/swings/ideas
+// enrichment for every idea regardless of status, so no separate fetch
+// is needed here.
+function isStopBroken(idea: SwingIdea): boolean {
+  const currentPrice = idea.snapshot?.price ?? null;
+  return (
+    currentPrice !== null && idea.stop_price !== null && currentPrice <= idea.stop_price
+  );
+}
+
+// Levels frozen at Track time vs. where the stock trades now. Only
+// screener-tracked ideas carry this context (source === "screener_track")
+// — manually-added ideas have no entry/target/stop to compare against.
+function SetupContextBlock({ idea }: { idea: SwingIdea }) {
+  if (idea.source !== "screener_track") return null;
+  const currentPrice = idea.snapshot?.price ?? null;
+  const stopBroken = isStopBroken(idea);
+  const vsEntryPct =
+    currentPrice !== null && idea.entry_price !== null && idea.entry_price > 0
+      ? (currentPrice - idea.entry_price) / idea.entry_price
+      : null;
+  const vsStopPct =
+    currentPrice !== null && idea.stop_price !== null && idea.stop_price > 0
+      ? (currentPrice - idea.stop_price) / idea.stop_price
+      : null;
+  return (
+    <div
+      className={`mb-2 rounded border p-2 text-[11px] ${
+        stopBroken ? "border-rose-500/50 bg-rose-500/10" : "border-border/60 bg-white/[0.02]"
+      }`}
+    >
+      <div className="mb-1 flex items-center justify-between gap-2">
+        <span className="flex items-center gap-1.5">
+          {idea.source_tab && (
+            <span className="rounded border border-sky-500/40 bg-sky-500/10 px-1 py-0.5 text-[9px] font-medium text-sky-300">
+              {SOURCE_TAB_LABEL[idea.source_tab] ?? idea.source_tab}
+            </span>
+          )}
+          {idea.source_score !== null && (
+            <span className={`font-mono font-semibold ${scoreColor(idea.source_score)}`}>
+              {idea.source_score}/10
+            </span>
+          )}
+        </span>
+        {stopBroken && (
+          <span
+            className="rounded border border-rose-500/50 bg-rose-500/20 px-1.5 py-0.5 text-[9px] font-semibold text-rose-300"
+            title="Price has broken the stop recorded at track time — this setup invalidated before it was ever entered."
+          >
+            INVALIDATED
+          </span>
+        )}
+      </div>
+      <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-muted-foreground">
+        <span>
+          Entry <span className="font-mono text-foreground">{fmtMoney(idea.entry_price)}</span>
+        </span>
+        <span>
+          Target <span className="font-mono text-foreground">{fmtMoney(idea.target_price)}</span>
+        </span>
+        <span className={stopBroken ? "text-rose-300" : ""}>
+          Stop <span className="font-mono">{fmtMoney(idea.stop_price)}</span>
+        </span>
+        {idea.rr !== null && (
+          <span>
+            R/R <span className="font-mono text-foreground">{idea.rr.toFixed(1)}:1</span>
+          </span>
+        )}
+      </div>
+      {currentPrice !== null && (
+        <div className="mt-1 text-muted-foreground">
+          Now <span className="font-mono text-foreground">{fmtMoney(currentPrice)}</span>
+          {vsEntryPct !== null && (
+            <span className={`ml-1 ${vsEntryPct >= 0 ? "text-emerald-300" : "text-rose-300"}`}>
+              ({vsEntryPct >= 0 ? "+" : ""}
+              {(vsEntryPct * 100).toFixed(1)}% vs entry)
+            </span>
+          )}
+          {stopBroken && vsStopPct !== null && (
+            <span className="ml-1 text-rose-300">
+              — {Math.abs(vsStopPct * 100).toFixed(1)}% below stop
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SetupReadyCard({
   idea,
   onMoveToEntered,
@@ -408,9 +513,15 @@ function SetupReadyCard({
 }) {
   const summary =
     idea.catalyst?.trim() || idea.user_thesis?.trim() || idea.ai_summary?.trim() || "";
+  const invalidated = idea.source === "screener_track" && isStopBroken(idea);
   return (
-    <div className="rounded-md border border-border bg-zinc-900/60 p-3 text-sm">
+    <div
+      className={`rounded-md border p-3 text-sm ${
+        invalidated ? "border-rose-500/40 bg-rose-950/20" : "border-border bg-zinc-900/60"
+      }`}
+    >
       <CardHeader idea={idea} />
+      <SetupContextBlock idea={idea} />
 
       <div className="mb-1 flex gap-3 text-[11px] text-muted-foreground">
         {idea.price_at_discovery !== null && (
