@@ -455,11 +455,15 @@ export function ScreenerView({ connected }: Props) {
   // bare Screen Today or applyWatchlist (which can introduce new
   // ungraded rows).
   const [screenIsGraded, setScreenIsGraded] = useState<boolean>(false);
-  // Count of candidates dropped from the displayed list because
-  // Schwab couldn't verify their option chain (token expired,
-  // Schwab outage, etc.). Surfaced as a small note below the table
-  // so the user knows the screen isn't necessarily exhaustive.
-  const [unverifiedExcluded, setUnverifiedExcluded] = useState<number>(0);
+  // Breakdown of candidates dropped from the displayed list during
+  // chain verification, keyed by category — no_weekly_chain (verified
+  // absent, non-whitelisted), no_chain_data (Schwab reachable but the
+  // chain came back empty), schwab_error (Schwab/network trouble on
+  // specific symbols), other. Surfaced as a small note below the table
+  // whose wording depends on which categories are present; the
+  // systemic all-Schwab-down case is schwabDown below, so this note
+  // never tells the user to reconnect Schwab on partial failures.
+  const [excludedCounts, setExcludedCounts] = useState<Record<string, number>>({});
   // Set when every single Stage-2 chain-verification failure came back
   // reason=schwab_error/schwab_disconnected — i.e. a systemic Schwab
   // outage or expired token, not per-symbol chain issues. Drives a
@@ -911,7 +915,7 @@ export function ScreenerView({ connected }: Props) {
     setExpanded({});
     setLastStats(null);
     setChainProgress(null);
-    setUnverifiedExcluded(0);
+    setExcludedCounts({});
     setSchwabDown(false);
     try {
       // ---- Stream A: calendar + filters + Stage 1+2 scoring ----
@@ -1021,6 +1025,27 @@ export function ScreenerView({ connected }: Props) {
       // the loop to tell "Schwab is systemically down" apart from
       // per-symbol chain issues.
       const unverifiedReasons: string[] = [];
+      // Per-category tally of every dropped candidate (unverified AND
+      // verified-absent non-whitelisted) for the note below the table.
+      const excluded: Record<string, number> = {};
+      const bumpExcluded = (category: string) => {
+        excluded[category] = (excluded[category] ?? 0) + 1;
+      };
+      // Server/client reasons → display category. Timeouts and fetch
+      // failures group under schwab_error: from the user's seat they're
+      // all "Schwab didn't answer for these symbols, retry".
+      const categorize = (reason: string | undefined): string => {
+        if (
+          reason === "schwab_error" ||
+          reason === "schwab_disconnected" ||
+          reason === "fetch_failed" ||
+          reason === "client_timeout"
+        ) {
+          return "schwab_error";
+        }
+        if (reason === "empty_response") return "no_chain_data";
+        return "other";
+      };
       const workingResults = [...initialResults];
       const isLatestRunRef = { current: true }; // guards against double-run races
 
@@ -1039,6 +1064,7 @@ export function ScreenerView({ connected }: Props) {
               dropSymbols.add(c.symbol.toUpperCase());
               unverifiedCount += 1;
               unverifiedReasons.push("client_timeout");
+              bumpExcluded("schwab_error");
             }
           }
           break;
@@ -1061,6 +1087,7 @@ export function ScreenerView({ connected }: Props) {
             dropSymbols.add(c.symbol.toUpperCase());
             unverifiedCount += 1;
             unverifiedReasons.push("fetch_failed");
+            bumpExcluded("schwab_error");
           }
         } else {
           const byKey = new Map(
@@ -1073,11 +1100,13 @@ export function ScreenerView({ connected }: Props) {
               dropSymbols.add(c.symbol.toUpperCase());
               unverifiedCount += 1;
               unverifiedReasons.push(v?.reason ?? "unknown");
+              bumpExcluded(categorize(v?.reason));
             } else if (v.status === "absent") {
               // Verified absent — drop unless whitelisted.
               absentCount += 1;
               if (!c.isWhitelisted) {
                 dropSymbols.add(c.symbol.toUpperCase());
+                bumpExcluded("no_weekly_chain");
               }
             } else {
               // Present — keep as-is. No grade injection here; Run
@@ -1093,7 +1122,7 @@ export function ScreenerView({ connected }: Props) {
         );
         if (isLatestRunRef.current) {
           setResults(displayed);
-          setUnverifiedExcluded(unverifiedCount);
+          setExcludedCounts({ ...excluded });
           setChainProgress({
             done: Math.min((b + 1) * BATCH_SIZE, initialResults.length),
             total: initialResults.length,
@@ -1143,7 +1172,7 @@ export function ScreenerView({ connected }: Props) {
         pass2Count: finalResults.length,
         vix: dailyContext?.market.vix ?? null,
       });
-      setUnverifiedExcluded(unverifiedCount);
+      setExcludedCounts({ ...excluded });
       setStatus("idle");
       const tail =
         absentCount > 0 || unverifiedCount > 0
@@ -2521,17 +2550,43 @@ export function ScreenerView({ connected }: Props) {
           </div>
         )}
 
-        {hasResults && unverifiedExcluded > 0 && (
-          <div className="flex items-center gap-1.5 text-[11px] text-amber-300/80">
-            <AlertTriangle className="h-3 w-3" />
-            <span>
-              {unverifiedExcluded} candidate
-              {unverifiedExcluded === 1 ? "" : "s"} excluded — Schwab couldn&apos;t
-              verify the option chain (token expired or temporary outage). Reconnect
-              Schwab in Settings and re-run Screen Today to see them.
-            </span>
-          </div>
-        )}
+        {(() => {
+          // Partial-exclusion note. The systemic case (every candidate
+          // failed with a Schwab-down reason) renders the dedicated
+          // schwabDown banner instead — this note never asks the user
+          // to reconnect Schwab, because Schwab verified other symbols
+          // in the same run.
+          const excludedTotal = Object.values(excludedCounts).reduce(
+            (s, n) => s + n,
+            0,
+          );
+          if (excludedTotal === 0 || schwabDown) return null;
+          const entries = Object.entries(excludedCounts).filter(([, n]) => n > 0);
+          const onlySchwab =
+            (excludedCounts.schwab_error ?? 0) === excludedTotal;
+          const labels: Record<string, string> = {
+            no_weekly_chain: "no weekly chain",
+            no_chain_data: "no chain data",
+            schwab_error: "Schwab error",
+            other: "other",
+          };
+          const breakdown = entries
+            .sort((a, b) => b[1] - a[1])
+            .map(([k, n]) => `${n} ${labels[k] ?? k}`)
+            .join(" · ");
+          return (
+            <div className="flex items-center gap-1.5 text-[11px] text-amber-300/80">
+              <AlertTriangle className="h-3 w-3" />
+              <span>
+                {excludedTotal} candidate{excludedTotal === 1 ? "" : "s"} excluded —{" "}
+                {onlySchwab
+                  ? "Schwab had trouble fetching some chains. Re-run Screen Today to retry."
+                  : "no weekly options chain or insufficient liquidity. This is expected for smaller or less-liquid names."}
+                {entries.length > 1 ? ` (${breakdown})` : ""}
+              </span>
+            </div>
+          );
+        })()}
 
       </div>
     </TooltipProvider>
