@@ -25,6 +25,11 @@ export async function GET(req: NextRequest) {
   }
   await ensurePortfolioWatchlist(userId);
   const watchlistId = req.nextUrl.searchParams.get("watchlistId");
+  // Snapshot refresh is otherwise lazy — batchRefreshSnapshots only
+  // re-pulls a symbol whose row is older than maxAgeMinutes. force=1
+  // bypasses that TTL entirely so the manual refresh control always
+  // gets live data for the symbols currently in view.
+  const force = req.nextUrl.searchParams.get("force") === "1";
 
   const sb = createServerClient();
   const listsRes = await sb
@@ -59,7 +64,7 @@ export async function GET(req: NextRequest) {
   }
   const symbols = Array.from(bySymbol.keys());
 
-  const snapshots = await batchRefreshSnapshots(symbols, 15);
+  const snapshots = await batchRefreshSnapshots(symbols, force ? 0 : 15);
   const snapMap = new Map<string, SymbolSnapshot>();
   for (const s of snapshots) snapMap.set(s.symbol.toUpperCase(), s);
 

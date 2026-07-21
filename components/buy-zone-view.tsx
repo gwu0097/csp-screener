@@ -7,10 +7,13 @@ import {
   ChevronDown,
   ChevronRight,
   Loader2,
+  RefreshCw,
   Search,
 } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PriceChart } from "@/components/price-chart";
+import { MarkdownBody } from "@/components/filing-analysis";
+import { stripCitations } from "@/lib/text";
 import { cn } from "@/lib/utils";
 
 type WatchlistMeta = {
@@ -55,6 +58,8 @@ type ResearchData = {
   };
   catalyst: {
     analysis: string | null;
+    date: string | null;
+    isExpired: boolean;
     cached: boolean;
     fetched_at: string | null;
   };
@@ -101,7 +106,8 @@ function insiderSignalColor(signal: string): string {
 }
 
 const ALL_SCOPE = "__all__";
-const CHART_STUDIES = ["RSI@tv-basicstudies", "MACD@tv-basicstudies"];
+const CHART_STUDIES = ["STD;RSI", "STD;MACD"];
+const CHART_RANGE = "6M";
 
 type SortKey = "symbol" | "price" | "changePct" | "rsi14" | "macd" | "composite";
 type SortDir = "asc" | "desc";
@@ -147,7 +153,9 @@ export function BuyZoneView() {
   const [scope, setScope] = useState<string>(ALL_SCOPE);
   const [rows, setRows] = useState<BuyZoneRow[] | null>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(null);
   // Default sort is Buy Zone score descending; stays that way until
   // the person clicks a different header.
   const [sortKey, setSortKey] = useState<SortKey>("composite");
@@ -208,28 +216,31 @@ export function BuyZoneView() {
     })();
   }, []);
 
-  const load = useCallback(async (watchlistId: string) => {
-    setLoading(true);
+  const load = useCallback(async (watchlistId: string, force: boolean) => {
+    if (force) setRefreshing(true);
+    else setLoading(true);
     setError(null);
     try {
-      const url =
-        watchlistId === ALL_SCOPE
-          ? "/api/analysis/buy-zone"
-          : `/api/analysis/buy-zone?watchlistId=${encodeURIComponent(watchlistId)}`;
-      const res = await fetch(url, { cache: "no-store" });
+      const params = new URLSearchParams();
+      if (watchlistId !== ALL_SCOPE) params.set("watchlistId", watchlistId);
+      if (force) params.set("force", "1");
+      const qs = params.toString();
+      const res = await fetch(`/api/analysis/buy-zone${qs ? `?${qs}` : ""}`, { cache: "no-store" });
       const json = (await res.json()) as { rows?: BuyZoneRow[]; error?: string };
       if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
       setRows(json.rows ?? []);
+      setLastRefreshedAt(new Date());
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load");
       setRows([]);
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   }, []);
 
   useEffect(() => {
-    void load(scope);
+    void load(scope, false);
   }, [scope, load]);
 
   const sortedRows = useMemo<BuyZoneRow[] | null>(() => {
@@ -263,13 +274,32 @@ export function BuyZoneView() {
 
   return (
     <div className="space-y-4">
-      <div className="space-y-1">
-        <h1 className="text-2xl font-semibold tracking-tight">Buy Zone</h1>
-        <p className="text-base text-muted-foreground">
-          Names closest to an oversold bullish turnaround — RSI approaching oversold plus a
-          MACD bullish cross out of negative territory. Click any column to sort, click a row
-          to expand.
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="space-y-1">
+          <h1 className="text-2xl font-semibold tracking-tight">Buy Zone</h1>
+          <p className="text-base text-muted-foreground">
+            Names closest to an oversold bullish turnaround — RSI approaching oversold plus a
+            MACD bullish cross out of negative territory. Click any column to sort, click a row
+            to expand.
+          </p>
+        </div>
+        <div className="flex flex-col items-end gap-1">
+          <button
+            type="button"
+            onClick={() => void load(scope, true)}
+            disabled={refreshing}
+            className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-2 text-base font-medium transition-colors hover:border-foreground/40 hover:text-foreground disabled:opacity-60"
+          >
+            <RefreshCw className={cn("h-4 w-4", refreshing && "animate-spin")} />
+            {refreshing ? "Refreshing…" : "Refresh"}
+          </button>
+          {lastRefreshedAt && (
+            <span className="text-[11px] text-muted-foreground">
+              Last refreshed{" "}
+              {lastRefreshedAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
+            </span>
+          )}
+        </div>
       </div>
 
       <Tabs value={scope} onValueChange={setScope}>
@@ -418,7 +448,7 @@ function BuyZoneRowItem({
           <td colSpan={8} className="px-3 py-3">
             <div className="space-y-4">
               <div className="grid grid-cols-1 gap-4 lg:grid-cols-[2fr_1fr]">
-                <PriceChart symbol={row.symbol} studies={CHART_STUDIES} height={520} />
+                <PriceChart symbol={row.symbol} studies={CHART_STUDIES} range={CHART_RANGE} height={520} />
                 <AnalystReadPanel row={row} />
               </div>
               <ResearchPanel row={row} research={research} loading={loading} error={error} onResearch={onResearch} />
@@ -575,12 +605,28 @@ function ResearchPanel({
             )}
           </div>
           <div className="space-y-2">
-            <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-              Upcoming catalyst
-            </span>
-            <p className="text-sm text-foreground/90">
-              {research.catalyst.analysis ?? "No catalyst read available."}
-            </p>
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                {research.catalyst.isExpired ? "Catalyst" : "Upcoming catalyst"}
+              </span>
+              {research.catalyst.date && (
+                <span
+                  className={cn(
+                    "rounded border px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider",
+                    research.catalyst.isExpired
+                      ? "border-muted-foreground/30 bg-muted-foreground/10 text-muted-foreground"
+                      : "border-sky-500/40 bg-sky-500/10 text-sky-300",
+                  )}
+                >
+                  {research.catalyst.isExpired ? "Expired" : "Upcoming"} · {research.catalyst.date}
+                </span>
+              )}
+            </div>
+            {research.catalyst.analysis ? (
+              <MarkdownBody text={stripCitations(research.catalyst.analysis)} />
+            ) : (
+              <p className="text-sm text-muted-foreground">No catalyst read available.</p>
+            )}
             {research.catalyst.fetched_at && (
               <div className="text-[10px] uppercase tracking-wide text-muted-foreground/70">
                 {research.catalyst.cached ? "cached · " : ""}

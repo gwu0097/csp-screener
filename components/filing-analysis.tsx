@@ -75,7 +75,7 @@ export function AddAiSummaryButton({
 }
 
 // Markdown body styled for the dark theme without a typography plugin.
-function MarkdownBody({ text }: { text: string }) {
+export function MarkdownBody({ text }: { text: string }) {
   return (
     <div
       className={cn(
