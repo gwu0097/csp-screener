@@ -89,3 +89,72 @@ export function computeATR(
   }
   return atr;
 }
+
+// Exponential moving average series aligned 1:1 with `values`
+// (OLDEST FIRST). Indices before `period` values are available are
+// `null`. Seeded with the SMA of the first `period` values (standard
+// EMA warm-up), then the usual multiplier k = 2/(period+1) forward —
+// NOT Wilder smoothing (that's a different, slower-decaying average;
+// MACD is conventionally built on the standard EMA).
+function emaSeries(values: number[], period: number): Array<number | null> {
+  const out: Array<number | null> = new Array(values.length).fill(null);
+  if (!Array.isArray(values) || period <= 0 || values.length < period) return out;
+  const k = 2 / (period + 1);
+  let seed = 0;
+  for (let i = 0; i < period; i += 1) seed += values[i];
+  seed /= period;
+  out[period - 1] = seed;
+  let prev = seed;
+  for (let i = period; i < values.length; i += 1) {
+    const cur = values[i] * k + prev * (1 - k);
+    out[i] = cur;
+    prev = cur;
+  }
+  return out;
+}
+
+export type MACDPoint = { macd: number; signal: number; histogram: number };
+
+// Standard 12/26/9 MACD: fast EMA - slow EMA = MACD line, signal = EMA
+// of the MACD line, histogram = MACD - signal.
+//   closes: closing prices, OLDEST FIRST — the same array computeRSI/
+//   computeSMA take, no separate fetch.
+// Returns null if there isn't enough history for the slow EMA + signal
+// EMA to both settle (needs >= slowPeriod + signalPeriod closes, with
+// real-world margin for a stable read). `series` is oldest-first and
+// only spans the range where MACD+signal are both defined — a caller
+// wanting "last N days" should `.slice(-N)`.
+export function computeMACD(
+  closes: number[],
+  fastPeriod = 12,
+  slowPeriod = 26,
+  signalPeriod = 9,
+): { latest: MACDPoint; series: MACDPoint[] } | null {
+  if (!Array.isArray(closes) || closes.length < slowPeriod + signalPeriod) {
+    return null;
+  }
+  const fastEma = emaSeries(closes, fastPeriod);
+  const slowEma = emaSeries(closes, slowPeriod);
+
+  // MACD line is defined wherever both EMAs are (from slowPeriod-1
+  // onward, since slow is the longer period) — collect it as its own
+  // dense array so it can be fed into emaSeries again for the signal.
+  const macdLine: number[] = [];
+  for (let i = slowPeriod - 1; i < closes.length; i += 1) {
+    const f = fastEma[i];
+    const s = slowEma[i];
+    if (f === null || s === null) continue;
+    macdLine.push(f - s);
+  }
+  if (macdLine.length < signalPeriod) return null;
+
+  const signalLine = emaSeries(macdLine, signalPeriod);
+  const points: MACDPoint[] = [];
+  for (let i = 0; i < macdLine.length; i += 1) {
+    const sig = signalLine[i];
+    if (sig === null) continue;
+    points.push({ macd: macdLine[i], signal: sig, histogram: macdLine[i] - sig });
+  }
+  if (points.length === 0) return null;
+  return { latest: points[points.length - 1], series: points };
+}

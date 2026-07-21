@@ -21,6 +21,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -68,6 +69,10 @@ type Row = {
   flags: Flag[];
   action: Action;
   hasEncyclopedia: boolean;
+  buyZoneRsiScore: number;
+  buyZoneMacdScore: number;
+  buyZoneComposite: number;
+  buyZoneMacdStatus: string;
 };
 
 type Alert = {
@@ -208,6 +213,21 @@ function alertKindLabel(kind: Alert["kind"]): string {
   }
 }
 
+// Buy Zone composite badge: 0-10, sum of the RSI + MACD component
+// scores shown alongside it (no hidden math).
+function buyZoneBadgeColor(composite: number): string {
+  if (composite >= 8) return "border-emerald-500/40 bg-emerald-500/10 text-emerald-300";
+  if (composite >= 5) return "border-amber-500/40 bg-amber-500/10 text-amber-300";
+  return "border-muted-foreground/30 bg-muted-foreground/10 text-muted-foreground";
+}
+
+function macdStatusColor(status: string): string {
+  if (status.startsWith("crossed")) return "text-emerald-300";
+  if (status === "approaching") return "text-amber-300";
+  if (status === "widening") return "text-rose-300";
+  return "text-muted-foreground";
+}
+
 // Visual 52-week range bar + buy/sell zone callouts below.
 function FiftyTwoWeekBar({
   price,
@@ -267,6 +287,7 @@ export function LongTermWatchlistView() {
   const [digestOpen, setDigestOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [sort, setSort] = useState<{ key: SortKey; dir: SortDir } | null>(null);
+  const [activeTab, setActiveTab] = useState<"all" | "buyzone">("all");
 
   const refetch = useCallback(async () => {
     setLoading(true);
@@ -350,6 +371,15 @@ export function LongTermWatchlistView() {
     return copy;
   }, [rows, sort]);
 
+  // Buy Zone view: same rows, no filtering, sorted by composite score
+  // descending regardless of the "All" tab's column sort.
+  const buyZoneRows = useMemo<Row[] | null>(() => {
+    if (!rows) return rows;
+    const copy = [...rows];
+    copy.sort((a, b) => b.buyZoneComposite - a.buyZoneComposite);
+    return copy;
+  }, [rows]);
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-3">
@@ -389,6 +419,12 @@ export function LongTermWatchlistView() {
         onToggle={() => setAlertsOpen((s) => !s)}
       />
 
+      <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as "all" | "buyzone")}>
+        <TabsList>
+          <TabsTrigger value="all">All ({rows?.length ?? 0})</TabsTrigger>
+          <TabsTrigger value="buyzone">Buy Zone</TabsTrigger>
+        </TabsList>
+        <TabsContent value="all">
       <div className="overflow-x-auto rounded-md border border-border bg-background/40">
         <table className="w-full min-w-[1400px] text-sm">
           <thead className="border-b border-border bg-background/60 text-[11px] uppercase tracking-wider text-muted-foreground">
@@ -492,6 +528,11 @@ export function LongTermWatchlistView() {
           </tbody>
         </table>
       </div>
+        </TabsContent>
+        <TabsContent value="buyzone">
+          <BuyZoneTable rows={buyZoneRows} loading={loading} />
+        </TabsContent>
+      </Tabs>
 
       <AddStockDialog
         open={addOpen}
@@ -910,6 +951,135 @@ function WatchRow({
         </tr>
       )}
     </>
+  );
+}
+
+// Buy Zone view: same 28 rows, nothing filtered out, sorted by
+// composite score descending. Existing flags/action stay visible;
+// adds RSI value+score, MACD status+score, and the composite badge.
+function BuyZoneTable({ rows, loading }: { rows: Row[] | null; loading: boolean }) {
+  return (
+    <div className="overflow-x-auto rounded-md border border-border bg-background/40">
+      <table className="w-full min-w-[1100px] text-sm">
+        <thead className="border-b border-border bg-background/60 text-[11px] uppercase tracking-wider text-muted-foreground">
+          <tr>
+            <th className="px-2 py-2 text-left">Symbol</th>
+            <th className="px-2 py-2 text-left">Name</th>
+            <th className="px-2 py-2 text-right">Price</th>
+            <th className="px-2 py-2 text-right">Change%</th>
+            <th className="px-2 py-2 text-right">RSI</th>
+            <th className="px-2 py-2 text-center">MACD</th>
+            <th className="px-2 py-2 text-center">Flags</th>
+            <th className="px-2 py-2 text-center">Action</th>
+            <th className="px-2 py-2 text-center">Buy Zone</th>
+          </tr>
+        </thead>
+        <tbody>
+          {loading && rows === null && (
+            <tr>
+              <td colSpan={9} className="px-2 py-8 text-center">
+                <Loader2 className="mx-auto h-4 w-4 animate-spin text-muted-foreground" />
+              </td>
+            </tr>
+          )}
+          {!loading && rows && rows.length === 0 && (
+            <tr>
+              <td colSpan={9} className="px-2 py-8 text-center text-muted-foreground">
+                No symbols yet. Use Add Stock to start.
+              </td>
+            </tr>
+          )}
+          {rows?.map((r) => (
+            <BuyZoneRow key={r.id} row={r} />
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function BuyZoneRow({ row }: { row: Row }) {
+  const changeColor =
+    row.changePct === null
+      ? "text-muted-foreground"
+      : row.changePct >= 0
+        ? "text-emerald-300"
+        : "text-rose-300";
+  const visibleFlags = row.flags.slice(0, 2);
+  const overflowFlags = row.flags.slice(2);
+  const flagsTooltip = row.flags
+    .map((f) => `${f.label}: ${f.description}`)
+    .join("\n\n");
+
+  return (
+    <tr className="border-b border-border/40 hover:bg-background/60">
+      <td className="px-2 py-1.5 font-mono font-semibold">
+        {row.symbol}
+        {row.hasEncyclopedia && <span className="ml-1 text-[10px]">📚</span>}
+      </td>
+      <td className="px-2 py-1.5 text-muted-foreground">{row.companyName ?? "—"}</td>
+      <td className="px-2 py-1.5 text-right font-mono">{fmtMoney(row.price)}</td>
+      <td className={cn("px-2 py-1.5 text-right font-mono", changeColor)}>
+        {fmtPct(row.changePct)}
+      </td>
+      <td className="px-2 py-1.5 text-right">
+        <div className={cn("font-mono", rsiColor(row.rsi14))}>
+          {row.rsi14 !== null && Number.isFinite(row.rsi14) ? row.rsi14.toFixed(0) : "—"}
+        </div>
+        <div className="text-[10px] text-muted-foreground">{row.buyZoneRsiScore.toFixed(1)}/5</div>
+      </td>
+      <td className="px-2 py-1.5 text-center">
+        <div className={cn("text-[11px] font-medium capitalize", macdStatusColor(row.buyZoneMacdStatus))}>
+          {row.buyZoneMacdStatus}
+        </div>
+        <div className="text-[10px] text-muted-foreground">{row.buyZoneMacdScore.toFixed(1)}/5</div>
+      </td>
+      <td className="px-2 py-1.5 text-center" title={flagsTooltip || undefined}>
+        {visibleFlags.length === 0 ? (
+          <span className="text-muted-foreground">—</span>
+        ) : (
+          <span className="inline-flex flex-wrap items-center justify-center gap-1">
+            {visibleFlags.map((f) => (
+              <span
+                key={f.kind}
+                className={cn(
+                  "rounded border px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wider whitespace-nowrap",
+                  FLAG_BADGE[f.kind],
+                )}
+              >
+                {f.label}
+              </span>
+            ))}
+            {overflowFlags.length > 0 && (
+              <span className="rounded border border-border bg-background px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-muted-foreground">
+                +{overflowFlags.length}
+              </span>
+            )}
+          </span>
+        )}
+      </td>
+      <td className="px-2 py-1.5 text-center">
+        <span
+          className={cn(
+            "inline-block rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider whitespace-nowrap",
+            actionBadge(row.action),
+          )}
+        >
+          {actionLabel(row.action)}
+        </span>
+      </td>
+      <td className="px-2 py-1.5 text-center">
+        <span
+          className={cn(
+            "inline-block rounded border px-2 py-0.5 font-mono text-[12px] font-semibold",
+            buyZoneBadgeColor(row.buyZoneComposite),
+          )}
+          title={`RSI ${row.buyZoneRsiScore.toFixed(1)} + MACD ${row.buyZoneMacdScore.toFixed(1)} = ${row.buyZoneComposite.toFixed(1)}`}
+        >
+          {row.buyZoneComposite.toFixed(1)}/10
+        </span>
+      </td>
+    </tr>
   );
 }
 

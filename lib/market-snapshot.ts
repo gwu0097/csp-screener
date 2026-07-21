@@ -8,7 +8,7 @@ import {
   getHistoricalPrices,
   getResearchSnapshot,
 } from "@/lib/yahoo";
-import { computeRSI, computeSMA } from "@/lib/indicators";
+import { computeRSI, computeSMA, computeMACD, type MACDPoint } from "@/lib/indicators";
 
 export type Price5d = { date: string; close: number; change_pct: number | null };
 
@@ -30,6 +30,13 @@ export type SymbolSnapshot = {
   sma20: number | null;
   vs_sma20_pct: number | null;
   rsi14: number | null;
+  macd_line: number | null;
+  macd_signal: number | null;
+  macd_histogram: number | null;
+  // Last ~10 daily {macd,signal,histogram} points, oldest first — the
+  // Buy Zone scorer needs recent history (cross/trend detection), not
+  // just the latest value.
+  macd_history: MACDPoint[] | null;
   trailing_pe: number | null;
   forward_pe: number | null;
   peg_ratio: number | null;
@@ -119,6 +126,17 @@ export async function refreshSymbolSnapshot(
   const series90 = sortedCloses(bars90);
   const closes90 = series90.map((b) => b.close);
   const rsi14 = round(computeRSI(closes90, 14), 2);
+  const macdResult = computeMACD(closes90);
+  const macd_line = round(macdResult?.latest.macd ?? null, 4);
+  const macd_signal = round(macdResult?.latest.signal ?? null, 4);
+  const macd_histogram = round(macdResult?.latest.histogram ?? null, 4);
+  const macd_history: MACDPoint[] | null = macdResult
+    ? macdResult.series.slice(-10).map((p) => ({
+        macd: round(p.macd, 4) as number,
+        signal: round(p.signal, 4) as number,
+        histogram: round(p.histogram, 4) as number,
+      }))
+    : null;
   const sma20 = round(computeSMA(closes90, 20), 4);
   const vs_sma20_pct =
     sma20 !== null && sma20 > 0 ? round(((price - sma20) / sma20) * 100) : null;
@@ -221,6 +239,10 @@ export async function refreshSymbolSnapshot(
     sma20,
     vs_sma20_pct,
     rsi14,
+    macd_line,
+    macd_signal,
+    macd_histogram,
+    macd_history,
     trailing_pe: round(quote.trailingPE),
     forward_pe: round(quote.forwardPE),
     peg_ratio: round(pegRatio),

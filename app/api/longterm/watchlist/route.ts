@@ -12,6 +12,7 @@ import {
   type SymbolSnapshot,
 } from "@/lib/market-snapshot";
 import { requireUserId, authErrorResponse } from "@/lib/auth";
+import { computeBuyZoneScore } from "@/lib/buy-zone";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -69,6 +70,13 @@ type EnrichedRow = WatchlistRow & {
   flags: Flag[];
   action: Action;
   hasEncyclopedia: boolean;
+  // "Buy Zone" turnaround score (RSI approaching oversold + a
+  // below-zero MACD bullish cross) — separate from the buyZone price
+  // band above. rsiScore + macdScore = buyZoneComposite, always.
+  buyZoneRsiScore: number;
+  buyZoneMacdScore: number;
+  buyZoneComposite: number;
+  buyZoneMacdStatus: string;
 };
 
 type Alert = {
@@ -314,6 +322,8 @@ function enrichFromSnapshot(
     high52: fiftyTwoWeekHigh,
     sma200,
   });
+  const rsi14 = snapshot?.rsi14 ?? null;
+  const buyZoneScore = computeBuyZoneScore(rsi14, snapshot?.macd_history ?? null);
   return {
     ...row,
     companyName: snapshot?.company_name ?? null,
@@ -331,12 +341,16 @@ function enrichFromSnapshot(
     momentum3mPct,
     return3yPct,
     vsSpy3yPct,
-    rsi14: snapshot?.rsi14 ?? null,
+    rsi14,
     buyZone,
     sellZone,
     flags,
     action,
     hasEncyclopedia: encyclopediaSet.has(row.symbol),
+    buyZoneRsiScore: buyZoneScore.rsiScore,
+    buyZoneMacdScore: buyZoneScore.macdScore,
+    buyZoneComposite: buyZoneScore.composite,
+    buyZoneMacdStatus: buyZoneScore.macdStatus,
   };
 }
 
