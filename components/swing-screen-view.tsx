@@ -2186,12 +2186,12 @@ function InsiderSection({ candidate: c }: { candidate: SwingCandidate }) {
     "signal high personal conviction — this is real money, not compensation.";
   const netTooltip =
     "Net = total open-market buy dollars minus total open-market sell dollars " +
-    "across all insiders in the last 45 days.\n\n" +
+    "across all insiders in the last 90 days.\n\n" +
     "Multiple insiders buying simultaneously is a stronger signal than one " +
     "person buying.";
   return (
     <DetailSection
-      title="Insider activity (last 45 days)"
+      title="Insider activity (last 90 days)"
       titleTooltip={sectionTooltip}
     >
       {c.insiderTransactions.length === 0 ? (

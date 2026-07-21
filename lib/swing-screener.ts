@@ -1186,10 +1186,21 @@ function classifyInsiderTxs(rows: FinnhubInsiderTx[]): {
   executiveBuys: InsiderTransaction[];
   signal: "strong_bullish" | "bullish" | "neutral" | "bearish";
 } {
+  // An option exercise reports as TWO Finnhub rows for the same event:
+  // a derivative leg (isDerivative: true, transactionPrice: 0 — the
+  // option being extinguished, a bookkeeping placeholder with no real
+  // dollar value) and a non-derivative leg (the actual shares acquired,
+  // with a real price). Both carry the same transactionCode, so
+  // without this filter the $0 placeholder sits in the display
+  // alongside — or ahead of, crowding out of the 8-row cap — its
+  // real-value sibling. Dropped before mapping so nothing downstream
+  // (display, executiveBuys, buy/sell sums) ever sees the placeholder.
+  const nonDerivative = rows.filter((r) => r.isDerivative !== true);
+
   // Direction comes from `change` (signed delta), not `share` (total post-tx
   // holdings — always positive). `Math.abs(change)` is the actual transaction
   // size in shares.
-  const transactions: InsiderTransaction[] = rows.map((r) => {
+  const transactions: InsiderTransaction[] = nonDerivative.map((r) => {
     const shares = Math.abs(r.change);
     const price = r.transactionPrice;
     const code = r.transactionCode ?? "";
@@ -1703,7 +1714,7 @@ export async function pass2Enrich(
     let insiderRows: FinnhubInsiderTx[] = [];
     let nextEarn: NextEarningsAnnouncement | null = null;
     try {
-      insiderRows = await getFinnhubInsiderTransactions(symbol, 45, { forceFresh });
+      insiderRows = await getFinnhubInsiderTransactions(symbol, 90, { forceFresh });
     } catch {
       insiderRows = [];
     }

@@ -396,6 +396,13 @@ export type FinnhubInsiderTx = {
   transactionDate: string;
   transactionCode: string;
   transactionPrice: number;
+  // An option-exercise (or similar) event reports as TWO rows: the
+  // derivative leg being extinguished (isDerivative: true,
+  // transactionPrice: 0 — a bookkeeping placeholder, not a real value)
+  // and the non-derivative leg for the actual shares acquired (the one
+  // with a real price). Optional because older cached rows / other
+  // endpoints may not carry it.
+  isDerivative?: boolean;
 };
 
 // Insider filings and the next-earnings-date are effectively static
@@ -404,9 +411,14 @@ export type FinnhubInsiderTx = {
 // cachedFinnhubGet) rather than refetched on every call.
 const FINNHUB_STATIC_MAX_AGE_MS = 8 * 60 * 60 * 1000;
 
+// 90 days, not 45 — open-market P/S transactions are rare (~1:200
+// against Grant/Exercise volume in a live sample), and a real purchase
+// dated 46-90 days back was aging out of a 45-day window before the
+// screener ever saw it (confirmed on CDW: two real open-market buys
+// ~$2.5M combined, 46-71 days back, invisible under the old window).
 export async function getFinnhubInsiderTransactions(
   symbol: string,
-  windowDays = 45,
+  windowDays = 90,
   opts: { forceFresh?: boolean } = {},
 ): Promise<FinnhubInsiderTx[]> {
   const to = new Date();
@@ -415,8 +427,12 @@ export async function getFinnhubInsiderTransactions(
   const toIso = to.toISOString().slice(0, 10);
 
   try {
+    // Cache key includes the window so a window-length change (like
+    // this one) can never silently serve rows fetched under a
+    // different range — an old 45-day-keyed row is simply a different,
+    // orphaned key now, not a stale hit under the new code.
     const data = await cachedFinnhubGet<{ data?: FinnhubInsiderTx[]; symbol?: string }>(
-      "insider-transactions",
+      `insider-transactions-${windowDays}d`,
       "/stock/insider-transactions",
       { symbol: symbol.toUpperCase(), from: fromIso, to: toIso },
       { symbol, maxAgeMs: FINNHUB_STATIC_MAX_AGE_MS, forceFresh: opts.forceFresh },
