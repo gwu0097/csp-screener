@@ -77,6 +77,13 @@ export async function GET(req: NextRequest) {
       buyZoneMacdScore: score.macdScore,
       buyZoneComposite: score.composite,
       buyZoneMacdStatus: score.macdStatus,
+      // Already fetched as part of the same snapshot refresh above
+      // (getQuoteEnrichment / getResearchSnapshot fallback) — no new
+      // call for the always-shown analyst read.
+      analystTarget: snap?.analyst_target ?? null,
+      upsideToTarget: snap?.upside_to_target ?? null,
+      fiftyTwoWeekLow: snap?.week52_low ?? null,
+      fiftyTwoWeekHigh: snap?.week52_high ?? null,
       watchlistNames: Array.from(bySymbol.get(sym) ?? []).sort(),
     };
   });

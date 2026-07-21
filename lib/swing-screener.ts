@@ -1181,7 +1181,7 @@ function transactionLabel(code: string): string {
   return TRANSACTION_CODE_LABELS[code] ?? code;
 }
 
-function classifyInsiderTxs(rows: FinnhubInsiderTx[]): {
+export function classifyInsiderTxs(rows: FinnhubInsiderTx[]): {
   transactions: InsiderTransaction[];
   executiveBuys: InsiderTransaction[];
   signal: "strong_bullish" | "bullish" | "neutral" | "bearish";

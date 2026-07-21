@@ -1,8 +1,16 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ArrowDown, ArrowUp, Loader2 } from "lucide-react";
+import {
+  ArrowDown,
+  ArrowUp,
+  ChevronDown,
+  ChevronRight,
+  Loader2,
+  Search,
+} from "lucide-react";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { PriceChart } from "@/components/price-chart";
 import { cn } from "@/lib/utils";
 
 type WatchlistMeta = {
@@ -21,7 +29,35 @@ type BuyZoneRow = {
   buyZoneMacdScore: number;
   buyZoneComposite: number;
   buyZoneMacdStatus: string;
+  analystTarget: number | null;
+  upsideToTarget: number | null;
+  fiftyTwoWeekLow: number | null;
+  fiftyTwoWeekHigh: number | null;
   watchlistNames: string[];
+};
+
+type InsiderTx = {
+  name: string;
+  action: string;
+  transactionCode: string;
+  shares: number;
+  price: number;
+  date: string;
+  type: "buy" | "sell";
+  dollarValue: number;
+};
+
+type ResearchData = {
+  insider: {
+    signal: "strong_bullish" | "bullish" | "neutral" | "bearish";
+    executiveBuys: InsiderTx[];
+    transactions: InsiderTx[];
+  };
+  catalyst: {
+    analysis: string | null;
+    cached: boolean;
+    fetched_at: string | null;
+  };
 };
 
 function fmtMoney(n: number | null): string {
@@ -55,7 +91,17 @@ function macdStatusColor(status: string): string {
   return "text-muted-foreground";
 }
 
+function insiderSignalColor(signal: string): string {
+  switch (signal) {
+    case "strong_bullish": return "border-emerald-500/40 bg-emerald-500/10 text-emerald-300";
+    case "bullish": return "border-emerald-500/30 bg-emerald-500/5 text-emerald-300/90";
+    case "bearish": return "border-rose-500/40 bg-rose-500/10 text-rose-300";
+    default: return "border-muted-foreground/30 bg-muted-foreground/10 text-muted-foreground";
+  }
+}
+
 const ALL_SCOPE = "__all__";
+const CHART_STUDIES = ["RSI@tv-basicstudies", "MACD@tv-basicstudies"];
 
 type SortKey = "symbol" | "price" | "changePct" | "rsi14" | "macd" | "composite";
 type SortDir = "asc" | "desc";
@@ -106,6 +152,40 @@ export function BuyZoneView() {
   // the person clicks a different header.
   const [sortKey, setSortKey] = useState<SortKey>("composite");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
+
+  // On-demand insider + catalyst research, keyed by symbol — fetched
+  // only when "Research" is clicked, cached in UI state for the
+  // session so re-expanding an already-researched row doesn't re-fetch.
+  const [research, setResearch] = useState<Record<string, ResearchData>>({});
+  const [researchLoading, setResearchLoading] = useState<Set<string>>(new Set());
+  const [researchError, setResearchError] = useState<Record<string, string>>({});
+
+  async function loadResearch(symbol: string) {
+    if (research[symbol]) return;
+    if (researchLoading.has(symbol)) return;
+    setResearchLoading((prev) => new Set(prev).add(symbol));
+    setResearchError((prev) => {
+      const next = { ...prev };
+      delete next[symbol];
+      return next;
+    });
+    try {
+      const res = await fetch(`/api/analysis/buy-zone/research?symbol=${encodeURIComponent(symbol)}`, {
+        cache: "no-store",
+      });
+      const json = (await res.json()) as ResearchData & { error?: string };
+      if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
+      setResearch((prev) => ({ ...prev, [symbol]: { insider: json.insider, catalyst: json.catalyst } }));
+    } catch (e) {
+      setResearchError((prev) => ({ ...prev, [symbol]: e instanceof Error ? e.message : "Research failed" }));
+    } finally {
+      setResearchLoading((prev) => {
+        const next = new Set(prev);
+        next.delete(symbol);
+        return next;
+      });
+    }
+  }
 
   function onSort(key: SortKey) {
     if (sortKey === key) {
@@ -187,7 +267,8 @@ export function BuyZoneView() {
         <h1 className="text-2xl font-semibold tracking-tight">Buy Zone</h1>
         <p className="text-base text-muted-foreground">
           Names closest to an oversold bullish turnaround — RSI approaching oversold plus a
-          MACD bullish cross out of negative territory. Click any column to sort.
+          MACD bullish cross out of negative territory. Click any column to sort, click a row
+          to expand.
         </p>
       </div>
 
@@ -237,62 +318,278 @@ export function BuyZoneView() {
                 </td>
               </tr>
             )}
-            {sortedRows?.map((r) => {
-              const changeColor =
-                r.changePct === null
-                  ? "text-muted-foreground"
-                  : r.changePct >= 0
-                    ? "text-emerald-300"
-                    : "text-rose-300";
-              return (
-                <tr key={r.symbol} className="border-b border-border/40 hover:bg-background/60">
-                  <td className="px-2 py-1.5 font-mono font-semibold">{r.symbol}</td>
-                  <td className="px-2 py-1.5 text-muted-foreground">{r.companyName ?? "—"}</td>
-                  <td className="px-2 py-1.5 text-right font-mono">{fmtMoney(r.price)}</td>
-                  <td className={cn("px-2 py-1.5 text-right font-mono", changeColor)}>
-                    {fmtPct(r.changePct)}
-                  </td>
-                  <td className="px-2 py-1.5 text-right">
-                    <div className={cn("font-mono", rsiColor(r.rsi14))}>
-                      {r.rsi14 !== null && Number.isFinite(r.rsi14) ? r.rsi14.toFixed(0) : "—"}
-                    </div>
-                    <div className="text-[10px] text-muted-foreground">{r.buyZoneRsiScore.toFixed(1)}/5</div>
-                  </td>
-                  <td className="px-2 py-1.5 text-center">
-                    <div className={cn("text-[11px] font-medium capitalize", macdStatusColor(r.buyZoneMacdStatus))}>
-                      {r.buyZoneMacdStatus}
-                    </div>
-                    <div className="text-[10px] text-muted-foreground">{r.buyZoneMacdScore.toFixed(1)}/5</div>
-                  </td>
-                  <td className="px-2 py-1.5 text-center">
-                    <span
-                      className={cn(
-                        "inline-block rounded border px-2 py-0.5 font-mono text-[12px] font-semibold",
-                        buyZoneBadgeColor(r.buyZoneComposite),
-                      )}
-                      title={`RSI ${r.buyZoneRsiScore.toFixed(1)} + MACD ${r.buyZoneMacdScore.toFixed(1)} = ${r.buyZoneComposite.toFixed(1)}`}
-                    >
-                      {r.buyZoneComposite.toFixed(1)}/10
-                    </span>
-                  </td>
-                  <td className="px-2 py-1.5">
-                    <span className="inline-flex flex-wrap items-center gap-1">
-                      {r.watchlistNames.map((name) => (
-                        <span
-                          key={name}
-                          className="rounded border border-border bg-background px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-muted-foreground"
-                        >
-                          {name}
-                        </span>
-                      ))}
-                    </span>
-                  </td>
-                </tr>
-              );
-            })}
+            {sortedRows?.map((r) => (
+              <BuyZoneRowItem
+                key={r.symbol}
+                row={r}
+                research={research[r.symbol] ?? null}
+                loading={researchLoading.has(r.symbol)}
+                error={researchError[r.symbol] ?? null}
+                onResearch={() => void loadResearch(r.symbol)}
+              />
+            ))}
           </tbody>
         </table>
       </div>
+    </div>
+  );
+}
+
+function BuyZoneRowItem({
+  row,
+  research,
+  loading,
+  error,
+  onResearch,
+}: {
+  row: BuyZoneRow;
+  research: ResearchData | null;
+  loading: boolean;
+  error: string | null;
+  onResearch: () => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const changeColor =
+    row.changePct === null
+      ? "text-muted-foreground"
+      : row.changePct >= 0
+        ? "text-emerald-300"
+        : "text-rose-300";
+
+  return (
+    <>
+      <tr
+        onClick={() => setExpanded((s) => !s)}
+        className="cursor-pointer border-b border-border/40 hover:bg-background/60"
+      >
+        <td className="px-2 py-1.5 font-mono font-semibold">
+          <span className="inline-flex items-center gap-1">
+            {expanded ? (
+              <ChevronDown className="h-3 w-3 shrink-0 text-muted-foreground" />
+            ) : (
+              <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground" />
+            )}
+            {row.symbol}
+          </span>
+        </td>
+        <td className="px-2 py-1.5 text-muted-foreground">{row.companyName ?? "—"}</td>
+        <td className="px-2 py-1.5 text-right font-mono">{fmtMoney(row.price)}</td>
+        <td className={cn("px-2 py-1.5 text-right font-mono", changeColor)}>
+          {fmtPct(row.changePct)}
+        </td>
+        <td className="px-2 py-1.5 text-right">
+          <div className={cn("font-mono", rsiColor(row.rsi14))}>
+            {row.rsi14 !== null && Number.isFinite(row.rsi14) ? row.rsi14.toFixed(0) : "—"}
+          </div>
+          <div className="text-[10px] text-muted-foreground">{row.buyZoneRsiScore.toFixed(1)}/5</div>
+        </td>
+        <td className="px-2 py-1.5 text-center">
+          <div className={cn("text-[11px] font-medium capitalize", macdStatusColor(row.buyZoneMacdStatus))}>
+            {row.buyZoneMacdStatus}
+          </div>
+          <div className="text-[10px] text-muted-foreground">{row.buyZoneMacdScore.toFixed(1)}/5</div>
+        </td>
+        <td className="px-2 py-1.5 text-center">
+          <span
+            className={cn(
+              "inline-block rounded border px-2 py-0.5 font-mono text-[12px] font-semibold",
+              buyZoneBadgeColor(row.buyZoneComposite),
+            )}
+            title={`RSI ${row.buyZoneRsiScore.toFixed(1)} + MACD ${row.buyZoneMacdScore.toFixed(1)} = ${row.buyZoneComposite.toFixed(1)}`}
+          >
+            {row.buyZoneComposite.toFixed(1)}/10
+          </span>
+        </td>
+        <td className="px-2 py-1.5">
+          <span className="inline-flex flex-wrap items-center gap-1">
+            {row.watchlistNames.map((name) => (
+              <span
+                key={name}
+                className="rounded border border-border bg-background px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-muted-foreground"
+              >
+                {name}
+              </span>
+            ))}
+          </span>
+        </td>
+      </tr>
+      {expanded && (
+        <tr className="border-b border-border/40 bg-background/30">
+          <td colSpan={8} className="px-3 py-3">
+            <div className="space-y-4">
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-[2fr_1fr]">
+                <PriceChart symbol={row.symbol} studies={CHART_STUDIES} height={520} />
+                <AnalystReadPanel row={row} />
+              </div>
+              <ResearchPanel row={row} research={research} loading={loading} error={error} onResearch={onResearch} />
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+// Analyst target/consensus — always shown on expand, no button. Data
+// is already fetched as part of the same snapshot refresh the row's
+// price/RSI/MACD come from, so this is zero additional cost.
+function AnalystReadPanel({ row }: { row: BuyZoneRow }) {
+  const hasRange = row.fiftyTwoWeekLow !== null && row.fiftyTwoWeekHigh !== null;
+  return (
+    <div className="space-y-3 rounded-md border border-border bg-background/40 p-3">
+      <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+        Analyst read
+      </div>
+      {row.analystTarget === null ? (
+        <p className="text-sm text-muted-foreground">No analyst target available.</p>
+      ) : (
+        <div className="space-y-1 text-sm">
+          <div className="flex items-baseline justify-between">
+            <span className="text-muted-foreground">Mean target</span>
+            <span className="font-mono font-semibold">{fmtMoney(row.analystTarget)}</span>
+          </div>
+          <div className="flex items-baseline justify-between">
+            <span className="text-muted-foreground">Upside to target</span>
+            <span
+              className={cn(
+                "font-mono font-semibold",
+                row.upsideToTarget !== null && row.upsideToTarget >= 0
+                  ? "text-emerald-300"
+                  : "text-rose-300",
+              )}
+            >
+              {fmtPct(row.upsideToTarget)}
+            </span>
+          </div>
+        </div>
+      )}
+      {hasRange && (
+        <div className="flex items-baseline justify-between text-sm">
+          <span className="text-muted-foreground">52-week range</span>
+          <span className="font-mono">
+            {fmtMoney(row.fiftyTwoWeekLow)} – {fmtMoney(row.fiftyTwoWeekHigh)}
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Insider activity + upcoming catalyst — collapsed until "Research"
+// is clicked. Button visual states mirror the "FETCH EM HISTORY"
+// pattern (idle / fetching / error / done).
+function ResearchPanel({
+  row,
+  research,
+  loading,
+  error,
+  onResearch,
+}: {
+  row: BuyZoneRow;
+  research: ResearchData | null;
+  loading: boolean;
+  error: string | null;
+  onResearch: () => void;
+}) {
+  return (
+    <div className="space-y-3 rounded-md border border-border bg-background/40 p-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+          Insider activity + upcoming catalyst
+        </div>
+        {!research && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onResearch();
+            }}
+            disabled={loading}
+            className="inline-flex items-center gap-1 rounded border border-border bg-background/60 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-foreground/90 hover:bg-background disabled:opacity-60"
+          >
+            {loading ? (
+              <>
+                <Loader2 className="h-3 w-3 animate-spin" />
+                Researching…
+              </>
+            ) : error ? (
+              <>↻ Retry</>
+            ) : (
+              <>
+                <Search className="h-3 w-3" />
+                Research
+              </>
+            )}
+          </button>
+        )}
+      </div>
+
+      {error && !research && (
+        <div className="rounded border border-rose-500/40 bg-rose-500/10 px-2 py-1.5 text-[11px] text-rose-200">
+          {error}
+        </div>
+      )}
+
+      {!research && !error && (
+        <p className="text-sm text-muted-foreground">
+          Click Research to pull insider transactions and an upcoming-catalyst read for {row.symbol}.
+        </p>
+      )}
+
+      {research && (
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                Insider signal
+              </span>
+              <span
+                className={cn(
+                  "rounded border px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider",
+                  insiderSignalColor(research.insider.signal),
+                )}
+              >
+                {research.insider.signal.replace("_", " ")}
+              </span>
+            </div>
+            {research.insider.transactions.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No insider transactions in the last 90 days.</p>
+            ) : (
+              <ul className="space-y-1 text-[12px]">
+                {research.insider.transactions.map((t, i) => (
+                  <li key={i} className="flex items-center justify-between gap-2 text-muted-foreground">
+                    <span className="truncate">
+                      {t.name} · {t.action}
+                    </span>
+                    <span
+                      className={cn(
+                        "shrink-0 font-mono",
+                        t.type === "buy" ? "text-emerald-300" : "text-rose-300",
+                      )}
+                    >
+                      {t.dollarValue > 0 ? `$${(t.dollarValue / 1000).toFixed(0)}k` : "—"}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+          <div className="space-y-2">
+            <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              Upcoming catalyst
+            </span>
+            <p className="text-sm text-foreground/90">
+              {research.catalyst.analysis ?? "No catalyst read available."}
+            </p>
+            {research.catalyst.fetched_at && (
+              <div className="text-[10px] uppercase tracking-wide text-muted-foreground/70">
+                {research.catalyst.cached ? "cached · " : ""}
+                {new Date(research.catalyst.fetched_at).toLocaleString()}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
