@@ -9,6 +9,7 @@ import {
   ChevronUp,
   Loader2,
   Newspaper,
+  Pencil,
   Plus,
   RefreshCw,
   Trash2,
@@ -21,7 +22,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -69,10 +70,6 @@ type Row = {
   flags: Flag[];
   action: Action;
   hasEncyclopedia: boolean;
-  buyZoneRsiScore: number;
-  buyZoneMacdScore: number;
-  buyZoneComposite: number;
-  buyZoneMacdStatus: string;
 };
 
 type Alert = {
@@ -105,6 +102,14 @@ type SortKey =
   | "action";
 
 type SortDir = "asc" | "desc";
+
+type WatchlistMeta = {
+  id: string;
+  name: string;
+  isPortfolio: boolean;
+  symbolCount: number;
+  createdAt: string;
+};
 
 const ACTION_SEVERITY: Record<Action, number> = {
   CUT: 3,
@@ -213,21 +218,6 @@ function alertKindLabel(kind: Alert["kind"]): string {
   }
 }
 
-// Buy Zone composite badge: 0-10, sum of the RSI + MACD component
-// scores shown alongside it (no hidden math).
-function buyZoneBadgeColor(composite: number): string {
-  if (composite >= 8) return "border-emerald-500/40 bg-emerald-500/10 text-emerald-300";
-  if (composite >= 5) return "border-amber-500/40 bg-amber-500/10 text-amber-300";
-  return "border-muted-foreground/30 bg-muted-foreground/10 text-muted-foreground";
-}
-
-function macdStatusColor(status: string): string {
-  if (status.startsWith("crossed")) return "text-emerald-300";
-  if (status === "approaching") return "text-amber-300";
-  if (status === "widening") return "text-rose-300";
-  return "text-muted-foreground";
-}
-
 // Visual 52-week range bar + buy/sell zone callouts below.
 function FiftyTwoWeekBar({
   price,
@@ -278,6 +268,11 @@ function FiftyTwoWeekBar({
 }
 
 export function LongTermWatchlistView() {
+  const [watchlists, setWatchlists] = useState<WatchlistMeta[] | null>(null);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [listToast, setListToast] = useState<string | null>(null);
+
   const [rows, setRows] = useState<Row[] | null>(null);
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [alertsOpen, setAlertsOpen] = useState(true);
@@ -287,7 +282,35 @@ export function LongTermWatchlistView() {
   const [digestOpen, setDigestOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [sort, setSort] = useState<{ key: SortKey; dir: SortDir } | null>(null);
-  const [activeTab, setActiveTab] = useState<"all" | "buyzone">("all");
+
+  const loadWatchlists = useCallback(async () => {
+    try {
+      const res = await fetch("/api/watchlists", { cache: "no-store" });
+      const json = (await res.json()) as { watchlists?: WatchlistMeta[]; error?: string };
+      if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
+      const lists = json.watchlists ?? [];
+      setWatchlists(lists);
+      setActiveId((prev) => {
+        if (prev && lists.some((w) => w.id === prev)) return prev;
+        return lists.find((w) => w.isPortfolio)?.id ?? lists[0]?.id ?? null;
+      });
+    } catch {
+      setWatchlists([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadWatchlists();
+  }, [loadWatchlists]);
+
+  useEffect(() => {
+    if (!listToast) return;
+    const t = setTimeout(() => setListToast(null), 3500);
+    return () => clearTimeout(t);
+  }, [listToast]);
+
+  const activeWatchlist = watchlists?.find((w) => w.id === activeId) ?? null;
+  const isPortfolioActive = activeWatchlist ? activeWatchlist.isPortfolio : true;
 
   const refetch = useCallback(async () => {
     setLoading(true);
@@ -314,8 +337,8 @@ export function LongTermWatchlistView() {
   }, []);
 
   useEffect(() => {
-    void refetch();
-  }, [refetch]);
+    if (isPortfolioActive) void refetch();
+  }, [isPortfolioActive, refetch]);
 
   useEffect(() => {
     if (!toast) return;
@@ -371,179 +394,215 @@ export function LongTermWatchlistView() {
     return copy;
   }, [rows, sort]);
 
-  // Buy Zone view: same rows, no filtering, sorted by composite score
-  // descending regardless of the "All" tab's column sort.
-  const buyZoneRows = useMemo<Row[] | null>(() => {
-    if (!rows) return rows;
-    const copy = [...rows];
-    copy.sort((a, b) => b.buyZoneComposite - a.buyZoneComposite);
-    return copy;
-  }, [rows]);
-
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-3">
         <div className="space-y-1">
-          <h1 className="text-2xl font-semibold tracking-tight">
-            Long-Term Portfolio
-          </h1>
+          <h1 className="text-2xl font-semibold tracking-tight">Watchlists</h1>
           <p className="text-base text-muted-foreground">
-            Allocation buckets + live valuation. Click any column header to sort.
+            {isPortfolioActive
+              ? "Allocation buckets + live valuation. Click any column header to sort."
+              : "Symbol + thesis. See Analysis → Buy Zone for turnaround scoring across every list."}
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <Button variant="outline" onClick={() => setDigestOpen(true)}>
-            <Newspaper className="mr-1 h-4 w-4" /> Weekly Digest
-          </Button>
-          <Button onClick={() => setAddOpen(true)}>
-            <Plus className="mr-1 h-4 w-4" /> Add Stock
-          </Button>
-        </div>
+        {isPortfolioActive && (
+          <div className="flex items-center gap-2">
+            <Button variant="outline" onClick={() => setDigestOpen(true)}>
+              <Newspaper className="mr-1 h-4 w-4" /> Weekly Digest
+            </Button>
+            <Button onClick={() => setAddOpen(true)}>
+              <Plus className="mr-1 h-4 w-4" /> Add Stock
+            </Button>
+          </div>
+        )}
       </div>
 
-      {toast && (
+      {listToast && (
         <div className="rounded border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200">
-          {toast}
-        </div>
-      )}
-      {error && (
-        <div className="rounded border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-sm text-rose-200">
-          {error}
+          {listToast}
         </div>
       )}
 
-      <AlertsPanel
-        alerts={alerts}
-        groups={alertGroups}
-        open={alertsOpen}
-        onToggle={() => setAlertsOpen((s) => !s)}
-      />
-
-      <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as "all" | "buyzone")}>
-        <TabsList>
-          <TabsTrigger value="all">All ({rows?.length ?? 0})</TabsTrigger>
-          <TabsTrigger value="buyzone">Buy Zone</TabsTrigger>
-        </TabsList>
-        <TabsContent value="all">
-      <div className="overflow-x-auto rounded-md border border-border bg-background/40">
-        <table className="w-full min-w-[1400px] text-sm">
-          <thead className="border-b border-border bg-background/60 text-[11px] uppercase tracking-wider text-muted-foreground">
-            <tr>
-              <th className="px-2 py-2 text-left">Symbol</th>
-              <th className="px-2 py-2 text-left">Name</th>
-              <th className="px-2 py-2 text-left">Allocation</th>
-              <SortHeader label="Price" k="price" sort={sort} onSort={toggleSort} align="right" />
-              <SortHeader label="Change%" k="changePct" sort={sort} onSort={toggleSort} align="right" />
-              <SortHeader label="3M Mom" k="momentum3mPct" sort={sort} onSort={toggleSort} align="right" />
-              <SortHeader label="3Y Return" k="return3yPct" sort={sort} onSort={toggleSort} align="right" />
-              <SortHeader label="vs SPY" k="vsSpy3yPct" sort={sort} onSort={toggleSort} align="right" />
-              <th className="px-2 py-2 text-center">52W Range</th>
-              <SortHeader label="Trend (200d)" k="pctVs200dSma" sort={sort} onSort={toggleSort} align="right" />
-              <SortHeader label="P/E" k="trailingPE" sort={sort} onSort={toggleSort} align="right" />
-              <SortHeader label="PEG" k="pegRatio" sort={sort} onSort={toggleSort} align="right" />
-              <th className="px-2 py-2 text-right">RSI</th>
-              <th className="px-2 py-2 text-center">Flags</th>
-              <SortHeader label="Action" k="action" sort={sort} onSort={toggleSort} align="center" />
-              <th className="px-2 py-2"></th>
-            </tr>
-          </thead>
-          <tbody>
-            {loading && rows === null && (
-              <tr>
-                <td colSpan={16} className="px-2 py-8 text-center">
-                  <Loader2 className="mx-auto h-4 w-4 animate-spin text-muted-foreground" />
-                </td>
-              </tr>
-            )}
-            {!loading && rows && rows.length === 0 && (
-              <tr>
-                <td colSpan={16} className="px-2 py-8 text-center text-muted-foreground">
-                  No symbols yet. Use Add Stock to start.
-                </td>
-              </tr>
-            )}
-            {sortedRows?.map((r) => (
-              <WatchRow
-                key={r.id}
-                row={r}
-                onDelete={async () => {
-                  if (!confirm(`Remove ${r.symbol} from the watchlist?`)) return;
-                  try {
-                    const res = await fetch(
-                      `/api/longterm/watchlist?id=${encodeURIComponent(r.id)}`,
-                      { method: "DELETE" },
-                    );
-                    const json = (await res.json()) as { ok?: boolean; error?: string };
-                    if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
-                    setRows((prev) => (prev ? prev.filter((q) => q.id !== r.id) : prev));
-                    setToast(`${r.symbol} removed.`);
-                  } catch (e) {
-                    setToast(e instanceof Error ? e.message : "Delete failed");
-                  }
-                }}
-                onSaveNotes={async (notes) => {
-                  try {
-                    const res = await fetch("/api/longterm/watchlist", {
-                      method: "PATCH",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({ id: r.id, notes }),
-                    });
-                    const json = (await res.json()) as { row?: Row; error?: string };
-                    if (!res.ok || json.error || !json.row) {
-                      throw new Error(json.error ?? `HTTP ${res.status}`);
-                    }
-                    setRows((prev) =>
-                      prev
-                        ? prev.map((q) =>
-                            q.id === r.id
-                              ? { ...q, notes: json.row!.notes, updated_at: json.row!.updated_at }
-                              : q,
-                          )
-                        : prev,
-                    );
-                    setToast("Notes saved.");
-                  } catch (e) {
-                    setToast(e instanceof Error ? e.message : "Save failed");
-                  }
-                }}
-                onSetAllocation={async (allocation) => {
-                  try {
-                    const res = await fetch("/api/longterm/watchlist", {
-                      method: "PATCH",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({ id: r.id, allocation }),
-                    });
-                    const json = (await res.json()) as { row?: Row; error?: string };
-                    if (!res.ok || json.error || !json.row) {
-                      throw new Error(json.error ?? `HTTP ${res.status}`);
-                    }
-                    void refetch();
-                    setToast(`${r.symbol} → ${allocation}.`);
-                  } catch (e) {
-                    setToast(e instanceof Error ? e.message : "Update failed");
-                  }
-                }}
-              />
+      <div className="flex flex-wrap items-center gap-2">
+        <Tabs value={activeId ?? undefined} onValueChange={setActiveId}>
+          <TabsList>
+            {(watchlists ?? []).map((w) => (
+              <TabsTrigger key={w.id} value={w.id}>
+                {w.name}
+                {!w.isPortfolio && (
+                  <span className="ml-1 text-muted-foreground">({w.symbolCount})</span>
+                )}
+              </TabsTrigger>
             ))}
-          </tbody>
-        </table>
+          </TabsList>
+        </Tabs>
+        <Button variant="outline" size="sm" onClick={() => setCreateOpen(true)}>
+          <Plus className="mr-1 h-3.5 w-3.5" /> New Watchlist
+        </Button>
       </div>
-        </TabsContent>
-        <TabsContent value="buyzone">
-          <BuyZoneTable rows={buyZoneRows} loading={loading} />
-        </TabsContent>
-      </Tabs>
 
-      <AddStockDialog
-        open={addOpen}
-        onClose={() => setAddOpen(false)}
-        onAdded={(symbol) => {
-          setAddOpen(false);
-          setToast(`${symbol} added.`);
-          void refetch();
+      {isPortfolioActive ? (
+        <>
+          {toast && (
+            <div className="rounded border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200">
+              {toast}
+            </div>
+          )}
+          {error && (
+            <div className="rounded border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-sm text-rose-200">
+              {error}
+            </div>
+          )}
+
+          <AlertsPanel
+            alerts={alerts}
+            groups={alertGroups}
+            open={alertsOpen}
+            onToggle={() => setAlertsOpen((s) => !s)}
+          />
+
+          <div className="overflow-x-auto rounded-md border border-border bg-background/40">
+            <table className="w-full min-w-[1400px] text-sm">
+              <thead className="border-b border-border bg-background/60 text-[11px] uppercase tracking-wider text-muted-foreground">
+                <tr>
+                  <th className="px-2 py-2 text-left">Symbol</th>
+                  <th className="px-2 py-2 text-left">Name</th>
+                  <th className="px-2 py-2 text-left">Allocation</th>
+                  <SortHeader label="Price" k="price" sort={sort} onSort={toggleSort} align="right" />
+                  <SortHeader label="Change%" k="changePct" sort={sort} onSort={toggleSort} align="right" />
+                  <SortHeader label="3M Mom" k="momentum3mPct" sort={sort} onSort={toggleSort} align="right" />
+                  <SortHeader label="3Y Return" k="return3yPct" sort={sort} onSort={toggleSort} align="right" />
+                  <SortHeader label="vs SPY" k="vsSpy3yPct" sort={sort} onSort={toggleSort} align="right" />
+                  <th className="px-2 py-2 text-center">52W Range</th>
+                  <SortHeader label="Trend (200d)" k="pctVs200dSma" sort={sort} onSort={toggleSort} align="right" />
+                  <SortHeader label="P/E" k="trailingPE" sort={sort} onSort={toggleSort} align="right" />
+                  <SortHeader label="PEG" k="pegRatio" sort={sort} onSort={toggleSort} align="right" />
+                  <th className="px-2 py-2 text-right">RSI</th>
+                  <th className="px-2 py-2 text-center">Flags</th>
+                  <SortHeader label="Action" k="action" sort={sort} onSort={toggleSort} align="center" />
+                  <th className="px-2 py-2"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {loading && rows === null && (
+                  <tr>
+                    <td colSpan={16} className="px-2 py-8 text-center">
+                      <Loader2 className="mx-auto h-4 w-4 animate-spin text-muted-foreground" />
+                    </td>
+                  </tr>
+                )}
+                {!loading && rows && rows.length === 0 && (
+                  <tr>
+                    <td colSpan={16} className="px-2 py-8 text-center text-muted-foreground">
+                      No symbols yet. Use Add Stock to start.
+                    </td>
+                  </tr>
+                )}
+                {sortedRows?.map((r) => (
+                  <WatchRow
+                    key={r.id}
+                    row={r}
+                    onDelete={async () => {
+                      if (!confirm(`Remove ${r.symbol} from the watchlist?`)) return;
+                      try {
+                        const res = await fetch(
+                          `/api/longterm/watchlist?id=${encodeURIComponent(r.id)}`,
+                          { method: "DELETE" },
+                        );
+                        const json = (await res.json()) as { ok?: boolean; error?: string };
+                        if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
+                        setRows((prev) => (prev ? prev.filter((q) => q.id !== r.id) : prev));
+                        setToast(`${r.symbol} removed.`);
+                        void loadWatchlists();
+                      } catch (e) {
+                        setToast(e instanceof Error ? e.message : "Delete failed");
+                      }
+                    }}
+                    onSaveNotes={async (notes) => {
+                      try {
+                        const res = await fetch("/api/longterm/watchlist", {
+                          method: "PATCH",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ id: r.id, notes }),
+                        });
+                        const json = (await res.json()) as { row?: Row; error?: string };
+                        if (!res.ok || json.error || !json.row) {
+                          throw new Error(json.error ?? `HTTP ${res.status}`);
+                        }
+                        setRows((prev) =>
+                          prev
+                            ? prev.map((q) =>
+                                q.id === r.id
+                                  ? { ...q, notes: json.row!.notes, updated_at: json.row!.updated_at }
+                                  : q,
+                              )
+                            : prev,
+                        );
+                        setToast("Notes saved.");
+                      } catch (e) {
+                        setToast(e instanceof Error ? e.message : "Save failed");
+                      }
+                    }}
+                    onSetAllocation={async (allocation) => {
+                      try {
+                        const res = await fetch("/api/longterm/watchlist", {
+                          method: "PATCH",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ id: r.id, allocation }),
+                        });
+                        const json = (await res.json()) as { row?: Row; error?: string };
+                        if (!res.ok || json.error || !json.row) {
+                          throw new Error(json.error ?? `HTTP ${res.status}`);
+                        }
+                        void refetch();
+                        setToast(`${r.symbol} → ${allocation}.`);
+                      } catch (e) {
+                        setToast(e instanceof Error ? e.message : "Update failed");
+                      }
+                    }}
+                  />
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <AddStockDialog
+            open={addOpen}
+            onClose={() => setAddOpen(false)}
+            onAdded={(symbol) => {
+              setAddOpen(false);
+              setToast(`${symbol} added.`);
+              void refetch();
+              void loadWatchlists();
+            }}
+          />
+          <WeeklyDigestDialog open={digestOpen} onClose={() => setDigestOpen(false)} />
+        </>
+      ) : activeWatchlist ? (
+        <CustomWatchlistView
+          watchlist={activeWatchlist}
+          onDeleted={() => {
+            setListToast(`${activeWatchlist.name} deleted.`);
+            setActiveId(null);
+            void loadWatchlists();
+          }}
+          onRenamed={(name) => {
+            setListToast(`Renamed to ${name}.`);
+            void loadWatchlists();
+          }}
+          onItemsChanged={() => void loadWatchlists()}
+        />
+      ) : null}
+
+      <CreateWatchlistDialog
+        open={createOpen}
+        onClose={() => setCreateOpen(false)}
+        onCreated={(id, name) => {
+          setCreateOpen(false);
+          setListToast(`${name} created.`);
+          void loadWatchlists().then(() => setActiveId(id));
         }}
       />
-      <WeeklyDigestDialog open={digestOpen} onClose={() => setDigestOpen(false)} />
     </div>
   );
 }
@@ -954,135 +1013,6 @@ function WatchRow({
   );
 }
 
-// Buy Zone view: same 28 rows, nothing filtered out, sorted by
-// composite score descending. Existing flags/action stay visible;
-// adds RSI value+score, MACD status+score, and the composite badge.
-function BuyZoneTable({ rows, loading }: { rows: Row[] | null; loading: boolean }) {
-  return (
-    <div className="overflow-x-auto rounded-md border border-border bg-background/40">
-      <table className="w-full min-w-[1100px] text-sm">
-        <thead className="border-b border-border bg-background/60 text-[11px] uppercase tracking-wider text-muted-foreground">
-          <tr>
-            <th className="px-2 py-2 text-left">Symbol</th>
-            <th className="px-2 py-2 text-left">Name</th>
-            <th className="px-2 py-2 text-right">Price</th>
-            <th className="px-2 py-2 text-right">Change%</th>
-            <th className="px-2 py-2 text-right">RSI</th>
-            <th className="px-2 py-2 text-center">MACD</th>
-            <th className="px-2 py-2 text-center">Flags</th>
-            <th className="px-2 py-2 text-center">Action</th>
-            <th className="px-2 py-2 text-center">Buy Zone</th>
-          </tr>
-        </thead>
-        <tbody>
-          {loading && rows === null && (
-            <tr>
-              <td colSpan={9} className="px-2 py-8 text-center">
-                <Loader2 className="mx-auto h-4 w-4 animate-spin text-muted-foreground" />
-              </td>
-            </tr>
-          )}
-          {!loading && rows && rows.length === 0 && (
-            <tr>
-              <td colSpan={9} className="px-2 py-8 text-center text-muted-foreground">
-                No symbols yet. Use Add Stock to start.
-              </td>
-            </tr>
-          )}
-          {rows?.map((r) => (
-            <BuyZoneRow key={r.id} row={r} />
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function BuyZoneRow({ row }: { row: Row }) {
-  const changeColor =
-    row.changePct === null
-      ? "text-muted-foreground"
-      : row.changePct >= 0
-        ? "text-emerald-300"
-        : "text-rose-300";
-  const visibleFlags = row.flags.slice(0, 2);
-  const overflowFlags = row.flags.slice(2);
-  const flagsTooltip = row.flags
-    .map((f) => `${f.label}: ${f.description}`)
-    .join("\n\n");
-
-  return (
-    <tr className="border-b border-border/40 hover:bg-background/60">
-      <td className="px-2 py-1.5 font-mono font-semibold">
-        {row.symbol}
-        {row.hasEncyclopedia && <span className="ml-1 text-[10px]">📚</span>}
-      </td>
-      <td className="px-2 py-1.5 text-muted-foreground">{row.companyName ?? "—"}</td>
-      <td className="px-2 py-1.5 text-right font-mono">{fmtMoney(row.price)}</td>
-      <td className={cn("px-2 py-1.5 text-right font-mono", changeColor)}>
-        {fmtPct(row.changePct)}
-      </td>
-      <td className="px-2 py-1.5 text-right">
-        <div className={cn("font-mono", rsiColor(row.rsi14))}>
-          {row.rsi14 !== null && Number.isFinite(row.rsi14) ? row.rsi14.toFixed(0) : "—"}
-        </div>
-        <div className="text-[10px] text-muted-foreground">{row.buyZoneRsiScore.toFixed(1)}/5</div>
-      </td>
-      <td className="px-2 py-1.5 text-center">
-        <div className={cn("text-[11px] font-medium capitalize", macdStatusColor(row.buyZoneMacdStatus))}>
-          {row.buyZoneMacdStatus}
-        </div>
-        <div className="text-[10px] text-muted-foreground">{row.buyZoneMacdScore.toFixed(1)}/5</div>
-      </td>
-      <td className="px-2 py-1.5 text-center" title={flagsTooltip || undefined}>
-        {visibleFlags.length === 0 ? (
-          <span className="text-muted-foreground">—</span>
-        ) : (
-          <span className="inline-flex flex-wrap items-center justify-center gap-1">
-            {visibleFlags.map((f) => (
-              <span
-                key={f.kind}
-                className={cn(
-                  "rounded border px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wider whitespace-nowrap",
-                  FLAG_BADGE[f.kind],
-                )}
-              >
-                {f.label}
-              </span>
-            ))}
-            {overflowFlags.length > 0 && (
-              <span className="rounded border border-border bg-background px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-muted-foreground">
-                +{overflowFlags.length}
-              </span>
-            )}
-          </span>
-        )}
-      </td>
-      <td className="px-2 py-1.5 text-center">
-        <span
-          className={cn(
-            "inline-block rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider whitespace-nowrap",
-            actionBadge(row.action),
-          )}
-        >
-          {actionLabel(row.action)}
-        </span>
-      </td>
-      <td className="px-2 py-1.5 text-center">
-        <span
-          className={cn(
-            "inline-block rounded border px-2 py-0.5 font-mono text-[12px] font-semibold",
-            buyZoneBadgeColor(row.buyZoneComposite),
-          )}
-          title={`RSI ${row.buyZoneRsiScore.toFixed(1)} + MACD ${row.buyZoneMacdScore.toFixed(1)} = ${row.buyZoneComposite.toFixed(1)}`}
-        >
-          {row.buyZoneComposite.toFixed(1)}/10
-        </span>
-      </td>
-    </tr>
-  );
-}
-
 function AddStockDialog({
   open,
   onClose,
@@ -1193,6 +1123,514 @@ function AddStockDialog({
               <Plus className="mr-1 h-3.5 w-3.5" />
             )}
             Add
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function CreateWatchlistDialog({
+  open,
+  onClose,
+  onCreated,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onCreated: (id: string, name: string) => void;
+}) {
+  const [name, setName] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (open) {
+      setName("");
+      setError(null);
+    }
+  }, [open]);
+
+  async function submit() {
+    const n = name.trim();
+    if (!n) {
+      setError("Name required");
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/watchlists", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: n }),
+      });
+      const json = (await res.json()) as { watchlist?: { id: string; name: string }; error?: string };
+      if (!res.ok || json.error || !json.watchlist) {
+        throw new Error(json.error ?? `HTTP ${res.status}`);
+      }
+      onCreated(json.watchlist.id, json.watchlist.name);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to create");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>New watchlist</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-3 text-base">
+          <label className="block">
+            <span className="text-sm text-muted-foreground">Name</span>
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="e.g. Short Term"
+              className="mt-1 w-full rounded-md border border-border bg-background px-2 py-1"
+              onKeyDown={(e) => e.key === "Enter" && void submit()}
+            />
+          </label>
+          {error && (
+            <div className="rounded border border-rose-500/40 bg-rose-500/10 px-2 py-1 text-sm text-rose-200">
+              {error}
+            </div>
+          )}
+        </div>
+        <DialogFooter>
+          <Button variant="secondary" onClick={onClose} disabled={submitting}>
+            <X className="mr-1 h-3.5 w-3.5" />
+            Cancel
+          </Button>
+          <Button onClick={() => void submit()} disabled={submitting}>
+            {submitting ? (
+              <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Plus className="mr-1 h-3.5 w-3.5" />
+            )}
+            Create
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// Simple watchlist item shape — symbol + optional thesis + whatever
+// Buy Zone provides. No allocation/flags/action.
+type SimpleItem = {
+  id: string;
+  symbol: string;
+  notes: string | null;
+  companyName: string | null;
+  price: number | null;
+  changePct: number | null;
+  rsi14: number | null;
+  buyZoneRsiScore: number;
+  buyZoneMacdScore: number;
+  buyZoneComposite: number;
+  buyZoneMacdStatus: string;
+};
+
+function buyZoneBadgeColor(composite: number): string {
+  if (composite >= 8) return "border-emerald-500/40 bg-emerald-500/10 text-emerald-300";
+  if (composite >= 5) return "border-amber-500/40 bg-amber-500/10 text-amber-300";
+  return "border-muted-foreground/30 bg-muted-foreground/10 text-muted-foreground";
+}
+
+function macdStatusColor(status: string): string {
+  if (status.startsWith("crossed")) return "text-emerald-300";
+  if (status === "approaching") return "text-amber-300";
+  if (status === "widening") return "text-rose-300";
+  return "text-muted-foreground";
+}
+
+// Custom (non-Portfolio) watchlist: symbol + thesis + Buy Zone fields
+// only — no allocation tier, holdings flags, or ACTION column (those
+// only make sense for something already owned).
+function CustomWatchlistView({
+  watchlist,
+  onDeleted,
+  onRenamed,
+  onItemsChanged,
+}: {
+  watchlist: WatchlistMeta;
+  onDeleted: () => void;
+  onRenamed: (name: string) => void;
+  onItemsChanged: () => void;
+}) {
+  const [items, setItems] = useState<SimpleItem[] | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const [addSymbol, setAddSymbol] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [renameOpen, setRenameOpen] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/watchlists/${watchlist.id}/items`, { cache: "no-store" });
+      const json = (await res.json()) as { items?: SimpleItem[]; error?: string };
+      if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
+      setItems(json.items ?? []);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load");
+      setItems([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [watchlist.id]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 3500);
+    return () => clearTimeout(t);
+  }, [toast]);
+
+  async function addStock() {
+    const s = addSymbol.trim().toUpperCase();
+    if (!s) return;
+    setAdding(true);
+    try {
+      const res = await fetch(`/api/watchlists/${watchlist.id}/items`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ symbol: s }),
+      });
+      const json = (await res.json()) as { error?: string };
+      if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
+      setAddSymbol("");
+      setToast(`${s} added.`);
+      void load();
+      onItemsChanged();
+    } catch (e) {
+      setToast(e instanceof Error ? e.message : "Add failed");
+    } finally {
+      setAdding(false);
+    }
+  }
+
+  async function removeItem(item: SimpleItem) {
+    if (!confirm(`Remove ${item.symbol} from ${watchlist.name}?`)) return;
+    try {
+      const res = await fetch(
+        `/api/watchlists/${watchlist.id}/items?itemId=${encodeURIComponent(item.id)}`,
+        { method: "DELETE" },
+      );
+      const json = (await res.json()) as { ok?: boolean; error?: string };
+      if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
+      setItems((prev) => (prev ? prev.filter((i) => i.id !== item.id) : prev));
+      setToast(`${item.symbol} removed.`);
+      onItemsChanged();
+    } catch (e) {
+      setToast(e instanceof Error ? e.message : "Remove failed");
+    }
+  }
+
+  async function deleteWatchlist() {
+    if (!confirm(`Delete "${watchlist.name}"? This removes all its symbols.`)) return;
+    try {
+      const res = await fetch(`/api/watchlists/${watchlist.id}`, { method: "DELETE" });
+      const json = (await res.json()) as { ok?: boolean; error?: string };
+      if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
+      onDeleted();
+    } catch (e) {
+      setToast(e instanceof Error ? e.message : "Delete failed");
+    }
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <h2 className="text-lg font-semibold">{watchlist.name}</h2>
+          <Button variant="ghost" size="sm" onClick={() => setRenameOpen(true)}>
+            <Pencil className="h-3.5 w-3.5" />
+          </Button>
+          <Button variant="ghost" size="sm" onClick={() => void deleteWatchlist()}>
+            <Trash2 className="h-3.5 w-3.5 text-rose-300" />
+          </Button>
+        </div>
+        <div className="flex items-center gap-2">
+          <input
+            value={addSymbol}
+            onChange={(e) => setAddSymbol(e.target.value.toUpperCase())}
+            onKeyDown={(e) => e.key === "Enter" && void addStock()}
+            placeholder="Add symbol…"
+            className="w-32 rounded-md border border-border bg-background px-2 py-1 text-sm uppercase"
+          />
+          <Button size="sm" onClick={() => void addStock()} disabled={adding || !addSymbol.trim()}>
+            {adding ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
+          </Button>
+        </div>
+      </div>
+
+      {toast && (
+        <div className="rounded border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200">
+          {toast}
+        </div>
+      )}
+      {error && (
+        <div className="rounded border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-sm text-rose-200">
+          {error}
+        </div>
+      )}
+
+      <div className="overflow-x-auto rounded-md border border-border bg-background/40">
+        <table className="w-full min-w-[900px] text-sm">
+          <thead className="border-b border-border bg-background/60 text-[11px] uppercase tracking-wider text-muted-foreground">
+            <tr>
+              <th className="px-2 py-2 text-left">Symbol</th>
+              <th className="px-2 py-2 text-left">Name</th>
+              <th className="px-2 py-2 text-right">Price</th>
+              <th className="px-2 py-2 text-right">Change%</th>
+              <th className="px-2 py-2 text-right">RSI</th>
+              <th className="px-2 py-2 text-center">MACD</th>
+              <th className="px-2 py-2 text-center">Buy Zone</th>
+              <th className="px-2 py-2 text-left">Thesis</th>
+              <th className="px-2 py-2"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {loading && items === null && (
+              <tr>
+                <td colSpan={9} className="px-2 py-8 text-center">
+                  <Loader2 className="mx-auto h-4 w-4 animate-spin text-muted-foreground" />
+                </td>
+              </tr>
+            )}
+            {!loading && items && items.length === 0 && (
+              <tr>
+                <td colSpan={9} className="px-2 py-8 text-center text-muted-foreground">
+                  No symbols yet. Add one above.
+                </td>
+              </tr>
+            )}
+            {items?.map((item) => {
+              const changeColor =
+                item.changePct === null
+                  ? "text-muted-foreground"
+                  : item.changePct >= 0
+                    ? "text-emerald-300"
+                    : "text-rose-300";
+              return (
+                <tr key={item.id} className="border-b border-border/40 hover:bg-background/60">
+                  <td className="px-2 py-1.5 font-mono font-semibold">{item.symbol}</td>
+                  <td className="px-2 py-1.5 text-muted-foreground">{item.companyName ?? "—"}</td>
+                  <td className="px-2 py-1.5 text-right font-mono">{fmtMoney(item.price)}</td>
+                  <td className={cn("px-2 py-1.5 text-right font-mono", changeColor)}>
+                    {fmtPct(item.changePct)}
+                  </td>
+                  <td className="px-2 py-1.5 text-right">
+                    <div className={cn("font-mono", rsiColor(item.rsi14))}>
+                      {item.rsi14 !== null && Number.isFinite(item.rsi14) ? item.rsi14.toFixed(0) : "—"}
+                    </div>
+                    <div className="text-[10px] text-muted-foreground">{item.buyZoneRsiScore.toFixed(1)}/5</div>
+                  </td>
+                  <td className="px-2 py-1.5 text-center">
+                    <div className={cn("text-[11px] font-medium capitalize", macdStatusColor(item.buyZoneMacdStatus))}>
+                      {item.buyZoneMacdStatus}
+                    </div>
+                    <div className="text-[10px] text-muted-foreground">{item.buyZoneMacdScore.toFixed(1)}/5</div>
+                  </td>
+                  <td className="px-2 py-1.5 text-center">
+                    <span
+                      className={cn(
+                        "inline-block rounded border px-2 py-0.5 font-mono text-[12px] font-semibold",
+                        buyZoneBadgeColor(item.buyZoneComposite),
+                      )}
+                    >
+                      {item.buyZoneComposite.toFixed(1)}/10
+                    </span>
+                  </td>
+                  <td className="px-2 py-1.5 text-muted-foreground">
+                    <ThesisCell
+                      item={item}
+                      onSave={async (notes) => {
+                        try {
+                          const res = await fetch(`/api/watchlists/${watchlist.id}/items`, {
+                            method: "PATCH",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ id: item.id, notes }),
+                          });
+                          const json = (await res.json()) as { error?: string };
+                          if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
+                          setItems((prev) =>
+                            prev ? prev.map((i) => (i.id === item.id ? { ...i, notes } : i)) : prev,
+                          );
+                        } catch (e) {
+                          setToast(e instanceof Error ? e.message : "Save failed");
+                        }
+                      }}
+                    />
+                  </td>
+                  <td className="px-2 py-1.5 text-right">
+                    <button
+                      type="button"
+                      onClick={() => void removeItem(item)}
+                      className="rounded p-1 text-muted-foreground hover:bg-rose-500/15 hover:text-rose-300"
+                      title="Remove from watchlist"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      <RenameWatchlistDialog
+        open={renameOpen}
+        currentName={watchlist.name}
+        onClose={() => setRenameOpen(false)}
+        onRenamed={(name) => {
+          setRenameOpen(false);
+          onRenamed(name);
+        }}
+        watchlistId={watchlist.id}
+      />
+    </div>
+  );
+}
+
+function ThesisCell({
+  item,
+  onSave,
+}: {
+  item: SimpleItem;
+  onSave: (notes: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(item.notes ?? "");
+
+  if (!editing) {
+    return (
+      <button
+        type="button"
+        onClick={() => {
+          setDraft(item.notes ?? "");
+          setEditing(true);
+        }}
+        className="max-w-[220px] truncate text-left hover:text-foreground"
+        title={item.notes ?? "Add thesis…"}
+      >
+        {item.notes || <span className="text-muted-foreground/60">Add thesis…</span>}
+      </button>
+    );
+  }
+  return (
+    <div className="flex items-center gap-1">
+      <input
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            onSave(draft);
+            setEditing(false);
+          }
+          if (e.key === "Escape") setEditing(false);
+        }}
+        autoFocus
+        className="w-40 rounded border border-border bg-background px-1.5 py-0.5 text-xs"
+      />
+      <button
+        type="button"
+        onClick={() => {
+          onSave(draft);
+          setEditing(false);
+        }}
+        className="text-[10px] font-semibold text-emerald-300"
+      >
+        Save
+      </button>
+    </div>
+  );
+}
+
+function RenameWatchlistDialog({
+  open,
+  currentName,
+  watchlistId,
+  onClose,
+  onRenamed,
+}: {
+  open: boolean;
+  currentName: string;
+  watchlistId: string;
+  onClose: () => void;
+  onRenamed: (name: string) => void;
+}) {
+  const [name, setName] = useState(currentName);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (open) {
+      setName(currentName);
+      setError(null);
+    }
+  }, [open, currentName]);
+
+  async function submit() {
+    const n = name.trim();
+    if (!n) {
+      setError("Name required");
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/watchlists/${watchlistId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: n }),
+      });
+      const json = (await res.json()) as { error?: string };
+      if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
+      onRenamed(n);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to rename");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Rename watchlist</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-3 text-base">
+          <input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && void submit()}
+            className="w-full rounded-md border border-border bg-background px-2 py-1"
+          />
+          {error && (
+            <div className="rounded border border-rose-500/40 bg-rose-500/10 px-2 py-1 text-sm text-rose-200">
+              {error}
+            </div>
+          )}
+        </div>
+        <DialogFooter>
+          <Button variant="secondary" onClick={onClose} disabled={submitting}>
+            Cancel
+          </Button>
+          <Button onClick={() => void submit()} disabled={submitting}>
+            {submitting ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : null}
+            Save
           </Button>
         </DialogFooter>
       </DialogContent>

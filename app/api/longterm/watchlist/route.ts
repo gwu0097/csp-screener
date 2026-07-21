@@ -12,7 +12,7 @@ import {
   type SymbolSnapshot,
 } from "@/lib/market-snapshot";
 import { requireUserId, authErrorResponse } from "@/lib/auth";
-import { computeBuyZoneScore } from "@/lib/buy-zone";
+import { ensurePortfolioWatchlist } from "@/lib/watchlists";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -70,13 +70,6 @@ type EnrichedRow = WatchlistRow & {
   flags: Flag[];
   action: Action;
   hasEncyclopedia: boolean;
-  // "Buy Zone" turnaround score (RSI approaching oversold + a
-  // below-zero MACD bullish cross) — separate from the buyZone price
-  // band above. rsiScore + macdScore = buyZoneComposite, always.
-  buyZoneRsiScore: number;
-  buyZoneMacdScore: number;
-  buyZoneComposite: number;
-  buyZoneMacdStatus: string;
 };
 
 type Alert = {
@@ -323,7 +316,6 @@ function enrichFromSnapshot(
     sma200,
   });
   const rsi14 = snapshot?.rsi14 ?? null;
-  const buyZoneScore = computeBuyZoneScore(rsi14, snapshot?.macd_history ?? null);
   return {
     ...row,
     companyName: snapshot?.company_name ?? null,
@@ -347,10 +339,6 @@ function enrichFromSnapshot(
     flags,
     action,
     hasEncyclopedia: encyclopediaSet.has(row.symbol),
-    buyZoneRsiScore: buyZoneScore.rsiScore,
-    buyZoneMacdScore: buyZoneScore.macdScore,
-    buyZoneComposite: buyZoneScore.composite,
-    buyZoneMacdStatus: buyZoneScore.macdStatus,
   };
 }
 
@@ -411,10 +399,12 @@ export async function GET() {
     return authErrorResponse(e);
   }
   const sb = createServerClient();
+  const portfolio = await ensurePortfolioWatchlist(userId);
   const res = await sb
     .from("long_term_watchlist")
     .select("id,symbol,allocation,notes,created_at,updated_at")
-    .eq("user_id", userId);
+    .eq("user_id", userId)
+    .eq("watchlist_id", portfolio.id);
   if (res.error) {
     return NextResponse.json({ error: res.error.message }, { status: 500 });
   }
@@ -500,9 +490,16 @@ export async function POST(req: NextRequest) {
       : null;
 
   const sb = createServerClient();
+  const portfolio = await ensurePortfolioWatchlist(userId);
   const ins = await sb
     .from("long_term_watchlist")
-    .insert({ user_id: userId, symbol, allocation: body.allocation as Allocation, notes })
+    .insert({
+      user_id: userId,
+      watchlist_id: portfolio.id,
+      symbol,
+      allocation: body.allocation as Allocation,
+      notes,
+    })
     .select()
     .single();
   if (ins.error) {
@@ -568,11 +565,13 @@ export async function PATCH(req: NextRequest) {
     );
   }
   const sb = createServerClient();
+  const portfolio = await ensurePortfolioWatchlist(userId);
   const res = await sb
     .from("long_term_watchlist")
     .update(patch)
     .eq("id", id)
     .eq("user_id", userId)
+    .eq("watchlist_id", portfolio.id)
     .select()
     .single();
   if (res.error) {
@@ -593,11 +592,13 @@ export async function DELETE(req: NextRequest) {
     return NextResponse.json({ error: "Missing id" }, { status: 400 });
   }
   const sb = createServerClient();
+  const portfolio = await ensurePortfolioWatchlist(userId);
   const res = await sb
     .from("long_term_watchlist")
     .delete()
     .eq("id", id)
-    .eq("user_id", userId);
+    .eq("user_id", userId)
+    .eq("watchlist_id", portfolio.id);
   if (res.error) {
     return NextResponse.json({ error: res.error.message }, { status: 400 });
   }

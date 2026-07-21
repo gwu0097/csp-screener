@@ -10,6 +10,7 @@ import {
   ArrowRight,
   Brain,
   CheckCircle2,
+  Crosshair,
   LineChart,
   Loader2,
   RefreshCw,
@@ -86,6 +87,15 @@ type SwingIdeaLite = {
   swing_score: number | null;
 };
 type SwingsResp = { ideas: SwingIdeaLite[] };
+
+type BuyZoneRow = {
+  symbol: string;
+  companyName: string | null;
+  changePct: number | null;
+  buyZoneComposite: number;
+  buyZoneMacdStatus: string;
+};
+type BuyZoneResp = { rows: BuyZoneRow[] };
 
 type Slot<T> = { status: "loading" | "ok" | "error"; data: T | null };
 const LOADING: Slot<never> = { status: "loading", data: null };
@@ -243,6 +253,7 @@ export function DashboardView() {
   const [vix, setVix] = useState<Slot<number | null>>(LOADING);
   const [market, setMarket] = useState<Slot<MarketResp>>(LOADING);
   const [swings, setSwings] = useState<Slot<SwingsResp>>(LOADING);
+  const [buyZone, setBuyZone] = useState<Slot<BuyZoneResp>>(LOADING);
 
   const [brief, setBrief] = useState<string | null>(null);
   const [briefAt, setBriefAt] = useState<string | null>(null);
@@ -287,6 +298,10 @@ export function DashboardView() {
         fetch("/api/swings/ideas", { cache: "no-store" })
           .then((r) => r.json())
           .then((j) => setSwings({ status: "ok", data: j as SwingsResp }))
+          .catch(() => {}),
+        fetch("/api/analysis/buy-zone", { cache: "no-store" })
+          .then((r) => r.json())
+          .then((j) => setBuyZone({ status: "ok", data: j as BuyZoneResp }))
           .catch(() => {}),
         fetch("/api/context/daily", { cache: "no-store" })
           .then((r) => r.json())
@@ -346,6 +361,11 @@ export function DashboardView() {
       "/api/swings/ideas",
       setSwings,
       (j) => j as SwingsResp,
+    );
+    void load<BuyZoneResp>(
+      "/api/analysis/buy-zone",
+      setBuyZone,
+      (j) => j as BuyZoneResp,
     );
     void (async () => {
       try {
@@ -499,6 +519,11 @@ export function DashboardView() {
     const t = (i.catalyst || i.user_thesis || i.thesis || i.ai_summary || "").trim();
     return t.length > 40 ? `${t.slice(0, 40)}…` : t;
   }
+
+  // ---------- Buy Zone top 10 ----------
+  const buyZoneTop10 = [...(buyZone.data?.rows ?? [])]
+    .sort((a, b) => b.buyZoneComposite - a.buyZoneComposite)
+    .slice(0, 10);
 
   // ---------- Market tiles ----------
   const m = market.data;
@@ -850,6 +875,52 @@ export function DashboardView() {
                 </div>
               );
             })}
+          </div>
+        )}
+      </Panel>
+
+      {/* ---------- Buy Zone top 10 ---------- */}
+      <Panel>
+        <SectionHeader
+          icon={<Crosshair className="h-4 w-4" />}
+          right={
+            <Link
+              href="/analysis/buy-zone"
+              className="text-[11px] font-medium text-muted-foreground hover:text-foreground"
+            >
+              View all →
+            </Link>
+          }
+        >
+          Buy Zone — top 10
+        </SectionHeader>
+        {buyZone.status === "loading" ? (
+          <SkeletonLines n={3} />
+        ) : buyZone.status === "error" ? (
+          <p className="text-sm text-muted-foreground">—</p>
+        ) : buyZoneTop10.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            No watchlist symbols yet.
+          </p>
+        ) : (
+          <div className="space-y-1">
+            {buyZoneTop10.map((r) => (
+              <div
+                key={r.symbol}
+                className="flex items-center gap-2 border-t border-border/60 py-1.5 text-sm first:border-t-0"
+              >
+                <span className="w-14 shrink-0 font-mono font-semibold">{r.symbol}</span>
+                <span className="w-24 shrink-0 truncate text-xs text-muted-foreground">
+                  {r.buyZoneMacdStatus}
+                </span>
+                <span className="w-16 shrink-0 text-right">
+                  <ChangeCell pct={r.changePct} />
+                </span>
+                <span className="ml-auto shrink-0 rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-xs font-semibold">
+                  {r.buyZoneComposite.toFixed(1)}/10
+                </span>
+              </div>
+            ))}
           </div>
         )}
       </Panel>

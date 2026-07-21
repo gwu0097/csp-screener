@@ -14,6 +14,7 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  Crosshair,
   Layers,
   Lightbulb,
   Menu,
@@ -140,6 +141,16 @@ const LONGTERM_PORTFOLIO: NavItem = {
   href: "/longterm/portfolio",
   label: "Portfolio",
   icon: PieChart,
+};
+
+// ------------ ANALYSIS ------------
+// Cross-cutting views that read across watchlists/positions instead of
+// living inside one feature area. Buy Zone is the first entry — more
+// will land here later.
+const ANALYSIS_BUY_ZONE: NavItem = {
+  href: "/analysis/buy-zone",
+  label: "Buy Zone",
+  icon: Crosshair,
 };
 
 // ------------ TOOLS ------------
@@ -359,6 +370,9 @@ export function Sidebar() {
           <SidebarLink item={LONGTERM_IDEAS} pathname={pathname} mode={mode} />
           <SidebarLink item={LONGTERM_WATCHLIST} pathname={pathname} mode={mode} />
           <SidebarLink item={LONGTERM_PORTFOLIO} pathname={pathname} mode={mode} />
+
+          <SectionHeader label="Analysis" mode={mode} />
+          <SidebarLink item={ANALYSIS_BUY_ZONE} pathname={pathname} mode={mode} />
 
           <SectionHeader label="Tools" mode={mode} />
           <SidebarLink item={RESEARCH} pathname={pathname} mode={mode} />
