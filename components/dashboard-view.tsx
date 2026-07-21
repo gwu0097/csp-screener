@@ -92,6 +92,7 @@ type BuyZoneRow = {
   symbol: string;
   companyName: string | null;
   changePct: number | null;
+  rsi14: number | null;
   buyZoneComposite: number;
   buyZoneMacdStatus: string;
 };
@@ -910,7 +911,8 @@ export function DashboardView() {
                 className="flex items-center gap-2 border-t border-border/60 py-1.5 text-sm first:border-t-0"
               >
                 <span className="w-14 shrink-0 font-mono font-semibold">{r.symbol}</span>
-                <span className="w-24 shrink-0 truncate text-xs text-muted-foreground">
+                <span className="flex-1 truncate text-xs text-muted-foreground">
+                  RSI {r.rsi14 !== null && Number.isFinite(r.rsi14) ? r.rsi14.toFixed(0) : "—"} ·{" "}
                   {r.buyZoneMacdStatus}
                 </span>
                 <span className="w-16 shrink-0 text-right">

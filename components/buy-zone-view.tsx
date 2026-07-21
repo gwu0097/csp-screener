@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { Loader2 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { ArrowDown, ArrowUp, Loader2 } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 
@@ -57,12 +57,64 @@ function macdStatusColor(status: string): string {
 
 const ALL_SCOPE = "__all__";
 
+type SortKey = "symbol" | "price" | "changePct" | "rsi14" | "macd" | "composite";
+type SortDir = "asc" | "desc";
+
+// Same two-state (always-active) asc/desc pattern as screener-view.tsx's
+// SortableHeader — no unsorted state, one column is always active.
+function SortableHeader({
+  label,
+  active,
+  dir,
+  align,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  dir: SortDir;
+  align: "left" | "right" | "center";
+  onClick: () => void;
+}) {
+  return (
+    <th
+      onClick={onClick}
+      className={cn(
+        "cursor-pointer select-none whitespace-nowrap px-2 py-2 hover:text-foreground",
+        align === "right" ? "text-right" : align === "center" ? "text-center" : "text-left",
+      )}
+    >
+      <span className="inline-flex items-center gap-1">
+        {label}
+        {active &&
+          (dir === "asc" ? (
+            <ArrowUp className="h-3 w-3" />
+          ) : (
+            <ArrowDown className="h-3 w-3" />
+          ))}
+      </span>
+    </th>
+  );
+}
+
 export function BuyZoneView() {
   const [watchlists, setWatchlists] = useState<WatchlistMeta[] | null>(null);
   const [scope, setScope] = useState<string>(ALL_SCOPE);
   const [rows, setRows] = useState<BuyZoneRow[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Default sort is Buy Zone score descending; stays that way until
+  // the person clicks a different header.
+  const [sortKey, setSortKey] = useState<SortKey>("composite");
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
+
+  function onSort(key: SortKey) {
+    if (sortKey === key) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDir(key === "symbol" ? "asc" : "desc");
+    }
+  }
 
   useEffect(() => {
     void (async () => {
@@ -100,13 +152,42 @@ export function BuyZoneView() {
     void load(scope);
   }, [scope, load]);
 
+  const sortedRows = useMemo<BuyZoneRow[] | null>(() => {
+    if (!rows) return rows;
+    const getter = (r: BuyZoneRow): number | string | null => {
+      switch (sortKey) {
+        case "symbol": return r.symbol;
+        case "price": return r.price;
+        case "changePct": return r.changePct;
+        case "rsi14": return r.rsi14;
+        case "macd": return r.buyZoneMacdScore;
+        case "composite": return r.buyZoneComposite;
+      }
+    };
+    const copy = [...rows];
+    copy.sort((a, b) => {
+      const av = getter(a);
+      const bv = getter(b);
+      if (typeof av === "string" || typeof bv === "string") {
+        const cmp = String(av ?? "").localeCompare(String(bv ?? ""));
+        return sortDir === "asc" ? cmp : -cmp;
+      }
+      // Nulls sink to the bottom regardless of direction.
+      if (av === null && bv === null) return 0;
+      if (av === null) return 1;
+      if (bv === null) return -1;
+      return sortDir === "asc" ? av - bv : bv - av;
+    });
+    return copy;
+  }, [rows, sortKey, sortDir]);
+
   return (
     <div className="space-y-4">
       <div className="space-y-1">
         <h1 className="text-2xl font-semibold tracking-tight">Buy Zone</h1>
         <p className="text-base text-muted-foreground">
           Names closest to an oversold bullish turnaround — RSI approaching oversold plus a
-          MACD bullish cross out of negative territory. Sorted by composite score descending.
+          MACD bullish cross out of negative territory. Click any column to sort.
         </p>
       </div>
 
@@ -131,13 +212,13 @@ export function BuyZoneView() {
         <table className="w-full min-w-[1000px] text-sm">
           <thead className="border-b border-border bg-background/60 text-[11px] uppercase tracking-wider text-muted-foreground">
             <tr>
-              <th className="px-2 py-2 text-left">Symbol</th>
+              <SortableHeader label="Symbol" active={sortKey === "symbol"} dir={sortDir} align="left" onClick={() => onSort("symbol")} />
               <th className="px-2 py-2 text-left">Name</th>
-              <th className="px-2 py-2 text-right">Price</th>
-              <th className="px-2 py-2 text-right">Change%</th>
-              <th className="px-2 py-2 text-right">RSI</th>
-              <th className="px-2 py-2 text-center">MACD</th>
-              <th className="px-2 py-2 text-center">Buy Zone</th>
+              <SortableHeader label="Price" active={sortKey === "price"} dir={sortDir} align="right" onClick={() => onSort("price")} />
+              <SortableHeader label="Change%" active={sortKey === "changePct"} dir={sortDir} align="right" onClick={() => onSort("changePct")} />
+              <SortableHeader label="RSI" active={sortKey === "rsi14"} dir={sortDir} align="right" onClick={() => onSort("rsi14")} />
+              <SortableHeader label="MACD" active={sortKey === "macd"} dir={sortDir} align="center" onClick={() => onSort("macd")} />
+              <SortableHeader label="Buy Zone" active={sortKey === "composite"} dir={sortDir} align="center" onClick={() => onSort("composite")} />
               <th className="px-2 py-2 text-left">Lists</th>
             </tr>
           </thead>
@@ -156,7 +237,7 @@ export function BuyZoneView() {
                 </td>
               </tr>
             )}
-            {rows?.map((r) => {
+            {sortedRows?.map((r) => {
               const changeColor =
                 r.changePct === null
                   ? "text-muted-foreground"
