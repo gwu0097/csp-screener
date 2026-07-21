@@ -1,3 +1,5 @@
+import { createServerClient } from "@/lib/supabase";
+
 const FINNHUB_BASE = "https://finnhub.io/api/v1";
 const FINNHUB_KEY = process.env.FINNHUB_API_KEY ?? "";
 
@@ -33,6 +35,64 @@ export async function finnhubGet<T>(path: string, params: Record<string, string 
     throw new Error(`Finnhub ${path} failed: ${res.status} ${text}`);
   }
   return (await res.json()) as T;
+}
+
+// Shared response cache for Finnhub endpoints that are effectively
+// static intraday (insider transactions, next earnings date, analyst
+// recommendation counts, earnings-surprise history) — used by both the
+// swing and CSP screeners. Keyed on (symbol, endpoint) only, not a
+// params hash: every current caller uses a fixed parameter shape per
+// symbol, so this is deliberately not a general HTTP cache. See
+// migrations/2026-07-20-add-shared-caching-tables.sql.
+//
+// `forceFresh` skips the cache read (always hits Finnhub) but the
+// result is still written back, so a force-fresh run leaves the cache
+// warm for the next normal run.
+export async function cachedFinnhubGet<T>(
+  endpoint: string,
+  path: string,
+  params: Record<string, string | number | undefined>,
+  opts: { symbol: string; maxAgeMs: number; forceFresh?: boolean },
+): Promise<T> {
+  const symbol = opts.symbol.toUpperCase();
+  if (!opts.forceFresh) {
+    try {
+      const sb = createServerClient();
+      const r = await sb
+        .from("finnhub_cache")
+        .select("response,last_refreshed_at")
+        .eq("symbol", symbol)
+        .eq("endpoint", endpoint)
+        .limit(1);
+      if (!r.error && r.data && r.data.length > 0) {
+        const row = r.data[0] as { response: T; last_refreshed_at: string };
+        const ageMs = Date.now() - new Date(row.last_refreshed_at).getTime();
+        if (ageMs < opts.maxAgeMs) return row.response;
+      }
+    } catch (e) {
+      console.warn(
+        `[finnhub-cache] ${symbol}/${endpoint}: read failed — ${e instanceof Error ? e.message : e}`,
+      );
+    }
+  }
+  const fresh = await finnhubGet<T>(path, params);
+  try {
+    const sb = createServerClient();
+    await sb.from("finnhub_cache").upsert(
+      {
+        symbol,
+        endpoint,
+        response: fresh,
+        last_refreshed_at: new Date().toISOString(),
+      },
+      { onConflict: "symbol,endpoint" },
+    );
+  } catch (e) {
+    console.warn(
+      `[finnhub-cache] ${symbol}/${endpoint}: write failed — ${e instanceof Error ? e.message : e}`,
+    );
+  }
+  return fresh;
 }
 
 // Returns the current calendar date as YYYY-MM-DD in the US Eastern
@@ -204,11 +264,19 @@ export type AnalystEstimate = {
 
 // Finnhub's free tier does not expose estimate ranges for most symbols,
 // so we approximate dispersion from the stddev of recent surprise magnitudes.
-export async function getAnalystEstimates(symbol: string): Promise<AnalystEstimate> {
+// Analyst recommendation counts are effectively static intraday — cached
+// the same 8h as insider transactions / next-earnings-date (see
+// cachedFinnhubGet).
+export async function getAnalystEstimates(
+  symbol: string,
+  opts: { forceFresh?: boolean } = {},
+): Promise<AnalystEstimate> {
   try {
-    const rec = await finnhubGet<Array<{ buy: number; hold: number; sell: number; strongBuy: number; strongSell: number }>>(
+    const rec = await cachedFinnhubGet<Array<{ buy: number; hold: number; sell: number; strongBuy: number; strongSell: number }>>(
+      "recommendation",
       "/stock/recommendation",
       { symbol },
+      { symbol, maxAgeMs: FINNHUB_STATIC_MAX_AGE_MS, forceFresh: opts.forceFresh },
     );
     if (rec.length === 0) return { consensus: null, high: null, low: null, dispersionPct: null, analystCount: null };
     const latest = rec[0];
@@ -330,9 +398,16 @@ export type FinnhubInsiderTx = {
   transactionPrice: number;
 };
 
+// Insider filings and the next-earnings-date are effectively static
+// intraday — SEC Form-4 filings post episodically, not continuously,
+// and a calendar entry doesn't move within a day. Cached for 8h (see
+// cachedFinnhubGet) rather than refetched on every call.
+const FINNHUB_STATIC_MAX_AGE_MS = 8 * 60 * 60 * 1000;
+
 export async function getFinnhubInsiderTransactions(
   symbol: string,
   windowDays = 45,
+  opts: { forceFresh?: boolean } = {},
 ): Promise<FinnhubInsiderTx[]> {
   const to = new Date();
   const from = new Date(to.getTime() - windowDays * 24 * 60 * 60 * 1000);
@@ -340,9 +415,11 @@ export async function getFinnhubInsiderTransactions(
   const toIso = to.toISOString().slice(0, 10);
 
   try {
-    const data = await finnhubGet<{ data?: FinnhubInsiderTx[]; symbol?: string }>(
+    const data = await cachedFinnhubGet<{ data?: FinnhubInsiderTx[]; symbol?: string }>(
+      "insider-transactions",
       "/stock/insider-transactions",
       { symbol: symbol.toUpperCase(), from: fromIso, to: toIso },
+      { symbol, maxAgeMs: FINNHUB_STATIC_MAX_AGE_MS, forceFresh: opts.forceFresh },
     );
     const rows = data.data ?? [];
     return rows;
@@ -366,6 +443,7 @@ export type NextEarningsAnnouncement = {
 
 export async function getFinnhubNextEarningsDate(
   symbol: string,
+  opts: { forceFresh?: boolean } = {},
 ): Promise<NextEarningsAnnouncement | null> {
   const todayIso = todayInEastern();
   const to = new Date();
@@ -373,9 +451,11 @@ export async function getFinnhubNextEarningsDate(
   const toIso = `${to.getUTCFullYear()}-${String(to.getUTCMonth() + 1).padStart(2, "0")}-${String(to.getUTCDate()).padStart(2, "0")}`;
 
   try {
-    const data = await finnhubGet<{ earningsCalendar: FinnhubCalendarEntry[] }>(
+    const data = await cachedFinnhubGet<{ earningsCalendar: FinnhubCalendarEntry[] }>(
+      "next-earnings-date",
       "/calendar/earnings",
       { symbol: symbol.toUpperCase(), from: todayIso, to: toIso },
+      { symbol, maxAgeMs: FINNHUB_STATIC_MAX_AGE_MS, forceFresh: opts.forceFresh },
     );
     const rows = data.earningsCalendar ?? [];
     const matching = rows
@@ -419,11 +499,18 @@ export async function getFinnhubEarningsPeriods(symbol: string): Promise<string[
   }
 }
 
-export async function getEarningsSurpriseHistory(symbol: string): Promise<EarningsSurprise> {
+// Trailing 8-quarter earnings-surprise history is static intraday —
+// same 8h cache as the other static Finnhub fetches.
+export async function getEarningsSurpriseHistory(
+  symbol: string,
+  opts: { forceFresh?: boolean } = {},
+): Promise<EarningsSurprise> {
   try {
-    const rows = await finnhubGet<Array<{ actual: number | null; estimate: number | null; period: string }>>(
+    const rows = await cachedFinnhubGet<Array<{ actual: number | null; estimate: number | null; period: string }>>(
+      "earnings-surprise",
       "/stock/earnings",
       { symbol },
+      { symbol, maxAgeMs: FINNHUB_STATIC_MAX_AGE_MS, forceFresh: opts.forceFresh },
     );
     const recent = rows.slice(0, 8);
     let beatsInBand = 0;

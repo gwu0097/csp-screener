@@ -22,12 +22,14 @@ import {
   type SchwabOptionContract,
   type SchwabOptionsChain,
 } from "./schwab";
-import { getResearchSnapshot, getHistoricalPrices } from "./yahoo";
+import { getResearchSnapshot } from "./yahoo";
 import {
   batchRefreshSnapshots,
   type SymbolSnapshot,
 } from "./market-snapshot";
 import { computeATR } from "./indicators";
+import { createServerClient } from "./supabase";
+import { getOrFetchDailyBars } from "./daily-bars-cache";
 import YahooFinance from "yahoo-finance2";
 
 // Reuse the same yahoo-finance2 instance pattern as lib/yahoo.ts.
@@ -373,6 +375,143 @@ async function fetchYahooQuote(symbol: string): Promise<Pass1Quote | null> {
     console.warn(`[swing-screener] yahoo fetch(${symbol}) failed: ${msg}`);
     return null;
   }
+}
+
+// Fetched and cached as ONE row per symbol — price is never read
+// fresher than the MA/52w-range/analyst-target fields it's judged
+// against, or the qualification gates (vsMA50, vsMA200, pctFromHigh)
+// go silently incoherent. See migrations/2026-07-20-add-shared-caching-tables.sql.
+const QUOTE_CACHE_MAX_AGE_MS = 7 * 60 * 1000; // 5-10 min per the caching audit
+
+type QuoteCacheRow = {
+  symbol: string;
+  company_name: string | null;
+  current_price: number;
+  price_change_1d: number;
+  ma50: number;
+  ma200: number;
+  week52_low: number;
+  week52_high: number;
+  analyst_target: number | null;
+  num_analysts: number;
+  avg_volume_10d: number;
+  today_volume: number;
+  market_cap: number;
+  short_percent_float: number | null;
+  revenue_growth: number | null;
+  last_refreshed_at: string;
+};
+
+function quoteFromCacheRow(row: QuoteCacheRow): Pass1Quote {
+  return {
+    symbol: row.symbol,
+    companyName: row.company_name ?? row.symbol,
+    currentPrice: row.current_price,
+    priceChange1d: row.price_change_1d,
+    ma50: row.ma50,
+    ma200: row.ma200,
+    week52Low: row.week52_low,
+    week52High: row.week52_high,
+    analystTarget: row.analyst_target,
+    avgVolume10d: row.avg_volume_10d,
+    todayVolume: row.today_volume,
+    marketCap: row.market_cap,
+    numAnalysts: row.num_analysts,
+    shortPercentFloat: row.short_percent_float,
+    revenueGrowth: row.revenue_growth,
+  };
+}
+
+function quoteToCacheRow(q: Pass1Quote): Record<string, unknown> {
+  return {
+    symbol: q.symbol,
+    company_name: q.companyName,
+    current_price: q.currentPrice,
+    price_change_1d: q.priceChange1d,
+    ma50: q.ma50,
+    ma200: q.ma200,
+    week52_low: q.week52Low,
+    week52_high: q.week52High,
+    analyst_target: q.analystTarget,
+    num_analysts: q.numAnalysts,
+    avg_volume_10d: q.avgVolume10d,
+    today_volume: q.todayVolume,
+    market_cap: q.marketCap,
+    short_percent_float: q.shortPercentFloat,
+    revenue_growth: q.revenueGrowth,
+    last_refreshed_at: new Date().toISOString(),
+  };
+}
+
+// Bulk cache-check + Yahoo sweep, only for symbols the cache doesn't
+// already cover fresh. `forceFresh` skips the read entirely (every
+// symbol gets a live fetch) but results are still written back, so a
+// force-fresh run leaves the cache warm for the next normal run.
+async function batchGetOrFetchQuotes(
+  symbols: string[],
+  opts: { forceFresh?: boolean } = {},
+): Promise<Map<string, Pass1Quote>> {
+  const uniq = Array.from(new Set(symbols.map((s) => s.toUpperCase())));
+  const quotes = new Map<string, Pass1Quote>();
+  let needFetch = uniq;
+
+  if (!opts.forceFresh) {
+    try {
+      const sb = createServerClient();
+      const r = await sb.from("swing_quote_cache").select("*").in("symbol", uniq);
+      if (!r.error && r.data) {
+        const now = Date.now();
+        const seen = new Set<string>();
+        const stale: string[] = [];
+        for (const row of r.data as QuoteCacheRow[]) {
+          seen.add(row.symbol);
+          const ageMs = now - new Date(row.last_refreshed_at).getTime();
+          if (ageMs < QUOTE_CACHE_MAX_AGE_MS) {
+            quotes.set(row.symbol, quoteFromCacheRow(row));
+          } else {
+            stale.push(row.symbol);
+          }
+        }
+        const missing = uniq.filter((s) => !seen.has(s));
+        needFetch = [...stale, ...missing];
+      }
+    } catch (e) {
+      console.warn(
+        `[swing-screener] quote-cache batch read failed: ${e instanceof Error ? e.message : e}`,
+      );
+    }
+  }
+
+  // Same batches-of-20/200ms-gap shape pass1Filter always used for the
+  // full universe, now only over the cache-miss subset.
+  const BATCH = 20;
+  const fresh: Pass1Quote[] = [];
+  for (let i = 0; i < needFetch.length; i += BATCH) {
+    const batch = needFetch.slice(i, i + BATCH);
+    const results = await Promise.all(batch.map((s) => fetchYahooQuote(s)));
+    for (const q of results) {
+      if (q) {
+        quotes.set(q.symbol, q);
+        fresh.push(q);
+      }
+    }
+    if (i + BATCH < needFetch.length) await sleep(200);
+  }
+
+  if (fresh.length > 0) {
+    try {
+      const sb = createServerClient();
+      await sb.from("swing_quote_cache").upsert(fresh.map(quoteToCacheRow), {
+        onConflict: "symbol",
+      });
+    } catch (e) {
+      console.warn(
+        `[swing-screener] quote-cache batch write failed: ${e instanceof Error ? e.message : e}`,
+      );
+    }
+  }
+
+  return quotes;
 }
 
 // Concurrency-limited map. Used everywhere in this file so Yahoo, Finnhub,
@@ -760,23 +899,20 @@ function fallbackLevels(q: Pass1Quote): TradeLevels {
   };
 }
 
-// ~40 calendar days back covers ~26-28 trading bars — enough for a
-// 14-period ATR (needs 15) with a few bars of margin for holidays/gaps.
-const ATR_LOOKBACK_DAYS = 40;
-
-async function fetchAtr14(symbol: string): Promise<number | null> {
-  const to = new Date();
-  const from = new Date(to.getTime() - ATR_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
+// Daily bars settle once at EOD — backed by the shared daily_bars_cache
+// (lib/daily-bars-cache.ts), which also serves the CSP screener's
+// Stage-3 realized-vol fetch. That module already sorts oldest-first,
+// filters non-positive prices, and unconditionally falls back to a live
+// fetch if the cached row is more than ~30h old, independent of
+// forceFresh — a stop computed off multi-day-stale volatility with no
+// visible sign anything's wrong is a real risk, not a theoretical one.
+async function fetchAtr14(
+  symbol: string,
+  opts: { forceFresh?: boolean } = {},
+): Promise<number | null> {
   try {
-    const bars = await getHistoricalPrices(symbol, from, to);
-    // computeATR needs oldest-first, like computeRSI/computeSMA — Yahoo's
-    // historical pull isn't guaranteed sorted (see market-snapshot.ts's
-    // sortedCloses), so sort + drop any bar with a non-positive price
-    // defensively before computing.
-    const sorted = [...bars]
-      .filter((b) => b.high > 0 && b.low > 0 && b.close > 0 && b.date)
-      .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-    return computeATR(sorted, 14);
+    const bars = await getOrFetchDailyBars(symbol, opts);
+    return computeATR(bars, 14);
   } catch {
     return null;
   }
@@ -891,7 +1027,10 @@ function pregateTabSymbols(quotes: Map<string, Pass1Quote>): string[] {
 
 // ---------- Pass 1 ----------
 
-export async function pass1Filter(symbols: string[]): Promise<{
+export async function pass1Filter(
+  symbols: string[],
+  opts: { forceFresh?: boolean } = {},
+): Promise<{
   survivors: string[];
   quotes: Map<string, Pass1Quote>;
   trades: Map<string, TradeLevels>;
@@ -902,22 +1041,13 @@ export async function pass1Filter(symbols: string[]): Promise<{
 }> {
   const routeStarted = Date.now();
   const errors: string[] = [];
-  const quotes = new Map<string, Pass1Quote>();
 
-  // Step 1: bulk yahoo quote in batches of 20 with 200ms gaps.
-  const BATCH = 20;
-  for (let i = 0; i < symbols.length; i += BATCH) {
-    const batch = symbols.slice(i, i + BATCH);
-    const results = await Promise.all(batch.map((s) => fetchYahooQuote(s)));
-    for (let j = 0; j < batch.length; j += 1) {
-      const q = results[j];
-      if (!q) {
-        errors.push(`yahoo-quote:${batch[j]}`);
-        continue;
-      }
-      quotes.set(q.symbol, q);
-    }
-    if (i + BATCH < symbols.length) await sleep(200);
+  // Step 1: cache-check + Yahoo quote sweep for cache misses only (see
+  // batchGetOrFetchQuotes) — a normal same-day rerun mostly reads
+  // swing_quote_cache instead of refetching all ~520 symbols.
+  const quotes = await batchGetOrFetchQuotes(symbols, { forceFresh: opts.forceFresh });
+  for (const s of symbols) {
+    if (!quotes.has(s.toUpperCase())) errors.push(`yahoo-quote:${s}`);
   }
 
   // Step 2: instant disqualifiers + technical setup + R/R on quote-only data.
@@ -1532,7 +1662,9 @@ export async function pass2Enrich(
     capitulation: Record<string, TabStats>;
     pullback: Record<string, TabStats>;
   } = { capitulation: {}, pullback: {} },
+  opts: { forceFresh?: boolean } = {},
 ): Promise<SwingCandidate[]> {
+  const forceFresh = opts.forceFresh ?? false;
   // Schwab is best-effort — if disconnected or after-hours flake, options
   // signal stays neutral and the candidate isn't dropped.
   let schwabAvailable = false;
@@ -1571,18 +1703,20 @@ export async function pass2Enrich(
     let insiderRows: FinnhubInsiderTx[] = [];
     let nextEarn: NextEarningsAnnouncement | null = null;
     try {
-      insiderRows = await getFinnhubInsiderTransactions(symbol, 45);
+      insiderRows = await getFinnhubInsiderTransactions(symbol, 45, { forceFresh });
     } catch {
       insiderRows = [];
     }
     await sleep(200);
     try {
-      nextEarn = await getFinnhubNextEarningsDate(symbol);
+      nextEarn = await getFinnhubNextEarningsDate(symbol, { forceFresh });
     } catch {
       nextEarn = null;
     }
 
     // Schwab options + ATR history hit different hosts — run concurrently.
+    // Schwab (options chain) is never cached — force-fresh or not, this
+    // is always a live fetch.
     const [optionsChain, atr14] = await Promise.all([
       schwabAvailable
         ? getCallOptionsChainRange(symbol, fromIso, toIso).catch((e) => {
@@ -1591,7 +1725,7 @@ export async function pass2Enrich(
             return null;
           })
         : Promise.resolve(null),
-      fetchAtr14(symbol),
+      fetchAtr14(symbol, { forceFresh }),
     ]);
 
     const insider = classifyInsiderTxs(insiderRows);

@@ -751,6 +751,14 @@ export function SwingScreenView() {
   // Non-fatal degradation (pass 3 or save failed but results exist).
   const [runWarning, setRunWarning] = useState<string | null>(null);
   const [sort, setSort] = useState<SortState>(DEFAULT_SORT);
+  // Escape hatch for the quote-sweep/Finnhub/ATR caches — bypasses all
+  // of them for this run (but still writes fresh results back so the
+  // next normal run benefits). Schwab options data is never cached
+  // either way, so this toggle has no effect on it. One switch for the
+  // whole run, deliberately — no per-field refresh buttons, since a
+  // freshly-refreshed field sitting next to stale trade geometry is a
+  // worse, misleading state than just re-running everything.
+  const [forceFresh, setForceFresh] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   // Which symbol Enter was clicked for, so the import modal opens
   // knowing what it's importing a fill for instead of blank/generic.
@@ -796,11 +804,18 @@ export function SwingScreenView() {
     try {
       // Pass 1 — Yahoo technical filter + tab qualification on the
       // full universe (~20-40s). A failure here aborts the run.
+      // forceFresh bypasses the quote-sweep/Finnhub/ATR caches (but
+      // still writes fresh results back) — Schwab options data is
+      // never cached either way.
       setPhase("pass1");
       const p1 = await fetchPassJson<Pass1Wire>(
         "Pass 1 (technical filter)",
         "/api/swings/screen/pass1",
-        { method: "POST" },
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ forceFresh }),
+        },
       );
       setPass1Count(p1.survivors.length);
 
@@ -814,7 +829,7 @@ export function SwingScreenView() {
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(p1),
+          body: JSON.stringify({ ...p1, forceFresh }),
         },
       );
       const enriched = p2.candidates ?? [];
@@ -825,9 +840,12 @@ export function SwingScreenView() {
       setPhase("pass3");
       // Carry forward catalysts from the prior run when it's < 24h
       // old — Perplexity enrichment is expensive and a catalyst found
-      // this morning is still the catalyst this afternoon.
+      // this morning is still the catalyst this afternoon. forceFresh
+      // skips this entirely (empty knownCatalysts) so every candidate
+      // gets a fresh Perplexity pull, subject to the same per-run cap.
       const knownCatalysts: Record<string, unknown> = {};
       if (
+        !forceFresh &&
         data?.screenedAt &&
         Date.now() - new Date(data.screenedAt).getTime() < 24 * 3600_000
       ) {
@@ -1017,6 +1035,8 @@ export function SwingScreenView() {
         loading={loading}
         running={running}
         onRun={runScreen}
+        forceFresh={forceFresh}
+        onForceFreshChange={setForceFresh}
       />
 
       {running && <RunningBanner phase={phase} pass1Count={pass1Count} />}
@@ -1095,11 +1115,15 @@ function ControlsBar({
   loading,
   running,
   onRun,
+  forceFresh,
+  onForceFreshChange,
 }: {
   data: CachedResult | null;
   loading: boolean;
   running: boolean;
   onRun: () => void;
+  forceFresh: boolean;
+  onForceFreshChange: (v: boolean) => void;
 }) {
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border bg-background/40 p-3">
@@ -1118,19 +1142,39 @@ function ControlsBar({
           </div>
         )}
       </div>
-      <button
-        type="button"
-        onClick={onRun}
-        disabled={loading || running}
-        className="inline-flex items-center gap-2 rounded-md border border-border bg-emerald-500/10 px-3 py-1.5 text-base font-medium text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-50"
-      >
-        {running ? (
-          <Loader2 className="h-4 w-4 animate-spin" />
-        ) : (
-          <Zap className="h-4 w-4" />
-        )}
-        {running ? "Running…" : "Run Screen"}
-      </button>
+      <div className="flex items-center gap-3">
+        <label
+          className="flex cursor-pointer items-center gap-1.5 text-sm text-muted-foreground"
+          title={
+            "Bypasses the quote-sweep, insider/earnings-date, and ATR caches for this run — " +
+            "everything is pulled live regardless of how fresh the cache is. Catalyst research " +
+            "also skips its normal 24h reuse. Options chain data is always live either way. " +
+            "Fresh results still get written back to the caches for the next normal run."
+          }
+        >
+          <input
+            type="checkbox"
+            checked={forceFresh}
+            onChange={(e) => onForceFreshChange(e.target.checked)}
+            disabled={running}
+            className="h-3.5 w-3.5 accent-amber-400"
+          />
+          Force fresh
+        </label>
+        <button
+          type="button"
+          onClick={onRun}
+          disabled={loading || running}
+          className="inline-flex items-center gap-2 rounded-md border border-border bg-emerald-500/10 px-3 py-1.5 text-base font-medium text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-50"
+        >
+          {running ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <Zap className="h-4 w-4" />
+          )}
+          {running ? "Running…" : forceFresh ? "Run Screen (fresh)" : "Run Screen"}
+        </button>
+      </div>
     </div>
   );
 }

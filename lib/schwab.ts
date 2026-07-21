@@ -300,11 +300,15 @@ export async function getOptionsChain(
   // PUT-only default left callExpDateMap empty, which made atmLegs()
   // return null and every capture attempt skip with no_options_data.
   contractType: "PUT" | "CALL" | "ALL" = "PUT",
+  // Default 30 preserves every existing call site's window. Callers
+  // that need a wider strike range (e.g. to cover a 2x-EM target strike
+  // in one fetch instead of a conditional retry) can widen this.
+  strikeCount = 30,
 ): Promise<SchwabOptionsChain> {
   const params: Record<string, string | number | boolean> = {
     symbol,
     contractType,
-    strikeCount: 30,
+    strikeCount,
     includeUnderlyingQuote: true,
     strategy: "SINGLE",
   };

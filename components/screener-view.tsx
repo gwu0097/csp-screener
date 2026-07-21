@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   Play,
@@ -449,6 +449,23 @@ export function ScreenerView({ connected }: Props) {
   const [results, setResults] = useState<ScreenerResult[] | null>(null);
   const [prices, setPrices] = useState<Record<string, number>>({});
   const [screenedAt, setScreenedAt] = useState<Date | null>(null);
+  // Escape hatch for the Finnhub (analyst estimates, earnings-surprise
+  // history), daily-bars (realized-vol), and Perplexity-news caches —
+  // bypasses all of them for this Run Analysis (fresh results still get
+  // written back). Schwab chain data is never cached either way. One
+  // switch for the whole run, not per-field buttons — a freshly-
+  // refreshed field next to stale trade geometry is a worse, more
+  // misleading state than just re-running everything.
+  const [forceFresh, setForceFresh] = useState(false);
+  // News fetched this session, keyed by `${symbol}|${earningsDate}` —
+  // survives across multiple Run Analysis clicks in the same page load
+  // (resets on reload) so re-analyzing the same candidates minutes
+  // apart doesn't re-pay Perplexity. Ref, not state: read/written from
+  // async stream loops without needing a re-render.
+  const newsCacheRef = useRef<
+    Record<string, { news: PerplexityNewsResult; fetchedAt: number }>
+  >({});
+  const NEWS_REUSE_WINDOW_MS = 24 * 60 * 60 * 1000;
   // Whether the currently-rendered candidate list carries Stage 3 + 4
   // analysis grades. Drives the cross-device hydration banner copy.
   // Flips to true when Run Analysis completes; stays false after a
@@ -1351,10 +1368,27 @@ export function ScreenerView({ connected }: Props) {
 
       let success = false;
       try {
+        // Carry forward news fetched earlier this session (<24h) unless
+        // forceFresh — mirrors the swing screener's knownCatalysts
+        // pattern. Sent as a plain map; the server skips Perplexity for
+        // any key present here, regardless of which batch first fetched
+        // it, so re-analyzing the same candidates minutes apart is
+        // effectively free.
+        const knownNews: Record<string, PerplexityNewsResult> = {};
+        if (!forceFresh) {
+          const now = Date.now();
+          for (const b of batch) {
+            const key = `${b.symbol}|${b.earningsDate}`;
+            const cached = newsCacheRef.current[key];
+            if (cached && now - cached.fetchedAt < NEWS_REUSE_WINDOW_MS) {
+              knownNews[key] = cached.news;
+            }
+          }
+        }
         const r = await fetch("/api/screener/analyze/pass3a", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ candidates: batch }),
+          body: JSON.stringify({ candidates: batch, knownNews }),
           cache: "no-store",
         });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -1364,9 +1398,11 @@ export function ScreenerView({ connected }: Props) {
             news: PerplexityNewsResult;
           }>;
         };
+        const fetchedAt = Date.now();
         for (const row of json.results) {
           ctx.newsByKey[row.key] = row.news;
           ctx.pendingNews.delete(row.key);
+          newsCacheRef.current[row.key] = { news: row.news, fetchedAt };
         }
         setPendingNewsKeys(new Set(ctx.pendingNews));
         recomputeRowSpinners(ctx);
@@ -1575,7 +1611,7 @@ export function ScreenerView({ connected }: Props) {
       const r2 = await fetch("/api/screener/analyze/pass2", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ candidates: subset }),
+        body: JSON.stringify({ candidates: subset, forceFresh }),
         cache: "no-store",
       });
       if (!r2.ok) throw new Error(`HTTP ${r2.status}`);
@@ -1751,7 +1787,7 @@ export function ScreenerView({ connected }: Props) {
       const r2 = await fetch("/api/screener/analyze/pass2", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ candidates: candidatesToAnalyze }),
+        body: JSON.stringify({ candidates: candidatesToAnalyze, forceFresh }),
         cache: "no-store",
       });
       if (!r2.ok) {
@@ -2090,6 +2126,24 @@ export function ScreenerView({ connected }: Props) {
                 Load Previous
               </Button>
             )}
+            <label
+              className="flex cursor-pointer items-center gap-1.5 text-sm text-muted-foreground"
+              title={
+                "Bypasses the analyst-estimates, earnings-surprise-history, realized-vol, and " +
+                "news caches for this run — everything is pulled live regardless of how fresh " +
+                "the cache is. Schwab options chain data is always live either way. Fresh " +
+                "results still get written back to the caches for the next normal run."
+              }
+            >
+              <input
+                type="checkbox"
+                checked={forceFresh}
+                onChange={(e) => setForceFresh(e.target.checked)}
+                disabled={busy}
+                className="h-3.5 w-3.5 accent-amber-400"
+              />
+              Force fresh
+            </label>
             <Tooltip>
               <TooltipTrigger asChild>
                 <span>
@@ -2103,7 +2157,7 @@ export function ScreenerView({ connected }: Props) {
                     ) : (
                       <Sparkles className="mr-2 h-4 w-4" />
                     )}
-                    Run Analysis
+                    {forceFresh ? "Run Analysis (fresh)" : "Run Analysis"}
                   </Button>
                 </span>
               </TooltipTrigger>

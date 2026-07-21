@@ -21,6 +21,10 @@ export const maxDuration = 60;
 
 type Body = {
   candidates?: unknown;
+  // Bypasses the Finnhub (analyst estimates, earnings-surprise history)
+  // and daily-bars (realized-vol) caches for this run — still writes
+  // fresh results back. Schwab chain data is never cached either way.
+  forceFresh?: unknown;
 };
 
 export async function POST(req: NextRequest) {
@@ -43,6 +47,7 @@ export async function POST(req: NextRequest) {
   }
 
   const candidates = body.candidates as ScreenerResult[];
+  const forceFresh = body.forceFresh === true;
 
   // ---- Diagnostic — shape of the first candidate on entry ----
   // Surfaces whether stageTwo arrives as null / undefined / {} so the
@@ -159,6 +164,7 @@ export async function POST(req: NextRequest) {
             industryClass: cls.industry as ScreenContext["industryClass"],
             industryStatus,
             isWhitelisted: base.isWhitelisted,
+            forceFresh,
           };
           working = await evaluateStagesOneTwo(candidate, ctx);
           stageOneTwoRan += 1;
@@ -176,7 +182,7 @@ export async function POST(req: NextRequest) {
 
       let final: ScreenerResult;
       try {
-        final = await runStagesThreeFour(working);
+        final = await runStagesThreeFour(working, { forceFresh });
       } catch (e) {
         console.warn(
           `[analyze/pass2] ${upper} stages 3/4 THREW: ${e instanceof Error ? e.message : e}`,

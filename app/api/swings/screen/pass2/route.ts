@@ -14,9 +14,9 @@ export const maxDuration = 60;
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   const started = Date.now();
-  let body: Pass1Wire;
+  let body: Pass1Wire & { forceFresh?: boolean };
   try {
-    body = (await req.json()) as Pass1Wire;
+    body = (await req.json()) as Pass1Wire & { forceFresh?: boolean };
   } catch {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
@@ -37,6 +37,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         capitulation: body.capitulation ?? {},
         pullback: body.pullback ?? {},
       },
+      { forceFresh: body.forceFresh === true },
     );
     return NextResponse.json({
       candidates,

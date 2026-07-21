@@ -7,7 +7,6 @@ import {
 } from "@/lib/schwab";
 import {
   getHistoricalEarningsMovements,
-  getHistoricalPrices,
   getMarketCap,
   EarningsMove,
 } from "@/lib/yahoo";
@@ -17,6 +16,7 @@ import {
   getAnalystEstimates,
   getEarningsSurpriseHistory,
 } from "@/lib/earnings";
+import { getOrFetchDailyBars } from "@/lib/daily-bars-cache";
 import {
   ACTIVE_OVERHANG,
   BUSINESS_SIMPLICITY,
@@ -416,11 +416,14 @@ export async function runStageTwo(
     // preset value, so callers that don't thread a config keep the
     // historical behaviour.
     minMarketCapTier?: number;
+    // Bypasses the analyst-recommendation Finnhub cache (see
+    // getAnalystEstimates) — still writes the fresh result back.
+    forceFresh?: boolean;
   } = {},
 ): Promise<StageTwoResult> {
   const [mcapB, analyst] = await Promise.all([
     fetchMarketCapBillions(candidate.symbol),
-    getAnalystEstimates(candidate.symbol),
+    getAnalystEstimates(candidate.symbol, { forceFresh: options.forceFresh }),
   ]);
   const businessSimplicity = scoreBusinessSimplicity(candidate.symbol);
   const marketCapTier = scoreMarketCap(mcapB);
@@ -598,6 +601,7 @@ export async function runStageThree(
   chain: SchwabOptionsChain,
   monthlyChain: SchwabOptionsChain | null,
   historicalMoves: EarningsMove[],
+  opts: { forceFresh?: boolean } = {},
 ): Promise<StageThreeResult> {
   const sym = candidate.symbol;
   const weeklyAtm = pickAtmContract(chain, candidate.expiry, candidate.price);
@@ -639,10 +643,21 @@ export async function runStageThree(
       `emPct=${emPct ?? "null"} (weeklyIv * sqrt(${candidate.daysToExpiry}/365))`,
   );
 
-  // 30-day realized vol proxy
-  const today = new Date();
-  const thirtyDaysAgo = new Date(today.getTime() - 45 * 24 * 60 * 60 * 1000);
-  const prices = await getHistoricalPrices(candidate.symbol, thirtyDaysAgo, today);
+  // 30-day realized vol proxy. Daily bars settle once at EOD, so this
+  // is backed by the shared daily_bars_cache (lib/daily-bars-cache.ts)
+  // — same cache the swing screener's ATR uses, whichever runs first
+  // each day warms it for the other. That cache stores a wider window
+  // than this calculation originally used, so slice back down to the
+  // same 45-calendar-day lookback rather than passing the whole thing:
+  // annualizedRealizedVol has no internal windowing, it uses whatever
+  // array it's given, so passing a wider window would silently change
+  // the computed vol for every candidate.
+  const REALIZED_VOL_WINDOW_DAYS = 45;
+  const cutoffIso = new Date(Date.now() - REALIZED_VOL_WINDOW_DAYS * 24 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 10);
+  const allBars = await getOrFetchDailyBars(candidate.symbol, { forceFresh: opts.forceFresh });
+  const prices = allBars.filter((b) => b.date >= cutoffIso);
   const closes = prices.map((p) => p.close).filter((c) => c > 0);
   const realizedVol = annualizedRealizedVol(closes);
   console.log(
@@ -650,7 +665,7 @@ export async function runStageThree(
       `ivEdgeRatio=${weeklyIv && realizedVol ? (weeklyIv / realizedVol).toFixed(2) : "n/a"}`,
   );
 
-  const surprise = await getEarningsSurpriseHistory(candidate.symbol);
+  const surprise = await getEarningsSurpriseHistory(candidate.symbol, { forceFresh: opts.forceFresh });
 
   const historicalMoveScore = scoreHistoricalMove(medianMove, emPct);
   const consistencyScore = scoreConsistency(movePcts);
@@ -1186,9 +1201,15 @@ export async function safeGetChain(
   symbol: string,
   fromDate: string,
   toDate: string,
+  opts: { contractType?: "PUT" | "CALL" | "ALL"; strikeCount?: number } = {},
 ): Promise<SchwabOptionsChain | null> {
   try {
-    const chain = await getOptionsChain(symbol, fromDate);
+    const chain = await getOptionsChain(
+      symbol,
+      fromDate,
+      opts.contractType ?? "PUT",
+      opts.strikeCount ?? 30,
+    );
     void toDate;
     return chain;
   } catch (e) {
@@ -1246,6 +1267,9 @@ export type ScreenContext = {
   industryClass: IndustryClass;
   industryStatus: "pass" | "fail" | "unknown";
   isWhitelisted: boolean;
+  // Bypasses the Finnhub analyst-estimates cache for Stage 2 — still
+  // writes the fresh result back.
+  forceFresh?: boolean;
 };
 
 // Runs Stage 1 + Stage 2 and returns a ScreenerResult with stages 3/4 null and
@@ -1264,6 +1288,7 @@ export async function evaluateStagesOneTwo(
   const stageTwo = await runStageTwo(candidate, context.industryClass, {
     industryPenalty,
     isWhitelisted: context.isWhitelisted,
+    forceFresh: context.forceFresh,
   });
 
   const baseResult: Omit<ScreenerResult, "recommendation" | "stoppedAt" | "stageThree" | "stageFour" | "threeLayer"> = {
@@ -1299,7 +1324,7 @@ export async function evaluateStagesOneTwo(
 // earnings date and would mint a bogus event row.
 export async function runStagesThreeFour(
   base: ScreenerResult,
-  opts?: { skipPersist?: boolean },
+  opts?: { skipPersist?: boolean; forceFresh?: boolean },
 ): Promise<ScreenerResult> {
   const candidate: EarningsCandidate = {
     symbol: base.symbol,
@@ -1310,7 +1335,24 @@ export async function runStagesThreeFour(
     expiry: base.expiry,
   };
 
-  const chain = await safeGetChain(candidate.symbol, candidate.expiry, candidate.expiry);
+  // Fetch ALL sides (not just PUT) at strikeCount=200 up front — a
+  // strict superset of both the old PUT/30 default (so Stage 3/4's
+  // strike-picking is unaffected; pickAtmContract/pickStrikeNearestWithDiff
+  // only ever read chain.putExpDateMap, which Schwab populates
+  // identically regardless of contractType) and of what
+  // computeOptionsFlow's own chain fetch below used to ask for
+  // separately. This is the fix for the "verify-chains and pass2 both
+  // fetch the same chain" audit finding as applied within pass2 itself
+  // — it collapses what could be up to 4 chain fetches per candidate
+  // (this one, a conditional targeted-strike retry, and options-flow's
+  // own fetch) down to at most 2 (this one + the genuinely-different
+  // monthly-expiry fetch below). The conditional targeted retry stays
+  // as a safety net for the rare case even a 200-strike window misses
+  // the 2x-EM target, but should almost never fire now.
+  const chain = await safeGetChain(candidate.symbol, candidate.expiry, candidate.expiry, {
+    contractType: "ALL",
+    strikeCount: 200,
+  });
 
   // ---- DEBUG: SPOT-only chain dump (full Schwab response shape).
   // Captures the actual response right after the Schwab fetch so we
@@ -1400,7 +1442,9 @@ export async function runStagesThreeFour(
       `result=${monthlyChain ? "ok" : "null"}`,
   );
 
-  const stageThree = await runStageThree(candidate, chain, monthlyChain, historicalMoves);
+  const stageThree = await runStageThree(candidate, chain, monthlyChain, historicalMoves, {
+    forceFresh: opts?.forceFresh,
+  });
 
   // Encyclopedia crush fallback: when live history is too thin to grade
   // the crush (insufficientData), substitute the batch-computed
@@ -1471,6 +1515,7 @@ export async function runStagesThreeFour(
           spotPrice: candidate.price,
           emPct: stageThree.details.expectedMovePct,
           suggestedStrike: stageFour.suggestedStrike,
+          prefetchedChain: chain,
         }).catch((e: unknown) => {
           console.warn(
             `[options-flow] ${candidate.symbol} failed: ${e instanceof Error ? e.message : e}`,

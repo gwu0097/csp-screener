@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { pass1Filter, serializePass1 } from "@/lib/swing-screener";
 import { SWING_UNIVERSE } from "@/lib/stock-universe";
 
@@ -9,10 +9,17 @@ export const dynamic = "force-dynamic";
 // gracefully — survivors are computed from whatever Yahoo returned.
 export const maxDuration = 60;
 
-export async function POST(): Promise<NextResponse> {
+export async function POST(req: NextRequest): Promise<NextResponse> {
   const started = Date.now();
+  let forceFresh = false;
   try {
-    const result = await pass1Filter(SWING_UNIVERSE);
+    const body = (await req.json().catch(() => ({}))) as { forceFresh?: unknown };
+    forceFresh = body.forceFresh === true;
+  } catch {
+    forceFresh = false;
+  }
+  try {
+    const result = await pass1Filter(SWING_UNIVERSE, { forceFresh });
     const wire = serializePass1(result, SWING_UNIVERSE.length);
     return NextResponse.json({
       ...wire,

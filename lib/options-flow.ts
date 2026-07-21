@@ -179,12 +179,17 @@ export async function computeOptionsFlow(args: {
   spotPrice: number;
   emPct: number; // fractional, e.g. 0.038 for 3.8%
   suggestedStrike: number | null;
+  // When the caller already fetched a wide-enough chain (ALL sides,
+  // strikeCount >= 200) for this same symbol+expiry, pass it here to
+  // skip a second, otherwise-identical Schwab round trip. Falls back
+  // to fetching its own chain when omitted.
+  prefetchedChain?: SchwabOptionsChain | null;
 }): Promise<OptionsFlow | null> {
   const { symbol, expiry, spotPrice, emPct, suggestedStrike } = args;
   if (!Number.isFinite(spotPrice) || spotPrice <= 0) return null;
   if (!Number.isFinite(emPct) || emPct <= 0) return null;
 
-  const chain = await fetchFullChain(symbol, expiry);
+  const chain = args.prefetchedChain ?? (await fetchFullChain(symbol, expiry));
   if (!chain) return null;
 
   const calls = flatten(chain.callExpDateMap, expiry);
