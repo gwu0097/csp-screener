@@ -142,6 +142,11 @@ type SwingCandidate = {
   // lack them and get backfilled by normalizeCandidate().
   setupTabs?: SetupTab[];
   tabScores?: Partial<Record<SetupTab, number>>;
+  // The named components tabScores[tab] sums to, and the prose built
+  // from them — both optional, since rows saved before this redesign
+  // have neither. See lib/swing-screener.ts ScoreComponent/buildNarrative.
+  tabScoreComponents?: Partial<Record<SetupTab, ScoreComponent[]>>;
+  tabNarrative?: Partial<Record<SetupTab, string>>;
   tabStats?: TabStats | null;
   // Kept separate from tabStats so a confluence row shown under either
   // tab gets that tab's own stats. Optional for pre-redesign rows.
@@ -151,6 +156,18 @@ type SwingCandidate = {
   // null for rows saved before the real-levels redesign or when Yahoo
   // didn't return enough daily history.
   atr14?: number | null;
+};
+
+// Mirror of lib/swing-screener.ts ScoreComponent — the score IS the sum
+// of these, so this is what both the badge and the breakdown render.
+type ScoreComponent = {
+  key: string;
+  label: string;
+  value: string;
+  detail: string;
+  points: number;
+  maxPoints: number;
+  direction: "positive" | "negative" | "neutral";
 };
 
 type TabStats = {
@@ -1603,6 +1620,7 @@ function CandidateRow({
       {expanded && (
         <ExpandedDetail
           candidate={c}
+          activeTab={activeTab}
           chartData={chartData}
           chartLoading={chartLoading}
           chartError={chartError}
@@ -1948,11 +1966,13 @@ function RedFlagBadges({ redFlags }: { redFlags: string[] }) {
 
 function ExpandedDetail({
   candidate: c,
+  activeTab,
   chartData,
   chartLoading,
   chartError,
 }: {
   candidate: SwingCandidate;
+  activeTab: SetupTab;
   chartData: ChartPoint[] | null;
   chartLoading: boolean;
   chartError: string | null;
@@ -1982,7 +2002,7 @@ function ExpandedDetail({
             />
             <DetailRow
               label="Stop"
-              value={`${fmtMoney(c.stopPrice)} (${fmtPct(stopPct, 1)} — 3% below 52w low)`}
+              value={`${fmtMoney(c.stopPrice)} (${fmtPct(stopPct, 1)})`}
               tone="bad"
             />
             <DetailRow label="R/R" value={fmtRr(c.rr).text} tone={(c.rr ?? 0) >= 3 ? "good" : (c.rr ?? 0) >= 2 ? "warn" : "bad"} />
@@ -2029,7 +2049,8 @@ function ExpandedDetail({
         </div>
       </div>
 
-      <ScoreBreakdown candidate={c} />
+      <NarrativeCard candidate={c} activeTab={activeTab} />
+      <ScoreBreakdown candidate={c} activeTab={activeTab} />
     </div>
   );
 }
@@ -2418,217 +2439,92 @@ function EarningsAndShortSection({ candidate: c }: { candidate: SwingCandidate }
   );
 }
 
-// Setup score breakdown — recomputed in the UI from the candidate fields
-// so each component shows the actual data behind it. Mirrors the scoring
-// rules in lib/swing-screener.ts (kept in sync by hand).
-type ScoreComponent = {
-  label: string;
-  earned: number;
-  max: number;
-  detail: string;
-  tooltip: string;
-};
-
-function computeScoreBreakdown(c: SwingCandidate): ScoreComponent[] {
-  const out: ScoreComponent[] = [];
-
-  // ---- Insider ----
-  if (c.insiderSignal === "strong_bullish") {
-    const top = c.executiveBuys?.[0] ?? null;
-    out.push({
-      label: "Executive-grade open-market buying",
-      earned: 2,
-      max: 2,
-      detail: top
-        ? `${top.name || "Insider"} purchased $${(top.dollarValue / 1_000_000).toFixed(2)}M on ${top.date}`
-        : "Open-market purchase >$100K detected",
-      tooltip: top
-        ? `${top.name} made an open-market purchase:\n` +
-          `${top.shares.toLocaleString()} shares\n` +
-          `@ $${top.price.toFixed(2)} = $${(top.dollarValue / 1_000_000).toFixed(2)}M\n` +
-          `on ${top.date}\n\n` +
-          `Code P = open-market purchase with personal funds (not compensation).\n` +
-          `>$100K threshold confirms conviction.`
-        : "Open-market purchase >$100K detected.",
-    });
-  } else if (c.insiderSignal === "bullish") {
-    out.push({
-      label: "Insider buying",
-      earned: 1,
-      max: 2,
-      detail: "Net open-market buyers — no $100K+ executive-tier purchase",
-      tooltip:
-        "Multiple insiders made open-market purchases on net, but none crossed " +
-        "the $100K conviction threshold.\n\n" +
-        "Half-credit signal — net buying is positive but no single high-conviction trade.",
-    });
-  } else {
-    out.push({
-      label: "Insider buying",
-      earned: 0,
-      max: 2,
-      detail:
-        c.insiderSignal === "bearish"
-          ? "Insiders net selling on the open market"
-          : "No open-market buying — only grants / option exercises",
-      tooltip:
-        "No open-market purchases >$100K detected in last 45 days.\n\n" +
-        "RSU grants and option exercises excluded — those are compensation, not conviction.",
-    });
+// Analyst-style plain-language read — rendered verbatim from
+// c.tabNarrative[activeTab], built server-side (lib/swing-screener.ts
+// buildNarrative) from the exact same components ScoreBreakdown below
+// renders, so the prose and the numbers can't disagree. Sections are
+// blank-line-separated "LABEL: text" blocks (STRENGTH/CAUTION/
+// CONFIRMATION/TRADE GEOMETRY/BOTTOM LINE), mirroring the CSP
+// screener's STRENGTH/CAUTION/NEWS/HISTORY/BOTTOM LINE format.
+function NarrativeCard({
+  candidate: c,
+  activeTab,
+}: {
+  candidate: SwingCandidate;
+  activeTab: SetupTab;
+}) {
+  const text = c.tabNarrative?.[activeTab];
+  if (!text) {
+    return (
+      <div className="rounded border border-border/50 bg-white/[0.02] p-3 text-[11px] text-muted-foreground">
+        No narrative available — this row was saved before the analyst-read redesign.
+      </div>
+    );
   }
-
-  // ---- Upcoming catalyst (Pass 3 / Perplexity) ----
-  const catalystEarned =
-    c.catalystConfidence === "high"
-      ? 2
-      : c.catalystConfidence === "medium"
-        ? 1
-        : 0;
-  const catalystDetail =
-    c.catalystConfidence === "high" && c.catalystDescription
-      ? c.catalystDescription
-      : c.catalystConfidence === "medium" && c.catalystDescription
-        ? c.catalystDescription
-        : c.catalystConfidence === "low"
-          ? "Possible catalyst found, but confidence too low to score"
-          : "No specific catalyst found in next 30-90 days";
-  out.push({
-    label: "Upcoming catalyst",
-    earned: catalystEarned,
-    max: 2,
-    detail: catalystDetail,
-    tooltip:
-      c.catalystConfidence === "high" || c.catalystConfidence === "medium"
-        ? `Type: ${catalystTypeLabel(c.catalystType)}\n` +
-          (c.catalystDate ? `Date: ${fmtCalendarDate(c.catalystDate)}\n` : "") +
-          `Confidence: ${c.catalystConfidence.toUpperCase()}\n\n` +
-          (c.catalystDescription ? `"${c.catalystDescription}"\n\n` : "") +
-          `Source: Perplexity research over the last 30-90 day horizon.`
-        : c.catalystConfidence === "low"
-          ? `Perplexity surfaced a candidate catalyst but flagged confidence as low.\n\n` +
-            (c.catalystDescription ? `"${c.catalystDescription}"\n\n` : "") +
-            `No score awarded for low-confidence signals.`
-          : "Perplexity did not find a specific near-term catalyst (product launches, FDA decisions, contracts, partnerships, etc.). Regular quarterly earnings are intentionally excluded from this check.",
-  });
-
-  // ---- Unusual options ----
-  out.push({
-    label: "Unusual call activity",
-    earned: c.unusualOptionsActivity ? 2 : 0,
-    max: 2,
-    detail: c.unusualOptionsActivity
-      ? `${(c.callVolumeOiRatio ?? 0).toFixed(2)}x vol/OI on $${c.topOptionsStrike} strike${
-          c.topOptionsExpiry ? ` (exp ${fmtCalendarDate(c.topOptionsExpiry)})` : ""
-        }`
-      : c.callVolumeOiRatio !== null
-        ? `${c.callVolumeOiRatio.toFixed(2)}x vol/OI on top strike — below 0.5x threshold`
-        : "No options data (Schwab disconnected or no listed options)",
-    tooltip: c.unusualOptionsActivity
-      ? `Vol/OI ${(c.callVolumeOiRatio ?? 0).toFixed(2)}x on $${c.topOptionsStrike} strike (OTM` +
-        `${c.topOptionsExpiry ? `, exp ${fmtCalendarDate(c.topOptionsExpiry)}` : ""}).\n` +
-        `Threshold: >0.5x = unusual activity.\n` +
-        `${(c.callVolumeOiRatio ?? 0).toFixed(2)}x detected ✅`
-      : "No call strike with vol/OI >0.5x found. Either options activity is normal today or Schwab returned no chain data.",
-  });
-
-  // ---- Volume ----
-  const volHit = c.volumeRatio > 2.0 && c.priceChange1d > 0;
-  out.push({
-    label: "Volume spike",
-    earned: volHit ? 1 : 0,
-    max: 1,
-    detail: volHit
-      ? `${c.volumeRatio.toFixed(2)}x avg (${formatVolume(c.todayVolume)} today vs ${formatVolume(c.avgVolume10d)} avg) with price up`
-      : `${c.volumeRatio.toFixed(2)}x avg (${formatVolume(c.todayVolume)} today vs ${formatVolume(c.avgVolume10d)} avg) — no spike`,
-    tooltip:
-      `Today's volume: ${c.todayVolume.toLocaleString()}\n` +
-      `10-day avg vol: ${c.avgVolume10d.toLocaleString()}\n` +
-      `Ratio: ${c.volumeRatio.toFixed(2)}x average\n\n` +
-      `Threshold: >2.0x average AND price up today.\n\n` +
-      (volHit
-        ? "✅ Volume spike with positive price = accumulation signal"
-        : c.volumeRatio >= 2
-          ? "✗ High volume but price down = distribution, not accumulation"
-          : "✗ Normal volume — no unusual activity"),
-  });
-
-  // R/R is deliberately NOT a score component — see the R/R badge next to
-  // Signals for the trade-geometry sanity check. Setup quality (this
-  // breakdown) and trade geometry (can you place a sane order) are kept
-  // separate on purpose.
-
-  // ---- Short squeeze ----
-  const squeezeHit = c.shortPercentFloat !== null && c.shortPercentFloat > 0.15;
-  const shortPct =
-    c.shortPercentFloat !== null ? (c.shortPercentFloat * 100).toFixed(1) : null;
-  out.push({
-    label: "Short squeeze potential",
-    earned: squeezeHit ? 1 : 0,
-    max: 1,
-    detail:
-      c.shortPercentFloat === null
-        ? "No short data"
-        : squeezeHit
-          ? `${shortPct}% short float — squeeze possible if catalyst triggers`
-          : `${shortPct}% short float — below 15% threshold`,
-    tooltip:
-      shortPct === null
-        ? "No short interest data."
-        : `${shortPct}% short float.\n` +
-          `Threshold for point: >15%\n\n` +
-          (squeezeHit
-            ? "✅ Elevated short interest — squeeze possible if catalyst triggers"
-            : "✗ Below 15% threshold"),
-  });
-
-  // ---- 50d MA setup ----
-  const maPerfect = c.vsMA50 >= -0.02 && c.vsMA50 <= 0.02;
-  out.push({
-    label: "Perfect MA setup",
-    earned: maPerfect ? 1 : 0,
-    max: 1,
-    detail: maPerfect
-      ? `Within ±2% of 50d MA (${fmtPct(c.vsMA50, 1)})`
-      : `${fmtPct(c.vsMA50, 1)} from 50d MA — outside ±2% sweet spot`,
-    tooltip:
-      `Price: ${fmtMoney(c.currentPrice)}\n` +
-      `50d MA: ${fmtMoney(c.ma50)}\n` +
-      `vs MA: ${fmtPct(c.vsMA50, 1)}\n\n` +
-      `Threshold: within ±2% of 50d MA\n\n` +
-      (maPerfect
-        ? "✅ At the MA — key decision point"
-        : "✗ Not at MA level"),
-  });
-
-  // ---- Insider selling penalty ---- (only shown when it applies — see
-  // the -2 policy note in lib/swing-screener.ts pass2Enrich)
-  if (c.redFlags.includes("INSIDER_SELLING")) {
-    out.push({
-      label: "Insider selling penalty",
-      earned: -2,
-      max: 0,
-      detail: "Net insider selling on the open market — inverse of the insider-buying tier-1 signal",
-      tooltip:
-        "Insiders sold more than 2x what they bought on the open market.\n\n" +
-        "-2 to every tab score this candidate qualifies for, floored at 0. " +
-        "On a bullish-only screener, bearish insider activity works against " +
-        "the setup's own thesis rather than sitting as a label with no effect.",
-    });
-  }
-
-  return out;
+  const blocks = text.split("\n\n");
+  return (
+    <div className="space-y-2 rounded border border-border/50 bg-white/[0.02] p-3 text-[12px] leading-relaxed">
+      <div className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+        Analyst read
+      </div>
+      {blocks.map((block, i) => {
+        const m = block.match(/^([A-Z /]+):\s*([\s\S]*)$/);
+        if (!m) {
+          return (
+            <p key={i} className="text-foreground/90">
+              {block}
+            </p>
+          );
+        }
+        const [, label, body] = m;
+        const cls =
+          label === "STRENGTH"
+            ? "text-emerald-300"
+            : label === "CAUTION"
+              ? "text-amber-300"
+              : label === "BOTTOM LINE"
+                ? "text-foreground"
+                : "text-sky-300";
+        return (
+          <p key={i}>
+            <span className={`font-semibold ${cls}`}>{label}: </span>
+            <span className="text-foreground/90">{body}</span>
+          </p>
+        );
+      })}
+    </div>
+  );
 }
 
-function ScoreBreakdown({ candidate: c }: { candidate: SwingCandidate }) {
-  const components = computeScoreBreakdown(c);
-  const filled = Math.max(0, Math.min(10, c.setupScore));
+// Setup score breakdown — renders c.tabScoreComponents[activeTab]
+// verbatim (computed server-side, see lib/swing-screener.ts
+// ScoreComponent/finalizeScore). The badge, this breakdown, and the
+// narrative above all come from the same list, so they always sum and
+// agree with each other by construction, not by convention.
+function ScoreBreakdown({
+  candidate: c,
+  activeTab,
+}: {
+  candidate: SwingCandidate;
+  activeTab: SetupTab;
+}) {
+  const score = c.tabScores?.[activeTab] ?? c.setupScore;
+  const components = c.tabScoreComponents?.[activeTab];
+  const filled = Math.max(0, Math.min(10, score));
+  if (!components) {
+    return (
+      <div className="rounded border border-border/50 bg-white/[0.02] p-3 text-[11px] text-muted-foreground">
+        No score breakdown available — this row was saved before the analyst-read redesign.
+      </div>
+    );
+  }
   return (
     <div className="rounded border border-border/50 bg-white/[0.02] p-3">
       <div className="mb-2 flex items-center gap-2">
         <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-          Setup Score
+          {TAB_LABEL[activeTab]} score
         </span>
-        <span className="font-mono text-base text-foreground">{c.setupScore}/10</span>
+        <span className="font-mono text-base text-foreground">{score}/10</span>
         <span className="ml-2 font-mono text-sm tracking-tighter text-muted-foreground">
           {"━".repeat(filled)}
           <span className="text-muted-foreground/40">{"░".repeat(10 - filled)}</span>
@@ -2636,9 +2532,9 @@ function ScoreBreakdown({ candidate: c }: { candidate: SwingCandidate }) {
       </div>
       <div className="grid grid-cols-1 gap-1 text-[11px] md:grid-cols-2">
         {components.map((comp, i) => {
-          const negative = comp.earned < 0;
-          const ok = comp.earned > 0;
-          const partial = comp.earned > 0 && comp.earned < comp.max;
+          const negative = comp.points < 0;
+          const ok = comp.points > 0;
+          const partial = comp.points > 0 && comp.maxPoints > 0 && comp.points < comp.maxPoints;
           const icon = negative ? "−" : ok ? (partial ? "⚠" : "✓") : "✗";
           const cls = negative
             ? "text-rose-300"
@@ -2648,20 +2544,20 @@ function ScoreBreakdown({ candidate: c }: { candidate: SwingCandidate }) {
                 : "text-emerald-300"
               : "text-muted-foreground";
           return (
-            <div key={i} className="flex items-start gap-2">
+            <div key={comp.key ?? i} className="flex items-start gap-2">
               <span className={`mt-0.5 w-3 shrink-0 ${cls}`}>{icon}</span>
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
                   <span className="text-foreground/90">{comp.label}</span>
                   <span className={`font-mono ${cls}`}>
-                    <Tipped content={comp.tooltip}>
-                      {comp.earned}/{comp.max}
+                    <Tipped content={`${comp.value}\n\n${comp.detail}`}>
+                      {comp.points >= 0 ? "+" : ""}
+                      {comp.points}
+                      {comp.maxPoints > 0 ? `/${comp.maxPoints}` : ""}
                     </Tipped>
                   </span>
                 </div>
-                <div className="text-[10px] text-muted-foreground">
-                  {comp.detail}
-                </div>
+                <div className="text-[10px] text-muted-foreground">{comp.value}</div>
               </div>
             </div>
           );

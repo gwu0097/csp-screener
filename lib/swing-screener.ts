@@ -90,7 +90,69 @@ export type TabStats = {
   sma20: number | null;
   return3m: number | null; // percent (snapshot.return_3m)
   return1y: number | null; // percent
+  // Of the last 5 daily closes, how many sat within 2% of the 50d MA —
+  // the closest thing to a "tested support" signal the 5-day window
+  // affords. 1 means a single touch (untested); 2+ means the level has
+  // actually been revisited, not just brushed once.
+  daysNearMA50: number;
 };
+
+// ---------- Scoring: named, explainable components ----------
+//
+// Every tab scorer returns a list of these instead of a bare number.
+// The displayed score is the sum of `points` (clamped 0-10) — the same
+// list is what the expanded row's breakdown renders and what the
+// narrative is built from, so score and explanation cannot diverge.
+export type ScoreComponent = {
+  key: string;
+  label: string;
+  // Human-readable value at scoring time, e.g. "+21.4% above the 200d MA".
+  value: string;
+  // One sentence on the threshold/judgment behind the points.
+  detail: string;
+  points: number;
+  // Ceiling for this component, for a progress-bar-style render. 0 for
+  // pure-penalty/adjustment rows that have no positive ceiling.
+  maxPoints: number;
+  direction: "positive" | "negative" | "neutral";
+};
+
+// Sums component points, clamps to the 0-10 range every tab score lives
+// in, and — if clamping or rounding changed the total — appends a
+// transparent adjustment row so the components displayed always sum to
+// exactly the score displayed. No silent divergence between the badge
+// and the breakdown.
+export function finalizeScore(components: ScoreComponent[]): {
+  score: number;
+  components: ScoreComponent[];
+} {
+  const raw = components.reduce((s, c) => s + c.points, 0);
+  const score = Math.max(0, Math.min(10, Math.round(raw)));
+  const delta = Number((score - raw).toFixed(1));
+  if (Math.abs(delta) < 0.05) return { score, components };
+  const label = raw < 0 ? "Floored at 0" : raw > 10 ? "Capped at 10" : "Rounding";
+  const detail =
+    raw < 0
+      ? "Scores don't go below 0 — the components above net negative."
+      : raw > 10
+        ? "Scores cap at 10 even when components add up to more."
+        : "Rounded to a whole number for display.";
+  return {
+    score,
+    components: [
+      ...components,
+      {
+        key: "adjust",
+        label,
+        value: `${raw >= 0 ? "+" : ""}${raw.toFixed(1)} raw total`,
+        detail,
+        points: delta,
+        maxPoints: 0,
+        direction: "neutral",
+      },
+    ],
+  };
+}
 
 export type InsiderTransaction = {
   name: string;
@@ -145,7 +207,7 @@ export type SwingCandidate = {
   insiderSignal: "strong_bullish" | "bullish" | "neutral" | "bearish";
   executiveBuys: InsiderTransaction[];
   // Open-market (code P) purchase breakdown — the raw numbers
-  // scoreInsiderConviction ranks on, surfaced so the Insider tab's row
+  // scoreInsiderComponents ranks on, surfaced so the Insider tab's row
   // can show them directly instead of just the derived score.
   insiderBuyDollars: number;
   insiderBuyerCount: number;
@@ -185,6 +247,13 @@ export type SwingCandidate = {
   // the client backfills insider/options membership from tier1Signals.
   setupTabs: SetupTab[];
   tabScores: Partial<Record<SetupTab, number>>;
+  // The named components each tabScores[tab] is the sum of — this is
+  // what the expanded row's breakdown renders, so the number and the
+  // explanation come from the same place and cannot diverge.
+  tabScoreComponents: Partial<Record<SetupTab, ScoreComponent[]>>;
+  // Analyst-style prose built from those same components, one per
+  // qualifying tab.
+  tabNarrative: Partial<Record<SetupTab, string>>;
   tabStats: TabStats | null;
   // Kept separate (unlike tabStats, which collapses to one of the two)
   // so a confluence candidate shown from either tab gets that tab's own
@@ -227,6 +296,13 @@ function pickNumber(obj: Record<string, unknown>, key: string): number | null {
 function pickString(obj: Record<string, unknown>, key: string): string | null {
   const v = obj[key];
   return typeof v === "string" && v.trim().length > 0 ? v.trim() : null;
+}
+
+function fmtMarketCapValue(n: number): string {
+  if (n >= 1e12) return `$${(n / 1e12).toFixed(1)}T`;
+  if (n >= 1e9) return `$${(n / 1e9).toFixed(1)}B`;
+  if (n >= 1e6) return `$${(n / 1e6).toFixed(0)}M`;
+  return `$${n.toFixed(0)}`;
 }
 
 async function fetchYahooQuote(symbol: string): Promise<Pass1Quote | null> {
@@ -392,7 +468,7 @@ function nyTodayIso(): string {
 
 // Builds TabStats for one symbol from its snapshot + live quote.
 // Returns null when the snapshot lacks the daily history we need.
-function computeTabStats(
+export function computeTabStats(
   snap: SymbolSnapshot,
   q: Pass1Quote,
 ): TabStats | null {
@@ -429,6 +505,9 @@ function computeTabStats(
       : first.close;
   const move5dPct = prevClose > 0 ? price / prevClose - 1 : 0;
 
+  const daysNearMA50 =
+    q.ma50 > 0 ? bars.filter((b) => Math.abs(b.close - q.ma50) / q.ma50 <= 0.02).length : 0;
+
   return {
     redDayCount,
     move5dPct,
@@ -436,16 +515,23 @@ function computeTabStats(
     sma20: snap.sma20,
     return3m: snap.return_3m,
     return1y: snap.return_1y,
+    daysNearMA50,
   };
 }
 
 // TAB 1 — CAPITULATION: 3+ consecutive red days (today counts
 // intraday), 5d cumulative worse than -12%, RSI14 < 40. Mirrors the
 // manual ThinkorSwim scan (3 red / -15% in 5d) slightly loosened.
+// Ceiling: worse than -50% in 5 days is far more likely a binary/
+// fundamental event (halt, fraud, guidance blowup) than ordinary
+// technical selling a bounce thesis can be built on — excluded rather
+// than scored, since no amount of "it's oversold" makes that a swing
+// setup.
 function qualifiesCapitulation(stats: TabStats): boolean {
   return (
     stats.redDayCount >= 3 &&
     stats.move5dPct <= -0.12 &&
+    stats.move5dPct > -0.5 &&
     stats.rsi14 !== null &&
     stats.rsi14 < 40
   );
@@ -453,10 +539,17 @@ function qualifiesCapitulation(stats: TabStats): boolean {
 
 // TAB 2 — PULLBACK TO TREND: uptrend intact (above 200d, positive 3m
 // return), price within ~3% of the 50d SMA or sitting between the 20d
-// and 50d, and an orderly 5-12% pullback from the recent high.
-function qualifiesPullback(stats: TabStats, q: Pass1Quote): boolean {
+// and 50d, and an orderly 5-12% pullback from the recent high. Outer
+// ceilings (vs200MA, 3m return) are deliberately generous here — the
+// real "extended, not pulled back" judgment happens in the scorer below
+// so an extended stock still shows up with an honest low score and
+// narrative instead of silently vanishing. These only backstop the
+// truly absurd case (triple-digit 3-month runs, 60%+ above the 200d).
+export function qualifiesPullback(stats: TabStats, q: Pass1Quote): boolean {
   if (q.currentPrice <= q.ma200) return false;
-  if (stats.return3m === null || stats.return3m <= 0) return false;
+  const vsMA200 = (q.currentPrice - q.ma200) / q.ma200;
+  if (vsMA200 > 0.6) return false;
+  if (stats.return3m === null || stats.return3m <= 0 || stats.return3m > 150) return false;
   const vsMA50 = (q.currentPrice - q.ma50) / q.ma50;
   const nearMA50 = Math.abs(vsMA50) <= 0.03;
   const betweenMAs =
@@ -468,30 +561,178 @@ function qualifiesPullback(stats: TabStats, q: Pass1Quote): boolean {
   return pctFromHigh <= -0.05 && pctFromHigh >= -0.12;
 }
 
-// Severity ranking for capitulation: deeper selloff + lower RSI +
-// larger cap ranks higher; elevated volume = seller-exhaustion bonus.
-export function scoreCapitulation(stats: TabStats, q: Pass1Quote): number {
-  const depth = Math.min(4, (Math.abs(stats.move5dPct) * 100 - 12) * 0.5);
-  const rsi = stats.rsi14 !== null ? Math.min(3, (40 - stats.rsi14) * 0.15) : 0;
+// Severity ranking for capitulation: deeper selloff + lower RSI + larger
+// cap ranks higher, but each is banded with a ceiling rather than
+// scaling forever — beyond a point, "more oversold" stops being a
+// stronger bounce signal and starts being evidence something is
+// actually broken (see the extreme-move caution below).
+function scoreCapitulationComponents(stats: TabStats, q: Pass1Quote): ScoreComponent[] {
+  const pct = Math.abs(stats.move5dPct) * 100;
+  const depthPts = pct > 35 ? 1 : pct >= 20 ? 4 : pct >= 16 ? 3 : 2;
+  const depth: ScoreComponent = {
+    key: "depth",
+    label: "Selloff depth",
+    value: `${(stats.move5dPct * 100).toFixed(1)}% over ~5 trading days`,
+    detail:
+      pct > 35
+        ? "Beyond -35% in a week is more often a fundamental break than technical selling — treated as a caution, not a bigger bounce signal."
+        : "Full credit in the -20% to -35% band; tapers below -20% and above -35%.",
+    points: depthPts,
+    maxPoints: 4,
+    direction: depthPts <= 1 ? "negative" : "positive",
+  };
+
+  const rsi = stats.rsi14;
+  const rsiPts = rsi === null ? 0 : rsi < 15 ? 1 : rsi < 25 ? 3 : 2;
+  const rsiComp: ScoreComponent = {
+    key: "rsi",
+    label: "Oversold reading (RSI14)",
+    value: rsi !== null ? rsi.toFixed(0) : "no data",
+    detail:
+      rsi !== null && rsi < 15
+        ? "Under 15 is extreme — as consistent with a broken stock in freefall as a bottom. Verify there's no fundamental reason before treating this as capitulation."
+        : "Full credit at RSI 15-25, the classic capitulation reading.",
+    points: rsiPts,
+    maxPoints: 3,
+    direction: rsi !== null && rsi < 15 ? "negative" : rsiPts > 0 ? "positive" : "neutral",
+  };
+
   const cap =
     q.marketCap >= 100e9 ? 2 : q.marketCap >= 10e9 ? 1.5 : q.marketCap >= 2e9 ? 1 : 0;
+  const capComp: ScoreComponent = {
+    key: "marketcap",
+    label: "Market-cap quality",
+    value: fmtMarketCapValue(q.marketCap),
+    detail:
+      cap >= 1.5
+        ? "Large/mega-cap — selloffs here are more reliably technical, not existential."
+        : "Small/mid-cap — a sharp selloff here is more likely to reflect real deterioration, not just flow.",
+    points: cap,
+    maxPoints: 2,
+    direction: cap > 0 ? "positive" : "neutral",
+  };
+
   const volumeRatio = q.avgVolume10d > 0 ? q.todayVolume / q.avgVolume10d : 0;
-  const vol = volumeRatio > 1.5 ? 1 : 0;
-  return Math.min(10, Math.round(depth + rsi + cap + vol));
+  const volPts = volumeRatio > 1.5 ? 1 : 0;
+  const volComp: ScoreComponent = {
+    key: "volume",
+    label: "Volume (seller exhaustion)",
+    value: `${volumeRatio.toFixed(1)}x 10-day average`,
+    detail: "Elevated volume (>1.5x average) on the selloff is consistent with capitulation/exhaustion rather than quiet drift lower.",
+    points: volPts,
+    maxPoints: 1,
+    direction: volPts > 0 ? "positive" : "neutral",
+  };
+
+  return [depth, rsiComp, capComp, volComp];
 }
 
-// Trend-quality ranking for pullback: stronger 3m/1y returns + tighter
-// pullback to the 50d ranks higher.
-export function scorePullback(stats: TabStats, q: Pass1Quote): number {
+// Trend-quality ranking for pullback. Unlike the old formula, "more
+// extended" and "closer to the MA" are NOT monotonically better —
+// distance above the 200d and 3-month return are banded with real
+// ceilings (an overextended stock that ticked down isn't a pullback to
+// support), and MA proximity is graded together with RSI (has momentum
+// actually cooled, or did it just tick down while still overbought) and
+// how many of the last 5 closes sat near the level (a single touch is
+// untested; multiple closes there is real evidence).
+export function scorePullbackComponents(stats: TabStats, q: Pass1Quote): ScoreComponent[] {
+  const vsMA200 = (q.currentPrice - q.ma200) / q.ma200;
+  const trendPts = vsMA200 <= 0.08 ? 2 : vsMA200 <= 0.15 ? 1 : vsMA200 <= 0.2 ? 0 : -2;
+  const trendComp: ScoreComponent = {
+    key: "trend200",
+    label: "Distance above the 200d trend",
+    value: `${vsMA200 >= 0 ? "+" : ""}${(vsMA200 * 100).toFixed(1)}% above the 200d MA`,
+    detail:
+      trendPts < 0
+        ? "Above ~20% over the 200d MA reads as an extended stock that ticked down, not a pullback to support — a dip here is reversion risk, not a fresh continuation entry."
+        : trendPts === 0
+          ? "Fully extended (15-20% over trend) — no credit either way."
+          : "Full credit within 0-8% of the 200d MA, a healthy early/mid uptrend.",
+    points: trendPts,
+    maxPoints: 2,
+    direction: trendPts < 0 ? "negative" : trendPts > 0 ? "positive" : "neutral",
+  };
+
   const r3 = stats.return3m ?? 0;
-  const r1y = stats.return1y ?? 0;
-  const vsMA50 = Math.abs((q.currentPrice - q.ma50) / q.ma50);
+  const trend3mPts = r3 > 50 ? -1 : r3 >= 10 ? 3 : r3 >= 0 ? 1 : 0;
+  const trend3mComp: ScoreComponent = {
+    key: "trend3m",
+    label: "3-month trend strength",
+    value: `${r3 >= 0 ? "+" : ""}${r3.toFixed(1)}% over 3 months`,
+    detail:
+      r3 > 50
+        ? "A >50% three-month run is more parabolic than trending — more likely to mean-revert hard than continue smoothly."
+        : r3 >= 10
+          ? "Strong and sustainable (10-50% over 3 months)."
+          : "Positive but modest — a real trend hasn't fully established yet.",
+    points: trend3mPts,
+    maxPoints: 3,
+    direction: trend3mPts < 0 ? "negative" : trend3mPts > 0 ? "positive" : "neutral",
+  };
+
+  const vsMA50 = (q.currentPrice - q.ma50) / q.ma50;
+  const vsMA50abs = Math.abs(vsMA50);
+  const tightPts = vsMA50abs <= 0.01 ? 2 : vsMA50abs <= 0.02 ? 1 : 0;
+  const tightComp: ScoreComponent = {
+    key: "tightness",
+    label: "Pullback tightness to the 50d MA",
+    value: `${vsMA50 >= 0 ? "+" : ""}${(vsMA50 * 100).toFixed(1)}% vs 50d MA`,
+    detail: "Full credit sitting within 1% of the 50d MA — the level this thesis is testing.",
+    points: tightPts,
+    maxPoints: 2,
+    direction: tightPts > 0 ? "positive" : "neutral",
+  };
+
+  const rsi = stats.rsi14;
+  const rsiPts = rsi === null ? 0 : rsi >= 35 && rsi <= 55 ? 1 : rsi > 65 ? -1 : 0;
+  const rsiComp: ScoreComponent = {
+    key: "rsicool",
+    label: "Momentum cooldown (RSI14)",
+    value: rsi !== null ? rsi.toFixed(0) : "no data",
+    detail:
+      rsi !== null && rsi > 65
+        ? "Still above 65 — momentum hasn't actually cooled. This reads as an extended stock that ticked down, not a real pullback."
+        : rsi !== null && rsi >= 35 && rsi <= 55
+          ? "Cooled into a healthy pullback range (35-55)."
+          : "Neither confirms nor argues against a real cooldown.",
+    points: rsiPts,
+    maxPoints: 1,
+    direction: rsiPts < 0 ? "negative" : rsiPts > 0 ? "positive" : "neutral",
+  };
+
+  const testedPts = stats.daysNearMA50 >= 2 ? 1 : 0;
+  const testedComp: ScoreComponent = {
+    key: "tested",
+    label: "Support test quality",
+    value:
+      stats.daysNearMA50 >= 2
+        ? `${stats.daysNearMA50} of the last 5 closes near this level`
+        : "First close at this level",
+    detail:
+      stats.daysNearMA50 >= 2
+        ? "Multiple recent closes clustering here is real evidence this level is being tested, not just brushed once."
+        : "A single touch is untested support — the level hasn't been proven to hold yet.",
+    points: testedPts,
+    maxPoints: 1,
+    direction: testedPts > 0 ? "positive" : "neutral",
+  };
+
   const pctFromHigh = (q.currentPrice - q.week52High) / q.week52High;
-  const trend3m = r3 >= 20 ? 3 : r3 >= 10 ? 2 : 1;
-  const trend1y = r1y >= 30 ? 2 : r1y >= 10 ? 1 : 0;
-  const tight = vsMA50 <= 0.01 ? 3 : vsMA50 <= 0.02 ? 2 : 1;
-  const orderly = pctFromHigh >= -0.08 ? 2 : 1;
-  return Math.min(10, Math.round(trend3m + trend1y + tight + orderly));
+  const depthPts = pctFromHigh <= -0.09 ? 1 : 0;
+  const depthComp: ScoreComponent = {
+    key: "depth",
+    label: "Pullback depth",
+    value: `${(pctFromHigh * 100).toFixed(1)}% off the 52-week high`,
+    detail:
+      depthPts > 0
+        ? "A meaningful, orderly dip (9-12% off the high)."
+        : "Shallow — barely off the high, limited room for this to have actually reset anything.",
+    points: depthPts,
+    maxPoints: 1,
+    direction: depthPts > 0 ? "positive" : "neutral",
+  };
+
+  return [trendComp, trend3mComp, tightComp, rsiComp, testedComp, depthComp];
 }
 
 // Pass-1-only fallback for tab candidates that don't clear the legacy R/R
@@ -932,7 +1173,7 @@ function daysFromTodayUtc(dateIso: string): number | null {
   return Math.round((b - a) / (24 * 60 * 60 * 1000));
 }
 
-// Raw open-market (code P) purchase numbers scoreInsiderConviction ranks
+// Raw open-market (code P) purchase numbers scoreInsiderComponents ranks
 // on — split out so the Insider tab's row can display the actual $,
 // buyer count, and recency instead of just the derived score.
 export function insiderPurchaseBreakdown(transactions: InsiderTransaction[]): {
@@ -953,19 +1194,41 @@ export function insiderPurchaseBreakdown(transactions: InsiderTransaction[]): {
   return { dollars, distinctBuyers, newestBuyDaysAgo };
 }
 
-// Insider conviction (0-10): open-market purchase dollars + number of
-// distinct buyers + recency of the latest buy.
-export function scoreInsiderConviction(
-  transactions: InsiderTransaction[],
-): number {
-  const buys = transactions.filter((t) => t.transactionCode === "P");
-  if (buys.length === 0) return 0;
+// Insider conviction: open-market purchase dollars + number of distinct
+// buyers + recency of the latest buy. Each dimension is already
+// tier-capped (a $50M buy scores the same as a $1M buy) so there's no
+// "more is infinitely better" issue here to fix — restructured into
+// named components for the same reason every other tab is.
+function scoreInsiderComponents(transactions: InsiderTransaction[]): ScoreComponent[] {
   const { dollars, distinctBuyers, newestBuyDaysAgo } =
     insiderPurchaseBreakdown(transactions);
-  const size =
-    dollars >= 1_000_000 ? 4 : dollars >= 250_000 ? 3 : dollars >= 100_000 ? 2 : 1;
-  const breadth = distinctBuyers >= 3 ? 3 : distinctBuyers === 2 ? 2 : 1;
-  const recency =
+
+  const sizePts = dollars >= 1_000_000 ? 4 : dollars >= 250_000 ? 3 : dollars >= 100_000 ? 2 : 1;
+  const sizeComp: ScoreComponent = {
+    key: "size",
+    label: "Purchase size",
+    value: fmtMarketCapValue(dollars),
+    detail: "Open-market (Form 4 code P) purchase dollars — full credit at $1M+.",
+    points: sizePts,
+    maxPoints: 4,
+    direction: "positive",
+  };
+
+  const breadthPts = distinctBuyers >= 3 ? 3 : distinctBuyers === 2 ? 2 : 1;
+  const breadthComp: ScoreComponent = {
+    key: "breadth",
+    label: "Buyer breadth",
+    value: `${distinctBuyers} distinct buyer${distinctBuyers === 1 ? "" : "s"}`,
+    detail:
+      distinctBuyers >= 3
+        ? "3+ insiders buying is broad conviction, not one actor's bet."
+        : "A single buyer is a real signal but a narrower one.",
+    points: breadthPts,
+    maxPoints: 3,
+    direction: "positive",
+  };
+
+  const recencyPts =
     newestBuyDaysAgo !== null && newestBuyDaysAgo <= 7
       ? 3
       : newestBuyDaysAgo !== null && newestBuyDaysAgo <= 14
@@ -973,33 +1236,290 @@ export function scoreInsiderConviction(
         : newestBuyDaysAgo !== null && newestBuyDaysAgo <= 30
           ? 1
           : 0;
-  return Math.min(10, size + breadth + recency);
+  const recencyComp: ScoreComponent = {
+    key: "recency",
+    label: "Recency",
+    value: newestBuyDaysAgo !== null ? `${newestBuyDaysAgo}d ago` : "no dated purchase",
+    detail:
+      recencyPts >= 3
+        ? "Within the last week — a fresh signal, not stale news."
+        : recencyPts === 0
+          ? "Over 30 days old — the market has had time to digest this."
+          : "Within the last month.",
+    points: recencyPts,
+    maxPoints: 3,
+    direction: recencyPts > 0 ? "positive" : "neutral",
+  };
+
+  return [sizeComp, breadthComp, recencyComp];
 }
 
-// Options-flow aggressiveness (0-10): vol/OI ratio of the hottest call
-// strike + how far OTM the money is positioned + total-flow context.
-export function scoreOptionsFlow(
+// Options-flow aggressiveness: vol/OI ratio of the hottest call strike +
+// how far OTM the money is positioned + total-flow context. Deep-OTM
+// positioning with almost no time left to expiry is the one place
+// "more aggressive" stops being a stronger signal — that combination
+// reads as a lottery ticket, not informed positioning, so it's flagged
+// as a caution rather than credited.
+function scoreOptionsFlowComponents(
   opts: OptionsAnalysis,
   q: Pass1Quote,
-): number {
+): ScoreComponent[] {
   const ratio = opts.callVolumeOiRatio ?? 0;
-  const ratioPts =
-    ratio >= 3 ? 5 : ratio >= 2 ? 4 : ratio >= 1 ? 3 : ratio >= 0.5 ? 2 : 1;
+  const ratioPts = ratio >= 3 ? 5 : ratio >= 2 ? 4 : ratio >= 1 ? 3 : ratio >= 0.5 ? 2 : 1;
+  const ratioComp: ScoreComponent = {
+    key: "ratio",
+    label: "Flow aggressiveness (Vol/OI)",
+    value: `${ratio.toFixed(2)}x on the hottest strike`,
+    detail: "Volume relative to existing open interest — full credit at 3x+.",
+    points: ratioPts,
+    maxPoints: 5,
+    direction: "positive",
+  };
+
   const strike = opts.topOptionsStrike;
-  const skewPts =
-    strike !== null && strike > q.currentPrice * 1.05
-      ? 2
-      : strike !== null && strike > q.currentPrice
-        ? 1
-        : 0;
+  const isDeepOtm = strike !== null && strike > q.currentPrice * 1.05;
+  const skewPts = isDeepOtm ? 2 : strike !== null && strike > q.currentPrice ? 1 : 0;
+
+  const daysToExpiry = opts.topOptionsExpiry ? daysFromTodayUtc(opts.topOptionsExpiry) : null;
+  const lotteryRisk = isDeepOtm && daysToExpiry !== null && daysToExpiry <= 7;
+  const skewComp: ScoreComponent = {
+    key: "skew",
+    label: "Strike positioning",
+    value: strike !== null ? `$${strike} strike, ${daysToExpiry ?? "?"}d to expiry` : "no strike data",
+    detail: lotteryRisk
+      ? "Deep OTM with under a week to expiry reads more like a lottery ticket than a directional position — the aggressiveness that would normally score well is discounted here."
+      : isDeepOtm
+        ? "5%+ OTM — betting on a real move, not just drift."
+        : "At or modestly above the money.",
+    points: lotteryRisk ? Math.max(0, skewPts - 2) : skewPts,
+    maxPoints: 2,
+    direction: lotteryRisk ? "negative" : skewPts > 0 ? "positive" : "neutral",
+  };
+
   const volumeRatio = q.avgVolume10d > 0 ? q.todayVolume / q.avgVolume10d : 0;
   const volPts = volumeRatio > 1.5 ? 1 : 0;
-  return Math.min(10, ratioPts + skewPts + volPts);
+  const volComp: ScoreComponent = {
+    key: "volume",
+    label: "Underlying volume",
+    value: `${volumeRatio.toFixed(1)}x 10-day average`,
+    detail: "Elevated share volume alongside the options activity corroborates the flow.",
+    points: volPts,
+    maxPoints: 1,
+    direction: volPts > 0 ? "positive" : "neutral",
+  };
+
+  return [ratioComp, skewComp, volComp];
 }
 
 // Insider tab technical sanity gate: insider buying in a collapsing
 // stock is averaging-down, not a swing setup.
 const INSIDER_FREEFALL_VS_MA200 = -0.25;
+
+// ---------- Narrative: the components rendered as prose ----------
+//
+// One structure for score and explanation: every clause below is pulled
+// directly from the same ScoreComponent list the badge and breakdown
+// render, plus context already sitting on the candidate (catalyst,
+// confluence, red flags, trade geometry) — no new data, no separate
+// hand-written summary that can drift from what actually scored.
+
+const TAB_THESIS_LABEL: Record<SetupTab, string> = {
+  capitulation: "capitulation bounce",
+  pullback: "pullback-to-trend",
+  insider: "insider-conviction",
+  options_flow: "options-flow",
+};
+
+function pctStr(n: number, digits = 1): string {
+  return `${n >= 0 ? "+" : ""}${(n * 100).toFixed(digits)}%`;
+}
+
+export type NarrativeInput = {
+  symbol: string;
+  tab: SetupTab;
+  score: number;
+  components: ScoreComponent[];
+  setupTabs: SetupTab[];
+  tier1Signals: string[];
+  redFlags: string[];
+  catalystConfidence: "high" | "medium" | "low" | "none";
+  catalystDescription: string | null;
+  entryPrice: number;
+  targetPrice: number;
+  stopPrice: number;
+  rr: number | null;
+  analystTarget: number | null;
+  vsMA200: number;
+  vsMA50: number;
+  return3m: number | null;
+  move5dPct: number | null;
+  rsi14: number | null;
+  insiderBuyDollars: number;
+  insiderBuyerCount: number;
+  insiderLastBuyDaysAgo: number | null;
+  callVolumeOiRatio: number | null;
+  topOptionsStrike: number | null;
+  topOptionsExpiry: string | null;
+};
+
+// The opening line makes the actual case (or, for an extended stock
+// that only technically qualifies, makes the honest counter-case) —
+// this is where "extended, not pulled back" gets said up front rather
+// than buried in a caution further down.
+function thesisIntro(n: NarrativeInput): string {
+  switch (n.tab) {
+    case "capitulation":
+      return (
+        `${n.symbol} is down ${n.move5dPct !== null ? pctStr(n.move5dPct, 1) : "an unknown amount"} ` +
+        `over the last ~5 trading days with RSI14 at ${n.rsi14 !== null ? n.rsi14.toFixed(0) : "n/a"} — ` +
+        `a capitulation/bounce candidate, not a trend continuation.`
+      );
+    case "pullback": {
+      const trendComp = n.components.find((c) => c.key === "trend200");
+      const extended = trendComp?.direction === "negative";
+      if (extended) {
+        return (
+          `${n.symbol} is trading ${pctStr(n.vsMA200)} above its 200-day average and has only ` +
+          `pulled back to the 50-day — this reads as an extended stock that ticked down, not a ` +
+          `pullback to support.`
+        );
+      }
+      return (
+        `${n.symbol} is pulling back to its 50-day average within an uptrend, ${pctStr(n.vsMA200)} ` +
+        `above its 200-day MA after a ${n.return3m !== null ? `${n.return3m >= 0 ? "+" : ""}${n.return3m.toFixed(1)}%` : "n/a"} three-month run.`
+      );
+    }
+    case "insider":
+      return (
+        `${n.symbol} saw ${n.insiderBuyerCount} insider${n.insiderBuyerCount === 1 ? "" : "s"} buy ` +
+        `${fmtMarketCapValue(n.insiderBuyDollars)} on the open market, most recently ` +
+        `${n.insiderLastBuyDaysAgo !== null ? `${n.insiderLastBuyDaysAgo}d ago` : "at an unknown date"}.`
+      );
+    case "options_flow":
+      return (
+        `${n.symbol} is seeing unusual call activity: ${n.callVolumeOiRatio !== null ? n.callVolumeOiRatio.toFixed(2) : "?"}x ` +
+        `volume/OI on the $${n.topOptionsStrike ?? "?"} strike expiring ${n.topOptionsExpiry ?? "unknown"}.`
+      );
+  }
+}
+
+function clauseFor(c: ScoreComponent): string {
+  return `${c.label} (${c.value}) — ${c.detail}`;
+}
+
+// Cross-signal check — does anything ELSE on this candidate corroborate
+// the thesis, or is it standing on this one tab's numbers alone. Pulled
+// from data already on the candidate (catalyst, confluence, tier-1
+// signals) — no new lookups.
+function confirmationLines(n: NarrativeInput): string[] {
+  const lines: string[] = [];
+  if (n.catalystConfidence === "high" || n.catalystConfidence === "medium") {
+    lines.push(
+      `Catalyst (${n.catalystConfidence} confidence): ${n.catalystDescription ?? "identified but no description available"}.`,
+    );
+  } else if (n.catalystConfidence === "low") {
+    lines.push(
+      "A possible catalyst was found but flagged low-confidence — not enough to treat as confirmation.",
+    );
+  } else {
+    lines.push(
+      "No confirming catalyst identified — nothing external corroborates this beyond the technical setup itself.",
+    );
+  }
+  const otherTabs = n.setupTabs.filter((t) => t !== n.tab);
+  if (otherTabs.length > 0) {
+    lines.push(
+      `Also qualifies for ${otherTabs.map((t) => TAB_THESIS_LABEL[t]).join(" and ")} — independent confluence, not just this one read.`,
+    );
+  } else {
+    lines.push("Doesn't confirm on any other tab — this thesis stands alone.");
+  }
+  if (n.tab !== "insider" && n.tier1Signals.includes("INSIDER_BUYING")) {
+    lines.push("Insiders are also buying on the open market — a second, unrelated bullish signal.");
+  }
+  if (n.tab !== "options_flow" && n.tier1Signals.includes("UNUSUAL_OPTIONS")) {
+    lines.push("Unusual call buying is also present — options positioning agrees with this setup.");
+  }
+  if (n.redFlags.some((f) => f.startsWith("HIGH_SHORT"))) {
+    lines.push(
+      "Short interest is elevated — genuinely ambiguous here (squeeze fuel or a bearish crowd being proven right), not counted for or against.",
+    );
+  }
+  return lines;
+}
+
+// Does the trade geometry actually support acting on this, independent
+// of setup quality — the same question a trader asks after deciding
+// they like the story.
+function geometryLine(n: NarrativeInput): string {
+  const rewardPct = n.entryPrice > 0 ? (n.targetPrice - n.entryPrice) / n.entryPrice : 0;
+  const riskPct = n.entryPrice > 0 ? (n.entryPrice - n.stopPrice) / n.entryPrice : 0;
+  const rrText = n.rr !== null ? `${n.rr.toFixed(1)}:1` : "n/a";
+  const targetIsAnalyst = n.analystTarget !== null && Math.abs(n.analystTarget - n.targetPrice) < 0.01;
+  let room = "";
+  if (rewardPct < 0.05) {
+    room =
+      ` The target leaves almost no room — only ${pctStr(rewardPct)} of upside versus ` +
+      `${pctStr(-riskPct)} risked to the stop` +
+      (targetIsAnalyst ? ", capped by the analyst-consensus target." : ".");
+  } else if (n.rr !== null && n.rr < 1.5) {
+    room = ` At ${rrText}, the reward doesn't clearly outweigh the risk being taken.`;
+  } else if (n.rr !== null && n.rr >= 2.5) {
+    room = ` At ${rrText}, the reward comfortably outweighs the risk.`;
+  }
+  return (
+    `Entry ${fmtMoney2(n.entryPrice)} → target ${fmtMoney2(n.targetPrice)} (${pctStr(rewardPct)}) → ` +
+    `stop ${fmtMoney2(n.stopPrice)} (${pctStr(-riskPct)}), R/R ${rrText}.${room}`
+  );
+}
+
+function fmtMoney2(n: number): string {
+  return `$${n.toFixed(2)}`;
+}
+
+function scoreTier(score: number): "strong" | "decent" | "marginal" {
+  if (score >= 7) return "strong";
+  if (score >= 4) return "decent";
+  return "marginal";
+}
+
+export function buildNarrative(n: NarrativeInput): string {
+  const real = n.components.filter((c) => c.key !== "adjust");
+  const positives = real.filter((c) => c.direction === "positive" && c.points > 0);
+  const negatives = real.filter((c) => c.direction === "negative" || c.points < 0);
+
+  const strength =
+    positives.length > 0
+      ? positives.map(clauseFor).join(" ")
+      : "Nothing in the scoring actually argues for this setup — it's here on a technicality of the qualifier, not on its merits.";
+
+  const caution =
+    negatives.length > 0
+      ? negatives.map(clauseFor).join(" ")
+      : "No scored caution — the components above are the full case, positive or neutral throughout.";
+
+  const confirmation = confirmationLines(n).join(" ");
+  const geometry = geometryLine(n);
+
+  const tier = scoreTier(n.score);
+  const worst = negatives.length > 0 ? negatives[0] : null;
+  const best = positives.length > 0 ? positives[0] : null;
+  const bottomLine =
+    tier === "strong"
+      ? `Score ${n.score}/10 — a strong ${TAB_THESIS_LABEL[n.tab]} case${best ? `, led by ${best.label.toLowerCase()}` : ""}.`
+      : tier === "decent"
+        ? `Score ${n.score}/10 — a decent but incomplete case${worst ? `; ${worst.label.toLowerCase()} is the main thing arguing against it` : ""}.`
+        : `Score ${n.score}/10 — weak. ${worst ? `${worst.label} (${worst.value}) is the deciding problem: ${worst.detail}` : "The setup doesn't hold up under its own scoring."}`;
+
+  return [
+    thesisIntro(n),
+    `STRENGTH: ${strength}`,
+    `CAUTION: ${caution}`,
+    `CONFIRMATION: ${confirmation}`,
+    `TRADE GEOMETRY: ${geometry}`,
+    `BOTTOM LINE: ${bottomLine}`,
+  ].join("\n\n");
+}
 
 // ---------- Pass 2 ----------
 
@@ -1115,72 +1635,77 @@ export async function pass2Enrich(
     if (redFlags.includes("EARNINGS_TOO_SOON")) return null;
 
     // ---- Setup-tab bucketing ----
+    // Every tab's score is the sum of named components (see
+    // ScoreComponent) — the same list the expanded row's breakdown
+    // renders and the narrative is built from below, so the badge, the
+    // breakdown, and the prose can never disagree.
     const setupTabs: SetupTab[] = [];
     const tabScores: Partial<Record<SetupTab, number>> = {};
+    const tabComponents: Partial<Record<SetupTab, ScoreComponent[]>> = {};
     const capStats = tabInfo.capitulation[symbol] ?? null;
     const pullStats = tabInfo.pullback[symbol] ?? null;
     if (capStats) {
       setupTabs.push("capitulation");
-      tabScores.capitulation = scoreCapitulation(capStats, q);
+      tabComponents.capitulation = scoreCapitulationComponents(capStats, q);
     }
     if (pullStats) {
       setupTabs.push("pullback");
-      tabScores.pullback = scorePullback(pullStats, q);
+      tabComponents.pullback = scorePullbackComponents(pullStats, q);
     }
     if (
       tier1Signals.includes("INSIDER_BUYING") &&
       vsMA200 > INSIDER_FREEFALL_VS_MA200
     ) {
       setupTabs.push("insider");
-      tabScores.insider = scoreInsiderConviction(insider.transactions);
+      tabComponents.insider = scoreInsiderComponents(insider.transactions);
     }
     if (opts.unusualOptionsActivity) {
       setupTabs.push("options_flow");
-      tabScores.options_flow = scoreOptionsFlow(opts, q);
+      tabComponents.options_flow = scoreOptionsFlowComponents(opts, q);
     }
     if (setupTabs.length === 0) return null;
 
     // Red-flag scoring policy: EARNINGS_TOO_SOON gates (handled above).
     // INSIDER_SELLING is the inverse of the INSIDER_BUYING tier-1 signal
-    // (which is worth +2 to a candidate's legacy score) — on a
-    // bullish-only screener a bearish insider read against the setup's
-    // own thesis, so it costs every tab this candidate qualifies for 2
-    // points, floored at 0, rather than sitting purely as a label with
-    // no effect on rank. HIGH_SHORT_* stays informational-only below:
+    // — on a bullish-only screener a bearish insider read argues against
+    // the setup's own thesis, so it's folded in as a real component (not
+    // an invisible post-hoc adjustment) worth -2 to every tab this
+    // candidate qualifies for. HIGH_SHORT_* stays informational-only:
     // elevated short interest is genuinely ambiguous (squeeze fuel vs.
     // bearish crowd conviction), so there's no defensible direction to
-    // score it.
-    const insiderSellingPenalty = insider.signal === "bearish" ? 2 : 0;
-    for (const t of setupTabs) {
-      tabScores[t] = Math.max(0, (tabScores[t] ?? 0) - insiderSellingPenalty);
+    // score it — it surfaces in the narrative's confirmation section
+    // instead.
+    if (insider.signal === "bearish") {
+      const penalty: ScoreComponent = {
+        key: "insider_selling",
+        label: "Insider selling",
+        value: "net seller on the open market",
+        detail:
+          "The inverse of the insider-buying tier-1 signal — bearish insider activity argues against a bullish-only setup regardless of which tab surfaced it.",
+        points: -2,
+        maxPoints: 0,
+        direction: "negative",
+      };
+      for (const t of setupTabs) {
+        tabComponents[t] = [...(tabComponents[t] ?? []), penalty];
+      }
     }
 
-    // Score (out of 10). Catalyst points (+2/+1/0) are added in pass 3.
-    //   +2 strong_bullish insider (P-code purchase >$100K)
-    //   +1 bullish insider (net P buyer, no $100K trade)
-    //   +2 unusual options activity (was +1; promoted now that earnings
-    //      no longer occupies the +2 slot)
-    //   +1 volume spike (>2x avg + price up)
-    //   +1 short float >15% (squeeze potential)
-    //   +1 within ±2% of 50d MA
-    //   -2 insider selling (see policy note above)
-    // R/R is deliberately NOT in this list — trade geometry (can you
-    // place a sane order) and setup quality (should you take the trade)
-    // are separate questions; R/R stays a displayed sanity check only.
-    let setupScore = 0;
-    if (insider.signal === "strong_bullish") setupScore += 2;
-    else if (insider.signal === "bullish") setupScore += 1;
-    if (opts.unusualOptionsActivity) setupScore += 2;
-    if (volumeRatio > 2.0 && q.priceChange1d > 0) setupScore += 1;
-    if (q.shortPercentFloat !== null && q.shortPercentFloat > 0.15) setupScore += 1;
-    if (vsMA50 >= -0.02 && vsMA50 <= 0.02) setupScore += 1;
-    setupScore = Math.max(0, setupScore - insiderSellingPenalty);
-    setupScore = Math.min(10, setupScore);
-    // Pure capitulation/pullback candidates have no tier-1 signals, so
-    // the legacy additive score would read ~0 — the overall score is
-    // the best of (legacy additive, best tab score).
-    const bestTabScore = Math.max(0, ...Object.values(tabScores));
-    setupScore = Math.min(10, Math.max(setupScore, bestTabScore));
+    for (const t of setupTabs) {
+      const { score, components } = finalizeScore(tabComponents[t] ?? []);
+      tabScores[t] = score;
+      tabComponents[t] = components;
+    }
+
+    // R/R is deliberately not a component anywhere above — trade
+    // geometry (can you place a sane order) and setup quality (should
+    // you take the trade) are separate questions; R/R stays a displayed
+    // sanity check only (see the narrative's TRADE GEOMETRY line).
+    //
+    // The overall score is just the best of the qualifying tabs' scores
+    // — there's no separate legacy formula to diverge from what's
+    // actually displayed per tab.
+    const setupScore = Math.max(0, ...Object.values(tabScores));
 
     const tier2Signals = tier2ByCandidate.get(symbol) ?? [];
 
@@ -1191,6 +1716,41 @@ export async function pass2Enrich(
     const structural = computeStructuralLevels(q, atr14) ?? tl;
 
     const insiderBreakdown = insiderPurchaseBreakdown(insider.transactions);
+
+    // Narrative built once here (pre-catalyst) so a candidate never ends
+    // up with no explanation if pass 3 fails/is skipped — pass 3
+    // rebuilds it per tab once catalyst data (and its scoring bonus) is
+    // known.
+    const tabNarrative: Partial<Record<SetupTab, string>> = {};
+    for (const t of setupTabs) {
+      tabNarrative[t] = buildNarrative({
+        symbol: q.symbol,
+        tab: t,
+        score: tabScores[t] ?? 0,
+        components: tabComponents[t] ?? [],
+        setupTabs,
+        tier1Signals,
+        redFlags,
+        catalystConfidence: "none",
+        catalystDescription: null,
+        entryPrice: structural.entryPrice,
+        targetPrice: structural.targetPrice,
+        stopPrice: structural.stopPrice,
+        rr: structural.rr,
+        analystTarget: q.analystTarget,
+        vsMA200,
+        vsMA50,
+        return3m: pullStats?.return3m ?? capStats?.return3m ?? null,
+        move5dPct: capStats?.move5dPct ?? pullStats?.move5dPct ?? null,
+        rsi14: capStats?.rsi14 ?? pullStats?.rsi14 ?? null,
+        insiderBuyDollars: insiderBreakdown.dollars,
+        insiderBuyerCount: insiderBreakdown.distinctBuyers,
+        insiderLastBuyDaysAgo: insiderBreakdown.newestBuyDaysAgo,
+        callVolumeOiRatio: opts.callVolumeOiRatio,
+        topOptionsStrike: opts.topOptionsStrike,
+        topOptionsExpiry: opts.topOptionsExpiry,
+      });
+    }
 
     candidates.push({
       symbol: q.symbol,
@@ -1246,6 +1806,8 @@ export async function pass2Enrich(
       setupScore,
       setupTabs,
       tabScores,
+      tabScoreComponents: tabComponents,
+      tabNarrative,
       tabStats: capStats ?? pullStats,
       capitulationStats: capStats,
       pullbackStats: pullStats,
@@ -1521,23 +2083,75 @@ export async function pass3CatalystDiscovery(
     if (i + BATCH < toFetch.length) await sleep(500);
   }
 
-  // Re-score with catalyst points: +2 high, +1 medium, +0 low/none.
-  // Cap at 10. NOTE: pass 3 only ENRICHES — every candidate that made
-  // it through pass 2's tier-1 filter must remain in the result set,
-  // regardless of whether Perplexity found a specific catalyst. No
-  // candidate is filtered out here, no points are subtracted, and a
-  // missing catalyst never reduces a stock's setupScore below what
-  // pass 2 produced.
+  // Re-score with catalyst points: +2 high, +1 medium, +0 low/none —
+  // applied as a real component on EVERY qualifying tab (not just the
+  // top-level setupScore) so the per-tab badge, breakdown, and narrative
+  // stay in sync with what pass 3 found. NOTE: pass 3 only ENRICHES —
+  // every candidate that made it through pass 2's tier-1 filter must
+  // remain in the result set regardless of whether Perplexity found a
+  // specific catalyst. No candidate is filtered out here, no points are
+  // subtracted, and a missing catalyst never reduces a stock's score
+  // below what pass 2 produced.
   return out.map((c) => {
     const bonus =
-      c.catalystConfidence === "high"
-        ? 2
-        : c.catalystConfidence === "medium"
-          ? 1
-          : 0;
+      c.catalystConfidence === "high" ? 2 : c.catalystConfidence === "medium" ? 1 : 0;
+    const tabScores: Partial<Record<SetupTab, number>> = {};
+    const tabScoreComponents: Partial<Record<SetupTab, ScoreComponent[]>> = {};
+    const tabNarrative: Partial<Record<SetupTab, string>> = {};
+    for (const tab of c.setupTabs) {
+      const base = c.tabScoreComponents[tab] ?? [];
+      const withCatalyst =
+        bonus > 0
+          ? [
+              ...base,
+              {
+                key: "catalyst",
+                label: "Catalyst",
+                value: `${c.catalystConfidence} confidence`,
+                detail: c.catalystDescription ?? "Perplexity identified a near-term catalyst.",
+                points: bonus,
+                maxPoints: 2,
+                direction: "positive" as const,
+              },
+            ]
+          : base;
+      const { score, components } = finalizeScore(withCatalyst);
+      tabScores[tab] = score;
+      tabScoreComponents[tab] = components;
+      tabNarrative[tab] = buildNarrative({
+        symbol: c.symbol,
+        tab,
+        score,
+        components,
+        setupTabs: c.setupTabs,
+        tier1Signals: c.tier1Signals,
+        redFlags: c.redFlags,
+        catalystConfidence: c.catalystConfidence,
+        catalystDescription: c.catalystDescription,
+        entryPrice: c.entryPrice,
+        targetPrice: c.targetPrice,
+        stopPrice: c.stopPrice,
+        rr: c.rr,
+        analystTarget: c.analystTarget,
+        vsMA200: c.vsMA200,
+        vsMA50: c.vsMA50,
+        return3m: c.pullbackStats?.return3m ?? c.capitulationStats?.return3m ?? null,
+        move5dPct: c.capitulationStats?.move5dPct ?? c.pullbackStats?.move5dPct ?? null,
+        rsi14: c.capitulationStats?.rsi14 ?? c.pullbackStats?.rsi14 ?? null,
+        insiderBuyDollars: c.insiderBuyDollars,
+        insiderBuyerCount: c.insiderBuyerCount,
+        insiderLastBuyDaysAgo: c.insiderLastBuyDaysAgo,
+        callVolumeOiRatio: c.callVolumeOiRatio,
+        topOptionsStrike: c.topOptionsStrike,
+        topOptionsExpiry: c.topOptionsExpiry,
+      });
+    }
     return {
       ...c,
-      setupScore: Math.min(10, c.setupScore + bonus),
+      setupScore: Math.max(0, ...Object.values(tabScores)),
+      tabScores,
+      tabScoreComponents,
+      tabNarrative,
     };
   });
 }
