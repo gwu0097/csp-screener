@@ -243,19 +243,33 @@ type CachedResult = {
   screenedAt: string | null;
 };
 
-type SortKey =
-  | "setupScore"
-  | "rr"
-  | "pctFromHigh"
-  | "vsMA50"
-  | "signalCount"
-  | "currentPrice"
-  | "priceChange1d";
+// Column keys are dynamic per tab (see TAB_COLUMNS) plus a fixed set of
+// common columns (symbol/company/price/chg/score/signals) — no longer a
+// closed union, since each tab defines its own metric columns.
+type SortKey = string;
 
 type SortDir = "asc" | "desc";
 type SortState = { key: SortKey; dir: SortDir };
 
 const DEFAULT_SORT: SortState = { key: "setupScore", dir: "desc" };
+
+type SortValue = number | string | null;
+
+// Nulls/missing sort last regardless of direction — a sparse column
+// (e.g. Last Buy when a symbol somehow has no dated purchase) shouldn't
+// push empty rows to the top just because the direction flipped.
+function compareSortValues(a: SortValue, b: SortValue, dir: SortDir): number {
+  const aMissing = a === null || (typeof a === "number" && !Number.isFinite(a));
+  const bMissing = b === null || (typeof b === "number" && !Number.isFinite(b));
+  if (aMissing && bMissing) return 0;
+  if (aMissing) return 1;
+  if (bMissing) return -1;
+  const mult = dir === "asc" ? 1 : -1;
+  if (typeof a === "string" || typeof b === "string") {
+    return mult * String(a).localeCompare(String(b));
+  }
+  return mult * ((a as number) - (b as number));
+}
 
 function fmtMoney(n: number | null | undefined, digits = 2): string {
   if (n === null || n === undefined || !Number.isFinite(n)) return "—";
@@ -353,6 +367,13 @@ type MetricColumn = {
   width: string;
   tooltip?: string;
   render: (c: SwingCandidate) => React.ReactNode;
+  // Raw value to sort on (independent of the formatted render output) and
+  // which direction "most interesting first" means for this column —
+  // e.g. ascending for a metric where more negative is more extreme
+  // (5D move, RSI, distance below a moving average), descending for
+  // "more is more" metrics (buy $, volume ratio).
+  sortValue: (c: SwingCandidate) => SortValue;
+  defaultDir: SortDir;
 };
 
 const mutedRight = "text-right text-foreground";
@@ -373,6 +394,8 @@ const TAB_COLUMNS: Record<SetupTab, MetricColumn[]> = {
           {fmtPct(c.capitulationStats?.move5dPct ?? c.tabStats?.move5dPct, 0)}
         </span>
       ),
+      sortValue: (c) => c.capitulationStats?.move5dPct ?? c.tabStats?.move5dPct ?? null,
+      defaultDir: "asc",
     },
     {
       key: "rsi14",
@@ -393,6 +416,8 @@ const TAB_COLUMNS: Record<SetupTab, MetricColumn[]> = {
           </span>
         );
       },
+      sortValue: (c) => c.capitulationStats?.rsi14 ?? c.tabStats?.rsi14 ?? null,
+      defaultDir: "asc",
     },
     {
       key: "vsma50cap",
@@ -407,6 +432,8 @@ const TAB_COLUMNS: Record<SetupTab, MetricColumn[]> = {
           {fmtPct(c.vsMA50, 1)}
         </span>
       ),
+      sortValue: (c) => c.vsMA50,
+      defaultDir: "asc",
     },
     {
       key: "volratiocap",
@@ -421,6 +448,8 @@ const TAB_COLUMNS: Record<SetupTab, MetricColumn[]> = {
           {fmtRatio(c.volumeRatio, 1)}
         </span>
       ),
+      sortValue: (c) => c.volumeRatio,
+      defaultDir: "desc",
     },
   ],
   pullback: [
@@ -434,6 +463,8 @@ const TAB_COLUMNS: Record<SetupTab, MetricColumn[]> = {
           {fmtPctNumber(c.pullbackStats?.return3m ?? c.tabStats?.return3m)}
         </span>
       ),
+      sortValue: (c) => c.pullbackStats?.return3m ?? c.tabStats?.return3m ?? null,
+      defaultDir: "desc",
     },
     {
       key: "vsma50pb",
@@ -447,6 +478,8 @@ const TAB_COLUMNS: Record<SetupTab, MetricColumn[]> = {
           {fmtPct(c.vsMA50, 1)}
         </span>
       ),
+      sortValue: (c) => c.vsMA50,
+      defaultDir: "asc",
     },
     {
       key: "fromhighpb",
@@ -454,6 +487,8 @@ const TAB_COLUMNS: Record<SetupTab, MetricColumn[]> = {
       width: "80px",
       tooltip: "Depth off the 52-week high. Qualifies at -5% to -12% — an orderly dip.",
       render: (c) => <span className={mutedRight}>{fmtPct(c.pctFromHigh, 0)}</span>,
+      sortValue: (c) => c.pctFromHigh,
+      defaultDir: "asc",
     },
   ],
   insider: [
@@ -465,6 +500,8 @@ const TAB_COLUMNS: Record<SetupTab, MetricColumn[]> = {
       render: (c) => (
         <span className={mutedRight}>{fmtCompactMoney(insiderBreakdownOf(c).dollars)}</span>
       ),
+      sortValue: (c) => insiderBreakdownOf(c).dollars,
+      defaultDir: "desc",
     },
     {
       key: "buyers",
@@ -472,6 +509,8 @@ const TAB_COLUMNS: Record<SetupTab, MetricColumn[]> = {
       width: "60px",
       tooltip: "Distinct insiders who bought. 3+ scores as broad conviction.",
       render: (c) => <span className={mutedRight}>{insiderBreakdownOf(c).buyers || "—"}</span>,
+      sortValue: (c) => insiderBreakdownOf(c).buyers,
+      defaultDir: "desc",
     },
     {
       key: "lastbuy",
@@ -481,6 +520,8 @@ const TAB_COLUMNS: Record<SetupTab, MetricColumn[]> = {
       render: (c) => (
         <span className={mutedRight}>{fmtDaysAgo(insiderBreakdownOf(c).lastBuyDaysAgo)}</span>
       ),
+      sortValue: (c) => insiderBreakdownOf(c).lastBuyDaysAgo,
+      defaultDir: "asc",
     },
     {
       key: "vsma200ins",
@@ -495,6 +536,8 @@ const TAB_COLUMNS: Record<SetupTab, MetricColumn[]> = {
           {fmtPct(c.vsMA200, 1)}
         </span>
       ),
+      sortValue: (c) => c.vsMA200,
+      defaultDir: "asc",
     },
   ],
   options_flow: [
@@ -504,6 +547,8 @@ const TAB_COLUMNS: Record<SetupTab, MetricColumn[]> = {
       width: "70px",
       tooltip: "Hottest call strike's volume ÷ open interest. >0.5x qualifies as unusual.",
       render: (c) => <span className={mutedRight}>{fmtRatio(c.callVolumeOiRatio)}</span>,
+      sortValue: (c) => c.callVolumeOiRatio,
+      defaultDir: "desc",
     },
     {
       key: "skew",
@@ -511,6 +556,8 @@ const TAB_COLUMNS: Record<SetupTab, MetricColumn[]> = {
       width: "90px",
       tooltip: "How far OTM the hottest strike sits, as % of price.",
       render: (c) => <span className={mutedRight}>{fmtPct(strikeSkewPct(c), 1)}</span>,
+      sortValue: (c) => strikeSkewPct(c),
+      defaultDir: "desc",
     },
     {
       key: "voloptions",
@@ -518,6 +565,8 @@ const TAB_COLUMNS: Record<SetupTab, MetricColumn[]> = {
       width: "70px",
       tooltip: "Today's share volume ÷ 10-day average.",
       render: (c) => <span className={mutedRight}>{fmtRatio(c.volumeRatio, 1)}</span>,
+      sortValue: (c) => c.volumeRatio,
+      defaultDir: "desc",
     },
     {
       key: "expiry",
@@ -527,6 +576,8 @@ const TAB_COLUMNS: Record<SetupTab, MetricColumn[]> = {
       render: (c) => (
         <span className={mutedRight}>{fmtCalendarDate(c.topOptionsExpiry)}</span>
       ),
+      sortValue: (c) => c.topOptionsExpiry,
+      defaultDir: "asc",
     },
   ],
 };
@@ -581,28 +632,30 @@ function fmtCalendarDate(iso: string | null): string {
   });
 }
 
-function compareCandidates(
-  a: SwingCandidate,
-  b: SwingCandidate,
-  sort: SortState,
-): number {
-  const dir = sort.dir === "asc" ? 1 : -1;
-  switch (sort.key) {
-    case "setupScore":
-      return dir * (a.setupScore - b.setupScore);
-    case "rr":
-      return dir * ((a.rr ?? -Infinity) - (b.rr ?? -Infinity));
-    case "pctFromHigh":
-      return dir * (a.pctFromHigh - b.pctFromHigh);
-    case "vsMA50":
-      return dir * (a.vsMA50 - b.vsMA50);
-    case "signalCount":
-      return dir * (a.signalCount - b.signalCount);
-    case "currentPrice":
-      return dir * (a.currentPrice - b.currentPrice);
-    case "priceChange1d":
-      return dir * (a.priceChange1d - b.priceChange1d);
-  }
+// Columns common to every tab, regardless of which metric columns that
+// tab adds. Score is tab-relative (each tab ranks its own way), so its
+// value extractor needs the active tab.
+const COMMON_SORT_VALUES: Record<
+  string,
+  { value: (c: SwingCandidate, activeTab: SetupTab) => SortValue; defaultDir: SortDir }
+> = {
+  symbol: { value: (c) => c.symbol, defaultDir: "asc" },
+  company: { value: (c) => c.companyName, defaultDir: "asc" },
+  currentPrice: { value: (c) => c.currentPrice, defaultDir: "desc" },
+  priceChange1d: { value: (c) => c.priceChange1d, defaultDir: "desc" },
+  setupScore: { value: (c, activeTab) => tabScoreOf(c, activeTab), defaultDir: "desc" },
+  signalCount: { value: (c) => c.signalCount, defaultDir: "desc" },
+};
+
+function sortDescriptor(
+  key: SortKey,
+  activeTab: SetupTab,
+): { value: (c: SwingCandidate) => SortValue; defaultDir: SortDir } | null {
+  const common = COMMON_SORT_VALUES[key];
+  if (common) return { value: (c) => common.value(c, activeTab), defaultDir: common.defaultDir };
+  const col = TAB_COLUMNS[activeTab].find((c) => c.key === key);
+  if (col) return { value: col.sortValue, defaultDir: col.defaultDir };
+  return null;
 }
 
 function sortCandidates(
@@ -610,14 +663,11 @@ function sortCandidates(
   sort: SortState,
   activeTab: SetupTab,
 ): SwingCandidate[] {
+  const desc = sortDescriptor(sort.key, activeTab);
   return [...list].sort((a, b) => {
-    // The Score column ranks by the ACTIVE TAB's score — each tab has
-    // its own scoring (severity / trend quality / conviction / flow).
-    const primary =
-      sort.key === "setupScore"
-        ? (sort.dir === "asc" ? 1 : -1) *
-          (tabScoreOf(a, activeTab) - tabScoreOf(b, activeTab))
-        : compareCandidates(a, b, sort);
+    const primary = desc
+      ? compareSortValues(desc.value(a), desc.value(b), sort.dir)
+      : 0;
     if (primary !== 0) return primary;
     // Stable-ish tiebreaker so re-sorts don't churn order on ties.
     return a.symbol.localeCompare(b.symbol);
@@ -922,18 +972,24 @@ export function SwingScreenView() {
   function handleHeaderClick(key: SortKey) {
     setSort((cur) => {
       if (cur.key !== key) {
-        // Default per-column dir: setupScore/rr/signalCount/chg high-first,
-        // pctFromHigh/vsMA50 low-first (most beaten-down first).
-        const desc =
-          key === "setupScore" ||
-          key === "rr" ||
-          key === "signalCount" ||
-          key === "priceChange1d" ||
-          key === "currentPrice";
-        return { key, dir: desc ? "desc" : "asc" };
+        // Each column defines its own "most interesting first" direction
+        // (see COMMON_SORT_VALUES / TAB_COLUMNS[...].defaultDir) — e.g.
+        // descending for buy $, ascending for RSI/5D move where more
+        // negative is more extreme.
+        const d = sortDescriptor(key, activeTab);
+        return { key, dir: d?.defaultDir ?? "desc" };
       }
       return { key, dir: cur.dir === "asc" ? "desc" : "asc" };
     });
+  }
+
+  // Each tab has its own column set and its own notion of "most
+  // interesting" — switching tabs resets to that tab's default (Score
+  // descending) rather than carrying over a sort key that column may not
+  // even have.
+  function handleTabSelect(tab: SetupTab) {
+    setActiveTab(tab);
+    setSort(DEFAULT_SORT);
   }
 
   return (
@@ -974,7 +1030,7 @@ export function SwingScreenView() {
           <SetupTabBar
             active={activeTab}
             counts={tabCounts}
-            onSelect={setActiveTab}
+            onSelect={handleTabSelect}
           />
           {sortedCandidates.length === 0 ? (
             data.candidates.length === 0 ? (
@@ -1253,8 +1309,14 @@ function TableHeader({
     <div
       className={`${rowGridClass(activeTab)} border-b border-border/60 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground`}
     >
-      <SortHeader label="Symbol" />
-      <SortHeader label="Company" className="hidden md:block" />
+      <SortHeader label="Symbol" sortKey="symbol" sort={sort} onSort={onSort} />
+      <SortHeader
+        label="Company"
+        sortKey="company"
+        sort={sort}
+        onSort={onSort}
+        className="hidden md:block"
+      />
       <SortHeader
         label="Price"
         sortKey="currentPrice"
@@ -1273,6 +1335,9 @@ function TableHeader({
         <SortHeader
           key={col.key}
           label={col.label}
+          sortKey={col.key}
+          sort={sort}
+          onSort={onSort}
           align="right"
           className="hidden md:block"
           tooltip={col.tooltip}
