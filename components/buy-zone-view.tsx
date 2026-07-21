@@ -22,7 +22,7 @@ type WatchlistMeta = {
   isPortfolio: boolean;
 };
 
-type BuyZoneRow = {
+export type BuyZoneRow = {
   symbol: string;
   companyName: string | null;
   price: number | null;
@@ -39,7 +39,7 @@ type BuyZoneRow = {
   watchlistNames: string[];
 };
 
-type InsiderTx = {
+export type InsiderTx = {
   name: string;
   action: string;
   transactionCode: string;
@@ -50,7 +50,7 @@ type InsiderTx = {
   dollarValue: number;
 };
 
-type ResearchData = {
+export type ResearchData = {
   insider: {
     signal: "strong_bullish" | "bullish" | "neutral" | "bearish";
     executiveBuys: InsiderTx[];
@@ -148,22 +148,13 @@ function SortableHeader({
   );
 }
 
-export function BuyZoneView() {
-  const [watchlists, setWatchlists] = useState<WatchlistMeta[] | null>(null);
-  const [scope, setScope] = useState<string>(ALL_SCOPE);
-  const [rows, setRows] = useState<BuyZoneRow[] | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(null);
-  // Default sort is Buy Zone score descending; stays that way until
-  // the person clicks a different header.
-  const [sortKey, setSortKey] = useState<SortKey>("composite");
-  const [sortDir, setSortDir] = useState<SortDir>("desc");
-
-  // On-demand insider + catalyst research, keyed by symbol — fetched
-  // only when "Research" is clicked, cached in UI state for the
-  // session so re-expanding an already-researched row doesn't re-fetch.
+// On-demand insider + catalyst research, keyed by symbol — fetched
+// only when "Research" is clicked, cached in UI state for the
+// session so re-expanding/re-opening an already-researched row
+// doesn't re-fetch. Shared by the Buy Zone page and the dashboard's
+// modal so both get the exact same fetch/cache behavior from one
+// implementation.
+export function useBuyZoneResearch() {
   const [research, setResearch] = useState<Record<string, ResearchData>>({});
   const [researchLoading, setResearchLoading] = useState<Set<string>>(new Set());
   const [researchError, setResearchError] = useState<Record<string, string>>({});
@@ -194,6 +185,24 @@ export function BuyZoneView() {
       });
     }
   }
+
+  return { research, researchLoading, researchError, loadResearch };
+}
+
+export function BuyZoneView() {
+  const [watchlists, setWatchlists] = useState<WatchlistMeta[] | null>(null);
+  const [scope, setScope] = useState<string>(ALL_SCOPE);
+  const [rows, setRows] = useState<BuyZoneRow[] | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(null);
+  // Default sort is Buy Zone score descending; stays that way until
+  // the person clicks a different header.
+  const [sortKey, setSortKey] = useState<SortKey>("composite");
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
+
+  const { research, researchLoading, researchError, loadResearch } = useBuyZoneResearch();
 
   function onSort(key: SortKey) {
     if (sortKey === key) {
@@ -446,17 +455,39 @@ function BuyZoneRowItem({
       {expanded && (
         <tr className="border-b border-border/40 bg-background/30">
           <td colSpan={8} className="px-3 py-3">
-            <div className="space-y-4">
-              <div className="grid grid-cols-1 gap-4 lg:grid-cols-[2fr_1fr]">
-                <PriceChart symbol={row.symbol} studies={CHART_STUDIES} range={CHART_RANGE} height={520} />
-                <AnalystReadPanel row={row} />
-              </div>
-              <ResearchPanel row={row} research={research} loading={loading} error={error} onResearch={onResearch} />
-            </div>
+            <BuyZoneDetailContent row={row} research={research} loading={loading} error={error} onResearch={onResearch} />
           </td>
         </tr>
       )}
     </>
+  );
+}
+
+// The full expanded-row content: TradingView chart with RSI/MACD
+// panes, the always-shown analyst read, and the on-demand Research
+// panel. Exported so the dashboard's "Buy Zone" card can reuse this
+// exact component inside a modal instead of a second copy.
+export function BuyZoneDetailContent({
+  row,
+  research,
+  loading,
+  error,
+  onResearch,
+}: {
+  row: BuyZoneRow;
+  research: ResearchData | null;
+  loading: boolean;
+  error: string | null;
+  onResearch: () => void;
+}) {
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[2fr_1fr]">
+        <PriceChart symbol={row.symbol} studies={CHART_STUDIES} range={CHART_RANGE} height={520} />
+        <AnalystReadPanel row={row} />
+      </div>
+      <ResearchPanel row={row} research={research} loading={loading} error={error} onResearch={onResearch} />
+    </div>
   );
 }
 

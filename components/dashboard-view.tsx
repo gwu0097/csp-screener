@@ -18,6 +18,12 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { EntrySignalBadge } from "@/components/swing-ideas-board";
+import {
+  BuyZoneDetailContent,
+  useBuyZoneResearch,
+  type BuyZoneRow,
+} from "@/components/buy-zone-view";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
 // Markdown body for the AI morning brief — mirrors the styling used for
 // filing analyses (components/filing-analysis.tsx) without a typography plugin.
@@ -88,14 +94,10 @@ type SwingIdeaLite = {
 };
 type SwingsResp = { ideas: SwingIdeaLite[] };
 
-type BuyZoneRow = {
-  symbol: string;
-  companyName: string | null;
-  changePct: number | null;
-  rsi14: number | null;
-  buyZoneComposite: number;
-  buyZoneMacdStatus: string;
-};
+// BuyZoneRow imported from components/buy-zone-view — the dashboard
+// modal reuses that page's exact detail component, which needs the
+// full row shape (analyst fields, watchlist tags, etc), not a
+// narrower dashboard-local subset.
 type BuyZoneResp = { rows: BuyZoneRow[] };
 
 type Slot<T> = { status: "loading" | "ok" | "error"; data: T | null };
@@ -255,6 +257,8 @@ export function DashboardView() {
   const [market, setMarket] = useState<Slot<MarketResp>>(LOADING);
   const [swings, setSwings] = useState<Slot<SwingsResp>>(LOADING);
   const [buyZone, setBuyZone] = useState<Slot<BuyZoneResp>>(LOADING);
+  const [buyZoneModalRow, setBuyZoneModalRow] = useState<BuyZoneRow | null>(null);
+  const buyZoneResearch = useBuyZoneResearch();
 
   const [brief, setBrief] = useState<string | null>(null);
   const [briefAt, setBriefAt] = useState<string | null>(null);
@@ -521,10 +525,10 @@ export function DashboardView() {
     return t.length > 40 ? `${t.slice(0, 40)}…` : t;
   }
 
-  // ---------- Buy Zone top 10 ----------
-  const buyZoneTop10 = [...(buyZone.data?.rows ?? [])]
+  // ---------- Buy Zone top 5 ----------
+  const buyZoneTop5 = [...(buyZone.data?.rows ?? [])]
     .sort((a, b) => b.buyZoneComposite - a.buyZoneComposite)
-    .slice(0, 10);
+    .slice(0, 5);
 
   // ---------- Market tiles ----------
   const m = market.data;
@@ -880,7 +884,7 @@ export function DashboardView() {
         )}
       </Panel>
 
-      {/* ---------- Buy Zone top 10 ---------- */}
+      {/* ---------- Buy Zone top 5 ---------- */}
       <Panel>
         <SectionHeader
           icon={<Crosshair className="h-4 w-4" />}
@@ -893,39 +897,81 @@ export function DashboardView() {
             </Link>
           }
         >
-          Buy Zone — top 10
+          Buy Zone — top 5
         </SectionHeader>
         {buyZone.status === "loading" ? (
           <SkeletonLines n={3} />
         ) : buyZone.status === "error" ? (
           <p className="text-sm text-muted-foreground">—</p>
-        ) : buyZoneTop10.length === 0 ? (
+        ) : buyZoneTop5.length === 0 ? (
           <p className="text-sm text-muted-foreground">
             No watchlist symbols yet.
           </p>
         ) : (
-          <div className="space-y-1">
-            {buyZoneTop10.map((r) => (
-              <div
-                key={r.symbol}
-                className="flex items-center gap-2 border-t border-border/60 py-1.5 text-sm first:border-t-0"
-              >
-                <span className="w-14 shrink-0 font-mono font-semibold">{r.symbol}</span>
-                <span className="flex-1 truncate text-xs text-muted-foreground">
-                  RSI {r.rsi14 !== null && Number.isFinite(r.rsi14) ? r.rsi14.toFixed(0) : "—"} ·{" "}
-                  {r.buyZoneMacdStatus}
-                </span>
-                <span className="w-16 shrink-0 text-right">
-                  <ChangeCell pct={r.changePct} />
-                </span>
-                <span className="ml-auto shrink-0 rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-xs font-semibold">
-                  {r.buyZoneComposite.toFixed(1)}/10
-                </span>
-              </div>
-            ))}
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-[11px] uppercase tracking-wider text-muted-foreground">
+                  <th className="py-1.5 pr-3 font-medium">Symbol</th>
+                  <th className="py-1.5 pr-3 text-right font-medium">RSI</th>
+                  <th className="py-1.5 pr-3 font-medium">MACD</th>
+                  <th className="py-1.5 pr-3 text-right font-medium">Change%</th>
+                  <th className="py-1.5 text-right font-medium">Buy Zone</th>
+                </tr>
+              </thead>
+              <tbody>
+                {buyZoneTop5.map((r) => (
+                  <tr
+                    key={r.symbol}
+                    onClick={() => setBuyZoneModalRow(r)}
+                    className="cursor-pointer border-t border-border/60 hover:bg-background/60"
+                  >
+                    <td className="py-1.5 pr-3 font-mono font-semibold">{r.symbol}</td>
+                    <td className="py-1.5 pr-3 text-right font-mono">
+                      {r.rsi14 !== null && Number.isFinite(r.rsi14) ? r.rsi14.toFixed(0) : "—"}
+                    </td>
+                    <td className="py-1.5 pr-3 text-[11px] capitalize text-muted-foreground">
+                      {r.buyZoneMacdStatus}
+                    </td>
+                    <td className="py-1.5 pr-3 text-right">
+                      <ChangeCell pct={r.changePct} />
+                    </td>
+                    <td className="py-1.5 text-right font-mono font-semibold">
+                      {r.buyZoneComposite.toFixed(1)}/10
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         )}
       </Panel>
+
+      <Dialog open={buyZoneModalRow !== null} onOpenChange={(o) => !o && setBuyZoneModalRow(null)}>
+        <DialogContent className="max-h-[85vh] max-w-4xl overflow-y-auto">
+          {buyZoneModalRow && (
+            <>
+              <DialogHeader>
+                <DialogTitle className="font-mono">
+                  {buyZoneModalRow.symbol}
+                  {buyZoneModalRow.companyName ? (
+                    <span className="ml-2 font-sans text-sm font-normal text-muted-foreground">
+                      {buyZoneModalRow.companyName}
+                    </span>
+                  ) : null}
+                </DialogTitle>
+              </DialogHeader>
+              <BuyZoneDetailContent
+                row={buyZoneModalRow}
+                research={buyZoneResearch.research[buyZoneModalRow.symbol] ?? null}
+                loading={buyZoneResearch.researchLoading.has(buyZoneModalRow.symbol)}
+                error={buyZoneResearch.researchError[buyZoneModalRow.symbol] ?? null}
+                onResearch={() => void buyZoneResearch.loadResearch(buyZoneModalRow.symbol)}
+              />
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
 
       {/* ---------- ROW 3: two panels ---------- */}
       <div className="grid gap-4 md:grid-cols-2">
