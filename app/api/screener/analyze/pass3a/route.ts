@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getEarningsNewsContext, type PerplexityNewsResult } from "@/lib/perplexity";
+import { getCachedCompanyName } from "@/lib/market-snapshot";
 import type { ScreenerResult } from "@/lib/screener";
 
 export const dynamic = "force-dynamic";
@@ -59,7 +60,8 @@ export async function POST(req: NextRequest) {
         reused += 1;
         return { key, symbol: c.symbol, earningsDate: c.earningsDate, news: cached };
       }
-      const news = await getEarningsNewsContext(c.symbol, c.symbol).catch(
+      const companyName = (await getCachedCompanyName(c.symbol).catch(() => null)) ?? c.symbol;
+      const news = await getEarningsNewsContext(c.symbol, companyName, c.earningsDate).catch(
         () => ({
           summary: "News fetch failed",
           sentiment: "neutral" as const,

@@ -1,0 +1,554 @@
+{
+  "result": {
+    "symbol": "IBKR",
+    "price": 94.13,
+    "earningsDate": "2026-07-21",
+    "earningsTiming": "BMO",
+    "daysToExpiry": 3,
+    "expiry": "2026-07-24",
+    "stoppedAt": 3,
+    "stageThree": {
+      "score": 17,
+      "maxScore": 25,
+      "pass": true,
+      "threshold": 14,
+      "crushGrade": "B",
+      "insufficientData": false,
+      "details": {
+        "historicalMoveScore": 8,
+        "consistencyScore": 2,
+        "termStructureScore": 5,
+        "ivEdgeScore": 1,
+        "surpriseScore": 1,
+        "medianHistoricalMovePct": 0.023150289442948613,
+        "expectedMovePct": 0.072522306644893,
+        "weeklyIv": 0.79994,
+        "monthlyIv": 0.47102,
+        "realizedVol30d": 0.41618719465535564,
+        "crushHistory": [
+          {
+            "earningsDate": "2026-07-21",
+            "qtrLabel": "Q2 2026",
+            "impliedMovePct": 0.0714,
+            "actualMovePct": null,
+            "ratio": null,
+            "grade": null,
+            "impliedMoveSource": "schwab"
+          }
+        ],
+        "optionsFlow": {
+          "expiry": "2026-07-24",
+          "spot": 94.13,
+          "callVolume": 3685,
+          "putVolume": 2891,
+          "callOI": 2816,
+          "putOI": 2788,
+          "putCallRatio": 0.7845318860244234,
+          "putCallOI": 0.9900568181818182,
+          "flowBias": "bullish",
+          "unusualStrikes": [
+            {
+              "type": "call",
+              "strike": 98,
+              "volume": 897,
+              "oi": 77,
+              "volOiRatio": 11.64935064935065,
+              "delta": 0.31,
+              "mark": 1.35,
+              "note": "directional bet"
+            },
+            {
+              "type": "put",
+              "strike": 86,
+              "volume": 378,
+              "oi": 56,
+              "volOiRatio": 6.75,
+              "delta": -0.098,
+              "mark": 0.32,
+              "note": "tail hedge"
+            },
+            {
+              "type": "call",
+              "strike": 106,
+              "volume": 138,
+              "oi": 30,
+              "volOiRatio": 4.6,
+              "delta": 0.06,
+              "mark": 0.18,
+              "note": "upside lottery"
+            },
+            {
+              "type": "call",
+              "strike": 97,
+              "volume": 245,
+              "oi": 56,
+              "volOiRatio": 4.375,
+              "delta": 0.353,
+              "mark": 1.55,
+              "note": "directional bet"
+            },
+            {
+              "type": "call",
+              "strike": 100,
+              "volume": 771,
+              "oi": 206,
+              "volOiRatio": 3.7427184466019416,
+              "delta": 0.22,
+              "mark": 0.85,
+              "note": "unusual"
+            }
+          ],
+          "deepOtmPutCluster": {
+            "upperStrike": 87.30347527551622,
+            "lowerStrike": 77.06368818879055,
+            "totalVolume": 1929,
+            "totalOI": 1264,
+            "pctOfTotalPutVolume": 66.72431684538222,
+            "interpretation": "Elevated tail-risk hedging — 67% of put volume below $87"
+          },
+          "yourStrikeFlow": {
+            "strike": 80,
+            "volume": 74,
+            "oi": 289,
+            "volOiRatio": 0.2560553633217993,
+            "mark": 0.03,
+            "delta": -0.011,
+            "interpretation": "Normal activity at your strike (74 vol / 289 OI)"
+          }
+        }
+      }
+    },
+    "stageFour": {
+      "score": 0,
+      "maxScore": 20,
+      "opportunityGrade": "F",
+      "suggestedStrike": 80,
+      "premium": 0.03,
+      "delta": -0.011,
+      "bidAskSpreadPct": 200,
+      "premiumYieldPct": 0.031,
+      "note": null,
+      "availableStrikes": [
+        {
+          "strike": 45,
+          "bid": 0,
+          "ask": 0.05,
+          "mark": 0.03,
+          "delta": -0.003
+        },
+        {
+          "strike": 50,
+          "bid": 0,
+          "ask": 0.05,
+          "mark": 0.03,
+          "delta": -0.003
+        },
+        {
+          "strike": 55,
+          "bid": 0,
+          "ask": 0.05,
+          "mark": 0.03,
+          "delta": -0.004
+        },
+        {
+          "strike": 60,
+          "bid": 0,
+          "ask": 0.05,
+          "mark": 0.03,
+          "delta": -0.005
+        },
+        {
+          "strike": 65,
+          "bid": 0,
+          "ask": 0.05,
+          "mark": 0.03,
+          "delta": -0.005
+        },
+        {
+          "strike": 70,
+          "bid": 0,
+          "ask": 0.1,
+          "mark": 0.05,
+          "delta": -0.011
+        },
+        {
+          "strike": 74,
+          "bid": 0,
+          "ask": 0.1,
+          "mark": 0.05,
+          "delta": -0.013
+        },
+        {
+          "strike": 75,
+          "bid": 0,
+          "ask": 0.05,
+          "mark": 0.03,
+          "delta": -0.008
+        },
+        {
+          "strike": 76,
+          "bid": 0,
+          "ask": 0.05,
+          "mark": 0.03,
+          "delta": -0.015
+        },
+        {
+          "strike": 77,
+          "bid": 0,
+          "ask": 0.1,
+          "mark": 0.05,
+          "delta": -0.015
+        },
+        {
+          "strike": 78,
+          "bid": 0,
+          "ask": 0.1,
+          "mark": 0.05,
+          "delta": -0.016
+        },
+        {
+          "strike": 79,
+          "bid": 0,
+          "ask": 0.05,
+          "mark": 0.03,
+          "delta": -0.01
+        },
+        {
+          "strike": 80,
+          "bid": 0,
+          "ask": 0.05,
+          "mark": 0.03,
+          "delta": -0.011
+        },
+        {
+          "strike": 81,
+          "bid": 0,
+          "ask": 0.3,
+          "mark": 0.15,
+          "delta": -0.042
+        },
+        {
+          "strike": 82,
+          "bid": 0.05,
+          "ask": 0.1,
+          "mark": 0.08,
+          "delta": -0.028
+        },
+        {
+          "strike": 83,
+          "bid": 0.1,
+          "ask": 0.15,
+          "mark": 0.13,
+          "delta": -0.042
+        },
+        {
+          "strike": 84,
+          "bid": 0.1,
+          "ask": 0.2,
+          "mark": 0.15,
+          "delta": -0.052
+        },
+        {
+          "strike": 85,
+          "bid": 0.2,
+          "ask": 0.25,
+          "mark": 0.23,
+          "delta": -0.072
+        },
+        {
+          "strike": 86,
+          "bid": 0.3,
+          "ask": 0.35,
+          "mark": 0.32,
+          "delta": -0.098
+        },
+        {
+          "strike": 87,
+          "bid": 0.45,
+          "ask": 0.5,
+          "mark": 0.48,
+          "delta": -0.132
+        },
+        {
+          "strike": 88,
+          "bid": 0.55,
+          "ask": 0.65,
+          "mark": 0.6,
+          "delta": -0.163
+        },
+        {
+          "strike": 89,
+          "bid": 0.75,
+          "ask": 0.9,
+          "mark": 0.83,
+          "delta": -0.207
+        },
+        {
+          "strike": 90,
+          "bid": 1,
+          "ask": 1.15,
+          "mark": 1.08,
+          "delta": -0.254
+        },
+        {
+          "strike": 91,
+          "bid": 1.2,
+          "ask": 1.5,
+          "mark": 1.35,
+          "delta": -0.303
+        },
+        {
+          "strike": 92,
+          "bid": 1.7,
+          "ask": 1.95,
+          "mark": 1.83,
+          "delta": -0.363
+        },
+        {
+          "strike": 93,
+          "bid": 1.95,
+          "ask": 2.45,
+          "mark": 2.2,
+          "delta": -0.418
+        },
+        {
+          "strike": 94,
+          "bid": 2.5,
+          "ask": 2.8,
+          "mark": 2.65,
+          "delta": -0.475
+        },
+        {
+          "strike": 95,
+          "bid": 3,
+          "ask": 3.3,
+          "mark": 3.15,
+          "delta": -0.532
+        },
+        {
+          "strike": 96,
+          "bid": 3.5,
+          "ask": 4,
+          "mark": 3.75,
+          "delta": -0.588
+        },
+        {
+          "strike": 97,
+          "bid": 4.2,
+          "ask": 4.6,
+          "mark": 4.4,
+          "delta": -0.646
+        },
+        {
+          "strike": 98,
+          "bid": 4.8,
+          "ask": 5.3,
+          "mark": 5.05,
+          "delta": -0.689
+        },
+        {
+          "strike": 99,
+          "bid": 5.6,
+          "ask": 6.1,
+          "mark": 5.85,
+          "delta": -0.739
+        },
+        {
+          "strike": 100,
+          "bid": 5.8,
+          "ask": 6.9,
+          "mark": 6.35,
+          "delta": -0.778
+        },
+        {
+          "strike": 101,
+          "bid": 5.8,
+          "ask": 7.7,
+          "mark": 6.75,
+          "delta": -0.808
+        },
+        {
+          "strike": 102,
+          "bid": 7,
+          "ask": 8.8,
+          "mark": 7.9,
+          "delta": -0.854
+        },
+        {
+          "strike": 103,
+          "bid": 8.3,
+          "ask": 9.6,
+          "mark": 8.95,
+          "delta": -0.878
+        },
+        {
+          "strike": 104,
+          "bid": 9.8,
+          "ask": 10.6,
+          "mark": 10.2,
+          "delta": -0.896
+        },
+        {
+          "strike": 105,
+          "bid": 10.1,
+          "ask": 11.8,
+          "mark": 10.95,
+          "delta": -0.913
+        },
+        {
+          "strike": 106,
+          "bid": 10.4,
+          "ask": 12.8,
+          "mark": 11.6,
+          "delta": -0.923
+        },
+        {
+          "strike": 107,
+          "bid": 11.4,
+          "ask": 13.9,
+          "mark": 12.65,
+          "delta": -0.813
+        },
+        {
+          "strike": 108,
+          "bid": 12.2,
+          "ask": 14.9,
+          "mark": 13.55,
+          "delta": -0.82
+        },
+        {
+          "strike": 109,
+          "bid": 13.2,
+          "ask": 15.9,
+          "mark": 14.55,
+          "delta": -0.827
+        },
+        {
+          "strike": 110,
+          "bid": 14.4,
+          "ask": 16.3,
+          "mark": 15.35,
+          "delta": -1
+        },
+        {
+          "strike": 111,
+          "bid": 15.1,
+          "ask": 17.6,
+          "mark": 16.35,
+          "delta": -0.886
+        },
+        {
+          "strike": 112,
+          "bid": 16.1,
+          "ask": 18.6,
+          "mark": 17.35,
+          "delta": -1
+        },
+        {
+          "strike": 113,
+          "bid": 17.1,
+          "ask": 20,
+          "mark": 18.55,
+          "delta": -0.843
+        },
+        {
+          "strike": 114,
+          "bid": 18.1,
+          "ask": 20.8,
+          "mark": 19.45,
+          "delta": -0.845
+        },
+        {
+          "strike": 115,
+          "bid": 19.2,
+          "ask": 21.6,
+          "mark": 20.4,
+          "delta": -0.847
+        },
+        {
+          "strike": 116,
+          "bid": 20.1,
+          "ask": 22.8,
+          "mark": 21.45,
+          "delta": -0.849
+        },
+        {
+          "strike": 117,
+          "bid": 21.1,
+          "ask": 23.8,
+          "mark": 22.45,
+          "delta": -0.851
+        },
+        {
+          "strike": 118,
+          "bid": 22.1,
+          "ask": 25.5,
+          "mark": 23.8,
+          "delta": -1
+        }
+      ],
+      "details": {
+        "premiumYieldScore": 0,
+        "deltaScore": 0,
+        "spreadScore": 0,
+        "contractSymbol": "IBKR  260724P00080000",
+        "mathTargetStrike": 80.48,
+        "usedTargetedLookup": false
+      }
+    },
+    "recommendation": "Skip",
+    "spreadTooWide": false,
+    "threeLayer": {
+      "industryGrade": "B",
+      "industryScore": 43,
+      "industryFactors": {
+        "probabilityOfProfit": 0.989,
+        "ivRank": null,
+        "ivEdge": 1.9220677864979239,
+        "termStructure": 5,
+        "crushGrade": "B",
+        "opportunityGrade": "F",
+        "expectedValue": 2.9669999999999996,
+        "breakevenPrice": 79.97
+      },
+      "personalGrade": "INSUFFICIENT",
+      "personalScore": null,
+      "personalFactors": {
+        "tickerWinRate": null,
+        "tickerTradeCount": 0,
+        "tickerAvgRoc": null,
+        "tickerCrushAccuracy": null,
+        "dataInsufficient": true,
+        "scope": "none",
+        "sectorIndustry": "Capital Markets",
+        "cleanCount": 0,
+        "rolledCount": 0,
+        "recoveryCount": 0,
+        "tickerLevel": {
+          "campaigns": 0,
+          "clean": 0,
+          "rolled": 0,
+          "recovery": 0
+        },
+        "sampleWeight": 0,
+        "sector": null
+      },
+      "regimeGrade": "A",
+      "regimeScore": 14,
+      "regimeFactors": {
+        "newsSentiment": "positive",
+        "hasActiveOverhang": false,
+        "overhangDescription": null,
+        "newsSummary": "Interactive Brokers (IBKR) is scheduled to report Q2 2026 earnings on Tuesday, July 21, 2026, after the market closes, with reported diluted EPS of $0.59 and adjusted EPS of $0.60 alongside net revenues of $1.67 billion. The company also declared an increase in its quarterly cash dividend to $0.08 per share, reflecting strong financial performance and continued investor confidence.",
+        "gradePenalty": 0,
+        "vix": 16.99,
+        "vixRegime": "calm"
+      },
+      "finalGrade": "B",
+      "finalScore": 72,
+      "recommendation": "Marginal - Size smaller",
+      "recommendationReason": "STRENGTH: 99% probability of profit at $80.00 strike (2x EM). Crush B — historical moves stay well inside the implied move; strong IV crush expected.\n\nCAUTION: Opportunity F — premium at $0.03 is thin for the capital required. IV edge 1.92 — very elevated premium, but verify strike safety against the larger implied move.\n\nNEWS: Positive — Interactive Brokers (IBKR) is scheduled to report Q2 2026 earnings on Tuesday, July 21, 2026, after the market closes, with reported diluted EPS of $0.59 and adjusted EPS of $0.60 alongside net revenues of $1.67 billion. The company also declared an increase in its quarterly cash dividend to $0.08 per share, reflecting strong financial performance and continued investor confidence. No active risks detected.\n\nHISTORY: Insufficient history — 0 countable campaigns on this ticker (need 5+; sector fallback needs 10+ industry campaigns). No modifier applied.\n\nBOTTOM LINE: Rule B matched: POP 99% ≥ 83% and crush B, no overhang. Grade B. Size normally, with the caution above in mind."
+    }
+  },
+  "vix": 16.99
+}

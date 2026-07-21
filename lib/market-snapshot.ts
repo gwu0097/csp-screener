@@ -295,6 +295,27 @@ export async function refreshSymbolSnapshot(
   return snapshot;
 }
 
+// Read-only company-name lookup for callers that just need the name
+// (e.g. building an LLM prompt) without triggering a live refresh —
+// a single cached column read, never a Yahoo call. Returns null if no
+// cached row exists yet or the name hasn't been captured; callers
+// should fall back to the ticker rather than fail.
+export async function getCachedCompanyName(symbol: string): Promise<string | null> {
+  try {
+    const sb = createServerClient();
+    const res = await sb
+      .from("symbol_market_snapshot")
+      .select("company_name")
+      .eq("symbol", symbol.toUpperCase())
+      .limit(1);
+    if (res.error || !res.data || res.data.length === 0) return null;
+    const name = (res.data[0] as { company_name: string | null }).company_name;
+    return name && name.trim().length > 0 ? name.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
 function isFresh(row: { last_refreshed_at?: string | null }, maxAgeMinutes: number): boolean {
   if (!row.last_refreshed_at) return false;
   const ts = new Date(row.last_refreshed_at).getTime();

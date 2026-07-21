@@ -1,0 +1,19 @@
+{
+  "result": {
+    "symbol": "GEV",
+    "price": 1073.765,
+    "earningsDate": "2026-07-21",
+    "earningsTiming": "BMO",
+    "daysToExpiry": 3,
+    "expiry": "2026-07-24",
+    "stoppedAt": 3,
+    "stageThree": null,
+    "stageFour": null,
+    "recommendation": "Cannot evaluate",
+    "errors": [
+      "Schwab chain unavailable for weekly expiry"
+    ],
+    "threeLayer": null
+  },
+  "vix": 16.99
+}

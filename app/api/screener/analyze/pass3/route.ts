@@ -6,6 +6,7 @@ import {
   ScreenerResult,
 } from "@/lib/screener";
 import { getEarningsNewsContext } from "@/lib/perplexity";
+import { getCachedCompanyName } from "@/lib/market-snapshot";
 import { createServerClient } from "@/lib/supabase";
 import { type Fill } from "@/lib/positions";
 import { buildSnapshotRow } from "@/lib/snapshots";
@@ -193,8 +194,9 @@ export async function POST(req: NextRequest) {
   const results = await Promise.all(
     scored.map(async (base): Promise<ScreenerResult> => {
       if (!base.stageThree || !base.stageFour) return base;
+      const companyName = (await getCachedCompanyName(base.symbol).catch(() => null)) ?? base.symbol;
       const [news, personal] = await Promise.all([
-        getEarningsNewsContext(base.symbol, base.symbol).catch(() => ({
+        getEarningsNewsContext(base.symbol, companyName, base.earningsDate).catch(() => ({
           summary: "News fetch failed",
           sentiment: "neutral" as const,
           hasActiveOverhang: false,

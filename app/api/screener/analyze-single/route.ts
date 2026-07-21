@@ -9,6 +9,7 @@ import {
 } from "@/lib/screener";
 import { getEarningsNewsContext } from "@/lib/perplexity";
 import { getMarketContext } from "@/lib/market";
+import { getCachedCompanyName } from "@/lib/market-snapshot";
 import { requireUserId, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
@@ -108,8 +109,9 @@ export async function POST(req: NextRequest) {
   if (!scored.stageThree || !scored.stageFour) {
     return NextResponse.json({ result: scored, vix });
   }
+  const companyName = (await getCachedCompanyName(upper).catch(() => null)) ?? upper;
   const [news, personal] = await Promise.all([
-    getEarningsNewsContext(upper, upper).catch(() => ({
+    getEarningsNewsContext(upper, companyName, base.earningsDate).catch(() => ({
       summary: "News fetch failed",
       sentiment: "neutral" as const,
       hasActiveOverhang: false,

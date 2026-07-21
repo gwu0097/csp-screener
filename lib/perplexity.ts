@@ -28,8 +28,30 @@ const FALLBACK: PerplexityNewsResult = {
   gradePenalty: 0,
 };
 
-function buildPrompt(symbol: string, companyName: string): string {
-  return `For ${companyName} (${symbol}), reporting earnings tonight or tomorrow morning, search for news from the last 30 days.
+// Standard calendar-year fiscal-quarter heuristic (reports land 3-8
+// weeks after quarter end): Jan-Mar -> Q4 of the prior year, Apr-Jun
+// -> Q1, Jul-Sep -> Q2, Oct-Dec -> Q3. This is a grounding hint for
+// the prompt, not a verified fact — non-calendar fiscal years will be
+// labeled approximately.
+function fiscalPeriodLabel(earningsDateIso: string): string {
+  const d = new Date(earningsDateIso + "T00:00:00Z");
+  const month = d.getUTCMonth() + 1;
+  const year = d.getUTCFullYear();
+  if (month <= 3) return `Q4 ${year - 1}`;
+  if (month <= 6) return `Q1 ${year}`;
+  if (month <= 9) return `Q2 ${year}`;
+  return `Q3 ${year}`;
+}
+
+function buildPrompt(
+  symbol: string,
+  companyName: string,
+  earningsDate: string,
+): string {
+  const fiscalPeriod = fiscalPeriodLabel(earningsDate);
+  return `For ${companyName} (${symbol}), reporting ${fiscalPeriod} earnings on ${earningsDate}, search for news from the last 30 days.
+
+This is specifically about the UPCOMING ${fiscalPeriod} report due ${earningsDate} — do not use figures, results, or characterizations from a previously reported quarter as if they describe this one.
 
 Identify if ANY of these active risks exist:
 1. Government regulatory action or investigation
@@ -134,6 +156,7 @@ export async function askPerplexityRaw(
 export async function getEarningsNewsContext(
   symbol: string,
   companyName: string,
+  earningsDate: string,
 ): Promise<PerplexityNewsResult> {
   if (!PERPLEXITY_API_KEY) {
     console.warn("[perplexity] PERPLEXITY_API_KEY not set — returning fallback");
@@ -142,7 +165,7 @@ export async function getEarningsNewsContext(
 
   const body = JSON.stringify({
     model: "sonar",
-    messages: [{ role: "user", content: buildPrompt(symbol, companyName) }],
+    messages: [{ role: "user", content: buildPrompt(symbol, companyName, earningsDate) }],
     max_tokens: 500,
     temperature: 0,
   });

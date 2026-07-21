@@ -1,0 +1,592 @@
+{
+  "result": {
+    "symbol": "COF",
+    "price": 206.71,
+    "earningsDate": "2026-07-21",
+    "earningsTiming": "BMO",
+    "daysToExpiry": 3,
+    "expiry": "2026-07-24",
+    "stoppedAt": 3,
+    "stageThree": {
+      "score": 13,
+      "maxScore": 25,
+      "pass": false,
+      "threshold": 14,
+      "crushGrade": "C",
+      "insufficientData": false,
+      "details": {
+        "historicalMoveScore": 5,
+        "consistencyScore": 2,
+        "termStructureScore": 5,
+        "ivEdgeScore": 1,
+        "surpriseScore": 0,
+        "medianHistoricalMovePct": 0.046936884412378095,
+        "expectedMovePct": 0.06322334298190992,
+        "weeklyIv": 0.6973699999999999,
+        "monthlyIv": 0.38372999999999996,
+        "realizedVol30d": 0.34071550751105195,
+        "crushHistory": [
+          {
+            "earningsDate": "2026-07-21",
+            "qtrLabel": "Q2 2026",
+            "impliedMovePct": 0.0481,
+            "actualMovePct": 0,
+            "ratio": 0,
+            "grade": "A",
+            "impliedMoveSource": "schwab_t0"
+          },
+          {
+            "earningsDate": "2026-04-21",
+            "qtrLabel": "Q1 2026",
+            "impliedMovePct": 0.052,
+            "actualMovePct": -0.0152,
+            "ratio": 0.2923,
+            "grade": "A",
+            "impliedMoveSource": "polygon"
+          },
+          {
+            "earningsDate": "2026-01-22",
+            "qtrLabel": "Q4 2025",
+            "impliedMovePct": 0.0468,
+            "actualMovePct": -0.0756,
+            "ratio": 1.6154,
+            "grade": "F",
+            "impliedMoveSource": "polygon"
+          },
+          {
+            "earningsDate": "2025-10-21",
+            "qtrLabel": "Q3 2025",
+            "impliedMovePct": null,
+            "actualMovePct": 0.0153,
+            "ratio": null,
+            "grade": null,
+            "impliedMoveSource": null
+          },
+          {
+            "earningsDate": "2025-07-22",
+            "qtrLabel": "Q2 2025",
+            "impliedMovePct": null,
+            "actualMovePct": 0.0094,
+            "ratio": null,
+            "grade": null,
+            "impliedMoveSource": null
+          }
+        ],
+        "optionsFlow": {
+          "expiry": "2026-07-24",
+          "spot": 206.71,
+          "callVolume": 6858,
+          "putVolume": 7638,
+          "callOI": 14261,
+          "putOI": 5579,
+          "putCallRatio": 1.1137357830271215,
+          "putCallOI": 0.39120678774279505,
+          "flowBias": "neutral",
+          "unusualStrikes": [
+            {
+              "type": "put",
+              "strike": 187.5,
+              "volume": 425,
+              "oi": 45,
+              "volOiRatio": 9.444444444444445,
+              "delta": -0.072,
+              "mark": 0.45,
+              "note": "tail hedge"
+            },
+            {
+              "type": "call",
+              "strike": 207.5,
+              "volume": 454,
+              "oi": 70,
+              "volOiRatio": 6.485714285714286,
+              "delta": 0.474,
+              "mark": 4.6,
+              "note": "directional bet"
+            },
+            {
+              "type": "put",
+              "strike": 192.5,
+              "volume": 440,
+              "oi": 70,
+              "volOiRatio": 6.285714285714286,
+              "delta": -0.128,
+              "mark": 0.85,
+              "note": "tail hedge"
+            },
+            {
+              "type": "put",
+              "strike": 195,
+              "volume": 1379,
+              "oi": 274,
+              "volOiRatio": 5.032846715328467,
+              "delta": -0.182,
+              "mark": 1.35,
+              "note": "unusual"
+            },
+            {
+              "type": "put",
+              "strike": 170,
+              "volume": 573,
+              "oi": 131,
+              "volOiRatio": 4.374045801526718,
+              "delta": -0.012,
+              "mark": 0.08,
+              "note": "tail hedge"
+            },
+            {
+              "type": "put",
+              "strike": 197.5,
+              "volume": 573,
+              "oi": 140,
+              "volOiRatio": 4.0928571428571425,
+              "delta": -0.229,
+              "mark": 1.73,
+              "note": "unusual"
+            },
+            {
+              "type": "put",
+              "strike": 190,
+              "volume": 1215,
+              "oi": 358,
+              "volOiRatio": 3.393854748603352,
+              "delta": -0.09,
+              "mark": 0.55,
+              "note": "tail hedge"
+            }
+          ],
+          "deepOtmPutCluster": {
+            "upperStrike": 193.64110277220942,
+            "lowerStrike": 174.0377569305235,
+            "totalVolume": 3413,
+            "totalOI": 1906,
+            "pctOfTotalPutVolume": 44.68447237496727,
+            "interpretation": "Elevated tail-risk hedging — 45% of put volume below $194"
+          },
+          "yourStrikeFlow": {
+            "strike": 180,
+            "volume": 147,
+            "oi": 302,
+            "volOiRatio": 0.4867549668874172,
+            "mark": 0.15,
+            "delta": -0.026,
+            "interpretation": "Normal activity at your strike (147 vol / 302 OI)"
+          }
+        }
+      }
+    },
+    "stageFour": {
+      "score": 0,
+      "maxScore": 20,
+      "opportunityGrade": "F",
+      "suggestedStrike": 180,
+      "premium": 0.1,
+      "delta": -0.026,
+      "bid": 0.1,
+      "ask": 0.2,
+      "bidAskSpreadPct": 66.7,
+      "premiumYieldPct": 0.056,
+      "note": null,
+      "availableStrikes": [
+        {
+          "strike": 110,
+          "bid": 0,
+          "ask": 0.2,
+          "mark": 0.1,
+          "delta": -0.005
+        },
+        {
+          "strike": 115,
+          "bid": 0,
+          "ask": 2.15,
+          "mark": 1.08,
+          "delta": -0.033
+        },
+        {
+          "strike": 120,
+          "bid": 0,
+          "ask": 2.15,
+          "mark": 1.08,
+          "delta": -0.035
+        },
+        {
+          "strike": 125,
+          "bid": 0,
+          "ask": 2.15,
+          "mark": 1.08,
+          "delta": -0.038
+        },
+        {
+          "strike": 130,
+          "bid": 0,
+          "ask": 2.15,
+          "mark": 1.08,
+          "delta": -0.04
+        },
+        {
+          "strike": 135,
+          "bid": 0,
+          "ask": 2.15,
+          "mark": 1.08,
+          "delta": -0.043
+        },
+        {
+          "strike": 140,
+          "bid": 0,
+          "ask": 2.15,
+          "mark": 1.08,
+          "delta": -0.046
+        },
+        {
+          "strike": 145,
+          "bid": 0,
+          "ask": 2.15,
+          "mark": 1.08,
+          "delta": -0.05
+        },
+        {
+          "strike": 150,
+          "bid": 0,
+          "ask": 0.05,
+          "mark": 0.03,
+          "delta": -0.003
+        },
+        {
+          "strike": 155,
+          "bid": 0,
+          "ask": 1.1,
+          "mark": 0.55,
+          "delta": -0.037
+        },
+        {
+          "strike": 160,
+          "bid": 0,
+          "ask": 1,
+          "mark": 0.5,
+          "delta": -0.038
+        },
+        {
+          "strike": 165,
+          "bid": 0,
+          "ask": 0.1,
+          "mark": 0.05,
+          "delta": -0.008
+        },
+        {
+          "strike": 170,
+          "bid": 0,
+          "ask": 0.15,
+          "mark": 0.08,
+          "delta": -0.012
+        },
+        {
+          "strike": 172.5,
+          "bid": 0,
+          "ask": 2.15,
+          "mark": 1.08,
+          "delta": -0.081
+        },
+        {
+          "strike": 175,
+          "bid": 0,
+          "ask": 0.55,
+          "mark": 0.28,
+          "delta": -0.035
+        },
+        {
+          "strike": 177.5,
+          "bid": 0.05,
+          "ask": 0.2,
+          "mark": 0.13,
+          "delta": -0.021
+        },
+        {
+          "strike": 180,
+          "bid": 0.1,
+          "ask": 0.2,
+          "mark": 0.15,
+          "delta": -0.026
+        },
+        {
+          "strike": 182.5,
+          "bid": 0.1,
+          "ask": 0.3,
+          "mark": 0.2,
+          "delta": -0.035
+        },
+        {
+          "strike": 185,
+          "bid": 0.15,
+          "ask": 0.3,
+          "mark": 0.22,
+          "delta": -0.041
+        },
+        {
+          "strike": 187.5,
+          "bid": 0.4,
+          "ask": 0.5,
+          "mark": 0.45,
+          "delta": -0.072
+        },
+        {
+          "strike": 190,
+          "bid": 0.45,
+          "ask": 0.65,
+          "mark": 0.55,
+          "delta": -0.09
+        },
+        {
+          "strike": 192.5,
+          "bid": 0.7,
+          "ask": 1,
+          "mark": 0.85,
+          "delta": -0.128
+        },
+        {
+          "strike": 195,
+          "bid": 1.2,
+          "ask": 1.5,
+          "mark": 1.35,
+          "delta": -0.182
+        },
+        {
+          "strike": 197.5,
+          "bid": 1.45,
+          "ask": 2,
+          "mark": 1.73,
+          "delta": -0.229
+        },
+        {
+          "strike": 200,
+          "bid": 2.4,
+          "ask": 2.75,
+          "mark": 2.58,
+          "delta": -0.302
+        },
+        {
+          "strike": 202.5,
+          "bid": 3.2,
+          "ask": 4,
+          "mark": 3.6,
+          "delta": -0.376
+        },
+        {
+          "strike": 205,
+          "bid": 4.5,
+          "ask": 4.7,
+          "mark": 4.6,
+          "delta": -0.45
+        },
+        {
+          "strike": 207.5,
+          "bid": 5.5,
+          "ask": 6,
+          "mark": 5.75,
+          "delta": -0.526
+        },
+        {
+          "strike": 210,
+          "bid": 6.9,
+          "ask": 8.2,
+          "mark": 7.55,
+          "delta": -0.602
+        },
+        {
+          "strike": 212.5,
+          "bid": 8.4,
+          "ask": 9.1,
+          "mark": 8.75,
+          "delta": -0.672
+        },
+        {
+          "strike": 215,
+          "bid": 10.2,
+          "ask": 11.7,
+          "mark": 10.95,
+          "delta": -0.739
+        },
+        {
+          "strike": 217.5,
+          "bid": 11.2,
+          "ask": 12.9,
+          "mark": 12.05,
+          "delta": -0.794
+        },
+        {
+          "strike": 220,
+          "bid": 13.7,
+          "ask": 16.3,
+          "mark": 15,
+          "delta": -0.849
+        },
+        {
+          "strike": 222.5,
+          "bid": 15.4,
+          "ask": 18.5,
+          "mark": 16.95,
+          "delta": -0.88
+        },
+        {
+          "strike": 225,
+          "bid": 17.9,
+          "ask": 20.8,
+          "mark": 19.35,
+          "delta": -0.913
+        },
+        {
+          "strike": 227.5,
+          "bid": 20.3,
+          "ask": 23.2,
+          "mark": 21.75,
+          "delta": -0.931
+        },
+        {
+          "strike": 230,
+          "bid": 22.3,
+          "ask": 25.9,
+          "mark": 24.1,
+          "delta": -0.936
+        },
+        {
+          "strike": 232.5,
+          "bid": 24.8,
+          "ask": 28.2,
+          "mark": 26.5,
+          "delta": -1
+        },
+        {
+          "strike": 235,
+          "bid": 27.2,
+          "ask": 30.8,
+          "mark": 29,
+          "delta": -1
+        },
+        {
+          "strike": 237.5,
+          "bid": 29.8,
+          "ask": 33.2,
+          "mark": 31.5,
+          "delta": -1
+        },
+        {
+          "strike": 240,
+          "bid": 32.3,
+          "ask": 35.8,
+          "mark": 34.05,
+          "delta": -1
+        },
+        {
+          "strike": 245,
+          "bid": 37.3,
+          "ask": 40.8,
+          "mark": 39.05,
+          "delta": -1
+        },
+        {
+          "strike": 250,
+          "bid": 41.7,
+          "ask": 45.8,
+          "mark": 43.75,
+          "delta": -1
+        },
+        {
+          "strike": 255,
+          "bid": 46.9,
+          "ask": 50.6,
+          "mark": 48.75,
+          "delta": -1
+        },
+        {
+          "strike": 260,
+          "bid": 52,
+          "ask": 55.8,
+          "mark": 53.9,
+          "delta": -1
+        },
+        {
+          "strike": 265,
+          "bid": 57.3,
+          "ask": 60.8,
+          "mark": 59.05,
+          "delta": -0.896
+        },
+        {
+          "strike": 270,
+          "bid": 62.3,
+          "ask": 65.6,
+          "mark": 63.95,
+          "delta": -0.904
+        },
+        {
+          "strike": 275,
+          "bid": 67.2,
+          "ask": 70.8,
+          "mark": 69,
+          "delta": -0.894
+        }
+      ],
+      "details": {
+        "premiumYieldScore": 0,
+        "deltaScore": 0,
+        "spreadScore": 0,
+        "contractSymbol": "COF   260724P00180000",
+        "mathTargetStrike": 180.57,
+        "usedTargetedLookup": false
+      }
+    },
+    "recommendation": "Skip",
+    "spreadTooWide": false,
+    "threeLayer": {
+      "industryGrade": "B",
+      "industryScore": 43,
+      "industryFactors": {
+        "probabilityOfProfit": 0.974,
+        "ivRank": null,
+        "ivEdge": 2.046780920229699,
+        "termStructure": 5,
+        "crushGrade": "C",
+        "opportunityGrade": "F",
+        "expectedValue": 8.44,
+        "breakevenPrice": 179.9
+      },
+      "personalGrade": "B",
+      "personalScore": 18,
+      "personalFactors": {
+        "tickerWinRate": 100,
+        "tickerTradeCount": 2,
+        "tickerAvgRoc": 0.24673873873873875,
+        "tickerCrushAccuracy": null,
+        "dataInsufficient": false,
+        "scope": "ticker",
+        "sectorIndustry": "Credit Services",
+        "cleanCount": 2,
+        "rolledCount": 0,
+        "recoveryCount": 0,
+        "tickerLevel": {
+          "campaigns": 2,
+          "clean": 2,
+          "rolled": 0,
+          "recovery": 0
+        },
+        "sampleWeight": 0.5,
+        "sector": null
+      },
+      "regimeGrade": "A",
+      "regimeScore": 14,
+      "regimeFactors": {
+        "newsSentiment": "positive",
+        "hasActiveOverhang": false,
+        "overhangDescription": null,
+        "newsSummary": "Capital One Financial (COF) is scheduled to report Q2 2026 earnings today, July 21, 2026, with analysts maintaining a bullish consensus of 'Strong Buy' and an average price target of $254.62. Recent news highlights positive sentiment from JPMorgan raising the price target to $245, while no new regulatory actions, executive departures, or liquidity risks have been reported in the last 30 days.",
+        "gradePenalty": 0,
+        "vix": 17.05,
+        "vixRegime": "calm"
+      },
+      "finalGrade": "F",
+      "unrated": true,
+      "finalScore": 30,
+      "recommendation": "Unrated - below premium floor",
+      "recommendationReason": "STRENGTH: 97% probability of profit at $180.00 strike (2x EM).\n\nCAUTION: Opportunity F — premium at $0.10 is thin for the capital required. IV edge 2.05 — very elevated premium, but verify strike safety against the larger implied move.\n\nNEWS: Positive — Capital One Financial (COF) is scheduled to report Q2 2026 earnings today, July 21, 2026, with analysts maintaining a bullish consensus of 'Strong Buy' and an average price target of $254.62. Recent news highlights positive sentiment from JPMorgan raising the price target to $245, while no new regulatory actions, executive departures, or liquidity risks have been reported in the last 30 days. No active risks detected.\n\nHISTORY: 2 campaigns on this ticker: 100% win rate, 0.25% avg ROC (small sample — half weight; boost needs sector corroboration) → no modifier.\n\nBOTTOM LINE: No rule matched. Grade F. Skip."
+    }
+  },
+  "vix": 17.05
+}

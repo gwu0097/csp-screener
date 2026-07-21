@@ -183,6 +183,15 @@ function displayCrushGrade(s: ScreenerResult["stageThree"]): string {
   return s.crushGrade;
 }
 
+// Display "Unrated" instead of the bare F when Opportunity graded F
+// blocked what would otherwise have been a B or C — see the
+// `unrated` field / rule cascade comment in calculateThreeLayerGrade.
+function displayFinalGrade(tl: { finalGrade: string; unrated?: boolean } | null | undefined): string {
+  if (!tl) return "—";
+  if (tl.unrated) return "Unrated";
+  return tl.finalGrade;
+}
+
 function fmtPrice(n: number | null | undefined) {
   if (n === null || n === undefined || !Number.isFinite(n) || n === 0) return "--";
   return `$${n.toFixed(2)}`;
@@ -2473,10 +2482,10 @@ export function ScreenerView({ connected }: Props) {
                             <span
                               className={cn(
                                 "rounded-md border px-3 py-1 text-base font-bold",
-                                finalGradeBadgeColor(r.threeLayer.finalGrade),
+                                finalGradeBadgeColor(displayFinalGrade(r.threeLayer)),
                               )}
                             >
-                              {r.threeLayer.finalGrade}
+                              {displayFinalGrade(r.threeLayer)}
                             </span>
                           ) : (
                             <span className="text-base text-muted-foreground">—</span>
@@ -2570,13 +2579,19 @@ export function ScreenerView({ connected }: Props) {
                               </TableCell>
                               <TableCell className="text-base">{fmtNum(effDelta, 3)}</TableCell>
                               <TableCell className="text-center">
-                                {effSpread !== null && effSpread !== undefined && effSpread > 50 ? (
+                                {effSpread !== null && effSpread !== undefined ? (
                                   <Tooltip>
                                     <TooltipTrigger asChild>
-                                      <AlertTriangle className="inline h-4 w-4 text-amber-400" />
+                                      {effSpread > 50 ? (
+                                        <AlertTriangle className="inline h-4 w-4 text-amber-400" />
+                                      ) : (
+                                        <Info className="inline h-4 w-4 text-muted-foreground" />
+                                      )}
                                     </TooltipTrigger>
                                     <TooltipContent>
-                                      Bid-ask spread {fmtNum(effSpread, 1)}% — wider than 50% of premium
+                                      Bid ${fmtNum(r.stageFour?.bid ?? null)} · Ask ${fmtNum(r.stageFour?.ask ?? null)}
+                                      {" "}· Spread {fmtNum(effSpread, 1)}% of mid
+                                      {effSpread > 50 ? " — wider than 50% of premium" : ""}
                                     </TooltipContent>
                                   </Tooltip>
                                 ) : null}
@@ -2794,26 +2809,39 @@ function gradeFromRulesClient(params: {
   vix: number | null;
   penalty: number;
   personalModifier: "boost" | "drop" | null;
-}): "A" | "B" | "C" | "F" {
+}): { grade: "A" | "B" | "C" | "F"; unrated: boolean } {
   const { pop, crushGrade, opportunityGrade, hasOverhang, vix, penalty, personalModifier } = params;
   const crushOk = crushGrade === "A" || crushGrade === "B";
   let grade: "A" | "B" | "C" | "F";
+  let unrated = false;
   if (crushOk && pop >= 0.9 && opportunityGrade !== "F" && !hasOverhang && (vix === null || vix < 25)) {
     grade = "A";
   } else if (pop >= 0.83 && (crushOk || pop >= 0.95) && !hasOverhang) {
-    grade = "B";
+    if (opportunityGrade === "F") {
+      grade = "F";
+      unrated = true;
+    } else {
+      grade = "B";
+    }
   } else if (pop >= 0.75 && penalty > -15) {
-    grade = "C";
+    if (opportunityGrade === "F") {
+      grade = "F";
+      unrated = true;
+    } else {
+      grade = "C";
+    }
   } else {
     grade = "F";
   }
   if (hasOverhang) grade = "F";
   else if (vix !== null && vix > 30) grade = dropGradeClient(grade);
   if (!hasOverhang) {
-    if (personalModifier === "boost") grade = boostGradeClient(grade);
+    // unrated never boosts — mirrors the !unrated guard in
+    // calculateThreeLayerGrade (lib/screener.ts).
+    if (personalModifier === "boost" && !unrated) grade = boostGradeClient(grade);
     else if (personalModifier === "drop") grade = dropGradeClient(grade);
   }
-  return grade;
+  return { grade, unrated };
 }
 
 type CustomStrikeAnalysis = {
@@ -2824,6 +2852,7 @@ type CustomStrikeAnalysis = {
   delta: number;
   breakeven: number;
   finalGradeNew: "A" | "B" | "C" | "F";
+  unrated: boolean;
 };
 
 // Compact single-row fundamentals strip between the chart and the
@@ -3457,7 +3486,7 @@ function ExpandedDetail({
             <div className="flex items-center gap-2">
               <span className="text-sm font-medium text-muted-foreground">FINAL GRADE:</span>
               <GradeBadge
-                grade={tl.finalGrade}
+                grade={displayFinalGrade(tl)}
                 size="md"
                 tooltip={
                   <div className="space-y-1">
@@ -3465,8 +3494,9 @@ function ExpandedDetail({
                     <div>A: crush A/B · POP ≥ 90% · opp ≠ F · no overhang · VIX &lt; 25</div>
                     <div>B: POP ≥ 83% and (crush A/B or POP ≥ 95%), no overhang</div>
                     <div>C: POP ≥ 75% and penalty &gt; −15</div>
+                    <div>B/C also require opp ≠ F — opp F alone yields &ldquo;Unrated,&rdquo; not B/C</div>
                     <div className="pt-1 text-muted-foreground">
-                      Overrides: overhang → F · VIX &gt; 30 drops one level · personal wr &gt;80%+roc &gt;0.4% boosts · wr &lt;50% drops
+                      Overrides: overhang → F · VIX &gt; 30 drops one level · personal wr &gt;80%+roc &gt;0.4% boosts (never on Unrated) · wr &lt;50% drops
                     </div>
                   </div>
                 }
@@ -3498,7 +3528,7 @@ function ExpandedDetail({
             vix={tl.regimeFactors.vix}
             penalty={tl.regimeFactors.gradePenalty}
             personalModifier={personalModifier}
-            currentFinalGrade={tl.finalGrade}
+            currentFinalGrade={displayFinalGrade(tl)}
           />
         </TabsContent>
 
@@ -3560,7 +3590,7 @@ function CustomStrikeAnalyzer({
   vix: number | null;
   penalty: number;
   personalModifier: "boost" | "drop" | null;
-  currentFinalGrade: "A" | "B" | "C" | "F";
+  currentFinalGrade: string;
 }) {
   const [input, setInput] = useState("");
   const [result, setResult] = useState<CustomStrikeAnalysis | null>(null);
@@ -3589,7 +3619,7 @@ function CustomStrikeAnalyzer({
     const distancePct =
       currentPrice > 0 ? ((currentPrice - nearest.strike) / currentPrice) * 100 : 0;
 
-    const finalGradeNew = gradeFromRulesClient({
+    const { grade: finalGradeNew, unrated } = gradeFromRulesClient({
       pop,
       crushGrade,
       opportunityGrade,
@@ -3606,6 +3636,7 @@ function CustomStrikeAnalyzer({
       delta: nearest.delta,
       breakeven,
       finalGradeNew,
+      unrated,
     });
   }
 
@@ -3657,7 +3688,7 @@ function CustomStrikeAnalyzer({
             <span className="text-muted-foreground">Grade impact:</span>
             <GradeBadge grade={currentFinalGrade} />
             <span className="text-muted-foreground">→</span>
-            <GradeBadge grade={result.finalGradeNew} />
+            <GradeBadge grade={result.unrated ? "Unrated" : result.finalGradeNew} />
           </div>
         </div>
       )}

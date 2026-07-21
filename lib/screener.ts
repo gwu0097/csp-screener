@@ -107,6 +107,11 @@ export type StageFourResult = {
   suggestedStrike: number | null;
   premium: number | null;
   delta: number | null;
+  // Raw quote alongside the derived spread% — display-only, so a user
+  // can see when a quote looks unreliable without the grade acting on
+  // it (spread% itself is informational too; see isSpreadTooWide).
+  bid: number | null;
+  ask: number | null;
   bidAskSpreadPct: number | null;
   premiumYieldPct: number | null;
   note: string | null;
@@ -139,6 +144,20 @@ export type StageFourResult = {
 // 20% tolerates weekly single-stock option spreads while still killing truly
 // untradeable names (NDAQ ~78%, TMO ~85% seen in practice).
 export const SPREAD_KILL_PCT = 20;
+
+// Commission per contract, ONE LEG. Total friction subtracted from EV
+// is 2x this (entry: sell to open; exit: buy to close or assignment
+// fee) — NOT commission + half-spread, since premium is already
+// bid-priced (see runStageFour), which already captures entry
+// slippage. Rates vary by broker ($0 to ~$0.65/contract is the real
+// range), so this is env-configurable rather than a fixed number;
+// CSP_COMMISSION_PER_CONTRACT overrides the default when set.
+export const DEFAULT_COMMISSION_PER_CONTRACT = 0.65;
+export function commissionPerContract(): number {
+  const raw = process.env.CSP_COMMISSION_PER_CONTRACT;
+  const parsed = raw !== undefined ? Number(raw) : NaN;
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_COMMISSION_PER_CONTRACT;
+}
 
 export type ScreenerResult = {
   symbol: string;
@@ -237,6 +256,11 @@ export type ThreeLayerGrade = {
     vixRegime: "calm" | "elevated" | "panic" | null;
   };
   finalGrade: Grade;
+  // True when Opportunity graded F blocked what would otherwise have
+  // been a B or C — finalGrade stays "F" for type/sort compatibility,
+  // but this trade isn't bad-odds, it's just not worth pricing. UI
+  // should show "Unrated" instead of the bare letter when true.
+  unrated: boolean;
   finalScore: number;
   recommendation: string;
   recommendationReason: string;
@@ -922,6 +946,8 @@ export async function runStageFour(
       suggestedStrike: null,
       premium: null,
       delta: null,
+      bid: null,
+      ask: null,
       bidAskSpreadPct: null,
       premiumYieldPct: null,
       note: null,
@@ -1067,6 +1093,8 @@ export async function runStageFour(
       suggestedStrike,
       premium: null,
       delta: null,
+      bid: null,
+      ask: null,
       bidAskSpreadPct: null,
       premiumYieldPct: null,
       note: null,
@@ -1074,8 +1102,22 @@ export async function runStageFour(
     };
   }
 
+  // Spread% still uses the mid as its denominator (standard
+  // convention for expressing spread tightness) — display-only, no
+  // effect on any grade or kill (see isSpreadTooWide below).
   const mid = (contract.bid + contract.ask) / 2 || contract.mark || contract.last || 0;
-  const premium = mid;
+  const bid = Number.isFinite(contract.bid) ? contract.bid : 0;
+  const ask = Number.isFinite(contract.ask) ? contract.ask : 0;
+  // A zero/missing bid means there is no price at which this contract
+  // can actually be sold — distinct from "spread is wide but tradeable".
+  // Hard-kill, not a spread-percentage judgment call.
+  const noBid = !Number.isFinite(contract.bid) || contract.bid <= 0;
+  // Premium priced at the BID, not the bid-ask mid — a mid price isn't
+  // executable when selling to open. On a $0.05/$0.10 chain, mid rounds
+  // to $0.08, a fill that was never available. When there's no bid at
+  // all, premium is honestly 0 (no mark/last fallback here — that would
+  // mask the "cannot be sold" condition the hard-kill exists to catch).
+  const premium = noBid ? 0 : bid;
   // Yield denominator is STRIKE (capital at risk on a cash-secured
   // put), not spot — matches the Yield% screener column and what a
   // trader computes when sizing capital. A $5 premium on a $500
@@ -1085,6 +1127,11 @@ export async function runStageFour(
   const spreadPctOfMid = mid > 0 ? ((contract.ask - contract.bid) / mid) * 100 : 100;
   const delta = contract.delta;
 
+  console.log(
+    `[stage4:${candidate.symbol}] pricing: bid=${bid} ask=${ask} mid=${mid.toFixed(2)} ` +
+      `premium(bid-priced)=${premium.toFixed(2)} spread%ofMid=${spreadPctOfMid.toFixed(1)} noBid=${noBid}`,
+  );
+
   const premiumYieldScore = scorePremiumYield(yieldPct);
   const deltaScore = scoreDelta(delta);
   const rawScore = premiumYieldScore + deltaScore;
@@ -1093,8 +1140,11 @@ export async function runStageFour(
   // → A / B / C / F. Delta no longer influences the letter grade —
   // a thin-premium A would still be a bad trade — but deltaScore
   // stays in details for transparency in the expanded row.
-  const opportunityGrade = gradeFromYield(yieldPct);
-  const note: string | null = null;
+  // noBid is a hard kill regardless of the yield bucket math (though
+  // premium=0 already lands in the F bucket via gradeFromYield too —
+  // this makes the reason explicit via `note` rather than implicit).
+  const opportunityGrade = noBid ? "F" : gradeFromYield(yieldPct);
+  const note: string | null = noBid ? "No bid — cannot be sold at any price" : null;
 
   // Compact snapshot of the weekly put chain — the UI uses it to let
   // users try a custom strike without another API round-trip. When
@@ -1134,6 +1184,8 @@ export async function runStageFour(
     suggestedStrike: Math.round(contract.strikePrice * 100) / 100,
     premium: Math.round(premium * 100) / 100,
     delta: Math.round(delta * 1000) / 1000,
+    bid: Math.round(bid * 100) / 100,
+    ask: Math.round(ask * 100) / 100,
     bidAskSpreadPct: Math.round(spreadPctOfMid * 10) / 10,
     premiumYieldPct: Math.round(yieldPct * 1000) / 1000,
     note,
@@ -1876,6 +1928,10 @@ export function calculateThreeLayerGrade(
   personalHistory: PersonalHistory | null,
   vix: number | null,
   currentPrice: number = 0,
+  // Optional per-call override (e.g. a future per-user setting or a
+  // verification script comparing rates) — defaults to the
+  // env-configured commissionPerContract() when omitted.
+  commissionOverride?: number,
 ): ThreeLayerGrade {
   const crushGrade = stageThreeResult.crushGrade;
   const opportunityGrade = stageFourResult.opportunityGrade;
@@ -1902,8 +1958,15 @@ export function calculateThreeLayerGrade(
     currentPrice > 0
       ? Math.max(strike - expectedDownsidePrice, 0) * 100
       : strike * 100; // pre-currentPrice fallback keeps old behaviour
-  const expectedValue =
+  const grossExpectedValue =
     probabilityOfProfit * premium * 100 - (1 - probabilityOfProfit) * assignmentLoss;
+  // Friction — commission only, not half-spread (premium is already
+  // bid-priced, which already captures entry slippage). Two legs:
+  // entry (sell to open) + exit (buy to close or assignment). A final
+  // subtraction only — does not touch how loss itself is computed.
+  const commission = commissionOverride ?? commissionPerContract();
+  const friction = commission * 2;
+  const expectedValue = grossExpectedValue - friction;
 
   const weeklyIv = stageThreeResult.details.weeklyIv ?? null;
   const realizedVol = stageThreeResult.details.realizedVol30d ?? null;
@@ -1968,8 +2031,20 @@ export function calculateThreeLayerGrade(
   }
 
   // ---- Final grade: rule cascade ----
+  // Opportunity F (thin premium/reward) already blocks the A rule via
+  // its own `opportunityGrade !== "F"` clause. It did not block B or
+  // C — a trade with genuinely good odds (POP) but essentially no
+  // reward could reach "Grade B — size normally," which reads as an
+  // endorsement despite the worst possible reward grade. `unrated`
+  // marks that case explicitly: the trade isn't bad-odds (that's what
+  // F/"Skip" means elsewhere) — it's simply not worth pricing.
+  // finalGrade stays "F" internally so every other consumer (sorting,
+  // badges, persistence, the client-side CustomStrikeAnalyzer replica)
+  // keeps working unmodified; `unrated` lets the UI show "Unrated"
+  // instead of the bare letter.
   let finalGrade: Grade;
   let matchedRule: "A" | "B" | "C" | "F";
+  let unrated = false;
   if (
     crushOk &&
     probabilityOfProfit >= 0.9 &&
@@ -1984,11 +2059,23 @@ export function calculateThreeLayerGrade(
     (crushOk || probabilityOfProfit >= 0.95) &&
     !hasOverhang
   ) {
-    finalGrade = "B";
-    matchedRule = "B";
+    if (opportunityGrade === "F") {
+      finalGrade = "F";
+      matchedRule = "F";
+      unrated = true;
+    } else {
+      finalGrade = "B";
+      matchedRule = "B";
+    }
   } else if (probabilityOfProfit >= 0.75 && penalty > -15) {
-    finalGrade = "C";
-    matchedRule = "C";
+    if (opportunityGrade === "F") {
+      finalGrade = "F";
+      matchedRule = "F";
+      unrated = true;
+    } else {
+      finalGrade = "C";
+      matchedRule = "C";
+    }
   } else {
     finalGrade = "F";
     matchedRule = "F";
@@ -2028,10 +2115,13 @@ export function calculateThreeLayerGrade(
     const sec = history.sector ?? null;
     if (historyScope === "ticker") {
       if (sampleW >= 1.0) {
-        if (wr > 80 && roc > 0.3) personalModifier = "boost";
+        // unrated trades never boost — a good win rate on past trades
+        // can't manufacture reward that isn't there at THIS strike.
+        if (!unrated && wr > 80 && roc > 0.3) personalModifier = "boost";
         else if (dropWr < 50) personalModifier = "drop";
       } else if (sampleW >= 0.5) {
         if (
+          !unrated &&
           wr > 80 &&
           roc > 0.3 &&
           sec !== null &&
@@ -2062,7 +2152,8 @@ export function calculateThreeLayerGrade(
   const finalScore = gradeToFinalScore(finalGrade);
 
   let recommendation = "Skip";
-  if (finalGrade === "A") recommendation = "Strong - Take the trade";
+  if (unrated) recommendation = "Unrated - below premium floor";
+  else if (finalGrade === "A") recommendation = "Strong - Take the trade";
   else if (finalGrade === "B") recommendation = "Marginal - Size smaller";
   else if (finalGrade === "C") recommendation = "Marginal - Size small";
 
@@ -2282,6 +2373,7 @@ export function calculateThreeLayerGrade(
       vixRegime,
     },
     finalGrade,
+    unrated,
     finalScore,
     recommendation,
     recommendationReason,
