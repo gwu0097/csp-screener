@@ -48,7 +48,13 @@ export function PriceChart({
     const config: Record<string, unknown> = {
       autosize: true,
       symbol: symbol.toUpperCase(),
-      interval: "D",
+      // "D" alone isn't a recognized resolution for this widget and
+      // silently fell back to an auto-picked intraday interval (2H) —
+      // this widget's schema wants "1D" (matches its own resolution
+      // menu strings: "1","5","15","60","1H","2H","4H","1D","1W","1M").
+      // RSI/MACD are computed from daily bars elsewhere in the app, so
+      // the chart must render daily candles to show matching values.
+      interval: "1D",
       timezone: "Etc/UTC",
       theme: "dark",
       style: "1",

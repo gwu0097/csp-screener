@@ -483,7 +483,13 @@ export function BuyZoneDetailContent({
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[2fr_1fr]">
-        <PriceChart symbol={row.symbol} studies={CHART_STUDIES} range={CHART_RANGE} height={520} />
+        {/* The public embed widget has no per-pane height config (checked
+            its recognized config keys directly — no ratio/percentage
+            option exists for price vs. study panes), so the only lever
+            is total container height. RSI/MACD panes have a fixed-ish
+            comfortable height regardless of total space, so growing the
+            total gives that extra room almost entirely to price. */}
+        <PriceChart symbol={row.symbol} studies={CHART_STUDIES} range={CHART_RANGE} height={720} />
         <AnalystReadPanel row={row} />
       </div>
       <ResearchPanel row={row} research={research} loading={loading} error={error} onResearch={onResearch} />
