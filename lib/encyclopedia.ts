@@ -561,17 +561,22 @@ export async function updateEncyclopedia(symbol: string): Promise<UpdateSummary>
   // real announcement date — see fetchYahooPriceAction).
   const existingRes = await sb
     .from("earnings_history")
-    .select("earnings_date,is_complete,actual_move_pct")
+    .select("earnings_date,is_complete,actual_move_pct,implied_move_source")
     .eq("symbol", sym);
-  const existing = new Map<string, { is_complete: boolean; actual_move_pct: number | null }>();
+  const existing = new Map<
+    string,
+    { is_complete: boolean; actual_move_pct: number | null; implied_move_source: string | null }
+  >();
   for (const r of (existingRes.data ?? []) as Array<{
     earnings_date: string;
     is_complete: boolean;
     actual_move_pct: number | null;
+    implied_move_source: string | null;
   }>) {
     existing.set(r.earnings_date, {
       is_complete: r.is_complete,
       actual_move_pct: r.actual_move_pct,
+      implied_move_source: r.implied_move_source,
     });
   }
 
@@ -585,6 +590,14 @@ export async function updateEncyclopedia(symbol: string): Promise<UpdateSummary>
     const earnings_date = calMatch?.announcementDate ?? r.period;
     const hour = calMatch?.hour ?? null;
     const already = existing.get(earnings_date);
+    // Hand-entered rows (from the earnings-history table's inline EM/
+    // Actual editor) are never touched by the automated feed — that
+    // feed is exactly what left the row blank in the first place, and
+    // manual values come from a cleaner source (TOS implied-move).
+    // Unconditional skip, ahead of the is_complete re-run heuristic
+    // below, since a manual row should never be re-fetched for any
+    // reason.
+    if (already?.implied_move_source === "manual") continue;
     if (already?.is_complete === true) {
       const m = already.actual_move_pct;
       // Earnings reactions under 1% are almost always wrong (computed

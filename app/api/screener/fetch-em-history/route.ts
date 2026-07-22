@@ -79,8 +79,21 @@ async function seedHistoricalRows(symbol: string): Promise<SeedReport> {
     };
   }
 
+  // Hand-entered rows (from the earnings-history table's inline EM/
+  // Actual editor) must never be overwritten by this seed path — same
+  // rule as the Finnhub/updateEncyclopedia path in lib/encyclopedia.ts.
+  const manualRes = await sb
+    .from("earnings_history")
+    .select("earnings_date")
+    .eq("symbol", symbol)
+    .eq("implied_move_source", "manual");
+  const manualDates = new Set(
+    ((manualRes.data ?? []) as Array<{ earnings_date: string }>).map((r) => r.earnings_date),
+  );
+
   let added = 0;
   for (const ann of yahooAnnouncements) {
+    if (manualDates.has(ann.iso)) continue;
     const price = await fetchYahooPriceAction(symbol, ann.iso);
     const payload: Record<string, unknown> = {
       symbol,

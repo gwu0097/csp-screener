@@ -128,6 +128,100 @@ function gradeBadgeCls(g: CrushHistoryEvent["grade"]): string {
   return "bg-zinc-500/10 text-muted-foreground";
 }
 
+// Click-to-edit EM/Actual cell. Percent in, percent out (e.g. typing
+// "4.5" means 4.5%) — the caller converts to/from the fraction the API
+// and the rest of this table use. Ratio/Grade are never editable here;
+// they're recomputed server-side from whatever EM/Actual land after a
+// save (see saveField below), so there's no path to an independently-
+// wrong Ratio.
+function EditableMoveCell({
+  value,
+  onSave,
+  formatDisplay,
+  colorCls,
+  nullTooltip,
+  allowNegative,
+}: {
+  value: number | null; // fraction
+  onSave: (percentValue: number | null) => Promise<void>;
+  formatDisplay: (v: number | null) => string;
+  colorCls?: string;
+  nullTooltip?: string;
+  allowNegative?: boolean;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [val, setVal] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  async function commit() {
+    const trimmed = val.trim();
+    if (trimmed === "") {
+      setSaving(true);
+      await onSave(null);
+      setSaving(false);
+      setEditing(false);
+      return;
+    }
+    const parsed = Number(trimmed);
+    if (!Number.isFinite(parsed)) {
+      setEditing(false);
+      return;
+    }
+    setSaving(true);
+    await onSave(allowNegative ? parsed : Math.abs(parsed));
+    setSaving(false);
+    setEditing(false);
+  }
+
+  if (editing) {
+    return (
+      <input
+        autoFocus
+        type="number"
+        step="0.1"
+        value={val}
+        disabled={saving}
+        onChange={(e) => setVal(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            commit();
+          } else if (e.key === "Escape") {
+            setEditing(false);
+          }
+        }}
+        onBlur={commit}
+        className="w-16 rounded border border-border bg-background px-1 py-0.5 text-right font-mono text-[11px] outline-none focus:border-primary"
+      />
+    );
+  }
+
+  const trigger = (
+    <button
+      type="button"
+      onClick={() => {
+        setVal(value === null ? "" : (value * 100).toFixed(2));
+        setEditing(true);
+      }}
+      title="Click to edit"
+      className={`w-full cursor-text font-mono decoration-dotted hover:underline ${colorCls ?? ""}`}
+    >
+      {formatDisplay(value)}
+    </button>
+  );
+
+  if (value === null && nullTooltip) {
+    return (
+      <TooltipProvider delayDuration={200}>
+        <Tooltip>
+          <TooltipTrigger asChild>{trigger}</TooltipTrigger>
+          <TooltipContent className="max-w-xs text-sm">{nullTooltip}</TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+    );
+  }
+  return trigger;
+}
+
 export function CrushHistoryTable({
   events,
   todayEmPct,
@@ -149,6 +243,10 @@ export function CrushHistoryTable({
   const [eventsWithEm, setEventsWithEm] = useState(0);
   const [eventsWithActual, setEventsWithActual] = useState(0);
   const [fetchError, setFetchError] = useState<string | null>(null);
+  // Per-row save errors for the inline EM/Actual editor, keyed by
+  // earningsDate — independent of fetchError so a failed manual edit
+  // doesn't get lost/overwritten by the next Fetch EM History run.
+  const [editErrors, setEditErrors] = useState<Record<string, string>>({});
 
   // On mount: read the latest events for this symbol from the DB so
   // a re-expand never shows stale stageThree.details.crushHistory
@@ -244,6 +342,67 @@ export function CrushHistoryTable({
       setFetchError(
         `Failed to fetch history — ${e instanceof Error ? e.message : "network error"}. Try again.`,
       );
+    }
+  }
+
+  // Merges a saved/edited row back into whichever array is currently
+  // driving the render (refreshed if the on-mount load already landed,
+  // otherwise props.events) — normalizes to `refreshed` either way so
+  // this is the source of truth for the rest of the row's lifetime.
+  function applyEditedEvent(updated: CrushHistoryEvent) {
+    setRefreshed((prev) => {
+      const base = prev ?? events ?? [];
+      const exists = base.some((e) => e.earningsDate === updated.earningsDate);
+      return exists
+        ? base.map((e) => (e.earningsDate === updated.earningsDate ? updated : e))
+        : [...base, updated];
+    });
+  }
+
+  // Saves one field (EM or Actual) for a row, sending BOTH current
+  // values — the API always recomputes Ratio/Grade from the pair, so
+  // there's never a request that changes one without the other being
+  // present. rawPercent is what the user typed (e.g. 4.5 for 4.5%),
+  // null clears the field.
+  async function saveField(
+    e: CrushHistoryEvent,
+    field: "em" | "actual",
+    rawPercent: number | null,
+  ) {
+    const impliedMovePct =
+      field === "em" ? (rawPercent === null ? null : rawPercent / 100) : e.impliedMovePct;
+    const actualMovePct =
+      field === "actual" ? (rawPercent === null ? null : rawPercent / 100) : e.actualMovePct;
+    try {
+      const res = await fetch("/api/screener/earnings-history/update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          symbol: todaySymbol,
+          earningsDate: e.earningsDate,
+          impliedMovePct,
+          actualMovePct,
+        }),
+        cache: "no-store",
+      });
+      const json = (await res.json()) as { event: CrushHistoryEvent } | { error: string };
+      if (!res.ok || !("event" in json)) {
+        const msg = "error" in json ? json.error : `HTTP ${res.status}`;
+        setEditErrors((prev) => ({ ...prev, [e.earningsDate]: msg }));
+        return;
+      }
+      setEditErrors((prev) => {
+        if (!(e.earningsDate in prev)) return prev;
+        const next = { ...prev };
+        delete next[e.earningsDate];
+        return next;
+      });
+      applyEditedEvent(json.event);
+    } catch (err) {
+      setEditErrors((prev) => ({
+        ...prev,
+        [e.earningsDate]: err instanceof Error ? err.message : "network error",
+      }));
     }
   }
 
@@ -398,32 +557,47 @@ export function CrushHistoryTable({
                 e.impliedMovePct !== null &&
                 Math.abs(e.impliedMovePct - todayEmPct) <= SIMILAR_EM_TOLERANCE;
               const isF = e.grade === "F";
+              const isManual = e.impliedMoveSource === "manual";
+              const rowError = editErrors[e.earningsDate];
               return (
                 <tr
                   key={e.earningsDate}
                   className={`border-t border-border ${isSimilar ? "bg-emerald-500/[0.04]" : ""}`}
                 >
-                  <td className="px-2 py-1 font-mono">{e.qtrLabel}</td>
-                  <td className="px-2 py-1 text-right font-mono">
-                    {e.impliedMovePct === null ? (
+                  <td className="px-2 py-1 font-mono">
+                    {e.qtrLabel}
+                    {isManual && (
                       <TooltipProvider delayDuration={200}>
                         <Tooltip>
                           <TooltipTrigger asChild>
-                            <span className="cursor-help text-muted-foreground">—</span>
+                            <span className="ml-1.5 cursor-help rounded bg-sky-500/15 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-sky-300">
+                              manual
+                            </span>
                           </TooltipTrigger>
                           <TooltipContent className="max-w-xs text-sm">
-                            Implied move not available for this quarter — no historical options-data source (backfill discontinued).
+                            Hand-entered — Fetch EM History will never overwrite this row. Click EM/Actual to re-edit.
                           </TooltipContent>
                         </Tooltip>
                       </TooltipProvider>
-                    ) : (
-                      fmtPct(e.impliedMovePct)
                     )}
+                  </td>
+                  <td className="px-2 py-1 text-right font-mono">
+                    <EditableMoveCell
+                      value={e.impliedMovePct}
+                      formatDisplay={fmtPct}
+                      nullTooltip="Implied move not available for this quarter — no historical options-data source (backfill discontinued). Click to enter it by hand."
+                      onSave={(pct) => saveField(e, "em", pct)}
+                    />
                   </td>
                   <td
                     className={`px-2 py-1 text-right font-mono ${signedPctCls(e.actualMovePct)}`}
                   >
-                    {fmtSignedPct(e.actualMovePct)}
+                    <EditableMoveCell
+                      value={e.actualMovePct}
+                      formatDisplay={fmtSignedPct}
+                      allowNegative
+                      onSave={(pct) => saveField(e, "actual", pct)}
+                    />
                   </td>
                   <td className="px-2 py-1 text-right font-mono">
                     {e.ratio === null && e.actualMovePct !== null && e.impliedMovePct === null ? (
@@ -467,11 +641,19 @@ export function CrushHistoryTable({
                     )}
                   </td>
                   <td className="px-2 py-1 text-[10px] text-muted-foreground">
-                    {isSimilar && (
-                      <span className="text-emerald-300/80">★ similar EM</span>
-                    )}
-                    {!isSimilar && e.impliedMovePct === null && (
-                      <span>EM not available</span>
+                    {rowError ? (
+                      <span className="text-rose-300" title={rowError}>
+                        ⚠ save failed
+                      </span>
+                    ) : (
+                      <>
+                        {isSimilar && (
+                          <span className="text-emerald-300/80">★ similar EM</span>
+                        )}
+                        {!isSimilar && e.impliedMovePct === null && (
+                          <span>EM not available</span>
+                        )}
+                      </>
                     )}
                   </td>
                 </tr>
