@@ -26,11 +26,29 @@ export function PriceChart({
   studies,
   range,
   height,
+  showDateRangeSelector = true,
 }: {
   symbol: string;
   studies?: string[];
   range?: string;
   height?: number;
+  // Default true preserves existing behavior for every caller that
+  // doesn't pass this. Set false to drop BOTH withdateranges and range
+  // from the config entirely — see the comment above `interval` in the
+  // config object for why. Two interval-value fixes ("1D", then "D")
+  // both failed to change the rendered chart, which means something
+  // else in this config is the actual controlling factor; withdateranges
+  // (an interactive range-button UI that plausibly carries its own
+  // range->resolution auto-mapping, the same class of behavior
+  // TradingView's own site exhibits when you click a date-range button)
+  // is the strongest remaining suspect, with `range` removed alongside
+  // it since I can't independently verify from this environment which
+  // of the two is actually responsible — no browser/screenshot tool is
+  // available here, so this couldn't be tested before shipping. If a
+  // caller's chart needs its interval to reliably match an externally-
+  // computed indicator value (Buy Zone's RSI/MACD score, computed on
+  // daily bars), pass false.
+  showDateRangeSelector?: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -48,32 +66,30 @@ export function PriceChart({
     const config: Record<string, unknown> = {
       autosize: true,
       symbol: symbol.toUpperCase(),
-      // Previous fix here set this to "1D", reasoning from the *rendered
-      // chart's own UI dropdown labels* ("1","5","15","60","1H","2H",
-      // "4H","1D","1W","1M") — those are display labels, not the embed
-      // widget's config format. This widget (embed-widget-advanced-
-      // chart.js) silently ignores an unrecognized interval and falls
-      // back to an auto-picked intraday resolution, which is why "1D"
-      // still rendered 2H: the KEY name is right (confirmed working
-      // examples use this exact key with this exact script), the VALUE
-      // format was wrong. TradingView's resolution spec allows omitting
-      // the unit count when it's 1 ("D" instead of "1D") — bare "D" is
-      // also the value used in verified-working embed-widget-advanced-
-      // chart.js examples, unlike "1D" which is confirmed live-broken
-      // on this widget. RSI/MACD are computed from daily bars elsewhere
-      // in the app, so the chart must render daily candles to show
-      // matching values.
+      // History, honestly: two different interval values ("1D", then
+      // "D") were tried here and NEITHER changed the rendered chart —
+      // strong evidence the value format was never the actual problem.
+      // "D" is kept because it's the value used in the one real working
+      // embed-widget-advanced-chart.js example found during
+      // investigation (not because it's been confirmed to matter here).
+      // The real suspect is withdateranges/range below — see
+      // showDateRangeSelector's comment on the component signature.
+      // No browser is available in this dev environment to confirm any
+      // of this by rendering the page; treat "D" as a reasonable,
+      // unverified default, not a proven-correct value.
       interval: "D",
       timezone: "Etc/UTC",
       theme: "dark",
       style: "1",
       locale: "en",
-      withdateranges: true,
       hide_side_toolbar: false,
       allow_symbol_change: false,
       support_host: "https://www.tradingview.com",
     };
-    if (range) config.range = range;
+    if (showDateRangeSelector) {
+      config.withdateranges = true;
+      if (range) config.range = range;
+    }
     if (studies && studies.length > 0) config.studies = studies;
 
     const script = document.createElement("script");
@@ -82,7 +98,7 @@ export function PriceChart({
     script.async = true;
     script.text = JSON.stringify(config);
     container.appendChild(script);
-  }, [symbol, studies, range]);
+  }, [symbol, studies, range, showDateRangeSelector]);
 
   const h = height ?? (studies && studies.length > 0 ? 600 : 400);
 

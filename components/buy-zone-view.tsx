@@ -107,7 +107,6 @@ function insiderSignalColor(signal: string): string {
 
 const ALL_SCOPE = "__all__";
 const CHART_STUDIES = ["STD;RSI", "STD;MACD"];
-const CHART_RANGE = "6M";
 
 type SortKey = "symbol" | "price" | "changePct" | "rsi14" | "macd" | "composite";
 type SortDir = "asc" | "desc";
@@ -489,7 +488,24 @@ export function BuyZoneDetailContent({
             is total container height. RSI/MACD panes have a fixed-ish
             comfortable height regardless of total space, so growing the
             total gives that extra room almost entirely to price. */}
-        <PriceChart symbol={row.symbol} studies={CHART_STUDIES} range={CHART_RANGE} height={720} />
+        {/* showDateRangeSelector={false}, no range passed: two interval-
+            value fixes ("1D", then "D") both failed to change the
+            rendered chart from an auto-picked 2H, which points at
+            withdateranges (the interactive date-range button UI) as the
+            real override — see PriceChart's showDateRangeSelector doc.
+            Interval matching the RSI/MACD score (computed on daily
+            bars) matters more than the 6M default zoom, so this drops
+            the range selector rather than guessing at the interval
+            value again. Not independently verified from this dev
+            environment (no browser/screenshot tool) — check the live
+            chart's own interval label and RSI reading against the
+            row's RSI for the same symbol. */}
+        <PriceChart
+          symbol={row.symbol}
+          studies={CHART_STUDIES}
+          height={720}
+          showDateRangeSelector={false}
+        />
         <AnalystReadPanel row={row} />
       </div>
       <ResearchPanel row={row} research={research} loading={loading} error={error} onResearch={onResearch} />
