@@ -48,13 +48,22 @@ export function PriceChart({
     const config: Record<string, unknown> = {
       autosize: true,
       symbol: symbol.toUpperCase(),
-      // "D" alone isn't a recognized resolution for this widget and
-      // silently fell back to an auto-picked intraday interval (2H) —
-      // this widget's schema wants "1D" (matches its own resolution
-      // menu strings: "1","5","15","60","1H","2H","4H","1D","1W","1M").
-      // RSI/MACD are computed from daily bars elsewhere in the app, so
-      // the chart must render daily candles to show matching values.
-      interval: "1D",
+      // Previous fix here set this to "1D", reasoning from the *rendered
+      // chart's own UI dropdown labels* ("1","5","15","60","1H","2H",
+      // "4H","1D","1W","1M") — those are display labels, not the embed
+      // widget's config format. This widget (embed-widget-advanced-
+      // chart.js) silently ignores an unrecognized interval and falls
+      // back to an auto-picked intraday resolution, which is why "1D"
+      // still rendered 2H: the KEY name is right (confirmed working
+      // examples use this exact key with this exact script), the VALUE
+      // format was wrong. TradingView's resolution spec allows omitting
+      // the unit count when it's 1 ("D" instead of "1D") — bare "D" is
+      // also the value used in verified-working embed-widget-advanced-
+      // chart.js examples, unlike "1D" which is confirmed live-broken
+      // on this widget. RSI/MACD are computed from daily bars elsewhere
+      // in the app, so the chart must render daily candles to show
+      // matching values.
+      interval: "D",
       timezone: "Etc/UTC",
       theme: "dark",
       style: "1",
