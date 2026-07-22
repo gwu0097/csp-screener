@@ -1220,6 +1220,7 @@ type HistoryRow = {
   price_before: number | null;
   price_after: number | null;
   implied_move_pct: number | null;
+  implied_move_source: string | null;
   two_x_em_strike: number | null;
   iv_before: number | null;
   iv_after: number | null;
@@ -1369,6 +1370,17 @@ export async function captureEarningsT0(
   if (!row && !dryRun) {
     return { captured: false, skipped: true, reason: "row_not_found" };
   }
+  // Hand-entered rows (earnings-history table's inline EM/Actual editor)
+  // are never touched by the automated capture cron — same rule as
+  // FETCH EM HISTORY's seed paths. This is the HIGHER-risk gap of the
+  // two: T0 targets the current day's reporters, exactly the quarter a
+  // user is most likely to have just hand-entered. iv_before is still
+  // null on a manual-only row (the editor never touches it), so the
+  // already_captured gate below does NOT catch this case on its own —
+  // this check has to come first, not rely on that one.
+  if (row && row.implied_move_source === "manual") {
+    return { captured: false, skipped: true, reason: "manual_row" };
+  }
   // Gate on iv_before, NOT implied_move_pct: the live-EM tracker
   // (lib/earnings-history-table) pre-stamps implied_move_pct on
   // upcoming events days before the print, and gating on it silently
@@ -1473,6 +1485,14 @@ export async function captureEarningsT1(
   const sym = symbol.toUpperCase();
   const row = await readHistoryRow(sym, earningsDate);
   if (!row) return { captured: false, skipped: true, reason: "row_not_found" };
+  // Same manual-row protection as T0 above — covers the sequence where
+  // T0 ran first (stamping iv_before), the user then hand-edited the
+  // row that same day, and T1 would otherwise overwrite it that
+  // evening. The existing iv_after/no_t0_data gates below don't check
+  // provenance, so this has to run before them.
+  if (row.implied_move_source === "manual") {
+    return { captured: false, skipped: true, reason: "manual_row" };
+  }
   if (row.iv_after !== null) {
     return { captured: false, skipped: true, reason: "already_captured" };
   }
