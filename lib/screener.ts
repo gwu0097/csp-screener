@@ -29,7 +29,9 @@ import {
   gradeFromRatio,
   persistFlowSnapshot,
   persistLiveImpliedMove,
+  computeLossMultiplierLadder,
   type CrushHistoryEvent,
+  type LossMultiplierResult,
 } from "@/lib/earnings-history-table";
 import { computeOptionsFlow, type OptionsFlow } from "@/lib/options-flow";
 
@@ -83,10 +85,77 @@ export type StageThreeResult = {
     ivEdgeScore: number;
     surpriseScore: number;
     medianHistoricalMovePct: number | null;
+    // Fix C: mean of each historical event's OWN realized/implied-at-
+    // the-time ratio (getCrushHistory, Schwab-verified quarters only —
+    // see computeCrushRatioCap), applied as a CAP on crushGrade, not
+    // folded into the additive score above. Populated post-hoc in
+    // runStagesThreeFour (needs crushHistory, fetched after this
+    // function returns) — placeholder null/0/false here.
+    // NEVER medianHistoricalMovePct / today's current emPct — that
+    // conflates calibration quality with vol-regime drift (PASS_2A: NOW
+    // read 0.6-0.73x that way vs its real 1.55x per-event mean).
+    crushRatio: number | null;
+    crushRatioSeverity: "none" | "moderate" | "severe" | null;
+    crushRatioCapSampleWeight: number;
+    // Count of Schwab-verified quarters the ratio/weight above are based
+    // on — distinct from historicalMoves.length. 0 is the common case
+    // today (~19% of tickers have any); visible so a 0 isn't mistaken
+    // for "no data available" rather than "no VERIFIED data available."
+    crushRatioVerifiedN: number;
+    crushRatioCap: "A" | "B" | "C" | null;
+    // True when the cap actually lowered the grade the composite score
+    // (or the encyclopedia fallback) would otherwise have produced.
+    crushRatioCapApplied: boolean;
+    // Implied move actually used downstream (crush scoring, stage 4
+    // strike selection). Straddle-derived when available; see
+    // impliedMoveMethod for which method produced this value.
     expectedMovePct: number | null;
+    // "straddle" = ATM straddle mid / spot (Fix A, preferred).
+    // "iv_formula_degraded" = fell back to the old single-put IV × √t
+    // formula because no call chain or no usable straddle quote
+    // existed — never silent, always flagged here.
+    impliedMoveMethod: "straddle" | "iv_formula_degraded" | null;
+    impliedMoveDegradedReason: string | null;
+    // Diagnostic only, not used by any scoring — the old formula's
+    // value computed alongside the real one whenever possible, purely
+    // so before/after comparisons don't require a second run.
+    impliedMovePctIvFormula: number | null;
     weeklyIv: number | null;
     monthlyIv: number | null;
     realizedVol30d: number | null;
+    // True when termStructureScore is a degenerate 0, not a real
+    // signal: the monthly-IV-window fetch landed on the same expiry
+    // date as the (possibly monthly-fallback) candidate.expiry, so
+    // "weekly vs monthly" collapsed to "expiry vs itself". NOT folded
+    // into the crush composite — that renormalization is out of scope
+    // this pass (crush-composite-weighting backlog). Segment on it
+    // instead. See PASS_2A checkpoint notes.
+    termStructureExcluded?: boolean;
+    // |spot - strike| / spot for the straddle's nearest-strike ATM
+    // pick. Null when method=iv_formula_degraded (no straddle to
+    // measure). See atmDistanceFlag for the derived threshold.
+    atmDistancePct: number | null;
+    // Static intrinsic value of the ITM leg as a fraction of the
+    // straddle mid. Diagnostic — FBP measured 73.2%, a normal tight
+    // strike grid measures low single digits.
+    intrinsicPctOfStraddle: number | null;
+    // FLAG (not a kill): atmDistancePct > ivFormulaEmPct/2 — see the
+    // derivation comment beside atmDistanceFlag's computation in
+    // runStageThree. True means the straddle succeeded but its ATM
+    // strike is far enough from spot that intrinsic value materially
+    // contaminates emPct; segment these out of the Fix B distribution
+    // rather than treating them as clean reads.
+    atmDistanceFlag: boolean;
+    // Fix B: E[loss|breach] expressed as a multiple of this candidate's
+    // own emPct — see computeLossMultiplierLadder. Stamped by
+    // runStagesThreeFour (async DB read); optional so older mocked
+    // StageThreeResult fixtures still type-check, calculateThreeLayerGrade
+    // falls back to the pool default when absent.
+    lossMultiplier?: number;
+    lossMultiplierSource?: "ticker" | "sector" | "pool";
+    lossMultiplierTickerN?: number;
+    lossMultiplierSectorN?: number;
+    lossMultiplierPoolN?: number;
     // Per-quarter EM/actual/ratio/grade history for the expanded
     // screener row's crush table. Stamped by runStagesThreeFour
     // after stage 3 completes; older rows may have null EM where
@@ -134,7 +203,17 @@ export type StageFourResult = {
     strike: number;
     bid: number;
     ask: number;
+    // Mid ((bid+ask)/2, falling back to mark/last only when bid+ask
+    // isn't usable) — informational/spread-denominator use ONLY. Never
+    // read this as a tradeable premium; see premiumBid.
     mark: number;
+    // The CSP entry premium, matching runStageFour's own bid-only rule
+    // (line ~1596: `noBid ? 0 : bid`). 0 when bid is missing/non-numeric
+    // — never backfilled from mark/last, same "no bid = no real market"
+    // reasoning as the hard-kill it mirrors. This is what
+    // CustomStrikeAnalyzer/EditableStrikeCell must use for premium;
+    // `mark` stays mid for their spread% denominator.
+    premiumBid: number;
     delta: number;
   }>;
 };
@@ -166,6 +245,11 @@ export type ScreenerResult = {
   earningsTiming: "BMO" | "AMC";
   daysToExpiry: number;
   expiry: string;
+  // "monthly_fallback" when no weekly existed at the earnings-driven
+  // Friday and the pipeline fell back to the nearest standard monthly
+  // expiry after the earnings date instead. Never silent — see
+  // runStagesThreeFour's fallback block.
+  expirySource: "weekly" | "monthly_fallback";
   stoppedAt: 1 | 2 | 3 | 4 | null;
   stageOne: StageOneResult;
   stageTwo: StageTwoResult | null;
@@ -212,6 +296,14 @@ export type ThreeLayerGrade = {
     opportunityGrade: Grade;
     expectedValue: number;
     breakevenPrice: number;
+    // Fix B: which tier of the shrinkage ladder set the E[loss|breach]
+    // multiplier baked into expectedValue — "pool" near-universally as
+    // of PASS_2A (see the comment on assignmentLoss in
+    // calculateThreeLayerGrade). Parallel to expirySource: carried here
+    // so a candidate's EV can be segmented by evidence quality without
+    // reaching into stageThree.details.
+    lossMultiplierSource: "ticker" | "sector" | "pool";
+    lossMultiplier: number;
   };
   personalGrade: Grade | "INSUFFICIENT";
   personalScore: number | null;
@@ -264,6 +356,12 @@ export type ThreeLayerGrade = {
   finalScore: number;
   recommendation: string;
   recommendationReason: string;
+  // Passed through from ScreenerResult so the grading layer (and Fix B's
+  // loss model) can see it without reaching back into a sibling field —
+  // "weekly" is a clean earnings straddle, "monthly_fallback" blends the
+  // earnings jump with weeks of ordinary drift. Not used by any scoring
+  // yet; purely plumbing so it CAN be segmented on.
+  expirySource: "weekly" | "monthly_fallback";
 };
 
 export type PersonalHistory = {
@@ -510,6 +608,135 @@ function gradeFromCrushScore(score: number): StageThreeResult["crushGrade"] {
   return "F";
 }
 
+// ---------- Fix C: realized/implied ratio as a CAP, not a blend input ----------
+//
+// historicalMoveScore (one of five additive sub-scores, 8/25 points) was
+// the only place the realized/implied ratio entered the crush grade — a
+// bad ratio could still be outvoted by the other four (audit finding:
+// "1.24x avg, inside 67% of 3 events, dangerous" still produced Crush B).
+// This applies the ratio as a POST-HOC ceiling on whatever grade the
+// composite produces, so a bad calibration bounds the grade regardless of
+// termStructureScore/ivEdgeScore/etc.
+//
+// PASS_2A revision: the ratio is the MEAN of each historical event's OWN
+// realized-move / implied-move-AT-THE-TIME (getCrushHistory's per-quarter
+// `ratio` field) — never medianHistoricalMovePct / today's current emPct.
+// That earlier version conflated calibration quality with vol-regime
+// drift over time: NOW's real per-event ratios (1.87x Q1'26, 1.23x Q4'25,
+// mean 1.55x) read as a benign 0.6-0.73x when divided by today's current
+// EM instead, because today's IV happens to be higher than those two
+// quarters' implied moves — a fact about vol regime, not about whether
+// NOW's vol was underpriced at the time. Per-event ratios don't have that
+// problem: each is compared against what was actually priced in that
+// quarter.
+//
+// MEAN, not median: with n this thin (rarely more than 2-3 usable
+// quarters — see the source-quality filter below), a single severe print
+// should move the number. That's signal a name has an ugly tail in its
+// history, not an outlier to smooth away; median at n=2 just picks the
+// less alarming of two data points, which is the wrong instinct here.
+//
+// Source-quality filter (PASS_2A follow-up audit): only quarters with
+// implied_move_source IN ("schwab", "schwab_t0") count. Audited the full
+// distribution — of 144 earnings_history rows with any implied_move_pct,
+// 64% are implied_move_source="perplexity" (an LLM asked to recall a
+// historical %, filtered only by its own self-reported confidence and a
+// [5,25]% plausibility band — not verified against real market data) and
+// 17% are "polygon" (no code path anywhere in this repo produces that
+// value — unknown, unverifiable origin). Only 19% are schwab-sourced,
+// live-captured, trustworthy quarters. Building the cap on the other 81%
+// would launder unverified numbers through correct aggregation math.
+// Consequence, stated plainly: with ~19% coverage skewed toward recent
+// quarters (schwab capture only started this pass), most tickers will
+// have 0-1 verified quarters — the ratio-severity tiers will be dormant
+// almost everywhere today, same shape as Fix B's dormant loss-depth
+// multiplier. That's the honest result of only trusting verified data,
+// not a reason to loosen the filter.
+//
+// Severity bands derived from the ratio's own meaning, not fit to any
+// fixture:
+//   ratio <= 1.0            realized has NOT exceeded implied on average
+//                            — no evidence of underpricing, no cap.
+//   1.0 < ratio <= 2.0       "moderate" — realized runs hotter than
+//                            implied, up to double.
+//   ratio > 2.0              "severe" — realized moves TWICE what was
+//                            priced in, on average. 2.0 is not an
+//                            arbitrary pick: it's the same "how far is
+//                            far" multiplier this pass already uses as
+//                            the canonical breach reference (Stage 4's
+//                            2xEM strike, Fix B's breach-past-2xEM
+//                            definition) — reused here, not invented.
+//
+// Sample-size interaction reuses Layer 2's exact weight ladder
+// (getPersonalHistory's tradeCount>=5/2/1 -> 1.0/0.5/0.25), applied to
+// the count of SCHWAB-VERIFIED quarters — not historicalMoves.length,
+// not total quarters with any implied move:
+//   weight 1.0 (n>=5): full ratio-cap applies as derived (B or C).
+//   weight 0.5 (n 2-4): severe evidence still caps at C (a >2x miss is
+//     its own corroboration even at modest n) but moderate evidence does
+//     NOT cap on its own at this weight — however THIN SAMPLES ALSO
+//     IMPOSE A SEPARATE CEILING of B regardless of ratio value ("must not
+//     grant a top grade either" — uncertainty cuts both ways).
+//   weight 0.25 (n==1): a single verified event can't force the
+//     strictest cap alone (severe caps at B here, not C) but the same
+//     thin-sample B ceiling still applies.
+//   n==0 (no schwab-verified quarters at all — the common case today):
+//     NOT treated as "nothing to cap on" — this is the THINNEST possible
+//     case, so the same B ceiling applies here too, for the stated
+//     reason (zero verified history), not silently deferred to some
+//     other mechanism.
+const GRADE_ORDER: Record<"A" | "B" | "C" | "F", number> = { A: 3, B: 2, C: 1, F: 0 };
+
+export function capGrade(actual: "A" | "B" | "C" | "F", cap: "A" | "B" | "C" | "F" | null): "A" | "B" | "C" | "F" {
+  if (cap === null) return actual;
+  return GRADE_ORDER[actual] <= GRADE_ORDER[cap] ? actual : cap;
+}
+
+export type CrushRatioCapResult = {
+  ratio: number | null;
+  severity: "none" | "moderate" | "severe" | null;
+  sampleWeight: number;
+  cap: "A" | "B" | "C" | null; // null = uncapped
+  verifiedN: number;
+};
+
+// schwabRatios: each historical event's actualMovePct / impliedMovePct,
+// pre-filtered by the caller to implied_move_source IN
+// ("schwab","schwab_t0") — see getCrushHistory. Never pass a
+// medianMove/currentEM ratio here.
+export function computeCrushRatioCap(schwabRatios: number[]): CrushRatioCapResult {
+  const n = schwabRatios.length;
+  const ratio = n > 0 ? schwabRatios.reduce((sum, r) => sum + r, 0) / n : null;
+  const sampleWeight = n >= 5 ? 1.0 : n >= 2 ? 0.5 : n === 1 ? 0.25 : 0;
+
+  let severity: "none" | "moderate" | "severe" | null = null;
+  let ratioCap: "A" | "B" | "C" | null = null;
+  if (ratio !== null) {
+    severity = ratio <= 1.0 ? "none" : ratio <= 2.0 ? "moderate" : "severe";
+    if (severity === "severe") {
+      ratioCap = sampleWeight >= 0.5 ? "C" : "B";
+    } else if (severity === "moderate") {
+      ratioCap = sampleWeight >= 1.0 ? "B" : null;
+    }
+  }
+
+  // "Must not grant a top grade either" — thin samples (n<5), INCLUDING
+  // n=0, can't certify an A regardless of how favorable (or absent) the
+  // ratio looks.
+  const thinCeiling: "A" | "B" | "C" | null = sampleWeight < 1.0 ? "B" : null;
+
+  const cap =
+    ratioCap === null
+      ? thinCeiling
+      : thinCeiling === null
+        ? ratioCap
+        : GRADE_ORDER[ratioCap] <= GRADE_ORDER[thinCeiling]
+          ? ratioCap
+          : thinCeiling;
+
+  return { ratio, severity, sampleWeight, cap, verifiedN: n };
+}
+
 // Score the median historical move against today's IV-implied move.
 // We don't store per-event historical IV (Phase 2), so the denominator
 // is the CURRENT weekly emPct for every event in the window — same as
@@ -599,6 +826,174 @@ function expectedMoveFromIv(iv: number | null, dte: number): number | null {
   return iv * Math.sqrt(dte / 365);
 }
 
+// Straddle-derived implied move (Fix A). Prior method: single ATM
+// put's IV × √t — a formula proxy that ran systematically cooler than
+// the market's actual priced-in move, since it never looked at what
+// the straddle itself costs. This reads the price directly: expected
+// move ≈ ATM straddle price / spot, the standard textbook definition.
+//
+// ATM strike selection: NEAREST strike to spot, not interpolation
+// between the two bracketing strikes. Matches the existing
+// pickAtmContract convention elsewhere in this file, and interpolation
+// buys marginal precision for real complexity on a screener signal —
+// this isn't pricing a live straddle trade, it's estimating one
+// number. Judgment call, not derived from options math.
+//
+// Put and call legs are pinned to the SAME strike (a true straddle) —
+// if the call side has no contract at the put's chosen strike (a
+// mismatched strike grid), this returns null and the caller degrades
+// to the old method rather than pricing two different strikes as if
+// they were one straddle.
+//
+// Pricing: leg mid = (bid+ask)/2, falling back to mark/last only when
+// bid+ask isn't usable. This is deliberately NOT the same side as pass
+// 1's premium decision (bid, because a CSP SELLER only realizes the
+// bid). There's no seller/buyer role here — this is a market-implied
+// measurement, not a transaction — and mid is the standard convention
+// for expected-move calculations specifically because it's unbiased:
+// using ask would systematically overstate the move, bid would
+// systematically understate it, the same failure mode Fix A exists to
+// correct in the first place. Returns null (triggering the degraded
+// fallback) if EITHER leg has no usable bid/ask/mark/last at all.
+//
+// No adjustment/scaling factor is applied to the raw straddle-over-
+// spot ratio. I looked for a principled, non-empirical justification
+// for one and found none — some practitioners apply a correction
+// factor, but any specific value I picked without a real derivation
+// would be exactly the "back-solve a constant to get a nicer number"
+// the task explicitly forbids.
+// A leg needs BOTH a real bid AND a real ask to count as a usable
+// two-sided quote — the same "no bid = no real market" reasoning as
+// pass 1's hard kill, extended here since a zero bid with a nonzero
+// ask still produces a positive (bid+ask)/2 that looks like a normal
+// mid price while actually reflecting no buyer at any price. Found
+// live on KHC's put leg (bid=0, ask=1.13) during Checkpoint A
+// verification — without this guard the straddle would have silently
+// priced in a one-sided quote. No mark/last fallback here either. for
+// the same reason pass 1 didn't fall back for the no-bid premium case.
+//
+// No-arbitrage floor: an American option's bid can never be below its
+// own intrinsic value (put intrinsic = max(strike-spot,0), call
+// intrinsic = max(spot-strike,0)) — a market maker will always bid at
+// least intrinsic, since exercising immediately locks in that much.
+// A sub-intrinsic bid is a stale/unquotable print, not a real price;
+// this is a correctness invariant, not a tunable threshold. Found live
+// on FBP (put bid=1.10, intrinsic=2.36) during Checkpoint A follow-up —
+// averaging that bid in produced a straddle that was 73% intrinsic.
+function legMidPrice(c: SchwabOptionContract, spot: number, side: "PUT" | "CALL"): number | null {
+  const bid = Number.isFinite(c.bid) ? c.bid : 0;
+  const ask = Number.isFinite(c.ask) ? c.ask : 0;
+  if (bid <= 0 || ask <= 0) return null;
+  const intrinsic = side === "PUT" ? Math.max(c.strikePrice - spot, 0) : Math.max(spot - c.strikePrice, 0);
+  if (bid < intrinsic) return null;
+  return (bid + ask) / 2;
+}
+
+export type StraddleImpliedMove = {
+  emPct: number;
+  strike: number;
+  putMid: number;
+  callMid: number;
+  // |spot - strike| / spot for the nearest-strike ATM pick. Always
+  // populated on success so callers can flag wide-grid contamination
+  // (see runStageThree's atmDistanceFlag) without recomputing it.
+  atmDistancePct: number;
+  // Static intrinsic value of the ITM leg as a fraction of the total
+  // straddle mid. Diagnostic only — the flag decision lives in
+  // runStageThree, where an independent EM reference (ivFormulaEmPct)
+  // is available to size the threshold.
+  intrinsicPctOfStraddle: number;
+};
+
+// Deliberately no sanity bound here checking straddle/spot against the
+// ~0.7979 Brenner-Subrahmanyam constant (straddle ≈ 0.8 x IV x sqrt(T)).
+// That relationship assumes continuous lognormal diffusion; measured
+// against real earnings straddles it holds at dte=3 (~0.78-0.79) but
+// rises to ~0.95-1.07 at dte=2 (checkpoint A, PM/CME/PHM/T/EQT/NLY) —
+// the straddle is correctly pricing the discrete earnings jump that the
+// continuous formula can't see. That divergence from 0.8x is exactly
+// the signal this method exists to capture; a guard around the constant
+// would flag every real event as broken.
+function computeStraddleImpliedMove(
+  chain: SchwabOptionsChain,
+  expiryPrefix: string,
+  spot: number,
+): { move: StraddleImpliedMove | null; failureReason: string | null } {
+  if (spot <= 0) return { move: null, failureReason: "no spot price" };
+  const putExpKey = Object.keys(chain.putExpDateMap ?? {}).find((k) => k.startsWith(expiryPrefix));
+  const callExpKey = Object.keys(chain.callExpDateMap ?? {}).find((k) => k.startsWith(expiryPrefix));
+  if (!putExpKey || !callExpKey) return { move: null, failureReason: "no matching expiry key on put or call side" };
+
+  const puts = Object.values(chain.putExpDateMap[putExpKey] ?? {})
+    .flat()
+    .filter((c) => !c.putCall || c.putCall === "PUT");
+  const calls = Object.values(chain.callExpDateMap[callExpKey] ?? {})
+    .flat()
+    .filter((c) => !c.putCall || c.putCall === "CALL");
+  if (puts.length === 0 || calls.length === 0) return { move: null, failureReason: "empty put or call leg" };
+
+  let put = puts[0];
+  let bestDiff = Math.abs(put.strikePrice - spot);
+  for (const c of puts) {
+    const diff = Math.abs(c.strikePrice - spot);
+    if (diff < bestDiff) {
+      put = c;
+      bestDiff = diff;
+    }
+  }
+  const call = calls.find((c) => c.strikePrice === put.strikePrice);
+  if (!call) return { move: null, failureReason: "no call at the put's ATM strike (strike grid mismatch)" };
+
+  const putMid = legMidPrice(put, spot, "PUT");
+  const callMid = legMidPrice(call, spot, "CALL");
+  if (putMid === null || callMid === null) {
+    const putBid = Number.isFinite(put.bid) ? put.bid : 0;
+    const callBid = Number.isFinite(call.bid) ? call.bid : 0;
+    const putIntrinsic = Math.max(put.strikePrice - spot, 0);
+    const callIntrinsic = Math.max(spot - call.strikePrice, 0);
+    const arbViolation =
+      (putMid === null && put.bid > 0 && put.ask > 0 && putBid < putIntrinsic) ||
+      (callMid === null && call.bid > 0 && call.ask > 0 && callBid < callIntrinsic);
+    return {
+      move: null,
+      failureReason: arbViolation
+        ? "leg bid below its own intrinsic value (no-arbitrage violation — stale/unquotable print)"
+        : "missing bid/ask on a leg",
+    };
+  }
+
+  const straddleMid = putMid + callMid;
+  const intrinsic = Math.max(put.strikePrice - spot, 0) + Math.max(spot - call.strikePrice, 0);
+  return {
+    move: {
+      emPct: straddleMid / spot,
+      strike: put.strikePrice,
+      putMid,
+      callMid,
+      atmDistancePct: bestDiff / spot,
+      intrinsicPctOfStraddle: straddleMid > 0 ? intrinsic / straddleMid : 0,
+    },
+    failureReason: null,
+  };
+}
+
+// Pick the soonest listed expiry in a range chain — used by the
+// monthly-fallback path, where the range already starts at the
+// unavailable weekly Friday, so the earliest key present is the
+// nearest standard monthly expiry after the earnings date. Schwab keys
+// look like "2026-05-16:32" (date:dte); only the date half is used —
+// dte gets recomputed from today, not trusted from the key.
+function pickEarliestExpiry(chain: SchwabOptionsChain): { key: string; date: string } | null {
+  const keys = Object.keys(chain.putExpDateMap ?? {});
+  let best: { key: string; date: string } | null = null;
+  for (const k of keys) {
+    const date = k.split(":")[0];
+    if (!date) continue;
+    if (!best || date < best.date) best = { key: k, date };
+  }
+  return best;
+}
+
 // Pick the expiration key whose DTE is closest to the target DTE, within the
 // allowed [minDte, maxDte] window. Schwab keys look like "2026-05-16:32".
 function pickExpirationNear(
@@ -659,12 +1054,63 @@ export async function runStageThree(
     console.warn(`[stage3:${sym}] monthlyChain is null — monthly IV unavailable`);
   }
 
-  const emPct = expectedMoveFromIv(weeklyIv, candidate.daysToExpiry);
+  // Fix A: prefer the straddle-derived implied move; the old IV×√t
+  // formula is computed regardless (diagnostic field + degraded
+  // fallback) so a before/after comparison never needs a second run.
+  const ivFormulaEmPct = expectedMoveFromIv(weeklyIv, candidate.daysToExpiry);
+  const { move: straddle, failureReason: straddleFailureReason } = computeStraddleImpliedMove(
+    chain,
+    candidate.expiry,
+    candidate.price,
+  );
+  let emPct: number | null;
+  let impliedMoveMethod: "straddle" | "iv_formula_degraded" | null;
+  let impliedMoveDegradedReason: string | null;
+  if (straddle !== null) {
+    emPct = straddle.emPct;
+    impliedMoveMethod = "straddle";
+    impliedMoveDegradedReason = null;
+  } else {
+    emPct = ivFormulaEmPct;
+    impliedMoveMethod = ivFormulaEmPct !== null ? "iv_formula_degraded" : null;
+    impliedMoveDegradedReason = straddleFailureReason ?? "no usable ATM straddle quote";
+  }
+  // FLAG, not a kill: the nearest available strike can sit far enough
+  // from spot that static intrinsic value swamps the time-value signal
+  // the straddle is supposed to measure (FBP: strike 8.5% from spot,
+  // straddle 73% intrinsic). Threshold is derived, not fit to FBP —
+  // see the comment on atmDistanceFlag below — and only ever narrows
+  // confidence in an already-computed straddle reading; it never
+  // substitutes the degraded IV×√t method, which has no ATM-distance
+  // concept of its own to fall back on.
+  const atmDistancePct = straddle?.atmDistancePct ?? null;
+  const intrinsicPctOfStraddle = straddle?.intrinsicPctOfStraddle ?? null;
+  // Derivation: straddleMid decomposes as intrinsic + 2×(ITM leg's time
+  // value), and put-call parity puts that time-value term at roughly
+  // ivFormulaEmPct × spot for a true ATM strike (ivFormulaEmPct is an
+  // independent reference — single-put IV × √t, computed above,
+  // unrelated to the straddle or its strike grid). Flagging at
+  // atmDistancePct > ivFormulaEmPct/2 means: by the time the strike-grid
+  // error reaches half the size of the move itself, algebra gives
+  // intrinsic ≈ 1/3 of the reported straddle price — a third of the
+  // number is static ITM value, not a market read. Scales with each
+  // name's own vol level (adaptive), not a flat percentage that would
+  // be too loose for a high-IV name and too tight for a low-IV one.
+  const atmDistanceFlag =
+    straddle !== null &&
+    atmDistancePct !== null &&
+    ivFormulaEmPct !== null &&
+    ivFormulaEmPct > 0 &&
+    atmDistancePct > ivFormulaEmPct / 2;
+  console.log(
+    `[stage3:${sym}] implied move: method=${impliedMoveMethod ?? "none"} emPct=${emPct ?? "null"} ` +
+      `${straddle ? `straddle(strike=${straddle.strike} putMid=${straddle.putMid.toFixed(2)} callMid=${straddle.callMid.toFixed(2)} atmDistancePct=${(straddle.atmDistancePct * 100).toFixed(2)}% intrinsicPct=${(straddle.intrinsicPctOfStraddle * 100).toFixed(1)}% atmDistanceFlag=${atmDistanceFlag})` : `degraded(${impliedMoveDegradedReason})`} ` +
+      `ivFormulaEmPct=${ivFormulaEmPct ?? "null"} (weeklyIv * sqrt(${candidate.daysToExpiry}/365))`,
+  );
   const movePcts = historicalMoves.map((m) => m.actualMovePct);
   const medianMove = movePcts.length > 0 ? median(movePcts) : null;
   console.log(
-    `[stage3:${sym}] historicalMoves count=${historicalMoves.length} medianMove=${medianMove ?? "null"} ` +
-      `emPct=${emPct ?? "null"} (weeklyIv * sqrt(${candidate.daysToExpiry}/365))`,
+    `[stage3:${sym}] historicalMoves count=${historicalMoves.length} medianMove=${medianMove ?? "null"} emPct=${emPct ?? "null"}`,
   );
 
   // 30-day realized vol proxy. Daily bars settle once at EOD, so this
@@ -776,12 +1222,18 @@ export async function runStageThree(
     );
   }
 
+  // Fix C's crushRatioCap is applied later, in runStagesThreeFour, once
+  // getCrushHistory's per-quarter data (with per-event implied_move_source)
+  // is available — this function only has historicalMoves (Yahoo realized
+  // moves) and today's current emPct, which is exactly the wrong pair to
+  // build the ratio from (see the comment on computeCrushRatioCap). These
+  // detail fields are placeholders, overwritten post-hoc.
   return {
     score,
     maxScore: 25,
     pass: score >= threshold,
-    threshold,
     crushGrade: gradeFromCrushScore(score),
+    threshold,
     insufficientData: historicalMoves.length < 3,
     details: {
       historicalMoveScore,
@@ -791,9 +1243,31 @@ export async function runStageThree(
       surpriseScore,
       medianHistoricalMovePct: medianMove,
       expectedMovePct: emPct,
+      crushRatio: null,
+      crushRatioSeverity: null,
+      crushRatioCapSampleWeight: 0,
+      crushRatioVerifiedN: 0,
+      crushRatioCap: null,
+      crushRatioCapApplied: false,
+      impliedMoveMethod,
+      impliedMoveDegradedReason,
+      impliedMovePctIvFormula: ivFormulaEmPct,
       weeklyIv,
       monthlyIv,
       realizedVol30d: realizedVol,
+      // Structural, not numeric — compares the expiry DATE the monthly-
+      // IV window picked against candidate.expiry, not the IV values
+      // themselves. weeklyIv and monthlyIv come from two independent
+      // pickAtmContract calls against two separately-fetched chains
+      // (different HTTP round-trips), so an exact float match isn't
+      // guaranteed even when they're the same contract; the expiry
+      // key is the real invariant "did both reads land on the same
+      // expiration."
+      termStructureExcluded:
+        monthlyExpiryKey !== null && monthlyExpiryKey.startsWith(`${candidate.expiry}:`),
+      atmDistancePct,
+      intrinsicPctOfStraddle,
+      atmDistanceFlag,
     },
   };
 }
@@ -1160,12 +1634,25 @@ export async function runStageFour(
     for (const arr of Object.values(strikesSourceChain.putExpDateMap[expKey])) {
       for (const c of arr) {
         if (c.putCall && c.putCall !== "PUT") continue;
+        // Mid — informational only, feeds EditableStrikeCell's spread%
+        // denominator. Unchanged from before this fix.
         const strikeMid = (c.bid + c.ask) / 2 || c.mark || c.last || 0;
+        // Premium — same rule as the suggested strike's own premium
+        // above (noBid ? 0 : bid). Explicit NaN/non-numeric check, not
+        // a `||` chain: `(NaN + ask)/2` is falsy in JS, which is
+        // exactly how a bad quote silently fell through to raw Schwab
+        // mark before this fix (TMUS: bid/ask unusable on that
+        // snapshot, mark ask-skewed, card showed 0.43 against a
+        // 0.25/0.45 market). A missing/non-numeric bid means "no real
+        // market for this contract" — treat it as zero-bid, same as
+        // the hard-kill this mirrors, never backfilled from mark/last.
+        const strikeBid = Number.isFinite(c.bid) && c.bid > 0 ? c.bid : 0;
         availableStrikes!.push({
           strike: c.strikePrice,
           bid: c.bid,
           ask: c.ask,
           mark: Math.round(strikeMid * 100) / 100,
+          premiumBid: Math.round(strikeBid * 100) / 100,
           delta: Math.round(c.delta * 1000) / 1000,
         });
       }
@@ -1238,7 +1725,13 @@ export function buildCandidateFromEarnings(
   today.setUTCHours(0, 0, 0, 0);
   const seed = earningsDate < today ? today : earningsDate;
   const friday = nextFridayOnOrAfter(seed);
-  const dte = businessDaysBetween(seed, friday);
+  // daysToExpiry is the option's real time-to-expiration and must be
+  // measured from TODAY (the screening date), never from `seed`/
+  // earningsDate. A BMO name reporting tomorrow still has a contract
+  // whose time value runs from today->expiry, not tomorrow->expiry —
+  // anchoring on earningsDate understates t and (via expectedMoveFromIv)
+  // silently deflates the IV-formula fallback's expected move.
+  const dte = businessDaysBetween(today, friday);
   return {
     symbol: row.symbol,
     price,
@@ -1276,9 +1769,16 @@ export async function safeGetChainRange(
   symbol: string,
   fromDate: string,
   toDate: string,
+  opts: { contractType?: "PUT" | "CALL" | "ALL"; strikeCount?: number } = {},
 ): Promise<SchwabOptionsChain | null> {
   try {
-    return await getOptionsChainRange(symbol, fromDate, toDate);
+    return await getOptionsChainRange(
+      symbol,
+      fromDate,
+      toDate,
+      opts.contractType ?? "PUT",
+      opts.strikeCount ?? 30,
+    );
   } catch (e) {
     console.warn(
       `[screener] safeGetChainRange(${symbol}, ${fromDate}→${toDate}) failed:`,
@@ -1350,6 +1850,9 @@ export async function evaluateStagesOneTwo(
     earningsTiming: candidate.earningsTiming,
     daysToExpiry: candidate.daysToExpiry,
     expiry: candidate.expiry,
+    // Stage 1/2 hasn't attempted a chain fetch yet; runStagesThreeFour
+    // overwrites this if it falls back to a monthly expiry.
+    expirySource: "weekly",
     stageOne,
     stageTwo,
     errors: [],
@@ -1378,7 +1881,7 @@ export async function runStagesThreeFour(
   base: ScreenerResult,
   opts?: { skipPersist?: boolean; forceFresh?: boolean },
 ): Promise<ScreenerResult> {
-  const candidate: EarningsCandidate = {
+  let candidate: EarningsCandidate = {
     symbol: base.symbol,
     price: base.price,
     earningsDate: base.earningsDate,
@@ -1386,6 +1889,7 @@ export async function runStagesThreeFour(
     daysToExpiry: base.daysToExpiry,
     expiry: base.expiry,
   };
+  let expirySource: ScreenerResult["expirySource"] = "weekly";
 
   // Fetch ALL sides (not just PUT) at strikeCount=200 up front — a
   // strict superset of both the old PUT/30 default (so Stage 3/4's
@@ -1401,7 +1905,7 @@ export async function runStagesThreeFour(
   // monthly-expiry fetch below). The conditional targeted retry stays
   // as a safety net for the rare case even a 200-strike window misses
   // the 2x-EM target, but should almost never fire now.
-  const chain = await safeGetChain(candidate.symbol, candidate.expiry, candidate.expiry, {
+  let chain = await safeGetChain(candidate.symbol, candidate.expiry, candidate.expiry, {
     contractType: "ALL",
     strikeCount: 200,
   });
@@ -1456,26 +1960,61 @@ export async function runStagesThreeFour(
   }
 
   if (!chain || !chainHasWeeklyExpiry(chain, candidate.expiry)) {
+    const requestedWeekly = candidate.expiry;
     if (!chain) {
       console.log(
-        `[screener] ${candidate.symbol} soft-fail: chain unavailable (null) for expiry ${candidate.expiry}`,
+        `[screener] ${candidate.symbol} soft-fail: chain unavailable (null) for expiry ${requestedWeekly}`,
       );
     } else {
       const availableKeys = Object.keys(chain.putExpDateMap ?? {});
       console.log(
-        `[screener] ${candidate.symbol} soft-fail: weekly ${candidate.expiry} not in chain. ` +
+        `[screener] ${candidate.symbol} soft-fail: weekly ${requestedWeekly} not in chain. ` +
           `Available expiry keys: ${availableKeys.join(", ") || "(none)"}`,
       );
     }
-    return {
-      ...base,
-      stoppedAt: 3,
-      stageThree: null,
-      stageFour: null,
-      recommendation: "Cannot evaluate",
-      errors: [...(base.errors ?? []), "Schwab chain unavailable for weekly expiry"],
-      threeLayer: null,
-    };
+
+    // No weekly at the earnings-driven Friday — many mid/small-caps and
+    // financials only list standard monthlies. Before giving up, search
+    // out to +60 days for the nearest expiry on/after the requested
+    // weekly and use that instead, explicitly flagged via expirySource
+    // so it's never a silent substitution.
+    const fallbackTo = new Date(
+      new Date(`${requestedWeekly}T00:00:00Z`).getTime() + 60 * 24 * 60 * 60 * 1000,
+    );
+    const fallbackChain = await safeGetChainRange(
+      candidate.symbol,
+      requestedWeekly,
+      toIsoDate(fallbackTo),
+      { contractType: "ALL", strikeCount: 200 },
+    );
+    const picked = fallbackChain ? pickEarliestExpiry(fallbackChain) : null;
+
+    if (fallbackChain && picked) {
+      const today = new Date();
+      today.setUTCHours(0, 0, 0, 0);
+      const pickedExpiryDate = new Date(`${picked.date}T00:00:00Z`);
+      candidate = {
+        ...candidate,
+        expiry: picked.date,
+        daysToExpiry: Math.max(1, businessDaysBetween(today, pickedExpiryDate)),
+      };
+      chain = fallbackChain;
+      expirySource = "monthly_fallback";
+      console.log(
+        `[screener] ${candidate.symbol} monthly fallback: weekly ${requestedWeekly} unavailable, ` +
+          `using ${picked.date} (dte=${candidate.daysToExpiry}) instead`,
+      );
+    } else {
+      return {
+        ...base,
+        stoppedAt: 3,
+        stageThree: null,
+        stageFour: null,
+        recommendation: "Cannot evaluate",
+        errors: [...(base.errors ?? []), "Schwab chain unavailable for weekly expiry"],
+        threeLayer: null,
+      };
+    }
   }
 
   const historicalMoves = await getHistoricalEarningsMovements(candidate.symbol);
@@ -1504,6 +2043,15 @@ export async function runStagesThreeFour(
   // through the same grade bands. Converts "Crush unproven" to a real
   // letter for symbols with 3+ historical pairs. Score/pass semantics
   // are untouched — only the letter that feeds the grade cascade.
+  //
+  // Deliberately NOT re-run through Fix C's crushRatioCap: that cap is
+  // keyed on historicalMoves.length (the LIVE fetch, thin here by
+  // definition since insufficientData is true), but this fallback
+  // substitutes a ratio from a DIFFERENT, more complete source
+  // (total_earnings_records) that already gates on >=3 records via the
+  // check below. Applying the live-n thin-sample ceiling on top would
+  // punish a well-evidenced encyclopedia grade for a thinness that
+  // belongs to a different dataset.
   if (stageThree.insufficientData) {
     try {
       const sb = createServerClient();
@@ -1554,11 +2102,11 @@ export async function runStagesThreeFour(
     );
   }
 
-  // Crush history (Supabase) + options flow (Schwab full chain) run
-  // concurrently. Both are stamped on stageThree.details so the API
-  // response surfaces them for the expanded-row UI without changing
-  // the top-level result shape.
-  const [crushHistory, optionsFlow] = await Promise.all([
+  // Crush history (Supabase) + options flow (Schwab full chain) + Fix B's
+  // loss-multiplier ladder run concurrently. All three are stamped on
+  // stageThree.details so the API response surfaces them without
+  // changing the top-level result shape.
+  const [crushHistory, optionsFlow, lossMultiplierResult] = await Promise.all([
     getCrushHistory(candidate.symbol, 8),
     stageThree.details.expectedMovePct !== null
       ? computeOptionsFlow({
@@ -1575,9 +2123,64 @@ export async function runStagesThreeFour(
           return null;
         })
       : Promise.resolve<OptionsFlow | null>(null),
+    computeLossMultiplierLadder(candidate.symbol).catch((e: unknown) => {
+      console.warn(
+        `[loss-multiplier] ${candidate.symbol} failed: ${e instanceof Error ? e.message : e}`,
+      );
+      return null as LossMultiplierResult | null;
+    }),
   ]);
   stageThree.details.crushHistory = crushHistory;
   stageThree.details.optionsFlow = optionsFlow;
+
+  // Fix C: apply the crush-ratio cap now that crushHistory (with each
+  // quarter's implied_move_source) is available. Schwab-only filter per
+  // the PASS_2A source-quality audit — see computeCrushRatioCap's
+  // docblock. Applied AFTER whichever grade is currently on stageThree
+  // (composite score or the encyclopedia-fallback substitution above),
+  // so it's a backstop regardless of which mechanism produced the letter.
+  // Excludes h.earningsDate === candidate.earningsDate: the T0/T1 crush
+  // capture cron writes a schwab_t0 row for the CURRENT cycle's own
+  // earnings before it's happened yet (seeding the pre-earnings implied
+  // move) — found live on NOW's own 2026-07-22 row, actual_move_pct
+  // 0.0003 sampled hours apart same-day, nowhere near a real post-
+  // earnings reaction. That's the live candidate itself, not history.
+  const schwabRatios = crushHistory
+    .filter(
+      (h) =>
+        (h.impliedMoveSource === "schwab" || h.impliedMoveSource === "schwab_t0") &&
+        h.ratio !== null &&
+        h.earningsDate !== candidate.earningsDate,
+    )
+    .map((h) => h.ratio as number);
+  const ratioCap = computeCrushRatioCap(schwabRatios);
+  const preCapGrade = stageThree.crushGrade;
+  stageThree.crushGrade = capGrade(preCapGrade, ratioCap.cap);
+  stageThree.details.crushRatio = ratioCap.ratio;
+  stageThree.details.crushRatioSeverity = ratioCap.severity;
+  stageThree.details.crushRatioCapSampleWeight = ratioCap.sampleWeight;
+  stageThree.details.crushRatioVerifiedN = ratioCap.verifiedN;
+  stageThree.details.crushRatioCap = ratioCap.cap;
+  stageThree.details.crushRatioCapApplied = stageThree.crushGrade !== preCapGrade;
+  console.log(
+    `[crush-ratio-cap] ${candidate.symbol} schwabVerifiedN=${ratioCap.verifiedN} ` +
+      `ratio=${ratioCap.ratio?.toFixed(3) ?? "null (no verified quarters)"} severity=${ratioCap.severity ?? "n/a"} ` +
+      `weight=${ratioCap.sampleWeight} cap=${ratioCap.cap ?? "none"} preCapGrade=${preCapGrade} ` +
+      `postCapGrade=${stageThree.crushGrade}`,
+  );
+
+  if (lossMultiplierResult) {
+    stageThree.details.lossMultiplier = lossMultiplierResult.multiplier;
+    stageThree.details.lossMultiplierSource = lossMultiplierResult.source;
+    stageThree.details.lossMultiplierTickerN = lossMultiplierResult.tickerBreachN;
+    stageThree.details.lossMultiplierSectorN = lossMultiplierResult.sectorBreachN;
+    stageThree.details.lossMultiplierPoolN = lossMultiplierResult.poolBreachN;
+    console.log(
+      `[loss-multiplier] ${candidate.symbol} multiplier=${lossMultiplierResult.multiplier.toFixed(3)} ` +
+        `source=${lossMultiplierResult.source} tickerN=${lossMultiplierResult.tickerBreachN} ` +
+        `sectorN=${lossMultiplierResult.sectorBreachN} poolN=${lossMultiplierResult.poolBreachN}`,
+    );
+  }
 
   // Persist the flow snapshot to the earnings_history row for this
   // upcoming event so future quarters can compare pre-print positioning
@@ -1613,6 +2216,9 @@ export async function runStagesThreeFour(
 
   return {
     ...base,
+    expiry: candidate.expiry,
+    daysToExpiry: candidate.daysToExpiry,
+    expirySource,
     stoppedAt: tradeable ? null : 3,
     stageThree,
     stageFour,
@@ -1932,6 +2538,9 @@ export function calculateThreeLayerGrade(
   // verification script comparing rates) — defaults to the
   // env-configured commissionPerContract() when omitted.
   commissionOverride?: number,
+  // Defaults "weekly" for callers that predate this param (none of the
+  // scoring below branches on it yet — see ThreeLayerGrade.expirySource).
+  expirySource: "weekly" | "monthly_fallback" = "weekly",
 ): ThreeLayerGrade {
   const crushGrade = stageThreeResult.crushGrade;
   const opportunityGrade = stageFourResult.opportunityGrade;
@@ -1941,23 +2550,44 @@ export function calculateThreeLayerGrade(
   const premium = stageFourResult.premium ?? 0;
   const strike = stageFourResult.suggestedStrike ?? 0;
   const breakevenPrice = strike - premium;
-  // EV per contract (dollars). The assignment-loss leg uses a realistic
-  // 2× expected-move downside instead of "stock goes to zero", which
-  // was the old proxy and made every CSP look terrible.
+  // PASS_2A Fix B: assignmentLoss no longer references strike or a
+  // strike-mimicking "currentPrice × (1 − 2×emPct)" reconstruction at
+  // all — that formula was IDENTICAL to Stage 4's strike-selection
+  // formula, so assignmentLoss collapsed to ~0 by construction on every
+  // candidate (the audit's "EV is 93-100% of premium" finding).
   //
-  //   expectedDownsidePrice = currentPrice × (1 − emPct × 2)
-  //   assignmentLoss        = max(strike − expectedDownsidePrice, 0) × 100
-  //   EV                    = POP × premium × 100 − (1 − POP) × assignmentLoss
+  // E[loss|breach] now comes from computeLossMultiplierLadder: a
+  // multiplier learned from pooled historical (implied,actual) move
+  // ratios — "when a 2xEM strike breaches, how far past does it
+  // typically land, in EM-units" — via a ticker/sector/global shrinkage
+  // ladder (ticker and sector default DARK, weight-zero, until each
+  // clears its own BREACH-count bar; see LOSS_LADDER_MIN_BREACH_N in
+  // earnings-history-table.ts). The multiplier is real, measured data,
+  // never a transform of THIS candidate's own emPct — applying it
+  // through emPct here is a units conversion (EM-multiples -> today's
+  // dollars), not a re-derivation of the multiplier itself.
   //
-  // If the 2× downside still lands above the strike, assignmentLoss = 0
-  // and EV collapses to POP × premium × 100 (pure premium expectation).
+  //   assignmentLoss = emPct × lossMultiplier × currentPrice × 100
+  //   EV             = POP × premium × 100 − (1 − POP) × assignmentLoss
+  //
+  // As of PASS_2A checkpoint, the ladder resolves to the global pool
+  // (multiplier ≈0.331, n=6 breaches) for effectively every candidate —
+  // no ticker or sector yet clears the breach-count bar. That's a real
+  // fix over the old identity (loss is no longer mathematically pinned
+  // to zero, and the empirical tail is fatter than a lognormal's ~2%
+  // mass past 2σ — measured here at 4.2%) but it means loss-DEPTH
+  // differentiation across candidates is currently dormant; EV varies
+  // via probabilityOfProfit (delta) and premium, not yet via a
+  // ticker/sector-specific loss read. Self-promotes with zero code
+  // change once a bucket clears the bar.
   const emPct = stageThreeResult.details.expectedMovePct ?? 0;
-  const expectedDownsidePrice =
-    currentPrice > 0 ? currentPrice * (1 - emPct * 2) : 0;
+  // Fallback mirrors FALLBACK_LOSS_MULTIPLIER_NO_POOL_DATA in
+  // earnings-history-table.ts — only reachable for callers/mocks that
+  // predate this field (e.g. Test/test-three-layer.ts fixtures) or if
+  // the async ladder fetch failed upstream.
+  const lossMultiplier = stageThreeResult.details.lossMultiplier ?? 0.331;
   const assignmentLoss =
-    currentPrice > 0
-      ? Math.max(strike - expectedDownsidePrice, 0) * 100
-      : strike * 100; // pre-currentPrice fallback keeps old behaviour
+    currentPrice > 0 && emPct > 0 ? emPct * lossMultiplier * currentPrice * 100 : 0;
   const grossExpectedValue =
     probabilityOfProfit * premium * 100 - (1 - probabilityOfProfit) * assignmentLoss;
   // Friction — commission only, not half-spread (premium is already
@@ -2343,6 +2973,8 @@ export function calculateThreeLayerGrade(
       opportunityGrade,
       expectedValue,
       breakevenPrice,
+      lossMultiplierSource: stageThreeResult.details.lossMultiplierSource ?? "pool",
+      lossMultiplier,
     },
     personalGrade,
     personalScore,
@@ -2377,5 +3009,6 @@ export function calculateThreeLayerGrade(
     finalScore,
     recommendation,
     recommendationReason,
+    expirySource,
   };
 }

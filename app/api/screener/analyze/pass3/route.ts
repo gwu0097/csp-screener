@@ -218,6 +218,8 @@ export async function POST(req: NextRequest) {
         personal,
         vix,
         base.price,
+        undefined,
+        base.expirySource,
       );
 
       // ---- DEBUG: SPOT-only EV / POP validation dump. ----

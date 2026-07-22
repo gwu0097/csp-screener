@@ -352,6 +352,7 @@ export async function POST(req: NextRequest) {
         earningsTiming: candidate.earningsTiming,
         daysToExpiry: candidate.daysToExpiry,
         expiry: candidate.expiry,
+        expirySource: "weekly",
         stoppedAt: null,
         // stageOne is required on the type — placeholder lets the UI
         // distinguish "screen-only row" from a fully-graded one

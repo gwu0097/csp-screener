@@ -91,6 +91,151 @@ export async function getCrushHistory(
   });
 }
 
+// ---------- Fix B: empirical E[loss|breach] shrinkage ladder ----------
+//
+// Reads (implied_move_pct, actual_move_pct) pairs directly — NOT the
+// two_x_em_strike/breached_two_x_em columns, which calculateBreachAnalysis
+// computes but which are populated on only ~1% of rows (the encyclopedia
+// backfill that would run it broadly is out of scope this pass). This
+// recomputes the same breach test at read time from data that's actually
+// there.
+//
+// Ladder: ticker -> sector -> global pool, weight scales with each tier's
+// own BREACH count (not total event count — see LOSS_LADDER_MIN_BREACH_N).
+// Mirrors getPersonalHistory's ticker/sector pattern (same industry-join
+// query), rescaled: breach events are far rarer than trade outcomes, so
+// Layer 2's 1/2/5 thresholds would promote on 1-4 anecdotes here.
+
+export type LossMultiplierResult = {
+  // E[loss | breach] expressed as a multiple of the candidate's OWN
+  // implied move — e.g. 0.331 means "when a 2xEM strike breaches, it
+  // lands ~0.331 EM further past it, on average." Applying this through
+  // the candidate's own emPct is a units conversion (dimensionless
+  // multiplier -> today's dollars), not a re-derivation of the multiplier
+  // itself — the multiplier comes from pooled historical ratios, never
+  // from this candidate's own emPct.
+  multiplier: number;
+  // Which tier actually has nonzero weight in the blend — "pool" when
+  // both ticker and sector are dark. Parallel to termStructureExcluded /
+  // expirySource: visible and segmentable, not folded away.
+  source: "ticker" | "sector" | "pool";
+  tickerBreachN: number;
+  sectorBreachN: number;
+  poolBreachN: number;
+  poolEventN: number;
+};
+
+// Below this many BREACH events (not total events) in a tier, that
+// tier's "mean overshoot" is 1-4 anecdotes, not a distribution — the
+// PASS_2A sector gate check found all 6 global breaches land in 6
+// different sectors, so a bar keyed on total events would promote a
+// bucket the moment classification happens to fill in, not when there's
+// real tail evidence. Rescaled from Layer 2's ticker sampleWeight
+// thresholds (1/2/5 trades) since breach events are far rarer than trade
+// outcomes; 5/10 is the same "graduated, capped at full weight" shape at
+// a magnitude that fits how few breaches exist at all today (6 globally).
+// Judgment call — tune if breach volume grows and this reads too strict
+// or too loose in practice.
+const LOSS_LADDER_MIN_BREACH_N = 5;
+const LOSS_LADDER_FULL_WEIGHT_BREACH_N = 10;
+
+// Only used if the live pool query returns literally zero breach events
+// anywhere — shouldn't happen given current earnings_history volume
+// (100+ paired events, 6+ breaches as of PASS_2A). A trip of this path
+// is a data-availability incident worth investigating, not a normal
+// code path; frozen at the pool's PASS_2A-measured value rather than 0
+// so a transient query hiccup doesn't understate risk to zero.
+const FALLBACK_LOSS_MULTIPLIER_NO_POOL_DATA = 0.331;
+
+type NormalizedMoveRow = { symbol: string; normMove: number };
+
+// Shared pool cache — the global-tier query is identical for every
+// candidate, so fetch it once per process and reuse rather than
+// re-querying ~1000 rows per candidate scored. Refreshed hourly; the
+// pool only grows a handful of rows a week (new earnings prints), so
+// staleness within an hour is a non-issue. Same shape as the existing
+// daily_bars_cache pattern used elsewhere in this codebase.
+let poolCache: { rows: NormalizedMoveRow[]; fetchedAt: number } | null = null;
+const POOL_CACHE_TTL_MS = 60 * 60 * 1000;
+
+async function getPoolEvents(): Promise<NormalizedMoveRow[]> {
+  if (poolCache && Date.now() - poolCache.fetchedAt < POOL_CACHE_TTL_MS) {
+    return poolCache.rows;
+  }
+  const sb = createServerClient();
+  const res = await sb
+    .from("earnings_history")
+    .select("symbol,implied_move_pct,actual_move_pct")
+    .limit(1000); // wrapper's read cap — see supabase-wrapper-limitations memory
+  const rows = ((res.data ?? []) as Array<{
+    symbol: string;
+    implied_move_pct: number | null;
+    actual_move_pct: number | null;
+  }>)
+    .filter((r) => r.implied_move_pct !== null && r.actual_move_pct !== null && r.implied_move_pct > 0)
+    .map((r) => ({ symbol: r.symbol, normMove: r.actual_move_pct! / r.implied_move_pct! }));
+  poolCache = { rows, fetchedAt: Date.now() };
+  return rows;
+}
+
+// Mean overshoot beyond -2 EM-units among events that breached it — the
+// building block for every tier. n is the BREACH count, not the input
+// event count.
+function conditionalOvershoot(events: NormalizedMoveRow[]): { n: number; multiplier: number | null } {
+  const breaches = events.filter((e) => e.normMove < -2);
+  if (breaches.length === 0) return { n: 0, multiplier: null };
+  const mean = breaches.reduce((sum, b) => sum + (-2 - b.normMove), 0) / breaches.length;
+  return { n: breaches.length, multiplier: mean };
+}
+
+function ladderWeight(breachN: number): number {
+  if (breachN >= LOSS_LADDER_FULL_WEIGHT_BREACH_N) return 1.0;
+  if (breachN >= LOSS_LADDER_MIN_BREACH_N) return 0.5;
+  return 0;
+}
+
+export async function computeLossMultiplierLadder(symbol: string): Promise<LossMultiplierResult> {
+  const upper = symbol.toUpperCase();
+  const pool = await getPoolEvents();
+  const poolStats = conditionalOvershoot(pool);
+  const poolMultiplier = poolStats.multiplier ?? FALLBACK_LOSS_MULTIPLIER_NO_POOL_DATA;
+
+  const tickerStats = conditionalOvershoot(pool.filter((r) => r.symbol === upper));
+
+  const sb = createServerClient();
+  let sectorStats: { n: number; multiplier: number | null } = { n: 0, multiplier: null };
+  const profRes = await sb.from("stock_profiles").select("industry").eq("symbol", upper).limit(1);
+  const industry = ((profRes.data ?? []) as Array<{ industry: string | null }>)[0]?.industry ?? null;
+  if (industry) {
+    const symsRes = await sb.from("stock_profiles").select("symbol").eq("industry", industry).limit(300);
+    const peers = new Set(
+      ((symsRes.data ?? []) as Array<{ symbol: string }>).map((r) => r.symbol.toUpperCase()),
+    );
+    sectorStats = conditionalOvershoot(pool.filter((r) => peers.has(r.symbol)));
+  }
+
+  const tickerWeight = ladderWeight(tickerStats.n);
+  const sectorWeight = (1 - tickerWeight) * ladderWeight(sectorStats.n);
+  const globalWeight = 1 - tickerWeight - sectorWeight;
+
+  const multiplier =
+    tickerWeight * (tickerStats.multiplier ?? poolMultiplier) +
+    sectorWeight * (sectorStats.multiplier ?? poolMultiplier) +
+    globalWeight * poolMultiplier;
+
+  const source: LossMultiplierResult["source"] =
+    tickerWeight > 0 ? "ticker" : sectorWeight > 0 ? "sector" : "pool";
+
+  return {
+    multiplier,
+    source,
+    tickerBreachN: tickerStats.n,
+    sectorBreachN: sectorStats.n,
+    poolBreachN: poolStats.n,
+    poolEventN: pool.length,
+  };
+}
+
 // Persists the live IV-implied move for a candidate's upcoming earnings
 // event. Called from the screener when stage 3 computes emPct so we
 // build a real per-event EM history over time. Only writes the two

@@ -408,14 +408,15 @@ export async function getOptionsChainRange(
   symbol: string,
   fromDate: string,
   toDate: string,
-  // PUT default preserves existing call sites; earnings T0/T1 passes
-  // "ALL" for the ATM straddle (needs both legs).
+  // PUT default preserves existing call sites; earnings T0/T1 and the
+  // monthly-expiry fallback pass "ALL" for the ATM straddle (needs both legs).
   contractType: "PUT" | "CALL" | "ALL" = "PUT",
+  strikeCount = 30,
 ): Promise<SchwabOptionsChain> {
   return schwabGet<SchwabOptionsChain>(`${MARKETDATA_BASE}/chains`, {
     symbol,
     contractType,
-    strikeCount: 30,
+    strikeCount,
     includeUnderlyingQuote: true,
     strategy: "SINGLE",
     fromDate,

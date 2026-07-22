@@ -1,0 +1,806 @@
+{
+  "attempted": 112,
+  "successCount": 25,
+  "successes": [
+    {
+      "group": "heldout",
+      "symbol": "ADP",
+      "earningsDate": "2026-08-05",
+      "expiry": "2026-08-07",
+      "price": 246.22,
+      "oldEmPctIvFormula": 0.028324283555001172,
+      "newEmPct": 0.06741938104134515,
+      "impliedMoveMethod": "straddle",
+      "weeklyIv": 0.38264000000000004,
+      "suggestedStrike": 215,
+      "premium": 0.15,
+      "crushGrade": "B",
+      "opportunityGrade": "F",
+      "finalGrade": "F",
+      "unrated": true,
+      "ev": -9.943000000000202
+    },
+    {
+      "group": "heldout",
+      "symbol": "ALB",
+      "earningsDate": "2026-08-05",
+      "expiry": "2026-08-07",
+      "price": 118.89,
+      "oldEmPctIvFormula": 0.05101021074792718,
+      "newEmPct": 0.116494238371604,
+      "impliedMoveMethod": "straddle",
+      "weeklyIv": 0.68911,
+      "suggestedStrike": 90,
+      "premium": 0,
+      "crushGrade": "B",
+      "opportunityGrade": "F",
+      "finalGrade": "F",
+      "unrated": true,
+      "ev": -1.3
+    },
+    {
+      "group": "heldout",
+      "symbol": "AMPX",
+      "earningsDate": "2026-08-05",
+      "expiry": "2026-08-07",
+      "price": 10.9784,
+      "oldEmPctIvFormula": 0.09156980903428456,
+      "newEmPct": 0.2095022954164541,
+      "impliedMoveMethod": "straddle",
+      "weeklyIv": 1.23704,
+      "suggestedStrike": 6,
+      "premium": 0,
+      "crushGrade": "B",
+      "opportunityGrade": "F",
+      "finalGrade": "F",
+      "unrated": true,
+      "ev": -1.3
+    },
+    {
+      "group": "heldout",
+      "symbol": "APP",
+      "earningsDate": "2026-08-05",
+      "expiry": "2026-08-07",
+      "price": 428.25,
+      "oldEmPctIvFormula": 0.07451261517170114,
+      "newEmPct": 0.17408056042031522,
+      "impliedMoveMethod": "straddle",
+      "weeklyIv": 1.00661,
+      "suggestedStrike": 285,
+      "premium": 0.55,
+      "crushGrade": "B",
+      "opportunityGrade": "F",
+      "finalGrade": "F",
+      "unrated": true,
+      "ev": 33.22000000000009
+    },
+    {
+      "group": "heldout",
+      "symbol": "CF",
+      "earningsDate": "2026-08-05",
+      "expiry": "2026-08-07",
+      "price": 123.4,
+      "oldEmPctIvFormula": 0.03834408028823596,
+      "newEmPct": 0.09035656401944894,
+      "impliedMoveMethod": "straddle",
+      "weeklyIv": 0.518,
+      "suggestedStrike": 101,
+      "premium": 0,
+      "crushGrade": "B",
+      "opportunityGrade": "F",
+      "finalGrade": "F",
+      "unrated": true,
+      "ev": -1.3
+    },
+    {
+      "group": "heldout",
+      "symbol": "CVS",
+      "earningsDate": "2026-08-05",
+      "expiry": "2026-08-07",
+      "price": 110.4401,
+      "oldEmPctIvFormula": 0.03862166774206005,
+      "newEmPct": 0.08307670855060799,
+      "impliedMoveMethod": "straddle",
+      "weeklyIv": 0.5217499999999999,
+      "suggestedStrike": 92,
+      "premium": 0.12,
+      "crushGrade": "C",
+      "opportunityGrade": "F",
+      "finalGrade": "F",
+      "unrated": true,
+      "ev": 10.088
+    },
+    {
+      "group": "heldout",
+      "symbol": "DASH",
+      "earningsDate": "2026-08-05",
+      "expiry": "2026-08-07",
+      "price": 187.07,
+      "oldEmPctIvFormula": 0.05353514622791121,
+      "newEmPct": 0.12602234457689634,
+      "impliedMoveMethod": "straddle",
+      "weeklyIv": 0.72322,
+      "suggestedStrike": 140,
+      "premium": 0,
+      "crushGrade": "B",
+      "opportunityGrade": "F",
+      "finalGrade": "F",
+      "unrated": true,
+      "ev": -1.7319999999999145
+    },
+    {
+      "group": "heldout",
+      "symbol": "DIS",
+      "earningsDate": "2026-08-05",
+      "expiry": "2026-08-07",
+      "price": 96.28,
+      "oldEmPctIvFormula": 0.032540651920286726,
+      "newEmPct": 0.07711882010801828,
+      "impliedMoveMethod": "straddle",
+      "weeklyIv": 0.4396,
+      "suggestedStrike": 80,
+      "premium": 0.01,
+      "crushGrade": "C",
+      "opportunityGrade": "F",
+      "finalGrade": "F",
+      "unrated": true,
+      "ev": -0.3410000000000001
+    },
+    {
+      "group": "heldout",
+      "symbol": "DUOL",
+      "earningsDate": "2026-08-05",
+      "expiry": "2026-08-07",
+      "price": 124.64,
+      "oldEmPctIvFormula": 0.07896289723140915,
+      "newEmPct": 0.1813222079589217,
+      "impliedMoveMethod": "straddle",
+      "weeklyIv": 1.06673,
+      "suggestedStrike": 80,
+      "premium": 0,
+      "crushGrade": "F",
+      "opportunityGrade": "F",
+      "finalGrade": "F",
+      "unrated": true,
+      "ev": -5.108000000000019
+    },
+    {
+      "group": "heldout",
+      "symbol": "FSLY",
+      "earningsDate": "2026-08-05",
+      "expiry": "2026-08-07",
+      "price": 20.55,
+      "oldEmPctIvFormula": 0.1024697430544443,
+      "newEmPct": 0.24209245742092456,
+      "impliedMoveMethod": "straddle",
+      "weeklyIv": 1.38429,
+      "suggestedStrike": 11,
+      "premium": 0,
+      "crushGrade": "F",
+      "opportunityGrade": "F",
+      "finalGrade": "F",
+      "unrated": true,
+      "ev": -4.259999999999987
+    },
+    {
+      "group": "heldout",
+      "symbol": "GTM",
+      "earningsDate": "2026-08-05",
+      "expiry": "2026-08-07",
+      "price": 2.9928,
+      "oldEmPctIvFormula": 0.08748742288004477,
+      "newEmPct": 0.20883453622026196,
+      "impliedMoveMethod": "straddle",
+      "weeklyIv": 1.1818899999999999,
+      "suggestedStrike": 1.5,
+      "premium": 0,
+      "crushGrade": "F",
+      "opportunityGrade": "F",
+      "finalGrade": "F",
+      "unrated": true,
+      "ev": -1.3
+    },
+    {
+      "group": "heldout",
+      "symbol": "IRM",
+      "earningsDate": "2026-08-05",
+      "expiry": "2026-08-07",
+      "price": 126.09,
+      "oldEmPctIvFormula": 0.03448820549631663,
+      "newEmPct": 0.07811880402886828,
+      "impliedMoveMethod": "straddle",
+      "weeklyIv": 0.46591,
+      "suggestedStrike": 106,
+      "premium": 0.05,
+      "crushGrade": "A",
+      "opportunityGrade": "F",
+      "finalGrade": "F",
+      "unrated": true,
+      "ev": 3.3100000000000005
+    },
+    {
+      "group": "heldout",
+      "symbol": "KHC",
+      "earningsDate": "2026-08-05",
+      "expiry": "2026-08-07",
+      "price": 25.77,
+      "oldEmPctIvFormula": 0.026655797899215766,
+      "newEmPct": 0.06072953046177726,
+      "impliedMoveMethod": "straddle",
+      "weeklyIv": 0.3601,
+      "suggestedStrike": 22.5,
+      "premium": 0.05,
+      "crushGrade": "C",
+      "opportunityGrade": "C",
+      "finalGrade": "C",
+      "unrated": false,
+      "ev": 3.0550000000000006
+    },
+    {
+      "group": "heldout",
+      "symbol": "OXY",
+      "earningsDate": "2026-08-05",
+      "expiry": "2026-08-07",
+      "price": 56.3421,
+      "oldEmPctIvFormula": 0.031314085490989296,
+      "newEmPct": 0.07454461228814686,
+      "impliedMoveMethod": "straddle",
+      "weeklyIv": 0.42302999999999996,
+      "suggestedStrike": 48,
+      "premium": 0,
+      "crushGrade": "C",
+      "opportunityGrade": "F",
+      "finalGrade": "F",
+      "unrated": true,
+      "ev": -1.6473999999999793
+    },
+    {
+      "group": "heldout",
+      "symbol": "PSX",
+      "earningsDate": "2026-08-05",
+      "expiry": "2026-08-07",
+      "price": 212.01,
+      "oldEmPctIvFormula": 0.02864406430180653,
+      "newEmPct": 0.06485543134757794,
+      "impliedMoveMethod": "straddle",
+      "weeklyIv": 0.38695999999999997,
+      "suggestedStrike": 185,
+      "premium": 0,
+      "crushGrade": "C",
+      "opportunityGrade": "F",
+      "finalGrade": "F",
+      "unrated": true,
+      "ev": -6.543000000000096
+    },
+    {
+      "group": "heldout",
+      "symbol": "RIG",
+      "earningsDate": "2026-08-05",
+      "expiry": "2026-08-07",
+      "price": 5.25,
+      "oldEmPctIvFormula": 0.04526674127000396,
+      "newEmPct": 0.11047619047619049,
+      "impliedMoveMethod": "straddle",
+      "weeklyIv": 0.6115200000000001,
+      "suggestedStrike": 4,
+      "premium": 0,
+      "crushGrade": "B",
+      "opportunityGrade": "F",
+      "finalGrade": "F",
+      "unrated": true,
+      "ev": -1.3
+    },
+    {
+      "group": "heldout",
+      "symbol": "RUN",
+      "earningsDate": "2026-08-05",
+      "expiry": "2026-08-07",
+      "price": 11.5,
+      "oldEmPctIvFormula": 0.08167881287962417,
+      "newEmPct": 0.18695652173913044,
+      "impliedMoveMethod": "straddle",
+      "weeklyIv": 1.10342,
+      "suggestedStrike": 7,
+      "premium": 0,
+      "crushGrade": "F",
+      "opportunityGrade": "F",
+      "finalGrade": "F",
+      "unrated": true,
+      "ev": -1.3
+    },
+    {
+      "group": "heldout",
+      "symbol": "SEDG",
+      "earningsDate": "2026-08-05",
+      "expiry": "2026-08-07",
+      "price": 50.27,
+      "oldEmPctIvFormula": 0.08873767677206852,
+      "newEmPct": 0.20290431668987466,
+      "impliedMoveMethod": "straddle",
+      "weeklyIv": 1.19878,
+      "suggestedStrike": 30,
+      "premium": 0.01,
+      "crushGrade": "B",
+      "opportunityGrade": "F",
+      "finalGrade": "F",
+      "unrated": true,
+      "ev": -0.6639999999999793
+    },
+    {
+      "group": "heldout",
+      "symbol": "SHAK",
+      "earningsDate": "2026-08-05",
+      "expiry": "2026-08-07",
+      "price": 56.5,
+      "oldEmPctIvFormula": 0.060115079233357724,
+      "newEmPct": 0.1407079646017699,
+      "impliedMoveMethod": "straddle",
+      "weeklyIv": 0.81211,
+      "suggestedStrike": 41,
+      "premium": 0,
+      "crushGrade": "C",
+      "opportunityGrade": "F",
+      "finalGrade": "F",
+      "unrated": true,
+      "ev": -3.7800000000000376
+    },
+    {
+      "group": "heldout",
+      "symbol": "SHOP",
+      "earningsDate": "2026-08-05",
+      "expiry": "2026-08-07",
+      "price": 122.16,
+      "oldEmPctIvFormula": 0.06259189955467892,
+      "newEmPct": 0.14939423706614277,
+      "impliedMoveMethod": "straddle",
+      "weeklyIv": 0.84557,
+      "suggestedStrike": 85,
+      "premium": 0,
+      "crushGrade": "C",
+      "opportunityGrade": "F",
+      "finalGrade": "F",
+      "unrated": true,
+      "ev": -1.3
+    },
+    {
+      "group": "heldout",
+      "symbol": "SRPT",
+      "earningsDate": "2026-08-05",
+      "expiry": "2026-08-07",
+      "price": 16.28,
+      "oldEmPctIvFormula": 0.06819990635513597,
+      "newEmPct": 0.16124078624078622,
+      "impliedMoveMethod": "straddle",
+      "weeklyIv": 0.92133,
+      "suggestedStrike": 11,
+      "premium": 0,
+      "crushGrade": "B",
+      "opportunityGrade": "F",
+      "finalGrade": "F",
+      "unrated": true,
+      "ev": -1.3
+    },
+    {
+      "group": "heldout",
+      "symbol": "ABNB",
+      "earningsDate": "2026-08-06",
+      "expiry": "2026-08-07",
+      "price": 142.6,
+      "oldEmPctIvFormula": 0.02928661531676764,
+      "newEmPct": 0.09484572230014024,
+      "impliedMoveMethod": "straddle",
+      "weeklyIv": 0.55952,
+      "suggestedStrike": 115,
+      "premium": 0.1,
+      "crushGrade": "B",
+      "opportunityGrade": "F",
+      "finalGrade": "F",
+      "unrated": true,
+      "ev": 8.35
+    },
+    {
+      "group": "heldout",
+      "symbol": "AFL",
+      "earningsDate": "2026-08-06",
+      "expiry": "2026-08-07",
+      "price": 123.2782,
+      "oldEmPctIvFormula": 0.013178244099053809,
+      "newEmPct": 0.04542571192635843,
+      "impliedMoveMethod": "straddle",
+      "weeklyIv": 0.25177,
+      "suggestedStrike": 112,
+      "premium": 0,
+      "crushGrade": "B",
+      "opportunityGrade": "F",
+      "finalGrade": "F",
+      "unrated": true,
+      "ev": -1.3
+    },
+    {
+      "group": "heldout",
+      "symbol": "AIG",
+      "earningsDate": "2026-08-06",
+      "expiry": "2026-08-07",
+      "price": 80.24,
+      "oldEmPctIvFormula": 0.017719993475369095,
+      "newEmPct": 0.059820538384845474,
+      "impliedMoveMethod": "straddle",
+      "weeklyIv": 0.33854,
+      "suggestedStrike": 71,
+      "premium": 0,
+      "crushGrade": "A",
+      "opportunityGrade": "F",
+      "finalGrade": "F",
+      "unrated": true,
+      "ev": -6.663999999999992
+    },
+    {
+      "group": "heldout",
+      "symbol": "AKAM",
+      "earningsDate": "2026-08-06",
+      "expiry": "2026-08-07",
+      "price": 125.99,
+      "oldEmPctIvFormula": 0.05292025226956096,
+      "newEmPct": 0.16588618144297165,
+      "impliedMoveMethod": "straddle",
+      "weeklyIv": 1.01104,
+      "suggestedStrike": 85,
+      "premium": 0.05,
+      "crushGrade": "C",
+      "opportunityGrade": "F",
+      "finalGrade": "F",
+      "unrated": true,
+      "ev": -0.6859999999999424
+    }
+  ],
+  "failures": [
+    {
+      "symbol": "ACLX",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "ACT",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "ADNT",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "ALL",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "ARRY",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "ASC",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "ASND",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "BAM",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "BKH",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "BLMN",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "BMBL",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "BRKR",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "BRNS",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "BWA",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "CABA",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "CACC",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "CACI",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "CCRN",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "CDW",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "CG",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "CHRD",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "COR",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "CRL",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "DIN",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "DK",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "DVA",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "ECVT",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "EHC",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "ELAN",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "EPC",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "EVCM",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "EVTC",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "EXEL",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "EXTR",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "FLNC",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "GDEN",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "GDRX",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "GFS",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "GNK",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "GOOD",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "GPRE",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "GT",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "HP",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "HUBS",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "IAS",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "IMCR",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "IMUX",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "JJSF",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "KLIC",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "KLTR",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "KMT",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "KNTK",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "KRMD",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "LESL",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "LIVN",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "MET",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "MFA",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "MGNI",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "MGY",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "MKL",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "MKSI",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "MTDR",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "MUR",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "NI",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "NNN",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "NVST",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "O",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "OEC",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "OLPX",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "ORA",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "OSW",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "OWLT",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "PACB",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "PAYC",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "PLL",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "POWI",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "PR",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "PRI",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "PRSU",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "PSBD",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "QGEN",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "RDN",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "RELY",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "RGNX",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "ROOT",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "RPC",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    },
+    {
+      "symbol": "SITM",
+      "reason": "Schwab chain unavailable for weekly expiry"
+    }
+  ]
+}

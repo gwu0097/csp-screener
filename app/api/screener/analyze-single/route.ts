@@ -133,6 +133,8 @@ export async function POST(req: NextRequest) {
     personal,
     vix,
     scored.price,
+    undefined,
+    scored.expirySource,
   );
 
   return NextResponse.json({ result: { ...scored, threeLayer }, vix });

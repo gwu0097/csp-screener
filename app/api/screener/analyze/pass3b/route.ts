@@ -143,6 +143,8 @@ export async function POST(req: NextRequest) {
         personal,
         vix,
         base.price,
+        undefined,
+        base.expirySource,
       );
       return { ...base, threeLayer };
     }),

@@ -439,6 +439,7 @@ function normaliseResult(r: Partial<ScreenerResult> & { symbol?: string }): Scre
     earningsTiming: (r.earningsTiming as "BMO" | "AMC") ?? "AMC",
     daysToExpiry: r.daysToExpiry ?? 0,
     expiry: r.expiry ?? "",
+    expirySource: r.expirySource ?? "weekly",
     stoppedAt: r.stoppedAt ?? null,
     stageOne: r.stageOne ?? { pass: true, reason: "", details: {} },
     stageTwo: r.stageTwo ?? null,
@@ -3614,7 +3615,12 @@ function CustomStrikeAnalyzer({
       }
     }
     const pop = 1 - Math.abs(nearest.delta);
-    const premium = nearest.mark;
+    // Bid-priced, matching Fix 3(b) — nearest.mark is mid/informational
+    // only, never the tradeable premium (see StageFourResult.availableStrikes).
+    // ?? 0, not the old mark fallback: a stale cached row from before this
+    // fix won't have premiumBid at all — treat that as unavailable, same
+    // as a genuinely missing bid, never silently substitute mark/mid.
+    const premium = nearest.premiumBid ?? 0;
     const breakeven = nearest.strike - premium;
     const distancePct =
       currentPrice > 0 ? ((currentPrice - nearest.strike) / currentPrice) * 100 : 0;
@@ -4049,13 +4055,18 @@ function EditableStrikeCell({
     const nearest = availableStrikes.reduce((best, s) =>
       Math.abs(s.strike - target) < Math.abs(best.strike - target) ? s : best,
     );
+    // Spread% denominator stays mid — nearest.mark, unchanged. Premium
+    // is bid-priced (Fix 3(b)) via the separate premiumBid field; do not
+    // collapse these back into one field (see availableStrikes' type).
     const spreadPct =
       nearest.mark > 0
         ? ((nearest.ask - nearest.bid) / nearest.mark) * 100
         : 0;
     onApply({
       strike: nearest.strike,
-      premium: nearest.mark,
+      // ?? 0: a stale cached row predating this fix won't have
+      // premiumBid — treat as unavailable, never fall back to mid.
+      premium: nearest.premiumBid ?? 0,
       delta: nearest.delta,
       bidAskSpreadPct: spreadPct,
     });
@@ -4291,6 +4302,7 @@ function makeSandboxCandidate(symbol: string): ScreenerResult {
     earningsTiming: "AMC",
     daysToExpiry,
     expiry,
+    expirySource: "weekly",
     stoppedAt: null,
     stageOne: {
       pass: true,
