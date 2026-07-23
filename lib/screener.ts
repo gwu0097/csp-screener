@@ -362,7 +362,72 @@ export type ThreeLayerGrade = {
   // earnings jump with weeks of ordinary drift. Not used by any scoring
   // yet; purely plumbing so it CAN be segmented on.
   expirySource: "weekly" | "monthly_fallback";
+  // PASS_3: "is this name's earnings setup favorable" — same rule
+  // cascade as finalGrade (crush/POP/overhang/VIX/personal-history)
+  // with the opportunity/premium gate removed entirely. Premium is
+  // compensation, not opportunity; this answers a genuinely different
+  // question than finalGrade does. finalGrade/unrated/opportunityGrade
+  // are UNCHANGED by this addition — Fix 2's gate still governs them
+  // exactly as before. POP here is evaluated at the 2xEM reference
+  // strike (stable, comparable across candidates) — NOT the same POP
+  // as ladderRecommendation's, which is strike-specific to whatever the
+  // ladder recommends. Two different numbers serving two purposes.
+  setupGrade: Grade;
+  // Walks the chain from the 2xEM strike toward the money looking for a
+  // real-bid rung worth trading. See PASS_3.md for the full derivation.
+  ladderRecommendation: LadderRecommendation;
 };
+
+export type LadderRecommendation =
+  | {
+      status: "moved";
+      referenceStrike: number;
+      referenceHasBid: boolean;
+      recommendedStrike: number;
+      recommendedEmMultiple: number;
+      recommendedPremiumBid: number;
+      recommendedPctOtm: number;
+      recommendedPop: number;
+      recommendedDelta: number;
+      // True whenever the recommended strike differs from the 2xEM
+      // reference: Fix B's lossMultiplier (0.331) was measured as
+      // overshoot PAST A 2xEM THRESHOLD specifically — every breach
+      // event in that calibration pool was defined relative to 2xEM.
+      // Applying the same multiplier at a closer strike is a valid
+      // formula application but an extrapolation beyond what was
+      // actually measured (a closer strike breaches more often, with a
+      // plausibly different typical overshoot-in-EM-units than the
+      // 2xEM-specific figure). Not a bug, not fixed here — surfaced so
+      // a moved-strike EV is never read as equally trustworthy as a
+      // 2xEM EV. See PASS_3.md's logged follow-up: the multiplier
+      // should eventually be a function of strike distance.
+      evExtrapolated: boolean;
+      // Computed via the SAME EV formula as industryFactors.expectedValue
+      // (computeCspExpectedValue), just fed this strike's real pop/premium
+      // instead of the 2xEM default. Fix A/B/C math itself is untouched.
+      expectedValue: number;
+      // Strikes in the walk range whose delta violates monotonicity
+      // (less negative than the strike immediately below it) — a
+      // corrupted/stale quote, not a market condition, per
+      // isDeltaMonotonicityViolation. Never recommendable; listed here
+      // so the exclusion is visible rather than silent, same pattern as
+      // impliedMoveMethod="iv_formula_degraded" elsewhere in this file.
+      deltaAnomalyStrikes: number[];
+      text: string;
+    }
+  | {
+      status: "skip_no_tradeable_strike";
+      referenceStrike: number;
+      // Nearest real bid found ANYWHERE between the reference strike
+      // and spot, even if it failed the yield/delta/EM-multiple floor —
+      // diagnostic only, distinguishes "there's money here but only at
+      // a reckless distance" from "there's no bid anywhere at all."
+      nearestRealBidStrike: number | null;
+      nearestRealBidPop: number | null;
+      nearestRealBidEmMultiple: number | null;
+      deltaAnomalyStrikes: number[];
+      text: string;
+    };
 
 export type PersonalHistory = {
   tradeCount: number;
@@ -1303,12 +1368,16 @@ function scoreDelta(delta: number): number {
   return 0;
 }
 
+// Named so the ladder's yield bar (below) can reuse the exact same
+// number instead of a second hardcoded 0.2 that could drift out of sync.
+const YIELD_GRADE_C_THRESHOLD_PCT = 0.2;
+
 function gradeFromYield(
   yieldPct: number,
 ): StageFourResult["opportunityGrade"] {
   if (yieldPct > 0.75) return "A";
   if (yieldPct >= 0.4) return "B";
-  if (yieldPct >= 0.2) return "C";
+  if (yieldPct >= YIELD_GRADE_C_THRESHOLD_PCT) return "C";
   return "F";
 }
 
@@ -2522,6 +2591,322 @@ export async function getPersonalHistory(
   }
 }
 
+// Fix A/B/C's EV formula, factored out so PASS_3's ladder-recommended-
+// strike EV can reuse the exact same math (not a re-derivation) instead
+// of being fed the 2xEM defaults. Unchanged from calculateThreeLayerGrade's
+// original inline version.
+function computeCspExpectedValue(params: {
+  pop: number;
+  premium: number;
+  emPct: number;
+  lossMultiplier: number;
+  currentPrice: number;
+  commission: number;
+}): number {
+  const assignmentLoss =
+    params.currentPrice > 0 && params.emPct > 0
+      ? params.emPct * params.lossMultiplier * params.currentPrice * 100
+      : 0;
+  const gross =
+    params.pop * params.premium * 100 - (1 - params.pop) * assignmentLoss;
+  return gross - params.commission * 2;
+}
+
+// PASS_3: "is this name's earnings setup favorable" — the EXACT same
+// cascade calculateThreeLayerGrade uses for finalGrade, minus every
+// opportunity/premium clause. Premium is compensation, not opportunity;
+// this answers a different question. POP passed in must be the 2xEM-
+// reference POP (stable, comparable across candidates) — not whatever
+// strike the ladder ends up recommending.
+function computeSetupGrade(
+  crushGrade: Grade,
+  probabilityOfProfit: number,
+  hasOverhang: boolean,
+  vix: number | null,
+  penalty: number,
+  history: PersonalHistory,
+  historyScope: "ticker" | "sector" | "none",
+): Grade {
+  const crushOk = crushGrade === "A" || crushGrade === "B";
+  let setupGrade: Grade;
+  if (crushOk && probabilityOfProfit >= 0.9 && !hasOverhang && (vix === null || vix < 25)) {
+    setupGrade = "A";
+  } else if (probabilityOfProfit >= 0.83 && (crushOk || probabilityOfProfit >= 0.95) && !hasOverhang) {
+    setupGrade = "B";
+  } else if (probabilityOfProfit >= 0.75 && penalty > -15) {
+    setupGrade = "C";
+  } else {
+    setupGrade = "F";
+  }
+  if (hasOverhang) {
+    setupGrade = "F";
+  } else if (vix !== null && vix > 30) {
+    setupGrade = dropGrade(setupGrade);
+  }
+  const sampleW = history.sampleWeight ?? (historyScope === "ticker" ? 1.0 : 0);
+  if (!history.dataInsufficient && history.winRate !== null && !hasOverhang) {
+    const wr = history.winRate;
+    const dropWr = history.dropWinRate ?? wr;
+    const roc = history.avgRoc ?? 0;
+    const sec = history.sector ?? null;
+    let modifier: "boost" | "drop" | null = null;
+    if (historyScope === "ticker") {
+      if (sampleW >= 1.0) {
+        if (wr > 80 && roc > 0.3) modifier = "boost";
+        else if (dropWr < 50) modifier = "drop";
+      } else if (sampleW >= 0.5) {
+        if (wr > 80 && roc > 0.3 && sec !== null && (sec.winRate ?? 0) >= 60 && sec.campaigns >= 10) {
+          modifier = "boost";
+        } else if (dropWr < 50) {
+          modifier = "drop";
+        }
+      } else if (sampleW >= 0.25) {
+        if (dropWr < 50 && sec !== null && (sec.dropWinRate ?? 100) < 50) {
+          modifier = "drop";
+        }
+      }
+    } else if (historyScope === "sector" && dropWr < 45) {
+      modifier = "drop";
+    }
+    if (modifier === "boost") setupGrade = boostGrade(setupGrade);
+    else if (modifier === "drop") setupGrade = dropGrade(setupGrade);
+  }
+  return setupGrade;
+}
+
+// PASS_3: walks availableStrikes from the 2xEM reference strike toward
+// the money looking for the FIRST (least aggressive, not max-yield —
+// see PASS_3.md §2 for why max-yield overshoots) rung clearing all
+// three derived bars:
+//   yield >= 0.40%   — gradeFromYield's existing B threshold, reused
+//   |delta| <= 0.25  — scoreDelta's existing zero-credit cutoff, reused
+//   EM-multiple >= 1.0 — derived from the EM's own meaning: below 1x
+//     the strike sits INSIDE the priced-in move, a categorically
+//     different risk posture than "closer," not a tunable choice.
+// Never recommends a rung with premiumBid=0 (availableStrikes already
+// encodes Fix 3(b)'s no-bid-fallback rule) or one that would fail
+// Fix A's no-arbitrage floor (moot here — every rung is OTM, strike
+// below spot, so intrinsic is always 0).
+// gradeFromYield's C floor, not B. The B threshold (0.40%) asked for a
+// better trade than the strategy actually takes — real A-graded fills
+// (GEV 0.29%, INTC 0.27%, CME 0.26%, TMUS 0.25%, PM 0.21%) all land in
+// the C bucket by yield alone; grading them A comes from crush/POP/
+// history, not premium richness. Combined with the 95% POP floor below,
+// requiring B-grade yield on top asked for a strictly better trade than
+// the strategy's own precedent ever clears.
+const LADDER_MIN_YIELD_PCT = YIELD_GRADE_C_THRESHOLD_PCT;
+// POP floor, not a delta-scoring cutoff. scoreDelta's |delta|<=0.25 is a
+// credit-scoring boundary (it still pays out 2pts up to 0.25) and permits
+// POP down to ~75% — a materially different risk posture than the 95%+
+// win rate the 2xEM strategy targets. The floor here is pinned directly
+// to that stated target, not discounted: a moved strike is meant to be
+// "the same strategy, closer in," not "trade a lower-conviction setup for
+// premium." 1 - |delta| is the standard POP proxy used everywhere else
+// in this file.
+const LADDER_MIN_POP = 0.95;
+const LADDER_MIN_EM_MULTIPLE = 1.0;
+
+function walkStrikeLadder(
+  availableStrikes: NonNullable<StageFourResult["availableStrikes"]> | undefined,
+  spot: number,
+  emPct: number,
+  referenceStrike: number,
+  lossMultiplier: number,
+  commission: number,
+): LadderRecommendation {
+  const strikes = availableStrikes ?? [];
+  if (spot <= 0 || emPct <= 0 || strikes.length === 0) {
+    return {
+      status: "skip_no_tradeable_strike",
+      referenceStrike,
+      nearestRealBidStrike: null,
+      nearestRealBidPop: null,
+      nearestRealBidEmMultiple: null,
+      deltaAnomalyStrikes: [],
+      text: `No bid at 2xEM ($${referenceStrike.toFixed(2)}). Cannot evaluate the ladder — spot/EM/chain unavailable.`,
+    };
+  }
+
+  // Moving "closer" means a HIGHER strike than the deep-OTM 2xEM
+  // reference (never further out — premium only decreases moving away
+  // from the money). Ascending strike order = walking from 2xEM toward
+  // the money.
+  const rungsAll = strikes
+    .filter((s) => s.strike >= referenceStrike && s.strike < spot)
+    .map((s) => ({
+      ...s,
+      pctOtm: ((spot - s.strike) / spot) * 100,
+      emMultiple: ((spot - s.strike) / spot) / emPct,
+      yieldPct: s.strike > 0 ? (s.premiumBid / s.strike) * 100 : 0,
+      pop: 1 - Math.abs(s.delta),
+      deltaMonotonicityViolation: false,
+    }))
+    .sort((a, b) => a.strike - b.strike);
+
+  const referenceRung = rungsAll.find((r) => r.strike === referenceStrike) ?? null;
+  const referenceHasBid = (referenceRung?.premiumBid ?? 0) > 0;
+
+  // Zero-bid rungs are unquoted contracts — the same noBid rule
+  // runStageFour already applies to the suggested strike itself
+  // (bid<=0 -> premium forced to 0, hard-killed to opportunityGrade F).
+  // Excluded from the walk entirely, not merely deprioritized: a $0
+  // bid against a wide, stale ask isn't "a worse trade," it's not a
+  // trade.
+  const rungs = rungsAll.filter((r) => r.premiumBid > 0);
+
+  // Delta-monotonicity invariant, not a tunable threshold: for a put, a
+  // HIGHER strike can never have a LESS negative delta than a lower
+  // strike — a further-OTM put is never more likely to finish ITM than
+  // a closer one. A violation means the quote is stale/corrupted, not
+  // that the market is doing something unusual (this is exactly what
+  // produced the earlier CHTR "$96, 97% POP" result — POP is
+  // delta-derived, and LADDER_MIN_POP is the ladder's only safety gate,
+  // so a corrupted delta lets a bad quote pass a real check). Compared
+  // against the last KNOWN-GOOD delta, skipping over already-flagged
+  // rungs, so one bad quote doesn't mask the next one behind it.
+  let lastGoodDelta: number | null = null;
+  const deltaAnomalyStrikes: number[] = [];
+  for (const r of rungs) {
+    const violation = lastGoodDelta !== null && r.delta > lastGoodDelta;
+    r.deltaMonotonicityViolation = violation;
+    if (violation) {
+      deltaAnomalyStrikes.push(r.strike);
+    } else {
+      lastGoodDelta = r.delta;
+    }
+  }
+  const anomalyNote =
+    deltaAnomalyStrikes.length > 0
+      ? ` (excluded ${deltaAnomalyStrikes.length} stale-delta quote${deltaAnomalyStrikes.length > 1 ? "s" : ""} from the walk: ${deltaAnomalyStrikes.map((s) => `$${s.toFixed(2)}`).join(", ")})`
+      : "";
+
+  const eligible = rungs.filter(
+    (r) =>
+      !r.deltaMonotonicityViolation &&
+      r.pop >= LADDER_MIN_POP &&
+      r.yieldPct >= LADDER_MIN_YIELD_PCT &&
+      r.emMultiple >= LADDER_MIN_EM_MULTIPLE,
+  );
+
+  if (eligible.length === 0) {
+    // Diagnostic for the skip case: report the closest NEAR MISS, not
+    // just "the first strike with any bid" (which is usually the
+    // reference strike itself — true but uninformative, since a real,
+    // larger bid often exists further in that fails only one bar by a
+    // small margin). Respect the EM floor as non-negotiable when
+    // picking the near miss — a strike inside 1xEM isn't "close," it's
+    // a different risk posture — then take the highest yield among
+    // what's left as the closest-to-qualifying candidate. Never a
+    // monotonicity-flagged rung — recommending the near miss on a
+    // corrupted delta would repeat the exact problem this guards.
+    const clean = rungs.filter((r) => !r.deltaMonotonicityViolation);
+    const emSafe = clean.filter((r) => r.emMultiple >= LADDER_MIN_EM_MULTIPLE);
+    const nearMiss =
+      emSafe.length > 0
+        ? emSafe.reduce((a, b) => (b.yieldPct > a.yieldPct ? b : a))
+        : (clean.sort((a, b) => a.strike - b.strike)[0] ?? null);
+    let text: string;
+    if (nearMiss) {
+      const reasons: string[] = [];
+      if (nearMiss.yieldPct < LADDER_MIN_YIELD_PCT) {
+        reasons.push(`yield ${nearMiss.yieldPct.toFixed(2)}% < ${LADDER_MIN_YIELD_PCT}% floor`);
+      }
+      if (nearMiss.pop < LADDER_MIN_POP) {
+        reasons.push(`POP ${(nearMiss.pop * 100).toFixed(0)}% < ${(LADDER_MIN_POP * 100).toFixed(0)}% floor`);
+      }
+      if (nearMiss.emMultiple < LADDER_MIN_EM_MULTIPLE) {
+        reasons.push(`${nearMiss.emMultiple.toFixed(2)}xEM < 1.0xEM floor`);
+      }
+      const reasonText = reasons.length > 0 ? reasons.join(", ") : "no rung clears every bar at once";
+      text =
+        `No bid at 2xEM ($${referenceStrike.toFixed(2)}). Nearest real bid: $${nearMiss.strike.toFixed(2)} ` +
+        `(${nearMiss.emMultiple.toFixed(2)}xEM), $${nearMiss.premiumBid.toFixed(2)} bid (${nearMiss.yieldPct.toFixed(2)}% yield, ` +
+        `${(nearMiss.pop * 100).toFixed(0)}% POP) — fails ${reasonText}. Skip — no vol to monetize within your risk tolerance.` +
+        anomalyNote;
+    } else if (rungs.length > 0) {
+      text =
+        `No bid at 2xEM ($${referenceStrike.toFixed(2)}). Real bids exist toward the money but every one fails the ` +
+        `delta-monotonicity check — treating as unquoted. Skip.` + anomalyNote;
+    } else {
+      text = `No bid at 2xEM ($${referenceStrike.toFixed(2)}). No real bid anywhere in the chain toward the money. Skip.`;
+    }
+    return {
+      status: "skip_no_tradeable_strike",
+      referenceStrike,
+      nearestRealBidStrike: nearMiss?.strike ?? null,
+      nearestRealBidPop: nearMiss?.pop ?? null,
+      nearestRealBidEmMultiple: nearMiss?.emMultiple ?? null,
+      deltaAnomalyStrikes,
+      text,
+    };
+  }
+
+  const best = eligible[0];
+  // Direction invariant: for a put, "closer to the money" is a HIGHER
+  // strike, never lower — `rungs` is already filtered to
+  // strike >= referenceStrike, so this should be unreachable. Asserted
+  // explicitly rather than trusted implicitly: a below-reference
+  // recommendation must fail loudly, never ship silently.
+  if (best.strike < referenceStrike) {
+    throw new Error(
+      `walkStrikeLadder invariant violated: recommendedStrike $${best.strike} < ` +
+        `referenceStrike $${referenceStrike} — a put recommendation must never move ` +
+        `further OTM than the 2xEM reference.`,
+    );
+  }
+  const pop = best.pop;
+  const movedFromReference = best.strike !== referenceStrike;
+  const expectedValue = computeCspExpectedValue({
+    pop,
+    premium: best.premiumBid,
+    emPct,
+    lossMultiplier,
+    currentPrice: spot,
+    commission,
+  });
+
+  // The loss model was calibrated to overshoot PAST 2xEM specifically;
+  // applying it to a much closer strike is an extrapolation that plausibly
+  // OVERSTATES the assignment loss (closer strikes breach more often, but
+  // typically by less per breach — see PASS_3.md's logged follow-up). A
+  // negative EV here is therefore less trustworthy than a positive one,
+  // not equally trustworthy-but-bad — the text must not read as "trade
+  // this, EV agrees" when the sign is exactly what's in question.
+  let evNote = "";
+  if (movedFromReference) {
+    evNote =
+      expectedValue < 0
+        ? ` Modeled EV is -$${Math.abs(expectedValue).toFixed(2)}, but that's likely pessimistic: it applies the ` +
+          `2xEM-calibrated loss model to a strike only ${best.emMultiple.toFixed(2)}xEM out, inside where that ` +
+          `multiplier was measured. Judge this on POP/yield/OTM above, not the EV sign.`
+        : ` EV $${expectedValue.toFixed(2)} — still extrapolates the 2xEM-calibrated loss model to a closer strike, ` +
+          `so treat the magnitude as approximate, not precise.`;
+  }
+  const text =
+    (movedFromReference
+      ? `No bid at 2xEM ($${referenceStrike.toFixed(2)}). Best tradeable strike: $${best.strike.toFixed(2)} ` +
+        `(${best.emMultiple.toFixed(2)}xEM), $${best.premiumBid.toFixed(2)} bid, ${(pop * 100).toFixed(0)}% POP, ` +
+        `${best.pctOtm.toFixed(1)}% OTM.` + evNote
+      : `2xEM strike ($${referenceStrike.toFixed(2)}) is tradeable: $${best.premiumBid.toFixed(2)} bid, ` +
+        `${(pop * 100).toFixed(0)}% POP, ${best.pctOtm.toFixed(1)}% OTM.`) + anomalyNote;
+
+  return {
+    status: "moved",
+    referenceStrike,
+    referenceHasBid,
+    recommendedStrike: best.strike,
+    recommendedEmMultiple: best.emMultiple,
+    recommendedPremiumBid: best.premiumBid,
+    recommendedPctOtm: best.pctOtm,
+    recommendedPop: pop,
+    recommendedDelta: best.delta,
+    evExtrapolated: movedFromReference,
+    expectedValue,
+    deltaAnomalyStrikes,
+    text,
+  };
+}
+
 // Rule-based grade cascade. No weighted points — the grade is assigned
 // by a small ladder of explicit conditions, with overrides for
 // hasActiveOverhang / high VIX and a boost/drop modifier from personal
@@ -2586,17 +2971,23 @@ export function calculateThreeLayerGrade(
   // predate this field (e.g. Test/test-three-layer.ts fixtures) or if
   // the async ladder fetch failed upstream.
   const lossMultiplier = stageThreeResult.details.lossMultiplier ?? 0.331;
-  const assignmentLoss =
-    currentPrice > 0 && emPct > 0 ? emPct * lossMultiplier * currentPrice * 100 : 0;
-  const grossExpectedValue =
-    probabilityOfProfit * premium * 100 - (1 - probabilityOfProfit) * assignmentLoss;
   // Friction — commission only, not half-spread (premium is already
   // bid-priced, which already captures entry slippage). Two legs:
   // entry (sell to open) + exit (buy to close or assignment). A final
   // subtraction only — does not touch how loss itself is computed.
   const commission = commissionOverride ?? commissionPerContract();
-  const friction = commission * 2;
-  const expectedValue = grossExpectedValue - friction;
+  // Factored into computeCspExpectedValue (above calculateThreeLayerGrade)
+  // so PASS_3's ladder-recommended-strike EV reuses this exact formula
+  // instead of a second hand-copy of it. Same math, same numbers as
+  // before this refactor.
+  const expectedValue = computeCspExpectedValue({
+    pop: probabilityOfProfit,
+    premium,
+    emPct,
+    lossMultiplier,
+    currentPrice,
+    commission,
+  });
 
   const weeklyIv = stageThreeResult.details.weeklyIv ?? null;
   const realizedVol = stageThreeResult.details.realizedVol30d ?? null;
@@ -2961,6 +3352,34 @@ export function calculateThreeLayerGrade(
     `BOTTOM LINE: ${bottomLineFull}`,
   ].join("\n\n");
 
+  // PASS_3: setupGrade answers "is this name's earnings setup favorable"
+  // — same cascade as finalGrade, minus the opportunity/premium gate.
+  // POP here is the 2xEM-reference POP (probabilityOfProfit, unchanged
+  // above) — stable and comparable across candidates, NOT the same POP
+  // the ladder recommendation reports for whichever strike it picks.
+  const setupGrade = computeSetupGrade(
+    crushGrade,
+    probabilityOfProfit,
+    hasOverhang,
+    vix,
+    penalty,
+    history,
+    historyScope,
+  );
+
+  // Walks the chain from the 2xEM strike (== `strike` above) toward the
+  // money for a real-bid rung worth trading. finalGrade/unrated/
+  // opportunityGrade/expectedValue above are completely unchanged by
+  // this — Fix 2's gate still governs them exactly as before this pass.
+  const ladderRecommendation = walkStrikeLadder(
+    stageFourResult.availableStrikes,
+    currentPrice,
+    emPct,
+    strike,
+    lossMultiplier,
+    commission,
+  );
+
   return {
     industryGrade,
     industryScore,
@@ -3010,5 +3429,7 @@ export function calculateThreeLayerGrade(
     recommendation,
     recommendationReason,
     expirySource,
+    setupGrade,
+    ladderRecommendation,
   };
 }
