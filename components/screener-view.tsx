@@ -34,7 +34,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import type { ScreenerResult, StageFourResult } from "@/lib/screener";
+import type { ScreenerResult, StageFourResult, LadderRecommendation } from "@/lib/screener";
 import type { PerplexityNewsResult } from "@/lib/perplexity";
 import type { MarketContext } from "@/lib/market";
 import { CrushHistoryTable } from "@/components/crush-history-table";
@@ -190,6 +190,26 @@ function displayFinalGrade(tl: { finalGrade: string; unrated?: boolean } | null 
   if (!tl) return "—";
   if (tl.unrated) return "Unrated";
   return tl.finalGrade;
+}
+
+// Pass 3: tradeability at whatever strike actually has a real bid, not just
+// the 2xEM reference the Grade column reflects. `outcome` is computed
+// server-side in walkStrikeLadder — never re-derive it from a raw
+// yield/POP comparison here (those thresholds have moved twice already).
+function ladderOutcomeBadgeColor(outcome: LadderRecommendation["outcome"]): string {
+  if (outcome === "moved") return "border-emerald-500/40 bg-emerald-500/20 text-emerald-300";
+  if (outcome === "premium_below_pop_floor") return "border-amber-500/40 bg-amber-500/20 text-amber-300";
+  return "border-border bg-background text-muted-foreground"; // no_vol
+}
+
+function ladderChipLabel(ladder: LadderRecommendation): string {
+  if (ladder.status === "moved") {
+    return `${fmtPrice(ladder.recommendedStrike)} (${ladder.recommendedEmMultiple.toFixed(1)}x) ${(ladder.recommendedPop * 100).toFixed(0)}%`;
+  }
+  if (ladder.outcome === "premium_below_pop_floor" && ladder.nearestRealBidStrike !== null) {
+    return `${fmtPrice(ladder.nearestRealBidStrike)} · ${((ladder.nearestRealBidPop ?? 0) * 100).toFixed(0)}% POP`;
+  }
+  return "No vol";
 }
 
 function fmtPrice(n: number | null | undefined) {
@@ -2384,6 +2404,11 @@ export function ScreenerView({ connected }: Props) {
                       </>
                     }
                   />
+                  <TableHead
+                    title="Where the real trade is, if not at the 2xEM strike above. Walks the chain from 2xEM toward the money for the closest rung clearing yield >= 0.20%, POP >= 95%, EM >= 1.0x."
+                  >
+                    Ladder
+                  </TableHead>
                   <SortableHeader label="Symbol" active={sortKey === "symbol"} dir={sortDir} onClick={() => onSort("symbol")} />
                   <SortableHeader label="Price" active={sortKey === "price"} dir={sortDir} onClick={() => onSort("price")} />
                   <TableHead>Earnings</TableHead>
@@ -2441,7 +2466,7 @@ export function ScreenerView({ connected }: Props) {
               <TableBody>
                 {sortedResults.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={15} className="py-10 text-center text-base text-muted-foreground">
+                    <TableCell colSpan={16} className="py-10 text-center text-base text-muted-foreground">
                       No qualifying earnings today or tomorrow after filters.
                     </TableCell>
                   </TableRow>
@@ -2457,7 +2482,7 @@ export function ScreenerView({ connected }: Props) {
                       {showDivider && (
                         <TableRow key={`divider-${idx}`} className="hover:bg-transparent">
                           <TableCell
-                            colSpan={15}
+                            colSpan={16}
                             className="bg-amber-500/10 py-1.5 text-center text-sm italic text-amber-300/90"
                           >
                             <AlertTriangle className="mr-1.5 inline h-3 w-3" />
@@ -2490,6 +2515,32 @@ export function ScreenerView({ connected }: Props) {
                             </span>
                           ) : (
                             <span className="text-base text-muted-foreground">—</span>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          {r.threeLayer?.ladderRecommendation ? (
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <span
+                                  className={cn(
+                                    "inline-flex cursor-default items-center gap-1 rounded-md border px-2 py-1 text-sm font-semibold",
+                                    ladderOutcomeBadgeColor(r.threeLayer.ladderRecommendation.outcome),
+                                  )}
+                                >
+                                  {ladderChipLabel(r.threeLayer.ladderRecommendation)}
+                                  {r.threeLayer.ladderRecommendation.deltaAnomalyStrikes.length > 0 && (
+                                    <span className="text-rose-400">
+                                      ⚠{r.threeLayer.ladderRecommendation.deltaAnomalyStrikes.length}
+                                    </span>
+                                  )}
+                                </span>
+                              </TooltipTrigger>
+                              <TooltipContent className="max-w-xs whitespace-normal text-sm">
+                                {r.threeLayer.ladderRecommendation.text}
+                              </TooltipContent>
+                            </Tooltip>
+                          ) : (
+                            <span className="text-sm text-muted-foreground">—</span>
                           )}
                         </TableCell>
                         <TableCell className="text-[15px] font-bold">
@@ -2603,7 +2654,7 @@ export function ScreenerView({ connected }: Props) {
                       </TableRow>
                       {open && (
                         <TableRow key={`${id}-detail`}>
-                          <TableCell colSpan={15} className="bg-muted/30">
+                          <TableCell colSpan={16} className="bg-muted/30">
                             <ExpandedDetail
                               r={r}
                               analyzing={analyzingSymbols.has(r.symbol.toUpperCase())}

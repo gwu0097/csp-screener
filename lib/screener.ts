@@ -378,9 +378,16 @@ export type ThreeLayerGrade = {
   ladderRecommendation: LadderRecommendation;
 };
 
+// Client-facing categorization, computed here where the thresholds live —
+// the UI must never re-derive this from a raw yield/POP comparison (those
+// thresholds have already moved twice in this pass; a client-side copy
+// would silently drift out of sync).
+export type LadderOutcome = "moved" | "premium_below_pop_floor" | "no_vol";
+
 export type LadderRecommendation =
   | {
       status: "moved";
+      outcome: LadderOutcome;
       referenceStrike: number;
       referenceHasBid: boolean;
       recommendedStrike: number;
@@ -417,6 +424,7 @@ export type LadderRecommendation =
     }
   | {
       status: "skip_no_tradeable_strike";
+      outcome: LadderOutcome;
       referenceStrike: number;
       // Nearest real bid found ANYWHERE between the reference strike
       // and spot, even if it failed the yield/delta/EM-multiple floor —
@@ -2718,6 +2726,7 @@ function walkStrikeLadder(
   if (spot <= 0 || emPct <= 0 || strikes.length === 0) {
     return {
       status: "skip_no_tradeable_strike",
+      outcome: "no_vol",
       referenceStrike,
       nearestRealBidStrike: null,
       nearestRealBidPop: null,
@@ -2805,6 +2814,18 @@ function walkStrikeLadder(
       emSafe.length > 0
         ? emSafe.reduce((a, b) => (b.yieldPct > a.yieldPct ? b : a))
         : (clean.sort((a, b) => a.strike - b.strike)[0] ?? null);
+    // "premium_below_pop_floor" only when POP is the SOLE blocker — real,
+    // safe-distance premium exists, just at a risk posture outside the
+    // strategy. Anything else (no near miss, or the near miss also fails
+    // yield/EM) is genuinely "no_vol": there's nothing worth trading here
+    // regardless of risk tolerance.
+    const outcome: LadderOutcome =
+      nearMiss !== null &&
+      nearMiss.yieldPct >= LADDER_MIN_YIELD_PCT &&
+      nearMiss.emMultiple >= LADDER_MIN_EM_MULTIPLE &&
+      nearMiss.pop < LADDER_MIN_POP
+        ? "premium_below_pop_floor"
+        : "no_vol";
     let text: string;
     if (nearMiss) {
       const reasons: string[] = [];
@@ -2832,6 +2853,7 @@ function walkStrikeLadder(
     }
     return {
       status: "skip_no_tradeable_strike",
+      outcome,
       referenceStrike,
       nearestRealBidStrike: nearMiss?.strike ?? null,
       nearestRealBidPop: nearMiss?.pop ?? null,
@@ -2892,6 +2914,7 @@ function walkStrikeLadder(
 
   return {
     status: "moved",
+    outcome: "moved",
     referenceStrike,
     referenceHasBid,
     recommendedStrike: best.strike,
