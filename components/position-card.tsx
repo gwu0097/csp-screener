@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { ChevronRight, ExternalLink, ListChecks, Loader2, Plus, Trash2, X } from "lucide-react";
+import { ChevronRight, ExternalLink, ListChecks, Loader2, Pencil, Plus, Trash2, X } from "lucide-react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import {
@@ -333,6 +333,10 @@ export function PositionCard(props: Props) {
   // refresh the parent list, and edits should ideally happen before
   // a position is closed out anyway).
   const [editsOpen, setEditsOpen] = useState(false);
+  // Edit-contract panel toggle — corrects strike/expiry/option type on
+  // the position itself (distinct from Edit Fills, which only touches
+  // the fills ledger). Same open-positions-only scoping as editsOpen.
+  const [contractEditOpen, setContractEditOpen] = useState(false);
   // Trade-type confirmation chip. Auto-detected rolled / recovery_play
   // classifications surface a non-blocking strip until the user
   // confirms, reclassifies, or dismisses (dismiss = session-local).
@@ -1064,6 +1068,16 @@ export function PositionCard(props: Props) {
                 {editsOpen ? "Hide Fills" : "Edit Fills"}
               </button>
             )}
+            {props.kind === "open" && (
+              <button
+                type="button"
+                onClick={() => setContractEditOpen((v) => !v)}
+                className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-sm text-muted-foreground hover:text-foreground"
+              >
+                <Pencil className="h-3 w-3" />
+                {contractEditOpen ? "Hide Contract" : "Edit Contract"}
+              </button>
+            )}
             <Link
               href={`/research/${encodeURIComponent(p.symbol)}`}
               className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-sm text-muted-foreground hover:text-foreground"
@@ -1084,6 +1098,16 @@ export function PositionCard(props: Props) {
             <EditFillsPanel
               positionId={props.position.id}
               fills={props.position.fills}
+              onChanged={props.onCloseSubmitted}
+            />
+          )}
+
+          {props.kind === "open" && contractEditOpen && (
+            <EditContractPanel
+              positionId={props.position.id}
+              strike={props.position.strike}
+              expiry={props.position.expiry}
+              optionType={props.position.optionType}
               onChanged={props.onCloseSubmitted}
             />
           )}
@@ -1940,6 +1964,140 @@ function EditFillsPanel({
           Add fill manually
         </button>
       )}
+    </div>
+  );
+}
+
+// Corrects strike/expiry/option type on the position itself — distinct
+// from EditFillsPanel above, which only edits the fills ledger. Every
+// strike-dependent value on the row (mark, P&L, POP, %OTM, IV, delta,
+// theta, DTE, the status badge) is computed at read time in
+// /api/positions/open straight off these columns, so a saved correction
+// shows up correctly on the parent's next refetch (onChanged) with no
+// extra client-side recompute needed here.
+function EditContractPanel({
+  positionId,
+  strike,
+  expiry,
+  optionType,
+  onChanged,
+}: {
+  positionId: string;
+  strike: number;
+  expiry: string;
+  optionType: "put" | "call";
+  onChanged: (msg: string) => void;
+}) {
+  const [strikeVal, setStrikeVal] = useState(String(strike));
+  const [expiryVal, setExpiryVal] = useState(expiry);
+  const [optionTypeVal, setOptionTypeVal] = useState<"put" | "call">(optionType);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Re-sync when the parent hands us a (possibly corrected) position
+  // after a save — the panel stays open showing the new values.
+  useEffect(() => {
+    setStrikeVal(String(strike));
+    setExpiryVal(expiry);
+    setOptionTypeVal(optionType);
+  }, [strike, expiry, optionType]);
+
+  const dirty =
+    Number(strikeVal) !== strike ||
+    expiryVal !== expiry ||
+    optionTypeVal !== optionType;
+
+  async function handleSave() {
+    const n = Number(strikeVal);
+    if (!Number.isFinite(n) || n <= 0) {
+      setError("Strike must be a positive number");
+      return;
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(expiryVal)) {
+      setError("Expiry must be a valid date");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/positions/${positionId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          strike: n,
+          expiry: expiryVal,
+          optionType: optionTypeVal,
+        }),
+      });
+      if (!res.ok) {
+        const j = (await res.json().catch(() => ({}))) as { error?: string };
+        setError(j.error ?? `HTTP ${res.status}`);
+        return;
+      }
+      onChanged("Contract corrected — mark, P&L, and grade will refresh");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Network error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="mt-4 rounded-md border border-border bg-background/40 p-3 text-sm">
+      <div className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+        Correct Contract
+      </div>
+      <div className="mb-3 text-[11px] text-muted-foreground">
+        Fixes a mis-recorded strike, expiry, or option type. Fills and stamped entry context
+        (entry stock price, entry EM%, entry VIX) are untouched. If this matches another
+        position&apos;s symbol/strike/expiry, both rows are kept — they are not merged.
+      </div>
+      {error && (
+        <div className="mb-2 rounded border border-rose-500/40 bg-rose-500/10 p-1.5 text-rose-200">
+          {error}
+        </div>
+      )}
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+          Strike
+          <input
+            type="number"
+            step="0.5"
+            value={strikeVal}
+            onChange={(e) => setStrikeVal(e.target.value)}
+            className="w-24 rounded border border-border bg-background px-2 py-1 text-sm"
+          />
+        </label>
+        <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+          Expiry
+          <input
+            type="date"
+            value={expiryVal}
+            onChange={(e) => setExpiryVal(e.target.value)}
+            className="rounded border border-border bg-background px-2 py-1 text-sm"
+          />
+        </label>
+        <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+          Type
+          <select
+            value={optionTypeVal}
+            onChange={(e) => setOptionTypeVal(e.target.value as "put" | "call")}
+            className="rounded border border-border bg-background px-2 py-1 text-sm"
+          >
+            <option value="put">Put</option>
+            <option value="call">Call</option>
+          </select>
+        </label>
+        <button
+          type="button"
+          onClick={() => void handleSave()}
+          disabled={!dirty || busy}
+          className="inline-flex items-center gap-1 rounded border border-border bg-background px-2 py-1 text-sm hover:bg-background/80 disabled:opacity-50"
+        >
+          {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+          Save Correction
+        </button>
+      </div>
     </div>
   );
 }

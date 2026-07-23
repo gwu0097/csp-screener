@@ -400,6 +400,17 @@ export async function POST(req: NextRequest) {
     // may have read the date a day or two off and a brand-new "open"
     // position from a close fill would mint a phantom row with negative
     // remaining contracts.
+    //
+    // (symbol, strike, expiry, broker) is no longer guaranteed unique —
+    // the positions edit-contract feature can legitimately produce two
+    // positions sharing that key (a corrected strike matching an
+    // already-correct sibling from the same import). Without user_id +
+    // this ORDER BY, `.limit(1)` returned whichever row Postgres felt
+    // like on an unordered multi-match, silently attaching an incoming
+    // fill to the wrong one. Most-recently-opened is the deterministic
+    // tie-break; still ambiguous in principle (a genuine, non-obvious
+    // edge case worth a real disambiguation UI eventually), but no
+    // longer silently random.
     const { data: findData, error: fErr } = await supabase
       .from("positions")
       .select("id,expiry")
@@ -408,6 +419,7 @@ export async function POST(req: NextRequest) {
       .eq("strike", input.strike)
       .eq("expiry", expiry)
       .eq("broker", broker)
+      .order("opened_date", { ascending: false })
       .limit(1);
     if (fErr) {
       errors.push(`${input.symbol}: find failed — ${fErr.message}`);

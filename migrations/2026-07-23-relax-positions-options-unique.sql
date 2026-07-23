@@ -1,0 +1,19 @@
+-- Positions edit-contract feature: correcting a mis-recorded strike can
+-- legitimately produce two option positions sharing (symbol, strike,
+-- expiry, broker) -- e.g. a mis-parsed import row corrected to match an
+-- already-correct sibling position from the same batch (real case: GOOG
+-- $245P Jul 24 corrected to $315P, colliding with an existing GOOG $315P
+-- Jul 24 position from the same import). These are legitimately distinct
+-- positions (different entry prices, different stamped entry context) and
+-- must be allowed to coexist, not merged.
+--
+-- Position identity is `id` everywhere else in this codebase: fills,
+-- trade-chain linking (lib/trade-chains.ts, keyed by id + symbol/broker
+-- adjacency, never strike/expiry equality), the snapshot/capture cron
+-- (keyed by id), and dashboard grouping (groupByTicker, symbol-only). The
+-- one place that still queries by the composite key -- bulk-create's
+-- import matcher -- already tolerates multiple candidates via a
+-- deterministic tie-break (see app/api/trades/bulk-create/route.ts). The
+-- DB no longer needs to enforce a uniqueness nothing downstream actually
+-- requires.
+DROP INDEX IF EXISTS positions_options_unique_idx;
