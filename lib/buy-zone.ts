@@ -63,17 +63,39 @@ export function computeMacdScore(
 
   // Bucket 2 — currently below signal AND below zero: scale by how
   // much the histogram has narrowed toward zero over the recent
-  // window. Widening (moving away from a cross) scores 0.
+  // window, using SIGNED values throughout — not magnitude. A bearish
+  // cross anywhere inside the window means the histogram was on the
+  // POSITIVE side of zero earlier in this same stretch: that's a
+  // histogram shrinking toward a BEARISH cross from above (worth 0 per
+  // spec), which, once it flips negative, looks IDENTICAL to a
+  // genuinely narrowing negative histogram if you take Math.abs()
+  // first and compare magnitudes — both "shrank." Comparing signed
+  // values (and hard-gating on any non-negative point in the window)
+  // is what tells them apart.
   const belowZero = latest.macd < 0 && latest.signal < 0;
   const belowSignal = latest.histogram < 0;
   if (belowZero && belowSignal) {
     const lookback = Math.min(5, n);
     const window = history.slice(n - lookback);
-    const mags = window.map((p) => Math.abs(p.histogram));
-    const refMag = mags[0];
-    const curMag = mags[mags.length - 1];
+    const hist = window.map((p) => p.histogram); // signed, oldest-first
+
+    // Any non-negative point in this window is a bearish cross (or the
+    // bar immediately before one) within the lookback — today's
+    // negative reading is fresh off THAT cross, moving away from any
+    // bullish cross, not approaching one. Hard zero regardless of how
+    // the raw magnitudes look.
+    if (hist.some((h) => h >= 0)) {
+      return { score: 0, status: "just crossed bearish" };
+    }
+
+    // Every point in the window is already negative — the histogram
+    // has been below zero for the whole stretch, so "magnitude
+    // shrinking toward zero" and "signed value rising toward zero"
+    // are the same statement. No sign ambiguity left to resolve.
+    const refMag = -hist[0];
+    const curMag = -hist[hist.length - 1];
     const lastStepNarrowing =
-      mags.length < 2 || mags[mags.length - 1] <= mags[mags.length - 2];
+      hist.length < 2 || hist[hist.length - 1] >= hist[hist.length - 2];
     const narrowing = refMag > 0 && curMag < refMag && lastStepNarrowing;
     if (narrowing) {
       const closeness = Math.max(0, Math.min(1, 1 - curMag / refMag));
