@@ -54,6 +54,47 @@ function quarterLabel(dateIso: string): string {
   return `Q3 ${y}`;
 }
 
+// Inverse side of quarterLabel — needed to compute 8 quarter SLOTS
+// working backward from today regardless of whether any event exists
+// for them yet. {q,y} arithmetic, not string parsing, so "one quarter
+// back" is exact at year boundaries (Q1 -> prior year's Q4).
+type QuarterYear = { q: 1 | 2 | 3 | 4; y: number };
+
+function quarterOfDate(dateIso: string): QuarterYear {
+  const [y, m] = dateIso.split("-").map(Number);
+  if (m <= 3) return { q: 4, y: y - 1 };
+  if (m <= 6) return { q: 1, y };
+  if (m <= 9) return { q: 2, y };
+  return { q: 3, y };
+}
+
+function quarterYearLabel(qy: QuarterYear): string {
+  return `Q${qy.q} ${qy.y}`;
+}
+
+function previousQuarter(qy: QuarterYear): QuarterYear {
+  return qy.q === 1 ? { q: 4, y: qy.y - 1 } : { q: ((qy.q - 1) as 1 | 2 | 3), y: qy.y };
+}
+
+// A stable, deterministic report-date for a quarter with no real event
+// yet — used only as the placeholder row's key (and the date a manual
+// entry lands on if the user fills it in before a real fetch ever
+// finds the actual date). Mirrors quarterLabel's own date->label
+// mapping in reverse (Q1 reports Apr-Jun, Q2 Jul-Sep, Q3 Oct-Dec, Q4
+// Jan-Mar of the following year) so quarterLabel(representativeDate(qy))
+// always round-trips back to qy — the placeholder always lands in the
+// slot it was built for.
+function representativeDate(qy: QuarterYear): string {
+  const byQuarter: Record<1 | 2 | 3 | 4, { y: number; m: number }> = {
+    1: { y: qy.y, m: 5 },
+    2: { y: qy.y, m: 8 },
+    3: { y: qy.y, m: 11 },
+    4: { y: qy.y + 1, m: 2 },
+  };
+  const { y, m } = byQuarter[qy.q];
+  return `${y}-${String(m).padStart(2, "0")}-15`;
+}
+
 function todayEasternIso(): string {
   return new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/New_York",
@@ -291,6 +332,41 @@ export function CrushHistoryTable({
   const sorted = liveEvents
     .filter((e) => e !== upcoming && e.earningsDate < todayIso)
     .sort((a, b) => b.earningsDate.localeCompare(a.earningsDate));
+
+  // Always render exactly 8 quarter slots working backward from
+  // today's calendar quarter, whether or not a fetched event exists
+  // for each one — a missing quarter still needs a row to receive a
+  // manual entry, or there's nowhere to type it. Real events fill
+  // their matching quarter (first one wins if a data glitch ever
+  // produces two in the same quarter); anything left over gets an
+  // empty, still-editable placeholder whose earningsDate round-trips
+  // back through quarterLabel to the correct slot.
+  const HISTORY_QUARTER_COUNT = 8;
+  const byQuarter = new Map<string, CrushHistoryEvent>();
+  for (const e of sorted) {
+    const label = quarterLabel(e.earningsDate);
+    if (!byQuarter.has(label)) byQuarter.set(label, e);
+  }
+  const displayRows: CrushHistoryEvent[] = [];
+  {
+    let cursor = quarterOfDate(todayIso);
+    for (let i = 0; i < HISTORY_QUARTER_COUNT; i += 1) {
+      const label = quarterYearLabel(cursor);
+      const real = byQuarter.get(label);
+      displayRows.push(
+        real ?? {
+          earningsDate: representativeDate(cursor),
+          qtrLabel: label,
+          impliedMovePct: null,
+          actualMovePct: null,
+          ratio: null,
+          grade: null,
+          impliedMoveSource: null,
+        },
+      );
+      cursor = previousQuarter(cursor);
+    }
+  }
 
   const pinnedDate = todayEarningsDate || upcoming?.earningsDate || todayIso;
   const pinnedQtr = quarterLabel(pinnedDate);
@@ -551,7 +627,7 @@ export function CrushHistoryTable({
                 {pinnedActual === null ? timing.note : "just reported"}
               </td>
             </tr>
-            {sorted.map((e) => {
+            {displayRows.map((e) => {
               const isSimilar =
                 todayEmPct !== null &&
                 e.impliedMovePct !== null &&
