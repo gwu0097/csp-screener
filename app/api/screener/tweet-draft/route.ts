@@ -5,14 +5,19 @@ import { requireUserId, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
-// Drafts trade-disclosure posts from facts already computed, scored,
-// and GROUPED into distinct per-variant subsets client-side — no
+// Drafts ONE trade-disclosure post (or thread, if it overflows the
+// char limit) from facts already computed and scored client-side — no
 // re-fetch of chain/news/history/Trade-Decision-Context here, the
-// client already pulled whatever it needed. The LLM's only job is
-// voice and structure: turn each variant's own fact subset + the one
-// shared risk (which may be absent — no generic filler risk exists)
-// into a strengths -> risk -> why-anyway draft. Position size,
-// contract count, premium, and dollar amounts are simply never
+// client already pulled whatever it needed. There used to be 2-3
+// competing "variants," each built from a different SUBSET of the
+// available facts — in practice they overlapped heavily on the
+// obvious points while splitting the genuinely distinct ones across
+// drafts no single post actually contained. One draft now, built from
+// every qualifying strength plus the top risk facts, so nothing good
+// gets left out. The LLM's only job is voice and structure: turn the
+// full fact pool + the risk (which may be absent — no generic filler
+// risk exists) into a strengths -> risk -> why-anyway draft. Position
+// size, contract count, premium, and dollar amounts are simply never
 // included in what's sent, so there's nothing to leak even by
 // accident — but live figures (POP, options flow ratios, delta) the
 // client marked as strong/risky ARE passed through and expected to
@@ -21,7 +26,6 @@ export const maxDuration = 60;
 
 type Fact = { id: string; text: string };
 type Risk = Fact & { isDissent: boolean; keyMetric?: string };
-type VariantSpec = { angle: string; strengths: Fact[]; emphasis: "strengths" | "risk" };
 
 type Body = {
   symbol?: unknown;
@@ -31,7 +35,7 @@ type Body = {
   dte?: unknown;
   grade?: unknown;
   gradeIsPreview?: unknown;
-  variants?: unknown; // VariantSpec[]
+  strengths?: unknown; // Fact[] — the full qualifying pool, not a subset
   risks?: unknown; // Risk[], 0-2
   convictionNote?: unknown; // string
   charLimit?: unknown;
@@ -56,17 +60,6 @@ function isFact(v: unknown): v is Fact {
     typeof (v as Record<string, unknown>).id === "string" &&
     typeof (v as Record<string, unknown>).text === "string" &&
     (v as Record<string, unknown>).text !== ""
-  );
-}
-
-function isVariantSpec(v: unknown): v is VariantSpec {
-  if (!v || typeof v !== "object") return false;
-  const o = v as Record<string, unknown>;
-  return (
-    typeof o.angle === "string" &&
-    Array.isArray(o.strengths) &&
-    o.strengths.every(isFact) &&
-    (o.emphasis === "strengths" || o.emphasis === "risk")
   );
 }
 
@@ -151,16 +144,10 @@ function splitAtSentenceBoundaries(text: string, limit: number): string[] {
   return posts.map(restoreDecimals);
 }
 
-// The model returns ONE continuous piece of text per variant — post
-// count is never the model's decision. It used to return a "posts"
-// array directly, with each entry split independently; that let the
-// model over-split (and restate the opener in every "continuation")
-// even when the combined content fit in a single post, since nothing
-// ever merged what it split apart. Now there is exactly one place
-// that decides how many posts a variant becomes: this function,
-// driven by actual text length vs `limit`. `raw` also accepts an
-// array as a defensive fallback (join before splitting) in case the
-// model reverts to the old shape despite the prompt.
+// The model returns ONE continuous piece of text — post count is
+// never the model's decision. `raw` also accepts an array as a
+// defensive fallback (join before splitting) in case the model
+// reverts to a pre-split shape despite the prompt.
 function enforcePostLimits(raw: unknown, limit: number): string[] {
   const text = typeof raw === "string"
     ? raw
@@ -177,7 +164,7 @@ function buildPrompt(f: {
   dte: number | null;
   grade: string;
   gradeIsPreview: boolean;
-  variants: VariantSpec[];
+  strengths: Fact[];
   risks: Risk[];
   convictionNote: string;
   charLimit: number;
@@ -189,22 +176,23 @@ function buildPrompt(f: {
     : "the strength that most directly outweighs the risk";
   const article = articleFor(f.grade);
 
-  const variantBlocks = f.variants
-    .map((v, i) => {
-      const strengthLines =
-        v.strengths.length > 0
-          ? v.strengths.map((s) => `  - ${s.text}`).join("\n")
-          : "  - (none — for this variant, keep the case brief and grounded in the assessment itself; do not invent a statistic to fill space)";
-      const emphasisNote =
-        v.emphasis === "risk"
-          ? "  This variant should be built primarily around the risk and the why-anyway reasoning below, not a strength pile — the strength above (if any) is brief supporting context only."
-          : "  This variant leads with and is built primarily around the strengths above.";
-      return `VARIANT ${i + 1} (angle="${v.angle}"):\n${strengthLines}\n${emphasisNote}`;
-    })
-    .join("\n\n");
+  const strengthLines =
+    f.strengths.length > 0
+      ? f.strengths.map((s) => `  - ${s.text}`).join("\n")
+      : "  - (none clear the bar — keep the case brief and grounded in the assessment itself; do not invent a statistic to fill space)";
+
+  // "if it fits naturally" made this discretionary — the model
+  // included it in one generation and dropped it in another, same
+  // run. Every field named here is now mandatory whenever the data
+  // exists, in a fixed position, so the opener is identical in shape
+  // across every draft.
+  const tradeLine =
+    f.expiry !== null
+      ? `open with a single line in EXACTLY this shape, every time: "Earnings play: selling the $${f.strike} put in $${f.symbol}, expiring ${f.expiry}"${f.dte !== null ? ` — you may add "(${f.dte}d out)" right after the date, but the date itself` : " — the date"} is mandatory in that position every single generation, never optional, never dropped`
+      : `open with a single line in this style: "Earnings play: selling the $${f.strike} put in $${f.symbol}"`;
 
   const riskBlock = hasRisk
-    ? `THE RISK (same for every variant — include ${f.risks.length > 1 ? "both concerns together" : "it"}, in step 4 of the structure):
+    ? `THE RISK (step 4 of the structure):
 ${f.risks
   .map((r) =>
     r.isDissent
@@ -213,24 +201,25 @@ ${f.risks
   )
   .join("\n")}
 Then explain your reasoning for proceeding despite it.`
-    : `THE RISK: none of the available signals cleared a real risk bar for this trade — there is nothing specific and material to report. DO NOT invent one, and do NOT fill this slot with a category-generic statement ("earnings is volatile", "options carry risk", "the stock could move against me", "there's always risk in any trade") — those are banned regardless of how the risk section is filled elsewhere. Every variant should simply SKIP the risk step and the reasoning-for-proceeding step entirely — go from strengths straight to the close (the conviction note, if given, or nothing extra).`;
+    : `THE RISK: none of the available signals cleared a real risk bar for this trade — there is nothing specific and material to report. DO NOT invent one, and do NOT fill this slot with a category-generic statement ("earnings is volatile", "options carry risk", "the stock could move against me", "there's always risk in any trade") — those are banned regardless of how the risk section is filled elsewhere. Skip the risk step and the reasoning-for-proceeding step entirely — go from strengths straight to the close (the conviction note, if given, or nothing extra).`;
 
-  return `You are drafting real social media posts (for X/Twitter) that a retail options trader will publish under their own name, disclosing a trade they are placing. Write in first person, plain and specific, and HONEST — this must read like genuine trader reasoning, not a pitch.
+  return `You are drafting a real social media post (for X/Twitter) that a retail options trader will publish under their own name, disclosing a trade they are placing. Write in first person, plain and specific, and HONEST — this must read like genuine trader reasoning, not a pitch.
 
-THE TRADE — open with a single line in this style: "Earnings play: selling the $${f.strike} put in $${f.symbol}"${f.expiry ? `, expiration ${f.expiry}${f.dte !== null ? ` (${f.dte}d out)` : ""} if it fits naturally in that line` : ""}. Do NOT recite "Earnings are [timing] on [date], with expiration on [date]" as a separate sentence — that's assumed context and wastes characters. A plain "Earnings play:" opener is enough.
+THE TRADE — ${tradeLine}. Do NOT recite "Earnings are [timing] on [date], with expiration on [date]" as a separate sentence — that's assumed context and wastes characters; the trade line above is the only place expiration needs to appear.
 
-MY ASSESSMENT: I have this graded as ${article} ${f.grade}${f.gradeIsPreview ? " at this strike" : ""}. State this somewhere in every variant as my own personal take, in first person — never as a bare system readout like "Grade: ${f.grade}". This is one of the places phrasing must vary across variants — see VARY PHRASING ACROSS VARIANTS below; do not settle on one sentence structure for this and reuse it three times.
+MY ASSESSMENT: I have this graded as ${article} ${f.grade}${f.gradeIsPreview ? " at this strike" : ""}. State this with a first-person VERB connecting you to the grade — e.g. a word like "grade", "call", "rate", "read", "have", or similar, your choice, vary which one across generations. Two things are equally banned here: (1) a bare system readout with no verb at all, like "Grade: ${f.grade}" or just "${f.grade}." sitting on its own as a sentence — a letter grade with nothing connecting it to you reads exactly like the system output this whole instruction exists to avoid; (2) a possessive qualifier tacked onto the verb to underline it's your opinion — avoid "in my book", "on my desk", "from my side", "in my view", "on my sheet", "in my own read", or any other "my [noun]" construction. The first-person verb by itself is both necessary and sufficient — it makes the grade a personal take without a bare readout, and a possessive on top of it is redundant.
 
-STRUCTURE — every variant follows this arc, in this order:
+STRUCTURE — this arc, in this order:
 1. The trade (one line, per above)
 2. My grade/assessment (see MY ASSESSMENT)
-3. The genuine strengths — the facts listed for that variant below
+3. The genuine strengths — ALL of the facts listed below; this is the full qualifying pool, not a sample to pick from, so every one of them should appear
 4. Acknowledge the concern below, in my own words, only if one is given (see THE RISK; may be two related concerns stated together)
 5. My reasoning for proceeding despite that concern, only if one was stated in step 4 — ${whyAnyway}
 
 ${hasRisk ? "Do NOT write a one-sided pitch. Naming the concern honestly, then explaining your reasoning for proceeding despite it, is what makes this credible — skipping either half when a real concern IS given below is a failed draft." : "There is no concern to state this time (see THE RISK below) — do not manufacture one just to fill the slot."}
 
-VARY PHRASING ACROSS VARIANTS: these variants are read side by side, so treat repeated connective tissue as a defect. Do not reuse the same opening words or sentence structure for the grade statement (step 2), the concern acknowledgment (step 4), or the closing reasoning (step 5) in more than one variant — if variant 1 states its grade one way, variant 2 and variant 3 must each do it differently, and likewise for how each variant transitions into and out of the risk. Do not default to a stock phrase like "I've got this as..." or "the risk is..." or "I'm taking it anyway because..." in every variant — those are examples of exactly the kind of repeated template this instruction is asking you to avoid, not phrases to use. Each variant should read like a distinct moment of thinking about the same trade, not the same scaffold with different facts dropped in.
+THE STRENGTHS (step 3 — use every one, don't drop any to save space; use more posts instead, see CHARACTER LIMIT below):
+${strengthLines}
 
 ${riskBlock}
 
@@ -249,23 +238,17 @@ CONTENT RULES — violating any of these is a failed draft:
 - No hashtags except a single ticker cashtag ($${f.symbol}) if it fits naturally. No hashtag spam.
 - Minimal to no emoji.
 
-VARIANTS: generate exactly ${f.variants.length} variant(s), each using ONLY the facts listed for it below — they must differ in WHICH FACTS they draw on, not just which one is mentioned first or how the same set is worded:
-
-${variantBlocks}
-
-CHARACTER LIMIT: ${Number.isFinite(f.charLimit) ? f.charLimit : "none — write as long as the content genuinely needs, no padding"} characters, applied automatically AFTER you write — see OUTPUT FORMAT below. Write the full case for each variant as ONE continuous piece of text — do not decide post boundaries yourself, do not write "Post 1/3", do not restate the trade line or grade partway through, do not pre-split into a thread. Just write it as continuous prose.
+CHARACTER LIMIT: ${Number.isFinite(f.charLimit) ? f.charLimit : "none — write as long as the content genuinely needs, no padding"} characters, applied automatically AFTER you write — see OUTPUT FORMAT below. Write the full case as ONE continuous piece of text — do not decide post boundaries yourself, do not write "Post 1/3", do not restate the trade line or grade partway through, do not pre-split into a thread. Just write it as continuous prose covering every strength listed above plus the risk arc if any.
 
 SENTENCE LENGTH: the process that splits your text into posts can only break between sentences, never mid-sentence — so a single long sentence has to land whole in one post, which can strand a short post with wasted room if the sentence right after it doesn't fit alongside it. Keep sentences short and roughly EVEN in length — aim for around 80-130 characters each, well under a fifth of the limit — rather than a few long ones. Splitting a single idea across two shorter sentences instead of one long one gives the splitter more places to pack tightly; it costs nothing in meaning.
 ${
   shortForm
-    ? `This will likely need to split into multiple posts once it's measured against the limit — that's expected and handled automatically. Just make sure the opening sentences state the trade plus that variant's lead strength before anything else, so if it does split, the first chunk is a real hook on its own.`
-    : `This will likely fit in a single post once measured against the limit — structure the prose internally with short line-broken sections covering the full arc, the same readable rhythm a thread would have, not one dense paragraph. Use the room the limit gives you: every fact listed for this variant (strengths, risk, why-anyway) should actually appear, with enough surrounding context to read as reasoning rather than a bare list — don't stop early or compress the case just because a shorter version would also technically fit. Padding with filler is still banned; the point is to not truncate genuine material for no reason.`
+    ? `This will likely need to split into multiple posts once it's measured against the limit — that's expected and handled automatically, becoming a thread. Just make sure the opening sentences state the trade plus the single strongest strength before anything else, so if it does split, the first chunk is a real hook on its own — and every strength still needs to appear somewhere in the thread, not just the ones that fit the first post.`
+    : `This may fit in a single post once measured against the limit — structure the prose internally with short line-broken sections covering the full arc, the same readable rhythm a thread would have, not one dense paragraph. Use the room the limit gives you: every strength listed above, plus the risk and why-anyway if any, should actually appear, with enough surrounding context to read as reasoning rather than a bare list — don't stop early or compress the case just because a shorter version would also technically fit. Padding with filler is still banned; the point is to not truncate genuine material for no reason. If the full case genuinely doesn't fit even at this limit, it's fine to run over into a second post — never drop a strength to stay under.`
 }
 
-OUTPUT FORMAT — one "text" string per variant, NOT a "posts" array. Do not pre-split; a separate process measures your text against the character limit and splits it into posts automatically, at sentence boundaries, only if it's actually too long. Writing it as multiple shorter strings yourself causes the exact failure this format exists to prevent: restating the opener in every "post" when the material would fit in one.
-
 Return ONLY this JSON, no other text, no markdown fences:
-{"variants":[{"angle":"<angle from the variant list above>","text":"<the full continuous prose for this variant>"}]}`;
+{"text":"<the full continuous prose>"}`;
 }
 
 export async function POST(req: NextRequest) {
@@ -306,16 +289,12 @@ export async function POST(req: NextRequest) {
 
   // Server-side cap is a defensive backstop (this endpoint is
   // auth-gated but still a network boundary), not a business rule —
-  // raised to match the client's own scaled cap (up to 6 at high char
-  // limits) so a legitimate large-budget request isn't silently
-  // clipped back down.
-  const variants = (Array.isArray(body.variants) ? body.variants : [])
-    .filter(isVariantSpec)
-    .slice(0, 3)
-    .map((v) => ({ ...v, strengths: v.strengths.slice(0, 6) }));
-  if (variants.length === 0) {
-    return NextResponse.json({ error: "Missing variants" }, { status: 400 });
-  }
+  // the client already scales its own cap with charLimit and there are
+  // only ~10 possible strength sources in the whole candidate pool, so
+  // this is generous on purpose: it should never actually bind.
+  const strengths = (Array.isArray(body.strengths) ? body.strengths : [])
+    .filter(isFact)
+    .slice(0, 12);
 
   // No generic fallback — a request with no genuine risk simply has an
   // empty risks array, and the draft omits the risk section entirely
@@ -334,7 +313,7 @@ export async function POST(req: NextRequest) {
     dte,
     grade,
     gradeIsPreview,
-    variants,
+    strengths,
     risks,
     convictionNote,
     charLimit,
@@ -349,7 +328,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Draft generation failed — Perplexity unavailable" }, { status: 502 });
   }
 
-  let parsed: { variants?: Array<{ angle?: unknown; text?: unknown; posts?: unknown }> };
+  let parsed: { text?: unknown; posts?: unknown };
   try {
     parsed = JSON.parse(unwrapJson(ppl.text)) as typeof parsed;
   } catch {
@@ -358,23 +337,11 @@ export async function POST(req: NextRequest) {
       { status: 502 },
     );
   }
-  if (!Array.isArray(parsed.variants) || parsed.variants.length === 0) {
-    return NextResponse.json(
-      { error: "Draft generation returned no variants — try Regenerate" },
-      { status: 502 },
-    );
-  }
 
-  const outVariants = parsed.variants
-    .map((v) => ({
-      angle: typeof v.angle === "string" && v.angle ? v.angle : "trade_setup",
-      posts: enforcePostLimits(typeof v.text === "string" ? v.text : v.posts, charLimit),
-    }))
-    .filter((v) => v.posts.length > 0);
-
-  if (outVariants.length === 0) {
+  const posts = enforcePostLimits(typeof parsed.text === "string" ? parsed.text : parsed.posts, charLimit);
+  if (posts.length === 0) {
     return NextResponse.json(
-      { error: "Draft generation returned empty posts — try Regenerate" },
+      { error: "Draft generation returned empty content — try Regenerate" },
       { status: 502 },
     );
   }
@@ -393,7 +360,7 @@ export async function POST(req: NextRequest) {
       char_limit: Number.isFinite(charLimit) ? charLimit : null,
       grade,
       grade_is_preview: gradeIsPreview,
-      variants: outVariants,
+      variants: posts,
     })
     .select("id")
     .single();
@@ -402,7 +369,7 @@ export async function POST(req: NextRequest) {
   }
 
   return NextResponse.json({
-    variants: outVariants,
+    posts,
     draftId: ins.error ? null : (ins.data as { id: string }).id,
   });
 }

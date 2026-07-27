@@ -440,8 +440,8 @@ type StoredTweetDraft = {
   strike: number;
   convictionNote: string;
   charLimit: number;
-  variants: TweetVariant[];
-  editedPosts: string[][];
+  posts: string[];
+  editedPosts: string[];
 };
 
 function tweetDraftKey(symbol: string): string {
@@ -455,9 +455,9 @@ function isStoredTweetDraft(v: unknown): v is StoredTweetDraft {
     typeof o.strike === "number" &&
     typeof o.convictionNote === "string" &&
     typeof o.charLimit === "number" &&
-    Array.isArray(o.variants) &&
+    Array.isArray(o.posts) &&
     Array.isArray(o.editedPosts) &&
-    o.variants.length === o.editedPosts.length
+    o.posts.length === o.editedPosts.length
   );
 }
 
@@ -4212,18 +4212,17 @@ function OptionsChainTab({
   );
 }
 
-type TweetVariant = { angle: string; posts: string[] };
 type TweetFact = { id: string; text: string };
 type TweetRisk = TweetFact & { isDissent: boolean; keyMetric?: string };
-type TweetVariantSpec = { angle: string; strengths: TweetFact[]; emphasis: "strengths" | "risk" };
-// kind="strength": score is a 0-1+ strength measure, higher = stronger,
-// only the top few survive selection. kind="risk": score is a severity
-// measure used to pick the single most material concern. A candidate
-// with neither strong support nor real severity is simply dropped —
-// that's the fix for weak evidence ("3 of 5 quarters") showing up as
-// if it were support. isDissent is set only on the genuine
-// Trade-Decision-Context "not safe to trade" case, not its milder
-// medium-risk sibling (both share id "tdc").
+// kind="strength": score is a 0-1+ strength measure — every candidate
+// that clears the bar is used (no top-N selection anymore; a single
+// draft uses the whole qualifying pool). kind="risk": score is a
+// severity measure used to pick the top couple most material
+// concerns. A candidate with neither strong support nor real severity
+// is simply dropped — that's the fix for weak evidence ("3 of 5
+// quarters") showing up as if it were support. isDissent is set only
+// on the genuine Trade-Decision-Context "not safe to trade" case, not
+// its milder medium-risk sibling (both share id "tdc").
 type FactCandidate = {
   kind: "strength" | "risk";
   score: number;
@@ -4232,43 +4231,6 @@ type FactCandidate = {
   keyMetric?: string;
   isDissent?: boolean;
 };
-
-// Which "case" a strength belongs to, so variants can be built from
-// DISTINCT subsets of facts (flow+positioning vs. probability+pattern)
-// instead of the same full list reordered.
-// Three groups roughly mirroring how a hand-written draft naturally
-// paragraphs the same material: pricing/positioning mechanics,
-// probability/track-record, and the macro/company backdrop.
-const STRENGTH_GROUP: Record<string, string> = {
-  flow: "flow_positioning",
-  em_position: "flow_positioning",
-  iv_edge: "flow_positioning",
-  term_structure: "flow_positioning",
-  pop: "probability_pattern",
-  crush_pattern: "probability_pattern",
-  tdc_clean: "probability_pattern",
-  directional: "probability_pattern",
-  vix: "regime_news",
-  news: "regime_news",
-};
-
-const TWEET_ANGLE_LABELS: Record<string, string> = {
-  pop: "Probability & strike distance",
-  crush_pattern: "Crush reliability",
-  em_position: "Strike positioning",
-  flow: "Options flow",
-  news: "News/sentiment",
-  tdc_clean: "Outlier-history review",
-  directional: "Directional move history",
-  iv_edge: "IV edge",
-  term_structure: "Term structure",
-  vix: "VIX regime",
-  risk_tension: "Risk / why-anyway",
-  trade_setup: "The trade setup",
-};
-function angleLabel(id: string): string {
-  return TWEET_ANGLE_LABELS[id] ?? id.replace(/_/g, " ");
-}
 
 // Auto-grows a textarea to fit its content — no scrollbar, no fixed
 // row-count guess.
@@ -4394,15 +4356,15 @@ function TweetTab({
   const [genError, setGenError] = useState<string | null>(null);
   // Hydrated from localStorage at mount (per symbol) so a generated
   // draft survives row collapse, a symbol switch, and a page reload —
-  // only Regenerate ever replaces it.
-  const [variants, setVariants] = useState<TweetVariant[] | null>(
-    () => getStoredTweetDraft(r.symbol)?.variants ?? null,
+  // only Regenerate ever replaces it. null = never generated.
+  const [posts, setPosts] = useState<string[] | null>(
+    () => getStoredTweetDraft(r.symbol)?.posts ?? null,
   );
-  // Editable copies, keyed by [variant][post] — generation seeds these;
-  // the user can then tweak text freely without a re-render clobbering
-  // their edits. Also hydrated from storage — an edited draft is the
-  // one that comes back, not the original generation.
-  const [editedPosts, setEditedPosts] = useState<string[][]>(
+  // Editable copy, keyed by [post] — generation seeds this; the user
+  // can then tweak text freely without a re-render clobbering their
+  // edits. Also hydrated from storage — an edited draft is the one
+  // that comes back, not the original generation.
+  const [editedPosts, setEditedPosts] = useState<string[]>(
     () => getStoredTweetDraft(r.symbol)?.editedPosts ?? [],
   );
   // Strike/note/limit the CURRENT stored draft was generated for —
@@ -4806,9 +4768,26 @@ function TweetTab({
         vixCandidate(),
       ].filter((c): c is FactCandidate => c !== null);
 
-      const strengthCandidates = candidates
+      // No top-N selection anymore — a single draft uses every
+      // strength that clears the bar, not a sample of them. The old
+      // per-variant split routinely stranded genuinely good, distinct
+      // points (term structure only in one variant, the directional
+      // survival argument only in another) with no single draft ever
+      // containing all of them. One list, fully sorted so the
+      // strongest points still lead.
+      //
+      // The cap here is a sanity ceiling, not a selection mechanism —
+      // scaled with charLimit so a 1000+-char draft can genuinely
+      // carry everything (there are only ~10 possible strength
+      // sources total, so "uncapped" and "generous cap" are nearly
+      // the same thing at high limits).
+      const strengthCap = !Number.isFinite(charLimit) || charLimit >= 1000 ? 10 : charLimit >= 500 ? 6 : 4;
+      const strengths: TweetFact[] = candidates
         .filter((c) => c.kind === "strength")
-        .sort((a, b) => b.score - a.score);
+        .sort((a, b) => b.score - a.score)
+        .slice(0, strengthCap)
+        .map((c) => ({ id: c.id, text: c.text }));
+
       // Top TWO most material concerns, if any — so compound risk
       // (e.g. a mediocre crush record AND the deep-OTM put cluster)
       // can appear together, the way a hand-written draft would.
@@ -4823,49 +4802,6 @@ function TweetTab({
         keyMetric: c.keyMetric,
       }));
 
-      // Group strengths into DISTINCT subsets — flow/positioning vs.
-      // probability/pattern vs. regime/news — so variants differ in
-      // which facts they draw on, not just which one is listed first.
-      // One variant per non-empty group, ranked by that group's best
-      // fact, plus (when a real risk exists) one risk-forward variant
-      // built around the risk/why-anyway tension instead of a
-      // strength pile. Variant count follows how much genuinely
-      // distinct material exists — never padded to a fixed number.
-      const byGroup = new Map<string, FactCandidate[]>();
-      for (const c of strengthCandidates) {
-        const g = STRENGTH_GROUP[c.id] ?? "other";
-        const list = byGroup.get(g) ?? [];
-        list.push(c);
-        byGroup.set(g, list);
-      }
-      const groupedSpecs = Array.from(byGroup.values())
-        .map((facts) => facts.sort((a, b) => b.score - a.score))
-        .sort((a, b) => b[0].score - a[0].score);
-
-      // The ~3-facts-per-variant cap under-fills a large char budget
-      // even when genuine material exists — scale it with the limit
-      // (Infinity-safe: an unset/invalid charLimit reads as "no
-      // limit," which should get the most generous cap).
-      const perVariantFactCap = !Number.isFinite(charLimit) || charLimit >= 1500 ? 6 : charLimit >= 800 ? 4 : 3;
-
-      const groupSlots = risks.length > 0 ? 2 : 3;
-      const variants: TweetVariantSpec[] = groupedSpecs.slice(0, groupSlots).map((facts) => ({
-        angle: facts[0].id,
-        strengths: facts.slice(0, perVariantFactCap).map((c) => ({ id: c.id, text: c.text })),
-        emphasis: "strengths",
-      }));
-      if (risks.length > 0) {
-        const bestOverall = strengthCandidates[0];
-        variants.push({
-          angle: "risk_tension",
-          strengths: bestOverall ? [{ id: bestOverall.id, text: bestOverall.text }] : [],
-          emphasis: "risk",
-        });
-      }
-      if (variants.length === 0) {
-        variants.push({ angle: "trade_setup", strengths: [], emphasis: "strengths" });
-      }
-
       const res = await fetch("/api/screener/tweet-draft", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -4876,7 +4812,7 @@ function TweetTab({
           dte: r.daysToExpiry,
           grade: effectiveGrade,
           gradeIsPreview,
-          variants: variants.slice(0, 3),
+          strengths,
           risks,
           convictionNote,
           charLimit,
@@ -4888,16 +4824,15 @@ function TweetTab({
         setGenError(typeof json.error === "string" ? json.error : `HTTP ${res.status}`);
         return;
       }
-      const body = json as { variants: TweetVariant[] };
-      const freshEditedPosts = body.variants.map((v) => [...v.posts]);
-      setVariants(body.variants);
-      setEditedPosts(freshEditedPosts);
+      const body = json as { posts: string[] };
+      setPosts(body.posts);
+      setEditedPosts([...body.posts]);
       const context = { strike: effectiveStrike, convictionNote, charLimit };
       setDraftContext(context);
       setStoredTweetDraft(r.symbol, {
         ...context,
-        variants: body.variants,
-        editedPosts: freshEditedPosts,
+        posts: body.posts,
+        editedPosts: [...body.posts],
       });
     } catch (e) {
       setGenError(e instanceof Error ? e.message : String(e));
@@ -4906,9 +4841,9 @@ function TweetTab({
     }
   }
 
-  function copyPost(variantIdx: number, postIdx: number, text: string) {
+  function copyPost(postIdx: number, text: string) {
     navigator.clipboard.writeText(text).catch(() => {});
-    const key = `${variantIdx}-${postIdx}`;
+    const key = `${postIdx}`;
     setCopiedKey(key);
     setTimeout(() => setCopiedKey((k) => (k === key ? null : k)), 1500);
   }
@@ -4918,7 +4853,7 @@ function TweetTab({
   // call and produce different text unasked). Just flagged so it's
   // obvious the draft below doesn't match the current inputs.
   const draftMismatches: string[] =
-    variants && draftContext
+    posts && draftContext
       ? [
           effectiveStrike !== null && draftContext.strike !== effectiveStrike
             ? `strike $${draftContext.strike}`
@@ -4998,7 +4933,7 @@ function TweetTab({
               <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
               Generating…
             </>
-          ) : variants ? (
+          ) : posts ? (
             "Regenerate"
           ) : (
             "Generate"
@@ -5014,68 +4949,61 @@ function TweetTab({
         </div>
       )}
 
-      {variants && (
-        <div className="grid gap-3 md:grid-cols-2">
-          {variants.map((v, vi) => {
-            const posts = editedPosts[vi] ?? v.posts;
-            return (
-              <div key={vi} className="space-y-2 rounded-md border border-border bg-background/40 p-3">
-                <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                  {angleLabel(v.angle)}
-                </div>
-                {posts.map((post, pi) => {
-                  const key = `${vi}-${pi}`;
-                  return (
-                    <div key={pi} className="space-y-1">
-                      {posts.length > 1 && (
-                        <div className="text-[10px] text-muted-foreground">
-                          Post {pi + 1} of {posts.length}
-                        </div>
-                      )}
-                      <AutoGrowTextarea
-                        value={post}
-                        onChange={(e) => {
-                          const text = e.target.value;
-                          setEditedPosts((prev) => {
-                            const next = prev.map((arr) => [...arr]);
-                            if (!next[vi]) next[vi] = [...v.posts];
-                            next[vi][pi] = text;
-                            // Persist the edit, not just the original
-                            // generation — this is the version that
-                            // should come back after collapse/reload.
-                            if (variants && draftContext) {
-                              setStoredTweetDraft(r.symbol, { ...draftContext, variants, editedPosts: next });
-                            }
-                            return next;
-                          });
-                        }}
-                        className="w-full resize-none overflow-hidden rounded border border-border bg-background p-2 text-sm"
-                      />
-                      <div className="flex items-center justify-between">
-                        <span
-                          className={cn(
-                            "font-mono text-xs",
-                            post.length > charLimit ? "text-red-400" : "text-muted-foreground",
-                          )}
-                        >
-                          {post.length} / {charLimit}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => copyPost(vi, pi, post)}
-                          className="rounded border border-border px-2 py-0.5 text-xs text-muted-foreground hover:bg-foreground/10 hover:text-foreground"
-                        >
-                          {copiedKey === key ? "Copied" : "Copy"}
-                        </button>
+      {posts &&
+        (() => {
+          const displayPosts = editedPosts.length === posts.length ? editedPosts : posts;
+          return (
+            <div className="space-y-2 rounded-md border border-border bg-background/40 p-3">
+              {displayPosts.map((post, pi) => {
+                const key = `${pi}`;
+                return (
+                  <div key={pi} className="space-y-1">
+                    {displayPosts.length > 1 && (
+                      <div className="text-[10px] text-muted-foreground">
+                        Post {pi + 1} of {displayPosts.length}
                       </div>
+                    )}
+                    <AutoGrowTextarea
+                      value={post}
+                      onChange={(e) => {
+                        const text = e.target.value;
+                        setEditedPosts((prev) => {
+                          const next = prev.length === posts.length ? [...prev] : [...posts];
+                          next[pi] = text;
+                          // Persist the edit, not just the original
+                          // generation — this is the version that
+                          // should come back after collapse/reload.
+                          if (draftContext) {
+                            setStoredTweetDraft(r.symbol, { ...draftContext, posts, editedPosts: next });
+                          }
+                          return next;
+                        });
+                      }}
+                      className="w-full resize-none overflow-hidden rounded border border-border bg-background p-2 text-sm"
+                    />
+                    <div className="flex items-center justify-between">
+                      <span
+                        className={cn(
+                          "font-mono text-xs",
+                          post.length > charLimit ? "text-red-400" : "text-muted-foreground",
+                        )}
+                      >
+                        {post.length} / {charLimit}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => copyPost(pi, post)}
+                        className="rounded border border-border px-2 py-0.5 text-xs text-muted-foreground hover:bg-foreground/10 hover:text-foreground"
+                      >
+                        {copiedKey === key ? "Copied" : "Copy"}
+                      </button>
                     </div>
-                  );
-                })}
-              </div>
-            );
-          })}
-        </div>
-      )}
+                  </div>
+                );
+              })}
+            </div>
+          );
+        })()}
     </div>
   );
 }
