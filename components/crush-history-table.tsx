@@ -182,6 +182,8 @@ function EditableMoveCell({
   colorCls,
   nullTooltip,
   allowNegative,
+  editHint,
+  warnAbovePct,
 }: {
   value: number | null; // fraction
   onSave: (percentValue: number | null) => Promise<void>;
@@ -189,6 +191,15 @@ function EditableMoveCell({
   colorCls?: string;
   nullTooltip?: string;
   allowNegative?: boolean;
+  // Shown (forced open, not hover-only — the input is only on screen
+  // for a few seconds) the moment the cell enters edit mode. Guidance
+  // only, no bearing on what gets saved.
+  editHint?: string;
+  // Soft sanity check, in percent (e.g. 40 for "warn above 40%"), not
+  // a fraction — matches the units `commit` already works in below.
+  // Warn-and-confirm only: never blocks a save, some names genuinely
+  // have huge earnings moves.
+  warnAbovePct?: number;
 }) {
   const [editing, setEditing] = useState(false);
   const [val, setVal] = useState("");
@@ -208,14 +219,21 @@ function EditableMoveCell({
       setEditing(false);
       return;
     }
+    const finalPct = allowNegative ? parsed : Math.abs(parsed);
+    if (warnAbovePct !== undefined && Math.abs(finalPct) >= warnAbovePct) {
+      const proceed = window.confirm(
+        `${Math.abs(finalPct).toFixed(1)}% is unusually large for an earnings move — this looks like it could be the Implied Volatility % rather than the ATM Straddle %. Save it anyway?`,
+      );
+      if (!proceed) return; // stays in edit mode with the typed value so it can be fixed or re-confirmed
+    }
     setSaving(true);
-    await onSave(allowNegative ? parsed : Math.abs(parsed));
+    await onSave(finalPct);
     setSaving(false);
     setEditing(false);
   }
 
   if (editing) {
-    return (
+    const input = (
       <input
         autoFocus
         type="number"
@@ -234,6 +252,17 @@ function EditableMoveCell({
         className="w-16 rounded border border-border bg-background px-1 py-0.5 text-right font-mono text-[11px] outline-none focus:border-primary"
       />
     );
+    if (editHint) {
+      return (
+        <TooltipProvider delayDuration={0}>
+          <Tooltip open>
+            <TooltipTrigger asChild>{input}</TooltipTrigger>
+            <TooltipContent className="max-w-xs text-sm">{editHint}</TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      );
+    }
+    return input;
   }
 
   const trigger = (
@@ -678,6 +707,8 @@ export function CrushHistoryTable({
                       value={e.impliedMovePct}
                       formatDisplay={fmtPct}
                       nullTooltip="Implied move not available for this quarter — no historical options-data source (backfill discontinued). Click to enter it by hand."
+                      editHint="Enter the ATM Straddle % from ThinkorSwim's earnings view (not the Implied Volatility % shown above it)."
+                      warnAbovePct={40}
                       onSave={(pct) => saveField(e, "em", pct)}
                     />
                   </td>
