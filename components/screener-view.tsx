@@ -4271,18 +4271,37 @@ function angleLabel(id: string): string {
 }
 
 // Auto-grows a textarea to fit its content — no scrollbar, no fixed
-// row-count guess. A callback ref only fires on attach/detach, so a
-// value change on an already-mounted node (Regenerate swapping text
-// in place) silently keeps the stale height — that bug got fixed once
-// with a remount-forcing key, then broke again the same way for
-// localStorage-restored drafts, which are correct from the very first
-// render (no separate "value changed" moment for a callback ref to
-// catch). A layout effect keyed on `value` covers every case with one
-// mechanism: it reruns on every value change (fresh generate,
-// Regenerate, edits) AND on initial mount (fresh generate's first
-// paint, and — critically — a restore from localStorage or a page
-// reload, where the correct value is already there on mount with
-// nothing to "change" into). No remount key needed anywhere.
+// row-count guess.
+//
+// This tab renders inside a Radix TabsContent mounted with
+// forceMount + `data-[state=inactive]:hidden` (see the "tweet"
+// TabsContent below) — Tailwind's `hidden` is display:none, applied
+// the instant data-state="inactive", which it is by default on any
+// row (re)open since <Tabs defaultValue="overview"> makes Overview
+// the active tab. An element with a display:none ANCESTOR has no
+// generated box at all, so scrollHeight reads 0 for it — confirmed
+// directly against this file's Tabs usage, not assumed. A
+// useLayoutEffect keyed on `value` fires correctly at that exact
+// mount (a genuine new mount, not a stale ref), but measures nothing
+// there is to measure, locks in a near-zero inline height, and
+// nothing re-fires it later when the user actually clicks over to
+// the Tweet tab, since `value` never changes just because visibility
+// did. That's why a fresh Generate (already on the visible Tweet tab
+// when clicked) works and a restored draft (mounted hidden behind
+// Overview) doesn't.
+//
+// Two distinct triggers legitimately invalidate the height, so two
+// hooks call the same resize function — this isn't a second
+// workaround for the SAME bug the way the old remount-key approach
+// was:
+//   - content changed while visible (typing, Regenerate, fresh
+//     generate's first paint) -> useLayoutEffect on `value`.
+//   - the element's own rendered box changed for a reason that has
+//     nothing to do with `value` (a hidden ancestor became visible,
+//     e.g. switching to the Tweet tab) -> ResizeObserver on the node
+//     itself, which fires on exactly that transition regardless of
+//     why it happened (Tabs today, any other conditionally-hidden
+//     wrapper in the future).
 function AutoGrowTextarea({
   value,
   onChange,
@@ -4293,12 +4312,25 @@ function AutoGrowTextarea({
   className?: string;
 }) {
   const ref = useRef<HTMLTextAreaElement>(null);
-  useLayoutEffect(() => {
+
+  function resize() {
     const el = ref.current;
     if (!el) return;
     el.style.height = "auto";
     el.style.height = `${el.scrollHeight}px`;
-  }, [value]);
+  }
+
+  useLayoutEffect(resize, [value]);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(resize);
+    observer.observe(el);
+    return () => observer.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- resize reads only the DOM node itself, not any prop/state that needs re-observing
+  }, []);
+
   return <textarea ref={ref} value={value} onChange={onChange} rows={3} className={className} />;
 }
 
