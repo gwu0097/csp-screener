@@ -427,6 +427,62 @@ function setTweetCharLimit(n: number) {
   }
 }
 
+// Generated drafts used to live only in TweetTab's own useState, gone
+// the moment the row collapsed (ExpandedDetail unmounts) — forcing a
+// fresh Perplexity call (different text, losing any edits) just to
+// look at a draft again. Persisted per symbol now, same localStorage
+// pattern as the char limit: read once at mount, write through on
+// every generate AND every edit, so a tweaked draft is what comes
+// back, not the original generation. Keyed by symbol alone (not row
+// id) — sandbox and the main table intentionally share one draft per
+// ticker, same as the char limit already does.
+type StoredTweetDraft = {
+  strike: number;
+  convictionNote: string;
+  charLimit: number;
+  variants: TweetVariant[];
+  editedPosts: string[][];
+};
+
+function tweetDraftKey(symbol: string): string {
+  return `screener_tweet_draft_${symbol.toUpperCase()}`;
+}
+
+function isStoredTweetDraft(v: unknown): v is StoredTweetDraft {
+  if (!v || typeof v !== "object") return false;
+  const o = v as Record<string, unknown>;
+  return (
+    typeof o.strike === "number" &&
+    typeof o.convictionNote === "string" &&
+    typeof o.charLimit === "number" &&
+    Array.isArray(o.variants) &&
+    Array.isArray(o.editedPosts) &&
+    o.variants.length === o.editedPosts.length
+  );
+}
+
+function getStoredTweetDraft(symbol: string): StoredTweetDraft | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = localStorage.getItem(tweetDraftKey(symbol));
+    if (!raw) return null;
+    const parsed: unknown = JSON.parse(raw);
+    return isStoredTweetDraft(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function setStoredTweetDraft(symbol: string, draft: StoredTweetDraft) {
+  try {
+    if (typeof window !== "undefined") {
+      localStorage.setItem(tweetDraftKey(symbol), JSON.stringify(draft));
+    }
+  } catch {
+    /* quota / privacy */
+  }
+}
+
 // Cross-device hydration freshness window. Anything older shows the
 // "stale — Run Analysis to update" banner instead of the green one.
 const FRESH_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -4282,11 +4338,29 @@ function TweetTab({
   }
   const [generating, setGenerating] = useState(false);
   const [genError, setGenError] = useState<string | null>(null);
-  const [variants, setVariants] = useState<TweetVariant[] | null>(null);
+  // Hydrated from localStorage at mount (per symbol) so a generated
+  // draft survives row collapse, a symbol switch, and a page reload —
+  // only Regenerate ever replaces it.
+  const [variants, setVariants] = useState<TweetVariant[] | null>(
+    () => getStoredTweetDraft(r.symbol)?.variants ?? null,
+  );
   // Editable copies, keyed by [variant][post] — generation seeds these;
   // the user can then tweak text freely without a re-render clobbering
-  // their edits.
-  const [editedPosts, setEditedPosts] = useState<string[][]>([]);
+  // their edits. Also hydrated from storage — an edited draft is the
+  // one that comes back, not the original generation.
+  const [editedPosts, setEditedPosts] = useState<string[][]>(
+    () => getStoredTweetDraft(r.symbol)?.editedPosts ?? [],
+  );
+  // Strike/note/limit the CURRENT stored draft was generated for —
+  // compared against the live values below to show a "generated for a
+  // different strike" note instead of silently discarding or
+  // auto-regenerating on a mismatch.
+  const [draftContext, setDraftContext] = useState<
+    { strike: number; convictionNote: string; charLimit: number } | null
+  >(() => {
+    const stored = getStoredTweetDraft(r.symbol);
+    return stored ? { strike: stored.strike, convictionNote: stored.convictionNote, charLimit: stored.charLimit } : null;
+  });
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   // Bumped on every successful generation and folded into each
   // textarea's key so Regenerate force-remounts them — autosizeTextarea
@@ -4769,9 +4843,17 @@ function TweetTab({
         return;
       }
       const body = json as { variants: TweetVariant[] };
+      const freshEditedPosts = body.variants.map((v) => [...v.posts]);
       setVariants(body.variants);
-      setEditedPosts(body.variants.map((v) => [...v.posts]));
+      setEditedPosts(freshEditedPosts);
       setGenerationId((n) => n + 1);
+      const context = { strike: effectiveStrike, convictionNote, charLimit };
+      setDraftContext(context);
+      setStoredTweetDraft(r.symbol, {
+        ...context,
+        variants: body.variants,
+        editedPosts: freshEditedPosts,
+      });
     } catch (e) {
       setGenError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -4785,6 +4867,21 @@ function TweetTab({
     setCopiedKey(key);
     setTimeout(() => setCopiedKey((k) => (k === key ? null : k)), 1500);
   }
+
+  // Stored drafts stay put on a strike/note/limit change — never
+  // silently discarded, never auto-regenerated (that would burn a
+  // call and produce different text unasked). Just flagged so it's
+  // obvious the draft below doesn't match the current inputs.
+  const draftMismatches: string[] =
+    variants && draftContext
+      ? [
+          effectiveStrike !== null && draftContext.strike !== effectiveStrike
+            ? `strike $${draftContext.strike}`
+            : null,
+          draftContext.convictionNote !== convictionNote ? "a different conviction note" : null,
+          draftContext.charLimit !== charLimit ? `a ${draftContext.charLimit}-char limit` : null,
+        ].filter((m): m is string => m !== null)
+      : [];
 
   return (
     <div className="space-y-4">
@@ -4865,6 +4962,13 @@ function TweetTab({
         {genError && <span className="text-sm text-red-400">{genError}</span>}
       </div>
 
+      {draftMismatches.length > 0 && (
+        <div className="rounded border border-amber-500/30 bg-amber-500/5 px-2 py-1.5 text-xs text-amber-200">
+          Generated for {draftMismatches.join(", ")} — inputs have changed since. Regenerate to
+          update.
+        </div>
+      )}
+
       {variants && (
         <div className="grid gap-3 md:grid-cols-2">
           {variants.map((v, vi) => {
@@ -4893,6 +4997,12 @@ function TweetTab({
                             const next = prev.map((arr) => [...arr]);
                             if (!next[vi]) next[vi] = [...v.posts];
                             next[vi][pi] = text;
+                            // Persist the edit, not just the original
+                            // generation — this is the version that
+                            // should come back after collapse/reload.
+                            if (variants && draftContext) {
+                              setStoredTweetDraft(r.symbol, { ...draftContext, variants, editedPosts: next });
+                            }
                             return next;
                           });
                           autosizeTextarea(e.target);
