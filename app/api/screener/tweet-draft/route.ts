@@ -204,7 +204,7 @@ function buildPrompt(f: {
     .join("\n\n");
 
   const riskBlock = hasRisk
-    ? `THE RISK (same for every variant — include ${f.risks.length > 1 ? "both concerns together" : "it"}, in step 3 of the structure):
+    ? `THE RISK (same for every variant — include ${f.risks.length > 1 ? "both concerns together" : "it"}, in step 4 of the structure):
 ${f.risks
   .map((r) =>
     r.isDissent
@@ -212,22 +212,25 @@ ${f.risks
       : `- ${r.text}`,
   )
   .join("\n")}
-Then give the honest reason I'm taking the trade anyway.`
-    : `THE RISK: none of the available signals cleared a real risk bar for this trade — there is nothing specific and material to report. DO NOT invent one, and do NOT fill this slot with a category-generic statement ("earnings is volatile", "options carry risk", "the stock could move against me", "there's always risk in any trade") — those are banned regardless of how the risk section is filled elsewhere. Every variant should simply SKIP the risk step and the why-anyway step entirely — go from strengths straight to the close (the conviction note, if given, or nothing extra).`;
+Then explain your reasoning for proceeding despite it.`
+    : `THE RISK: none of the available signals cleared a real risk bar for this trade — there is nothing specific and material to report. DO NOT invent one, and do NOT fill this slot with a category-generic statement ("earnings is volatile", "options carry risk", "the stock could move against me", "there's always risk in any trade") — those are banned regardless of how the risk section is filled elsewhere. Every variant should simply SKIP the risk step and the reasoning-for-proceeding step entirely — go from strengths straight to the close (the conviction note, if given, or nothing extra).`;
 
   return `You are drafting real social media posts (for X/Twitter) that a retail options trader will publish under their own name, disclosing a trade they are placing. Write in first person, plain and specific, and HONEST — this must read like genuine trader reasoning, not a pitch.
 
 THE TRADE — open with a single line in this style: "Earnings play: selling the $${f.strike} put in $${f.symbol}"${f.expiry ? `, expiration ${f.expiry}${f.dte !== null ? ` (${f.dte}d out)` : ""} if it fits naturally in that line` : ""}. Do NOT recite "Earnings are [timing] on [date], with expiration on [date]" as a separate sentence — that's assumed context and wastes characters. A plain "Earnings play:" opener is enough.
 
-MY ASSESSMENT: I have this graded as ${article} ${f.grade}${f.gradeIsPreview ? " at this strike" : ""}. Present this as MY OWN read, in my voice — e.g. "I've got this as ${article} ${f.grade}" — never as a system output like "Grade: ${f.grade}".
+MY ASSESSMENT: I have this graded as ${article} ${f.grade}${f.gradeIsPreview ? " at this strike" : ""}. State this somewhere in every variant as my own personal take, in first person — never as a bare system readout like "Grade: ${f.grade}". This is one of the places phrasing must vary across variants — see VARY PHRASING ACROSS VARIANTS below; do not settle on one sentence structure for this and reuse it three times.
 
 STRUCTURE — every variant follows this arc, in this order:
 1. The trade (one line, per above)
-2. The genuine strengths — the facts listed for that variant below
-3. The real risk (only if one is given below — see THE RISK; may be two related concerns stated together)
-4. Why taking it anyway (only if there's a risk to weigh against — ${whyAnyway})
+2. My grade/assessment (see MY ASSESSMENT)
+3. The genuine strengths — the facts listed for that variant below
+4. Acknowledge the concern below, in my own words, only if one is given (see THE RISK; may be two related concerns stated together)
+5. My reasoning for proceeding despite that concern, only if one was stated in step 4 — ${whyAnyway}
 
-${hasRisk ? 'Do NOT write a one-sided pitch. Stating the risk honestly, then explaining why I\'m taking the trade anyway, is what makes this credible — skipping either the risk or the "why anyway" when a real risk IS given below is a failed draft.' : "There is no risk to state this time (see THE RISK below) — do not manufacture one just to fill the slot."}
+${hasRisk ? "Do NOT write a one-sided pitch. Naming the concern honestly, then explaining your reasoning for proceeding despite it, is what makes this credible — skipping either half when a real concern IS given below is a failed draft." : "There is no concern to state this time (see THE RISK below) — do not manufacture one just to fill the slot."}
+
+VARY PHRASING ACROSS VARIANTS: these variants are read side by side, so treat repeated connective tissue as a defect. Do not reuse the same opening words or sentence structure for the grade statement (step 2), the concern acknowledgment (step 4), or the closing reasoning (step 5) in more than one variant — if variant 1 states its grade one way, variant 2 and variant 3 must each do it differently, and likewise for how each variant transitions into and out of the risk. Do not default to a stock phrase like "I've got this as..." or "the risk is..." or "I'm taking it anyway because..." in every variant — those are examples of exactly the kind of repeated template this instruction is asking you to avoid, not phrases to use. Each variant should read like a distinct moment of thinking about the same trade, not the same scaffold with different facts dropped in.
 
 ${riskBlock}
 
