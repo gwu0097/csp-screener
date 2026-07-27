@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   Play,
@@ -4271,13 +4271,35 @@ function angleLabel(id: string): string {
 }
 
 // Auto-grows a textarea to fit its content — no scrollbar, no fixed
-// row-count guess. Runs on mount (callback ref) and again on every
-// keystroke (called from onChange) since a callback ref only fires on
-// mount/unmount, not on content changes.
-function autosizeTextarea(el: HTMLTextAreaElement | null) {
-  if (!el) return;
-  el.style.height = "auto";
-  el.style.height = `${el.scrollHeight}px`;
+// row-count guess. A callback ref only fires on attach/detach, so a
+// value change on an already-mounted node (Regenerate swapping text
+// in place) silently keeps the stale height — that bug got fixed once
+// with a remount-forcing key, then broke again the same way for
+// localStorage-restored drafts, which are correct from the very first
+// render (no separate "value changed" moment for a callback ref to
+// catch). A layout effect keyed on `value` covers every case with one
+// mechanism: it reruns on every value change (fresh generate,
+// Regenerate, edits) AND on initial mount (fresh generate's first
+// paint, and — critically — a restore from localStorage or a page
+// reload, where the correct value is already there on mount with
+// nothing to "change" into). No remount key needed anywhere.
+function AutoGrowTextarea({
+  value,
+  onChange,
+  className,
+}: {
+  value: string;
+  onChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => void;
+  className?: string;
+}) {
+  const ref = useRef<HTMLTextAreaElement>(null);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, [value]);
+  return <textarea ref={ref} value={value} onChange={onChange} rows={3} className={className} />;
 }
 
 // No caching by design — regenerating is one call and sidesteps
@@ -4362,14 +4384,6 @@ function TweetTab({
     return stored ? { strike: stored.strike, convictionNote: stored.convictionNote, charLimit: stored.charLimit } : null;
   });
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
-  // Bumped on every successful generation and folded into each
-  // textarea's key so Regenerate force-remounts them — autosizeTextarea
-  // is a callback ref, which only fires on mount/unmount, not on a
-  // value update from Regenerate (as opposed to the user's own typing,
-  // which re-triggers it via onChange). Without the remount, a
-  // Regenerate that shrinks or grows the text would leave a stale
-  // height and reintroduce the scrollbar this exists to remove.
-  const [generationId, setGenerationId] = useState(0);
 
   const availableStrikes = r.stageFour?.availableStrikes ?? [];
   const effectiveStrike = strikeOverride?.strike ?? r.stageFour?.suggestedStrike ?? null;
@@ -4846,7 +4860,6 @@ function TweetTab({
       const freshEditedPosts = body.variants.map((v) => [...v.posts]);
       setVariants(body.variants);
       setEditedPosts(freshEditedPosts);
-      setGenerationId((n) => n + 1);
       const context = { strike: effectiveStrike, convictionNote, charLimit };
       setDraftContext(context);
       setStoredTweetDraft(r.symbol, {
@@ -4987,9 +5000,7 @@ function TweetTab({
                           Post {pi + 1} of {posts.length}
                         </div>
                       )}
-                      <textarea
-                        key={`${generationId}-${vi}-${pi}`}
-                        ref={autosizeTextarea}
+                      <AutoGrowTextarea
                         value={post}
                         onChange={(e) => {
                           const text = e.target.value;
@@ -5005,9 +5016,7 @@ function TweetTab({
                             }
                             return next;
                           });
-                          autosizeTextarea(e.target);
                         }}
-                        rows={3}
                         className="w-full resize-none overflow-hidden rounded border border-border bg-background p-2 text-sm"
                       />
                       <div className="flex items-center justify-between">
