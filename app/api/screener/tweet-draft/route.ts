@@ -88,6 +88,26 @@ function unwrapJson(raw: string): string {
   return raw.replace(/```(?:json)?/gi, "").replace(/```/g, "").trim();
 }
 
+// Decimal points ("0.71", "1.9x") read as sentence-ending "."s to the
+// tokenizer below, which excludes literal '.' from its "sentence body"
+// character class. When a "." inside a number isn't followed by
+// whitespace, the match at that position fails outright, the regex
+// engine re-anchors at a LATER position to find one that succeeds, and
+// everything between the stray "." and that later anchor — including
+// the digits before the decimal point — is silently dropped from the
+// output ("0.71" -> "71", "1.04" -> "04"). Swapping the "." in any
+// digit-period-digit run for a placeholder before tokenizing (and back
+// after) sidesteps the false terminator entirely without touching the
+// splitting logic itself. Placeholder is a 1-for-1 character swap, so
+// every length check downstream still sees the true character count.
+const DECIMAL_PLACEHOLDER = "\u0001"; // control char, never appears in real text — kept as an explicit escape so it stays visible/greppable in source
+function protectDecimals(text: string): string {
+  return text.replace(/(\d)\.(\d)/g, `$1${DECIMAL_PLACEHOLDER}$2`);
+}
+function restoreDecimals(text: string): string {
+  return text.split(DECIMAL_PLACEHOLDER).join(".");
+}
+
 // Splits a single post at sentence boundaries so it fits `limit`,
 // falling back to word-boundary wrapping only for a single sentence
 // that alone exceeds the limit. Never truncates — every character in
@@ -98,8 +118,8 @@ function unwrapJson(raw: string): string {
 // absent client value — char limit is now unclamped/unvalidated by
 // design) short-circuits on the first check, so it's always safe.
 function splitAtSentenceBoundaries(text: string, limit: number): string[] {
-  const trimmed = text.trim();
-  if (trimmed.length <= limit) return trimmed.length > 0 ? [trimmed] : [];
+  const trimmed = protectDecimals(text.trim());
+  if (trimmed.length <= limit) return trimmed.length > 0 ? [restoreDecimals(trimmed)] : [];
   const sentences = trimmed.match(/[^.!?\n]+[.!?]?(\s+|\n+|$)/g) ?? [trimmed];
   const posts: string[] = [];
   let current = "";
@@ -128,7 +148,7 @@ function splitAtSentenceBoundaries(text: string, limit: number): string[] {
     current = remainder;
   }
   if (current) posts.push(current);
-  return posts;
+  return posts.map(restoreDecimals);
 }
 
 // The model returns ONE continuous piece of text per variant — post
