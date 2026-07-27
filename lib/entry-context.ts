@@ -19,6 +19,56 @@ import {
 import { getOrRefreshSnapshot } from "@/lib/market-snapshot";
 import { getMarketContext } from "@/lib/market";
 import { getUpcomingEarnings } from "@/lib/earnings";
+import { getHistoricalPrices } from "@/lib/yahoo";
+
+// Same PT-anchored "today" bulk-create/fills routes already use for
+// opened_date/fill_date — a position's own openedDate is stamped in
+// this same calendar, so comparing against it here (not a UTC today)
+// is what makes "is this a same-day trade" mean the same thing
+// everywhere in the app.
+function todayPst(): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Los_Angeles",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
+
+function toIsoDate(d: unknown): string {
+  if (d instanceof Date) return d.toISOString().slice(0, 10);
+  if (typeof d === "string") return d.slice(0, 10);
+  return "";
+}
+
+// Last real close ON OR BEFORE targetIso — never looks forward, since
+// an entry value must reflect what was knowable at open, not what
+// happened after. Same normalize/sort/scan idiom as
+// fetchYahooPriceActionTimed's lastOnOrBefore in lib/encyclopedia.ts.
+// Works for any Yahoo-recognized symbol, including "^VIX" — verified
+// live against a real past date before writing this.
+async function historicalCloseOnOrBefore(
+  symbol: string,
+  targetIso: string,
+): Promise<number | null> {
+  const target = new Date(targetIso + "T00:00:00Z");
+  const from = new Date(target.getTime() - 6 * 86_400_000);
+  const to = new Date(target.getTime() + 86_400_000);
+  const bars = await getHistoricalPrices(symbol, from, to).catch(() => []);
+  const normalized = bars
+    .map((b) => ({
+      iso: toIsoDate((b as { date?: unknown }).date),
+      close: Number((b as { close?: unknown }).close ?? 0),
+    }))
+    .filter((b) => b.iso && Number.isFinite(b.close) && b.close > 0)
+    .sort((a, b) => a.iso.localeCompare(b.iso));
+  let best: number | null = null;
+  for (const b of normalized) {
+    if (b.iso <= targetIso) best = b.close;
+    else break;
+  }
+  return best;
+}
 
 export type EntryContextResult = {
   stamped: string[]; // column names written
@@ -197,6 +247,14 @@ export async function stampEntryContext(
   const result: EntryContextResult = { stamped: [], earningsLinked: false };
   const sb = createServerClient();
   const symbol = position.symbol.toUpperCase();
+  // The whole point of this fix: entry context is "as of when the
+  // position was actually opened," not "as of whenever this stamp
+  // happens to run." A same-day trade's open date IS today, so this
+  // branch changes nothing for the common case — it's a live fetch
+  // either way, just via the same code path as before. A backdated
+  // import (a rebuild, a delayed import, a re-run after a data fix)
+  // takes the other branch and never touches a live/current source.
+  const isSameDay = position.openedDate === todayPst();
 
   try {
     // Current values — only null fields get written, so the richer
@@ -214,48 +272,75 @@ export async function stampEntryContext(
 
     const patch: Record<string, number> = {};
 
+    // Pure calendar math, no market-data dependency either way — already
+    // correctly computed from openedDate, not "today." Unaffected by
+    // this fix, included here unchanged.
     if (row.entry_dte === null || row.entry_dte === undefined) {
       const dte = daysBetweenIso(position.expiry, position.openedDate);
       if (dte >= 0) patch.entry_dte = dte;
     }
-    if ((row.entry_vix === null || row.entry_vix === undefined) && ctx.vix !== null) {
-      patch.entry_vix = ctx.vix;
-    }
 
-    // Yahoo snapshot: spot fallback + market cap.
+    const needVix = row.entry_vix === null || row.entry_vix === undefined;
     const needPrice = row.entry_stock_price === null || row.entry_stock_price === undefined;
     const needCap = row.entry_market_cap === null || row.entry_market_cap === undefined;
-    let snapshotPrice: number | null = null;
-    if (needPrice || needCap) {
-      const snap = await getOrRefreshSnapshot(symbol, 30).catch(() => null);
-      snapshotPrice = snap?.price ?? null;
-      if (needCap && snap?.market_cap != null && Number.isFinite(snap.market_cap)) {
-        patch.entry_market_cap = snap.market_cap;
-      }
-    }
-
-    // Schwab chain: EM%, contract IV + delta, best spot.
     const needEm = row.entry_em_pct === null || row.entry_em_pct === undefined;
     const needIv = row.entry_iv === null || row.entry_iv === undefined;
     const needDelta = row.entry_delta === null || row.entry_delta === undefined;
-    let chainSpot: number | null = null;
-    if (ctx.schwabConnected && (needEm || needIv || needDelta || needPrice)) {
-      try {
-        const chain = await getOptionsChain(symbol, position.expiry, "ALL");
-        const r = chainReadings(chain, position.expiry, Number(position.strike), position.optionType);
-        chainSpot = r.spot;
-        if (needEm && r.emPct !== null) patch.entry_em_pct = r.emPct;
-        if (needIv && r.contractIv !== null) patch.entry_iv = r.contractIv;
-        if (needDelta && r.contractDelta !== null) patch.entry_delta = r.contractDelta;
-      } catch (e) {
-        console.warn(
-          `[entry-context] chain(${symbol}, ${position.expiry}) failed: ${e instanceof Error ? e.message : e}`,
-        );
+
+    if (isSameDay) {
+      // ---- unchanged: same-day trade, live sources are correct ----
+      if (needVix && ctx.vix !== null) patch.entry_vix = ctx.vix;
+
+      // Yahoo snapshot: spot fallback + market cap.
+      let snapshotPrice: number | null = null;
+      if (needPrice || needCap) {
+        const snap = await getOrRefreshSnapshot(symbol, 30).catch(() => null);
+        snapshotPrice = snap?.price ?? null;
+        if (needCap && snap?.market_cap != null && Number.isFinite(snap.market_cap)) {
+          patch.entry_market_cap = snap.market_cap;
+        }
       }
-    }
-    if (needPrice) {
-      const price = chainSpot ?? snapshotPrice;
-      if (price !== null && Number.isFinite(price)) patch.entry_stock_price = price;
+
+      // Schwab chain: EM%, contract IV + delta, best spot.
+      let chainSpot: number | null = null;
+      if (ctx.schwabConnected && (needEm || needIv || needDelta || needPrice)) {
+        try {
+          const chain = await getOptionsChain(symbol, position.expiry, "ALL");
+          const r = chainReadings(chain, position.expiry, Number(position.strike), position.optionType);
+          chainSpot = r.spot;
+          if (needEm && r.emPct !== null) patch.entry_em_pct = r.emPct;
+          if (needIv && r.contractIv !== null) patch.entry_iv = r.contractIv;
+          if (needDelta && r.contractDelta !== null) patch.entry_delta = r.contractDelta;
+        } catch (e) {
+          console.warn(
+            `[entry-context] chain(${symbol}, ${position.expiry}) failed: ${e instanceof Error ? e.message : e}`,
+          );
+        }
+      }
+      if (needPrice) {
+        const price = chainSpot ?? snapshotPrice;
+        if (price !== null && Number.isFinite(price)) patch.entry_stock_price = price;
+      }
+    } else {
+      // ---- backdated: historical sources only, or null — never a
+      // live/current value standing in for a past date. Price and VIX
+      // both have a real historical daily-bar source (Yahoo), so those
+      // get sourced properly. EM% / IV / delta need a historical OPTIONS
+      // CHAIN — Schwab only serves the current chain, and the paid
+      // historical-options source was cancelled (same reason
+      // fetch-em-history's implied-move backfill was discontinued) — a
+      // past date's chain genuinely isn't obtainable, so these stay
+      // null rather than being approximated from today's chain. Same
+      // reasoning for market cap: Yahoo's daily bars are OHLCV only, no
+      // historical shares-outstanding series to compute an as-of cap.
+      if (needPrice) {
+        const price = await historicalCloseOnOrBefore(symbol, position.openedDate);
+        if (price !== null) patch.entry_stock_price = price;
+      }
+      if (needVix) {
+        const vix = await historicalCloseOnOrBefore("^VIX", position.openedDate);
+        if (vix !== null) patch.entry_vix = vix;
+      }
     }
 
     if (Object.keys(patch).length > 0) {
