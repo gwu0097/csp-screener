@@ -2935,6 +2935,19 @@ function gradeFromRulesClient(params: {
   return { grade, unrated };
 }
 
+// Mirrors gradeFromYield (lib/screener.ts) — same thresholds, same
+// order. opportunityGrade is yield-derived (premium/strike), so it
+// changes with whatever strike is selected; callers must recompute
+// it fresh per strike rather than reusing the original suggested
+// strike's grade (the bug this function's introduction fixes in
+// CustomStrikeAnalyzer/OptionsChainTab's what-if previews).
+function gradeFromYieldClient(yieldPct: number): "A" | "B" | "C" | "F" {
+  if (yieldPct > 0.75) return "A";
+  if (yieldPct >= 0.4) return "B";
+  if (yieldPct >= 0.2) return "C"; // YIELD_GRADE_C_THRESHOLD_PCT in lib/screener.ts
+  return "F";
+}
+
 type CustomStrikeAnalysis = {
   strike: number;
   distancePct: number;
@@ -2942,6 +2955,7 @@ type CustomStrikeAnalysis = {
   premium: number;
   delta: number;
   breakeven: number;
+  opportunityGradeNew: "A" | "B" | "C" | "F";
   finalGradeNew: "A" | "B" | "C" | "F";
   unrated: boolean;
 };
@@ -3619,7 +3633,7 @@ function ExpandedDetail({
             currentPrice={r.price}
             availableStrikes={r.stageFour?.availableStrikes}
             crushGrade={tl.industryFactors.crushGrade}
-            opportunityGrade={tl.industryFactors.opportunityGrade}
+            currentOpportunityGrade={tl.industryFactors.opportunityGrade}
             hasOverhang={tl.regimeFactors.hasActiveOverhang}
             vix={tl.regimeFactors.vix}
             penalty={tl.regimeFactors.gradePenalty}
@@ -3670,6 +3684,11 @@ function ExpandedDetail({
             r={r}
             strikeOverride={strikeOverride}
             onSelectStrike={onSelectStrike}
+            crushGrade={tl.industryFactors.crushGrade}
+            hasOverhang={tl.regimeFactors.hasActiveOverhang}
+            vix={tl.regimeFactors.vix}
+            penalty={tl.regimeFactors.gradePenalty}
+            personalModifier={personalModifier}
           />
         </TabsContent>
       </Tabs>
@@ -3715,14 +3734,33 @@ type RefreshedChain = {
 // whatever strike is currently selected (see computeSetupGrade). This
 // never re-grades; the recap is pure display arithmetic on already-
 // loaded numbers.
+//
+// The grade PREVIEW alongside it runs the exact same
+// gradeFromYieldClient + gradeFromRulesClient pipeline
+// CustomStrikeAnalyzer's "Try:" box uses — same inputs (crush/overhang/
+// vix/penalty/personalModifier are candidate-level, strike-independent,
+// passed straight through from ExpandedDetail), so a chain click and
+// typing the same strike into "Try:" produce the same what-if grade.
+// It is display-only: r.threeLayer, sort order, and saved snapshots
+// are never touched here.
 function OptionsChainTab({
   r,
   strikeOverride,
   onSelectStrike,
+  crushGrade,
+  hasOverhang,
+  vix,
+  penalty,
+  personalModifier,
 }: {
   r: ScreenerResult;
   strikeOverride: StrikeOverride | null;
   onSelectStrike: (o: StrikeOverride) => void;
+  crushGrade: "A" | "B" | "C" | "F";
+  hasOverhang: boolean;
+  vix: number | null;
+  penalty: number;
+  personalModifier: "boost" | "drop" | null;
 }) {
   const baseStrikes = r.stageFour?.availableStrikes ?? [];
   const recommended = recommendedStrikeFor(r);
@@ -3784,6 +3822,24 @@ function OptionsChainTab({
   const selectedYieldPct =
     strikeOverride !== null && strikeOverride.strike > 0
       ? (strikeOverride.premium / strikeOverride.strike) * 100
+      : null;
+  // What-if grade at the selected strike — same pipeline as
+  // CustomStrikeAnalyzer's "Try:" box (gradeFromYieldClient recomputes
+  // opportunityGrade from THIS strike's yield rather than reusing the
+  // original suggested strike's, then gradeFromRulesClient runs the
+  // same cascade calculateThreeLayerGrade uses server-side). Never
+  // written back to r.threeLayer.
+  const previewGrade =
+    strikeOverride !== null && selectedPop !== null && selectedYieldPct !== null
+      ? gradeFromRulesClient({
+          pop: selectedPop,
+          crushGrade,
+          opportunityGrade: gradeFromYieldClient(selectedYieldPct),
+          hasOverhang,
+          vix,
+          penalty,
+          personalModifier,
+        })
       : null;
 
   if (availableStrikes.length === 0) {
@@ -3881,9 +3937,15 @@ function OptionsChainTab({
               {selectedPop !== null ? `${(selectedPop * 100).toFixed(0)}%` : "—"}
             </span>
           </span>
+          <span className="flex items-center gap-1.5">
+            grade at this strike:{" "}
+            <GradeBadge grade={previewGrade ? previewGrade.grade : null} />
+            <span className="italic text-muted-foreground">(preview)</span>
+          </span>
           <span className="text-muted-foreground">
-            — this row&apos;s Strike/Premium/%Drop/Yield%/Delta now use this pick. Grade and
-            ladder are unchanged; ↺ reset in the Strike column reverts to{" "}
+            — this row&apos;s Strike/Premium/%Drop/Yield%/Delta now use this pick. The row&apos;s
+            actual grade and ladder are unchanged — only the preview above reflects this strike.
+            ↺ reset in the Strike column reverts to{" "}
             {r.stageFour?.suggestedStrike !== null && r.stageFour?.suggestedStrike !== undefined
               ? fmtPrice(r.stageFour.suggestedStrike)
               : "the suggested strike"}
@@ -3959,7 +4021,7 @@ function CustomStrikeAnalyzer({
   currentPrice,
   availableStrikes,
   crushGrade,
-  opportunityGrade,
+  currentOpportunityGrade,
   hasOverhang,
   vix,
   penalty,
@@ -3970,7 +4032,10 @@ function CustomStrikeAnalyzer({
   currentPrice: number;
   availableStrikes: StageFourResult["availableStrikes"];
   crushGrade: "A" | "B" | "C" | "F";
-  opportunityGrade: "A" | "B" | "C" | "F";
+  // Original suggested strike's yield grade — display-only "before" in
+  // the Opportunity impact row below. Never fed into gradeFromRulesClient;
+  // that used to be the bug (see gradeFromYieldClient's comment).
+  currentOpportunityGrade: "A" | "B" | "C" | "F";
   hasOverhang: boolean;
   vix: number | null;
   penalty: number;
@@ -4009,11 +4074,19 @@ function CustomStrikeAnalyzer({
     const breakeven = nearest.strike - premium;
     const distancePct =
       currentPrice > 0 ? ((currentPrice - nearest.strike) / currentPrice) * 100 : 0;
+    // Recomputed from THIS strike's own premium/strike ratio — reusing
+    // currentOpportunityGrade (the original suggested strike's yield
+    // grade) here was the bug: opportunityGrade swings more with strike
+    // than pop does (premium roughly doubles across a typical ±5-strike
+    // band), so holding it fixed understated the grade impact of trying
+    // a different strike.
+    const yieldPct = nearest.strike > 0 ? (premium / nearest.strike) * 100 : 0;
+    const opportunityGradeNew = gradeFromYieldClient(yieldPct);
 
     const { grade: finalGradeNew, unrated } = gradeFromRulesClient({
       pop,
       crushGrade,
-      opportunityGrade,
+      opportunityGrade: opportunityGradeNew,
       hasOverhang,
       vix,
       penalty,
@@ -4026,6 +4099,7 @@ function CustomStrikeAnalyzer({
       premium,
       delta: nearest.delta,
       breakeven,
+      opportunityGradeNew,
       finalGradeNew,
       unrated,
     });
@@ -4076,6 +4150,12 @@ function CustomStrikeAnalyzer({
             <Row k="Breakeven" v={`$${result.breakeven.toFixed(2)}`} />
           </div>
           <div className="mt-2 flex items-center gap-2 border-t border-border pt-2">
+            <span className="text-muted-foreground">Opportunity:</span>
+            <GradeBadge grade={currentOpportunityGrade} />
+            <span className="text-muted-foreground">→</span>
+            <GradeBadge grade={result.opportunityGradeNew} />
+          </div>
+          <div className="mt-1 flex items-center gap-2">
             <span className="text-muted-foreground">Grade impact:</span>
             <GradeBadge grade={currentFinalGrade} />
             <span className="text-muted-foreground">→</span>
