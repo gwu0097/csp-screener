@@ -614,10 +614,13 @@ export function ScreenerView({ connected }: Props) {
   // implicitly by Apply Watchlist / Run Analysis (orphan keys are
   // harmless; the table reads via key lookup).
   const [strikeOverrides, setStrikeOverrides] = useState<Record<string, StrikeOverride>>({});
-  // Conviction note for the Tweet tab, keyed the same way as
-  // strikeOverrides — lives here (not local to ExpandedDetail) so it
-  // survives collapse/reopen, since ExpandedDetail unmounts on collapse.
+  // Conviction note + char limit for the Tweet tab, keyed the same way
+  // as strikeOverrides — lives here (not local to ExpandedDetail) so
+  // both survive collapse/reopen and regeneration, since ExpandedDetail
+  // unmounts on collapse and a local useState would reset on every
+  // remount.
   const [convictionNotes, setConvictionNotes] = useState<Record<string, string>>({});
+  const [tweetCharLimits, setTweetCharLimits] = useState<Record<string, number>>({});
   // Transient toast for Track confirmations. One line above the table.
   const [trackToast, setTrackToast] = useState<string | null>(null);
   // Stream C (chain verification) progress strip — populated while
@@ -2714,6 +2717,10 @@ export function ScreenerView({ connected }: Props) {
                               onConvictionNoteChange={(note) =>
                                 setConvictionNotes((prev) => ({ ...prev, [id]: note }))
                               }
+                              tweetCharLimit={tweetCharLimits[id] ?? 280}
+                              onTweetCharLimitChange={(n) =>
+                                setTweetCharLimits((prev) => ({ ...prev, [id]: n }))
+                              }
                             />
                           </TableCell>
                         </TableRow>
@@ -3144,6 +3151,8 @@ function ExpandedDetail({
   onResetStrike,
   convictionNote,
   onConvictionNoteChange,
+  tweetCharLimit,
+  onTweetCharLimitChange,
 }: {
   r: ScreenerResult;
   analyzing: boolean;
@@ -3153,6 +3162,8 @@ function ExpandedDetail({
   onResetStrike: () => void;
   convictionNote: string;
   onConvictionNoteChange: (note: string) => void;
+  tweetCharLimit: number;
+  onTweetCharLimitChange: (n: number) => void;
 }) {
   // Live campaign data — hooks must run unconditionally, so this sits
   // above the pre-analysis early return. The Layer 2 card's "your
@@ -3727,6 +3738,8 @@ function ExpandedDetail({
             onResetStrike={onResetStrike}
             convictionNote={convictionNote}
             onConvictionNoteChange={onConvictionNoteChange}
+            tweetCharLimit={tweetCharLimit}
+            onTweetCharLimitChange={onTweetCharLimitChange}
             crushGrade={tl.industryFactors.crushGrade}
             hasOverhang={tl.regimeFactors.hasActiveOverhang}
             vix={tl.regimeFactors.vix}
@@ -4086,25 +4099,48 @@ function OptionsChainTab({
 type TweetVariant = { angle: string; posts: string[] };
 type TweetFact = { id: string; text: string };
 type TweetRisk = TweetFact & { isDissent: boolean; keyMetric?: string };
+type TweetVariantSpec = { angle: string; strengths: TweetFact[]; emphasis: "strengths" | "risk" };
 // kind="strength": score is a 0-1+ strength measure, higher = stronger,
 // only the top few survive selection. kind="risk": score is a severity
 // measure used to pick the single most material concern. A candidate
 // with neither strong support nor real severity is simply dropped —
 // that's the fix for weak evidence ("3 of 5 quarters") showing up as
-// if it were support.
-type FactCandidate = { kind: "strength" | "risk"; score: number; id: string; text: string; keyMetric?: string };
+// if it were support. isDissent is set only on the genuine
+// Trade-Decision-Context "not safe to trade" case, not its milder
+// medium-risk sibling (both share id "tdc").
+type FactCandidate = {
+  kind: "strength" | "risk";
+  score: number;
+  id: string;
+  text: string;
+  keyMetric?: string;
+  isDissent?: boolean;
+};
+
+// Which "case" a strength belongs to, so variants can be built from
+// DISTINCT subsets of facts (flow+positioning vs. probability+pattern)
+// instead of the same full list reordered.
+const STRENGTH_GROUP: Record<string, string> = {
+  flow: "flow_positioning",
+  em_position: "flow_positioning",
+  pop: "probability_pattern",
+  crush_pattern: "probability_pattern",
+  tdc_clean: "probability_pattern",
+  news: "probability_pattern",
+};
 
 const TWEET_ANGLE_LABELS: Record<string, string> = {
-  pop: "Leads with probability of profit",
-  crush_pattern: "Leads with crush reliability",
-  em_position: "Leads with strike positioning",
-  flow: "Leads with options flow",
-  news: "Leads with news/sentiment",
-  tdc_clean: "Leads with outlier-history review",
-  trade_setup: "Leads with the trade setup",
+  pop: "Probability & strike distance",
+  crush_pattern: "Crush reliability",
+  em_position: "Strike positioning",
+  flow: "Options flow",
+  news: "News/sentiment",
+  tdc_clean: "Outlier-history review",
+  risk_tension: "Risk / why-anyway",
+  trade_setup: "The trade setup",
 };
 function angleLabel(id: string): string {
-  return TWEET_ANGLE_LABELS[id] ?? `Leads with ${id.replace(/_/g, " ")}`;
+  return TWEET_ANGLE_LABELS[id] ?? id.replace(/_/g, " ");
 }
 
 // Auto-grows a textarea to fit its content — no scrollbar, no fixed
@@ -4139,6 +4175,8 @@ function TweetTab({
   onResetStrike,
   convictionNote,
   onConvictionNoteChange,
+  tweetCharLimit,
+  onTweetCharLimitChange,
   crushGrade,
   hasOverhang,
   vix,
@@ -4153,6 +4191,8 @@ function TweetTab({
   onResetStrike: () => void;
   convictionNote: string;
   onConvictionNoteChange: (note: string) => void;
+  tweetCharLimit: number;
+  onTweetCharLimitChange: (n: number) => void;
   crushGrade: "A" | "B" | "C" | "F";
   hasOverhang: boolean;
   vix: number | null;
@@ -4161,7 +4201,10 @@ function TweetTab({
   currentFinalGrade: string;
   regimeFactors: { newsSentiment: "positive" | "negative" | "neutral"; overhangDescription: string | null };
 }) {
-  const [charLimit, setCharLimit] = useState(280);
+  // Persists on the row (via onTweetCharLimitChange, same map as
+  // convictionNote) — no local default-280 state here, or it would
+  // reset on every regenerate and every collapse/reopen.
+  const charLimit = tweetCharLimit;
   const [generating, setGenerating] = useState(false);
   const [genError, setGenError] = useState<string | null>(null);
   const [variants, setVariants] = useState<TweetVariant[] | null>(null);
@@ -4324,13 +4367,73 @@ function TweetTab({
     return null;
   }
 
+  // Deep-OTM put cluster — real, ticker-specific tail-hedging signal
+  // already computed for the Flow tab (stageThree.details.optionsFlow,
+  // no extra fetch). Only surfaced when the underlying lib judged it
+  // elevated (>25% of put volume in the 1x-2.5x EM band below spot) —
+  // a normal distribution isn't risk material either way.
+  function deepOtmCandidate(): FactCandidate | null {
+    const cluster = r.stageThree?.details?.optionsFlow?.deepOtmPutCluster;
+    if (!cluster || cluster.pctOfTotalPutVolume <= 25) return null;
+    return {
+      kind: "risk",
+      score: Math.min(cluster.pctOfTotalPutVolume, 60) / 60,
+      id: "deep_otm_cluster",
+      text: `${cluster.pctOfTotalPutVolume.toFixed(0)}% of put volume sits between $${cluster.lowerStrike.toFixed(0)} and $${cluster.upperStrike.toFixed(0)} — elevated tail-risk hedging`,
+    };
+  }
+
+  // Unusual-activity rows the Flow tab already classifies as tail
+  // hedges — same data, no new fetch.
+  function tailHedgeCandidate(): FactCandidate | null {
+    const flow = r.stageThree?.details?.optionsFlow;
+    if (!flow) return null;
+    const hedges = flow.unusualStrikes.filter((s) => s.type === "put" && s.note === "tail hedge");
+    if (hedges.length === 0) return null;
+    const strikesTxt = hedges.slice(0, 3).map((h) => `$${h.strike}`).join(", ");
+    return {
+      kind: "risk",
+      score: Math.min(hedges.length, 3) / 3,
+      id: "tail_hedges",
+      text: `unusual options activity flagged ${hedges.length} put strike${hedges.length > 1 ? "s" : ""} (${strikesTxt}) as tail hedges`,
+    };
+  }
+
+  // The Layer-1 move-vs-implied calibration grade — a different lens
+  // than crushCandidate's simple recent-quarters count (this one is
+  // shrinkage/pooled-based). Only surfaced when genuinely unfavorable;
+  // A/B don't get a separate strength slot here since crushCandidate
+  // already covers the specific pattern when it's strong.
+  function crushGradeCandidate(): FactCandidate | null {
+    if (crushGrade === "F") {
+      return {
+        kind: "risk",
+        score: 0.7,
+        id: "crush_grade",
+        text: "this ticker's post-earnings move-vs-implied calibration grades out poorly — IV pricing here has been unreliable",
+      };
+    }
+    if (crushGrade === "C") {
+      return {
+        kind: "risk",
+        score: 0.35,
+        id: "crush_grade",
+        text: "this ticker's post-earnings move-vs-implied calibration grades out middling",
+      };
+    }
+    return null;
+  }
+
   const [tdc, setTdc] = useState<CrushContext | null>(null);
   const [tdcChecked, setTdcChecked] = useState(false);
 
   function tdcCandidate(): FactCandidate | null {
     if (!tdc) return null;
     if (tdc.safe_to_trade === false || tdc.overall_risk === "high") {
-      return { kind: "risk", score: 0.99, id: "tdc", text: tdc.verdict, keyMetric: tdc.key_metric_to_watch };
+      return { kind: "risk", score: 0.99, id: "tdc", text: tdc.verdict, keyMetric: tdc.key_metric_to_watch, isDissent: true };
+    }
+    if (tdc.overall_risk === "medium") {
+      return { kind: "risk", score: 0.65, id: "tdc", text: tdc.verdict, keyMetric: tdc.key_metric_to_watch };
     }
     if (tdc.safe_to_trade === true && tdc.overall_risk === "low") {
       return {
@@ -4397,19 +4500,72 @@ function TweetTab({
       // needs to know about it before ranking candidates.
       await fetchTdcIfNeeded();
 
-      const candidates = [popCandidate(), crushCandidate(), emCandidate(), flowCandidate(), newsCandidate(), tdcCandidate()].filter(
-        (c): c is FactCandidate => c !== null,
-      );
-      const strengths: TweetFact[] = candidates
+      const candidates = [
+        popCandidate(),
+        crushCandidate(),
+        emCandidate(),
+        flowCandidate(),
+        newsCandidate(),
+        tdcCandidate(),
+        deepOtmCandidate(),
+        tailHedgeCandidate(),
+        crushGradeCandidate(),
+      ].filter((c): c is FactCandidate => c !== null);
+
+      const strengthCandidates = candidates
         .filter((c) => c.kind === "strength")
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 4)
-        .map((c) => ({ id: c.id, text: c.text }));
+        .sort((a, b) => b.score - a.score);
+      // Single most material concern, if any — no generic fallback.
+      // When nothing clears a real risk bar, `risk` stays null and the
+      // draft simply has no risk section, per the rule that an empty
+      // slot beats a placeholder.
       const riskCandidates = candidates.filter((c) => c.kind === "risk").sort((a, b) => b.score - a.score);
       const risk: TweetRisk | null =
         riskCandidates.length > 0
-          ? { id: riskCandidates[0].id, text: riskCandidates[0].text, isDissent: riskCandidates[0].id === "tdc", keyMetric: riskCandidates[0].keyMetric }
+          ? {
+              id: riskCandidates[0].id,
+              text: riskCandidates[0].text,
+              isDissent: riskCandidates[0].isDissent === true,
+              keyMetric: riskCandidates[0].keyMetric,
+            }
           : null;
+
+      // Group strengths into DISTINCT subsets — flow+positioning vs.
+      // probability+pattern — so variants differ in which facts they
+      // draw on, not just which one is listed first. One variant per
+      // non-empty group, ranked by that group's best fact, plus (when
+      // a real risk exists) one risk-forward variant built around the
+      // risk/why-anyway tension instead of a strength pile. Variant
+      // count follows how much genuinely distinct material exists —
+      // never padded to a fixed number.
+      const byGroup = new Map<string, FactCandidate[]>();
+      for (const c of strengthCandidates) {
+        const g = STRENGTH_GROUP[c.id] ?? "other";
+        const list = byGroup.get(g) ?? [];
+        list.push(c);
+        byGroup.set(g, list);
+      }
+      const groupedSpecs = Array.from(byGroup.values())
+        .map((facts) => facts.sort((a, b) => b.score - a.score))
+        .sort((a, b) => b[0].score - a[0].score);
+
+      const groupSlots = risk ? 2 : 3;
+      const variants: TweetVariantSpec[] = groupedSpecs.slice(0, groupSlots).map((facts) => ({
+        angle: facts[0].id,
+        strengths: facts.slice(0, 3).map((c) => ({ id: c.id, text: c.text })),
+        emphasis: "strengths",
+      }));
+      if (risk) {
+        const bestOverall = strengthCandidates[0];
+        variants.push({
+          angle: "risk_tension",
+          strengths: bestOverall ? [{ id: bestOverall.id, text: bestOverall.text }] : [],
+          emphasis: "risk",
+        });
+      }
+      if (variants.length === 0) {
+        variants.push({ angle: "trade_setup", strengths: [], emphasis: "strengths" });
+      }
 
       const res = await fetch("/api/screener/tweet-draft", {
         method: "POST",
@@ -4421,7 +4577,7 @@ function TweetTab({
           dte: r.daysToExpiry,
           grade: effectiveGrade,
           gradeIsPreview,
-          strengths,
+          variants: variants.slice(0, 3),
           risk,
           convictionNote,
           charLimit,
@@ -4485,16 +4641,15 @@ function TweetTab({
           <span className="w-24 shrink-0 text-muted-foreground">Char limit</span>
           <input
             type="number"
-            min={50}
-            max={2000}
-            step={10}
+            step="1"
             value={charLimit}
-            onChange={(e) =>
-              setCharLimit(Math.min(2000, Math.max(50, Number(e.target.value) || 280)))
-            }
+            onChange={(e) => {
+              const n = Number(e.target.value);
+              if (Number.isFinite(n)) onTweetCharLimitChange(n);
+            }}
             className="w-24 rounded border border-border bg-background px-2 py-1 font-mono"
           />
-          <span className="text-xs text-muted-foreground">default 280 · up to 2000</span>
+          <span className="text-xs text-muted-foreground">freeform · persists on this row</span>
         </label>
         <label className="flex flex-col gap-1 md:col-span-2">
           <span className="text-muted-foreground">Conviction note (persists on this row)</span>
@@ -5359,6 +5514,7 @@ function SandboxTester({ connected }: { connected: boolean }) {
   // run below.
   const [sandboxStrikeOverride, setSandboxStrikeOverride] = useState<StrikeOverride | null>(null);
   const [sandboxConvictionNote, setSandboxConvictionNote] = useState("");
+  const [sandboxCharLimit, setSandboxCharLimit] = useState(280);
 
   async function analyze() {
     const sym = symbol.trim().toUpperCase();
@@ -5371,6 +5527,7 @@ function SandboxTester({ connected }: { connected: boolean }) {
     setResult(null);
     setSandboxStrikeOverride(null);
     setSandboxConvictionNote("");
+    setSandboxCharLimit(280);
     const candidate = makeSandboxCandidate(sym);
     if (!connected) {
       setResult(candidate);
@@ -5483,6 +5640,8 @@ function SandboxTester({ connected }: { connected: boolean }) {
                 onResetStrike={() => setSandboxStrikeOverride(null)}
                 convictionNote={sandboxConvictionNote}
                 onConvictionNoteChange={setSandboxConvictionNote}
+                tweetCharLimit={sandboxCharLimit}
+                onTweetCharLimitChange={setSandboxCharLimit}
               />
             </div>
           ) : (
