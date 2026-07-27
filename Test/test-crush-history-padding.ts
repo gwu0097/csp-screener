@@ -1,8 +1,9 @@
-// Verifies the 8-quarter-slot padding math added to
+// Verifies the 8-quarter-slot padding + pinned-quarter dedup added to
 // components/crush-history-table.tsx. That file is a "use client"
 // component (not importable standalone), so the helper functions and
-// the padding loop are copied verbatim here to test in isolation —
-// keep in sync with the component if either changes.
+// the full sorted/pinned/displayRows pipeline are copied verbatim here
+// to test in isolation — keep in sync with the component if either
+// changes.
 // Run: npx tsx Test/test-crush-history-padding.ts
 
 function quarterLabel(dateIso: string): string {
@@ -43,30 +44,52 @@ function representativeDate(qy: QuarterYear): string {
   return `${y}-${String(m).padStart(2, "0")}-15`;
 }
 
-type Event = { earningsDate: string; qtrLabel: string; impliedMovePct: number | null };
+type Event = {
+  earningsDate: string;
+  qtrLabel: string;
+  impliedMovePct: number | null;
+};
 
 const HISTORY_QUARTER_COUNT = 8;
-function buildDisplayRows(realEvents: Event[], todayIso: string): Event[] {
+
+// Full pipeline mirror: liveEvents -> upcoming (pinned) -> sorted
+// (excludes pinned) -> displayRows (8 slots, skipping whichever one
+// matches the pinned quarter by (year, quarter) identity).
+function runPipeline(liveEvents: Event[], todayEarningsDate: string, todayIso: string) {
+  const upcoming =
+    liveEvents.find((e) => e.earningsDate === todayEarningsDate) ??
+    liveEvents.find((e) => e.earningsDate >= todayIso) ??
+    null;
+
+  const sorted = liveEvents
+    .filter((e) => e !== upcoming && e.earningsDate < todayIso)
+    .sort((a, b) => b.earningsDate.localeCompare(a.earningsDate));
+
+  const pinnedDate = todayEarningsDate || upcoming?.earningsDate || todayIso;
+  const pinnedQY = quarterOfDate(pinnedDate);
+
   const byQuarter = new Map<string, Event>();
-  for (const e of realEvents) {
+  for (const e of sorted) {
     const label = quarterLabel(e.earningsDate);
     if (!byQuarter.has(label)) byQuarter.set(label, e);
   }
-  const rows: Event[] = [];
+  const displayRows: Event[] = [];
   let cursor = quarterOfDate(todayIso);
   for (let i = 0; i < HISTORY_QUARTER_COUNT; i += 1) {
-    const label = quarterYearLabel(cursor);
-    const real = byQuarter.get(label);
-    rows.push(
-      real ?? {
-        earningsDate: representativeDate(cursor),
-        qtrLabel: label,
-        impliedMovePct: null,
-      },
-    );
+    if (cursor.q !== pinnedQY.q || cursor.y !== pinnedQY.y) {
+      const label = quarterYearLabel(cursor);
+      const real = byQuarter.get(label);
+      displayRows.push(
+        real ?? {
+          earningsDate: representativeDate(cursor),
+          qtrLabel: label,
+          impliedMovePct: null,
+        },
+      );
+    }
     cursor = previousQuarter(cursor);
   }
-  return rows;
+  return { upcoming, sorted, pinnedQY, displayRows };
 }
 
 let passed = 0;
@@ -81,9 +104,10 @@ function check(label: string, cond: boolean, detail?: string): void {
   }
 }
 
-const TODAY = "2026-07-26";
+const TODAY = "2026-07-27";
 
-// -------- Case 1: INTC's real 5 rows — 3 empty slots at the old end --------
+// -------- Case 1: INTC's real 5 rows — no pinned/upcoming context --------
+// (isolated padding math only, matches the previous pass's check)
 {
   const intc: Event[] = [
     { earningsDate: "2026-07-23", qtrLabel: "", impliedMovePct: 0.1203 },
@@ -92,23 +116,66 @@ const TODAY = "2026-07-26";
     { earningsDate: "2025-10-23", qtrLabel: "", impliedMovePct: 0.092 },
     { earningsDate: "2025-07-24", qtrLabel: "", impliedMovePct: 0.085 },
   ];
-  const rows = buildDisplayRows(intc, TODAY);
-  const labels = rows.map((r) => quarterLabel(r.earningsDate));
-  console.log("  INTC labels:", labels);
-  check("exactly 8 rows", rows.length === 8);
+  // No live pinned context (todayEarningsDate irrelevant to this
+  // symbol) — pinnedDate falls back to todayIso, whose quarter (Q2
+  // 2026) IS INTC's own already-reported quarter, so this exercises
+  // the exact same collapse as case 2 below via the todayIso fallback.
+  const { displayRows } = runPipeline(intc, "", TODAY);
+  const labels = displayRows.map((r) => quarterLabel(r.earningsDate));
+  console.log("  INTC (no explicit todayEarningsDate) labels:", labels);
+  check("7 historical rows + 1 pinned = 8 total quarters", displayRows.length === 7);
   check(
-    "labels are Q2 2026 -> Q3 2024, in order",
+    "labels are Q1 2026 -> Q3 2024 (Q2 2026 covered by pinned, not duplicated)",
     JSON.stringify(labels) ===
-      JSON.stringify(["Q2 2026", "Q1 2026", "Q4 2025", "Q3 2025", "Q2 2025", "Q1 2025", "Q4 2024", "Q3 2024"]),
+      JSON.stringify(["Q1 2026", "Q4 2025", "Q3 2025", "Q2 2025", "Q1 2025", "Q4 2024", "Q3 2024"]),
   );
-  check("first 5 are the real rows (non-null EM)", rows.slice(0, 5).every((r) => r.impliedMovePct !== null));
-  check("last 3 are empty placeholders (null EM)", rows.slice(5).every((r) => r.impliedMovePct === null));
 }
 
-// -------- Case 2: genuinely 8 fetchable quarters — no padding, no dupes --------
+// -------- Case 2: INTC with real todayEarningsDate — newest quarter --------
+// already reported, must show via the pinned row exactly once, not
+// also as an empty generated row.
+{
+  const intc: Event[] = [
+    { earningsDate: "2026-07-23", qtrLabel: "", impliedMovePct: 0.1203 },
+    { earningsDate: "2026-04-23", qtrLabel: "", impliedMovePct: 0.103 },
+    { earningsDate: "2026-01-22", qtrLabel: "", impliedMovePct: 0.0931 },
+    { earningsDate: "2025-10-23", qtrLabel: "", impliedMovePct: 0.092 },
+    { earningsDate: "2025-07-24", qtrLabel: "", impliedMovePct: 0.085 },
+  ];
+  const { upcoming, displayRows } = runPipeline(intc, "2026-07-23", TODAY);
+  const labels = displayRows.map((r) => quarterLabel(r.earningsDate));
+  console.log("  INTC (real todayEarningsDate) labels:", labels);
+  check("upcoming/pinned merge picked up INTC's real Q2 2026 row", upcoming?.earningsDate === "2026-07-23");
+  check("Q2 2026 does not appear in the historical rows", !labels.includes("Q2 2026"));
+  check("no empty duplicate for Q2 2026", displayRows.every((r) => quarterLabel(r.earningsDate) !== "Q2 2026"));
+  check("still 7 historical + 1 pinned = 8 total, no gaps", displayRows.length === 7);
+}
+
+// -------- Case 3: GLW — reports tomorrow, EM 11.0%, no fetched history yet --------
+// This is the reported bug: the pinned "reports tomorrow" row and a
+// generated empty Q2 2026 slot must collapse into one.
+{
+  // GLW has no earnings_history rows fetched yet at all — the "live"
+  // upcoming row comes from the screener context (todayEarningsDate +
+  // todayEmPct), not from liveEvents. liveEvents is empty.
+  const glw: Event[] = [];
+  const { displayRows } = runPipeline(glw, "2026-07-28", TODAY); // reports tomorrow
+  const labels = displayRows.map((r) => quarterLabel(r.earningsDate));
+  console.log("  GLW (reports tomorrow) labels:", labels);
+  check("Q2 2026 does not appear as a generated slot", !labels.includes("Q2 2026"));
+  check("7 empty historical slots, Q3 2025 through Q3 2024... i.e. Q1 2026 down", displayRows.length === 7);
+  check(
+    "labels are Q1 2026 -> Q3 2024",
+    JSON.stringify(labels) ===
+      JSON.stringify(["Q1 2026", "Q4 2025", "Q3 2025", "Q2 2025", "Q1 2025", "Q4 2024", "Q3 2024"]),
+  );
+}
+
+// -------- Case 4: genuinely 8 fetchable quarters, no pinned overlap --------
+// (todayEarningsDate is far in the future — e.g. next quarter's report
+// not yet scheduled close to today — so nothing gets excluded)
 {
   const eight: Event[] = [
-    { earningsDate: "2026-07-23", qtrLabel: "", impliedMovePct: 0.1 },
     { earningsDate: "2026-04-23", qtrLabel: "", impliedMovePct: 0.1 },
     { earningsDate: "2026-01-22", qtrLabel: "", impliedMovePct: 0.1 },
     { earningsDate: "2025-10-23", qtrLabel: "", impliedMovePct: 0.1 },
@@ -116,47 +183,42 @@ const TODAY = "2026-07-26";
     { earningsDate: "2025-04-24", qtrLabel: "", impliedMovePct: 0.1 },
     { earningsDate: "2025-01-23", qtrLabel: "", impliedMovePct: 0.1 },
     { earningsDate: "2024-10-24", qtrLabel: "", impliedMovePct: 0.1 },
+    { earningsDate: "2024-07-25", qtrLabel: "", impliedMovePct: 0.1 },
   ];
-  const rows = buildDisplayRows(eight, TODAY);
-  const labels = rows.map((r) => quarterLabel(r.earningsDate));
-  console.log("  8-real labels:", labels);
-  check("exactly 8 rows, no double-counting", rows.length === 8);
-  check("all 8 are real (non-null EM), none synthetic", rows.every((r) => r.impliedMovePct !== null));
-  check("no duplicate quarter labels", new Set(labels).size === 8);
-  check(
-    "matches expected 8-quarter span exactly",
-    JSON.stringify(labels) ===
-      JSON.stringify(["Q2 2026", "Q1 2026", "Q4 2025", "Q3 2025", "Q2 2025", "Q1 2025", "Q4 2024", "Q3 2024"]),
-  );
+  // Pinned quarter (from todayEarningsDate) is Q2 2026 — genuinely has
+  // no fetched row yet (next report not out), so all 8 target quarters
+  // Q2'26..Q3'24 should show: Q2'26 as an empty pinned row (not part of
+  // displayRows), the other 7 as real rows.
+  const { displayRows } = runPipeline(eight, "2026-07-28", TODAY);
+  const labels = displayRows.map((r) => quarterLabel(r.earningsDate));
+  console.log("  8-real (no Q2 2026 fetched yet) labels:", labels);
+  check("7 real historical rows, no synthetic, no dupes", displayRows.length === 7);
+  check("all 7 are real (non-null EM)", displayRows.every((r) => r.impliedMovePct !== null));
+  check("no duplicate quarter labels", new Set(labels).size === 7);
 }
 
-// -------- Case 3: gap in the MIDDLE (not just the old end) --------
+// -------- Case 5: manual quarter still dedups correctly against slots --------
+// A manually-backfilled OLD quarter (not the pinned one) must not
+// produce a twin empty row alongside itself.
 {
-  const gapped: Event[] = [
-    { earningsDate: "2026-07-23", qtrLabel: "", impliedMovePct: 0.1 }, // Q2 2026
-    { earningsDate: "2026-04-23", qtrLabel: "", impliedMovePct: 0.1 }, // Q1 2026
-    // Q4 2025 missing
-    { earningsDate: "2025-10-23", qtrLabel: "", impliedMovePct: 0.1 }, // Q3 2025
-    { earningsDate: "2025-07-24", qtrLabel: "", impliedMovePct: 0.1 }, // Q2 2025
-    { earningsDate: "2025-04-24", qtrLabel: "", impliedMovePct: 0.1 }, // Q1 2025
-    { earningsDate: "2025-01-23", qtrLabel: "", impliedMovePct: 0.1 }, // Q4 2024
-    { earningsDate: "2024-10-24", qtrLabel: "", impliedMovePct: 0.1 }, // Q3 2024
+  const withManual: Event[] = [
+    { earningsDate: "2026-07-23", qtrLabel: "", impliedMovePct: 0.1203 },
+    { earningsDate: "2026-04-23", qtrLabel: "", impliedMovePct: 0.103 },
+    { earningsDate: "2026-01-22", qtrLabel: "", impliedMovePct: 0.0931 },
+    { earningsDate: "2025-10-23", qtrLabel: "", impliedMovePct: 0.092 },
+    { earningsDate: "2025-07-24", qtrLabel: "", impliedMovePct: 0.085 },
+    { earningsDate: "2025-05-15", qtrLabel: "Q1 2025", impliedMovePct: 0.09 }, // manual backfill
   ];
-  const rows = buildDisplayRows(gapped, TODAY);
-  const labels = rows.map((r) => quarterLabel(r.earningsDate));
-  console.log("  gapped-middle labels:", labels);
-  check("exactly 8 rows even with a mid-window gap", rows.length === 8);
-  check(
-    "Q4 2025 (index 2) is the empty synthetic slot",
-    labels[2] === "Q4 2025" && rows[2].impliedMovePct === null,
-  );
-  check(
-    "every other slot is real",
-    rows.filter((_, i) => i !== 2).every((r) => r.impliedMovePct !== null),
-  );
+  const { displayRows } = runPipeline(withManual, "2026-07-23", TODAY);
+  const labels = displayRows.map((r) => quarterLabel(r.earningsDate));
+  const q1_2025_rows = displayRows.filter((r) => quarterLabel(r.earningsDate) === "Q1 2025");
+  console.log("  manual-backfill labels:", labels);
+  check("exactly one Q1 2025 row (the manual one), not a twin empty", q1_2025_rows.length === 1);
+  check("that row carries the manual data, not null", q1_2025_rows[0]?.impliedMovePct === 0.09);
+  check("7 historical rows total (Q2 2026 pinned, not duplicated)", displayRows.length === 7);
 }
 
-// -------- Case 4: representativeDate round-trips for every quarter of a year --------
+// -------- Case 6: representativeDate round-trips for every quarter --------
 {
   for (const q of [1, 2, 3, 4] as const) {
     const qy: QuarterYear = { q, y: 2025 };

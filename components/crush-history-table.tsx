@@ -333,14 +333,31 @@ export function CrushHistoryTable({
     .filter((e) => e !== upcoming && e.earningsDate < todayIso)
     .sort((a, b) => b.earningsDate.localeCompare(a.earningsDate));
 
-  // Always render exactly 8 quarter slots working backward from
-  // today's calendar quarter, whether or not a fetched event exists
-  // for each one — a missing quarter still needs a row to receive a
-  // manual entry, or there's nowhere to type it. Real events fill
-  // their matching quarter (first one wins if a data glitch ever
-  // produces two in the same quarter); anything left over gets an
-  // empty, still-editable placeholder whose earningsDate round-trips
-  // back through quarterLabel to the correct slot.
+  const pinnedDate = todayEarningsDate || upcoming?.earningsDate || todayIso;
+  const pinnedQtr = quarterLabel(pinnedDate);
+  // (year, quarter) struct, not the label string — the pinned row's own
+  // quarter needs to be excluded from the generated slots below by
+  // identity, not by re-deriving and string-comparing a label that
+  // could (in principle) drift from quarterYearLabel's formatting.
+  const pinnedQY = quarterOfDate(pinnedDate);
+
+  // Always render 8 quarter slots working backward from today's
+  // calendar quarter, whether or not a fetched event exists for each
+  // one — a missing quarter still needs a row to receive a manual
+  // entry, or there's nowhere to type it. The newest quarter is the
+  // one case that can exist on BOTH sides at once: as the pinned row
+  // above (merged from `upcoming`/todayEarningsDate) AND as a slot this
+  // loop would otherwise generate, because `sorted` — the only source
+  // this loop used to check — has already had the pinned quarter's
+  // event filtered OUT of it (see the `sorted` filter above). Checking
+  // only `sorted` for "does this quarter already have a row" can never
+  // see the pinned quarter, so it always looked empty and always
+  // duplicated. Skipping any slot whose (year, quarter) matches the
+  // pinned quarter's is what actually closes that gap — matching by
+  // struct identity, not by date (the pinned row's real date and this
+  // loop's synthetic placeholder date are never equal) and not by
+  // whether the slot happens to have data (an empty pinned quarter must
+  // still be skipped, not just a filled one).
   const HISTORY_QUARTER_COUNT = 8;
   const byQuarter = new Map<string, CrushHistoryEvent>();
   for (const e of sorted) {
@@ -351,25 +368,24 @@ export function CrushHistoryTable({
   {
     let cursor = quarterOfDate(todayIso);
     for (let i = 0; i < HISTORY_QUARTER_COUNT; i += 1) {
-      const label = quarterYearLabel(cursor);
-      const real = byQuarter.get(label);
-      displayRows.push(
-        real ?? {
-          earningsDate: representativeDate(cursor),
-          qtrLabel: label,
-          impliedMovePct: null,
-          actualMovePct: null,
-          ratio: null,
-          grade: null,
-          impliedMoveSource: null,
-        },
-      );
+      if (cursor.q !== pinnedQY.q || cursor.y !== pinnedQY.y) {
+        const label = quarterYearLabel(cursor);
+        const real = byQuarter.get(label);
+        displayRows.push(
+          real ?? {
+            earningsDate: representativeDate(cursor),
+            qtrLabel: label,
+            impliedMovePct: null,
+            actualMovePct: null,
+            ratio: null,
+            grade: null,
+            impliedMoveSource: null,
+          },
+        );
+      }
       cursor = previousQuarter(cursor);
     }
   }
-
-  const pinnedDate = todayEarningsDate || upcoming?.earningsDate || todayIso;
-  const pinnedQtr = quarterLabel(pinnedDate);
   const pinnedEm = todayEmPct ?? upcoming?.impliedMovePct ?? null;
   const pinnedActual = upcoming?.actualMovePct ?? null;
   const pinnedRatio = upcoming?.ratio ?? null;
