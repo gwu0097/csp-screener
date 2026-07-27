@@ -174,13 +174,18 @@ export type StageFourResult = {
   maxScore: 20;
   opportunityGrade: "A" | "B" | "C" | "F";
   suggestedStrike: number | null;
+  // Fill-priced (mid by default — see computeFillPrice/
+  // FILL_BASIS_AGGRESSIVENESS_X), not raw bid. This is what feeds
+  // grade/EV/yield/breakeven everywhere downstream.
   premium: number | null;
   delta: number | null;
   // Raw quote alongside the derived spread% — display-only, so a user
   // can see when a quote looks unreliable without the grade acting on
   // it (spread% itself is informational too; see isSpreadTooWide).
+  // `last` is informational only — trade price, never a grade/EV input.
   bid: number | null;
   ask: number | null;
+  last: number | null;
   bidAskSpreadPct: number | null;
   premiumYieldPct: number | null;
   note: string | null;
@@ -197,23 +202,35 @@ export type StageFourResult = {
     usedTargetedLookup?: boolean;
   };
   // Compact snapshot of the weekly put chain so the UI can run a custom
-  // strike analysis client-side without a new API call. Populated by
-  // runStageFour; sorted by strike ascending.
+  // strike analysis client-side (and feed the Options Chain tab)
+  // without a new API call. Populated by runStageFour; sorted by
+  // strike ascending.
   availableStrikes?: Array<{
     strike: number;
     bid: number;
     ask: number;
     // Mid ((bid+ask)/2, falling back to mark/last only when bid+ask
     // isn't usable) — informational/spread-denominator use ONLY. Never
-    // read this as a tradeable premium; see premiumBid.
+    // read this as a tradeable premium; see premiumFill.
     mark: number;
-    // The CSP entry premium, matching runStageFour's own bid-only rule
-    // (line ~1596: `noBid ? 0 : bid`). 0 when bid is missing/non-numeric
-    // — never backfilled from mark/last, same "no bid = no real market"
-    // reasoning as the hard-kill it mirrors. This is what
-    // CustomStrikeAnalyzer/EditableStrikeCell must use for premium;
-    // `mark` stays mid for their spread% denominator.
-    premiumBid: number;
+    // Informational only (Options Chain tab display) — never a
+    // grade/EV input.
+    last: number;
+    // The CSP entry premium, fill-priced the same way as runStageFour's
+    // own top-level `premium` (computeFillPrice — mid by default,
+    // falling back to bid + fillInvalid=true on a degenerate quote). 0
+    // when bid itself is missing/non-numeric — never backfilled from
+    // mark/last, same "no bid = no real market" reasoning as the
+    // hard-kill it mirrors. This is what CustomStrikeAnalyzer/
+    // EditableStrikeCell/walkStrikeLadder must use for premium; `mark`
+    // stays mid-for-display, `last` stays informational-only.
+    premiumFill: number;
+    // True when this strike's mid was untrustworthy (crossed or
+    // missing ask) and premiumFill fell back to bid instead — surfaced
+    // per-strike (not just at the top-level `note`) so the Options
+    // Chain tab and ladder diagnostics can flag it, not just silently
+    // use a possibly-stale bid.
+    fillInvalid: boolean;
     delta: number;
   }>;
 };
@@ -392,7 +409,8 @@ export type LadderRecommendation =
       referenceHasBid: boolean;
       recommendedStrike: number;
       recommendedEmMultiple: number;
-      recommendedPremiumBid: number;
+      // Fill-priced (mid by default — see computeFillPrice), not bid.
+      recommendedPremiumFill: number;
       recommendedPctOtm: number;
       recommendedPop: number;
       recommendedDelta: number;
@@ -1461,6 +1479,38 @@ async function fetchTargetedStrike(
   }
 }
 
+// Fill basis for grade/EV pricing. Raw bid understates realistic fills
+// on wide-spread deep-OTM strikes (GLW $109 put: bid .14, ask .48, last
+// .31 — grading on bid alone reads a trade as far worse than it is and
+// mis-gates opportunity). Mid is the default, deliberately conservative
+// basis (real fills land closer to ask ~90% of the time per the actual
+// trading pattern this was calibrated against — mid is a floor, not a
+// target). X is an optional aggressiveness offset toward ask:
+// fill = mid + X * (ask - mid). X=0 is pure mid (the default); X=1
+// would be ask itself. Dynamic, not hardcoded into the formula below —
+// change this one constant to retune every consumer at once.
+const FILL_BASIS_AGGRESSIVENESS_X = 0;
+
+// Degenerate-quote guard: a mid is only trustworthy when both bid and
+// ask are real, positive, two-sided quotes with ask >= bid. A missing/
+// zero ask, or a crossed quote (ask < bid — stale/unquotable), would
+// silently produce a garbage mid that inflates EV rather than reflect
+// a real market. Falls back to bid (0 when bid itself is missing —
+// same "no bid = no real market" reasoning as the existing hard-kill,
+// which still fires downstream on that 0 regardless of this guard).
+// midInvalid=true flags the fallback so it's visible, not silent.
+function computeFillPrice(
+  bid: number,
+  ask: number,
+): { fill: number; midInvalid: boolean } {
+  const bidOk = Number.isFinite(bid) && bid > 0;
+  const askOk = Number.isFinite(ask) && ask > 0;
+  if (!bidOk) return { fill: 0, midInvalid: false };
+  if (!askOk || ask < bid) return { fill: bid, midInvalid: true };
+  const mid = (bid + ask) / 2;
+  return { fill: mid + FILL_BASIS_AGGRESSIVENESS_X * (ask - mid), midInvalid: false };
+}
+
 export async function runStageFour(
   candidate: EarningsCandidate,
   chain: SchwabOptionsChain,
@@ -1499,6 +1549,7 @@ export async function runStageFour(
       delta: null,
       bid: null,
       ask: null,
+      last: null,
       bidAskSpreadPct: null,
       premiumYieldPct: null,
       note: null,
@@ -1646,6 +1697,7 @@ export async function runStageFour(
       delta: null,
       bid: null,
       ask: null,
+      last: null,
       bidAskSpreadPct: null,
       premiumYieldPct: null,
       note: null,
@@ -1659,16 +1711,22 @@ export async function runStageFour(
   const mid = (contract.bid + contract.ask) / 2 || contract.mark || contract.last || 0;
   const bid = Number.isFinite(contract.bid) ? contract.bid : 0;
   const ask = Number.isFinite(contract.ask) ? contract.ask : 0;
+  const last = Number.isFinite(contract.last) ? contract.last : 0;
   // A zero/missing bid means there is no price at which this contract
   // can actually be sold — distinct from "spread is wide but tradeable".
-  // Hard-kill, not a spread-percentage judgment call.
+  // Hard-kill, not a spread-percentage judgment call. Unchanged by the
+  // bid->mid fill-basis switch below: computeFillPrice returns fill=0
+  // when bid<=0 either way, so this still fires on that 0.
   const noBid = !Number.isFinite(contract.bid) || contract.bid <= 0;
-  // Premium priced at the BID, not the bid-ask mid — a mid price isn't
-  // executable when selling to open. On a $0.05/$0.10 chain, mid rounds
-  // to $0.08, a fill that was never available. When there's no bid at
-  // all, premium is honestly 0 (no mark/last fallback here — that would
-  // mask the "cannot be sold" condition the hard-kill exists to catch).
-  const premium = noBid ? 0 : bid;
+  // Premium priced at the FILL BASIS (mid by default, see
+  // computeFillPrice/FILL_BASIS_AGGRESSIVENESS_X above) — not the raw
+  // bid. Bid alone understates realistic fills on wide-spread deep-OTM
+  // strikes and mis-gates opportunity; mid is what actually clears most
+  // of the time. Falls back to bid (flagged via `note`) when the quote
+  // itself is degenerate (crossed or missing ask) — a garbage mid must
+  // never silently inflate EV. `last` is informational only (see the
+  // returned `last` field) and never feeds this.
+  const { fill: premium, midInvalid } = computeFillPrice(bid, ask);
   // Yield denominator is STRIKE (capital at risk on a cash-secured
   // put), not spot — matches the Yield% screener column and what a
   // trader computes when sizing capital. A $5 premium on a $500
@@ -1679,8 +1737,8 @@ export async function runStageFour(
   const delta = contract.delta;
 
   console.log(
-    `[stage4:${candidate.symbol}] pricing: bid=${bid} ask=${ask} mid=${mid.toFixed(2)} ` +
-      `premium(bid-priced)=${premium.toFixed(2)} spread%ofMid=${spreadPctOfMid.toFixed(1)} noBid=${noBid}`,
+    `[stage4:${candidate.symbol}] pricing: bid=${bid} ask=${ask} mid=${mid.toFixed(2)} last=${last.toFixed(2)} ` +
+      `premium(fill-priced)=${premium.toFixed(2)} spread%ofMid=${spreadPctOfMid.toFixed(1)} noBid=${noBid} midInvalid=${midInvalid}`,
   );
 
   const premiumYieldScore = scorePremiumYield(yieldPct);
@@ -1695,7 +1753,11 @@ export async function runStageFour(
   // premium=0 already lands in the F bucket via gradeFromYield too —
   // this makes the reason explicit via `note` rather than implicit).
   const opportunityGrade = noBid ? "F" : gradeFromYield(yieldPct);
-  const note: string | null = noBid ? "No bid — cannot be sold at any price" : null;
+  const note: string | null = noBid
+    ? "No bid — cannot be sold at any price"
+    : midInvalid
+      ? "Bid/ask quote invalid (missing or crossed ask) — priced at bid, not mid"
+      : null;
 
   // Compact snapshot of the weekly put chain — the UI uses it to let
   // users try a custom strike without another API round-trip. When
@@ -1714,22 +1776,29 @@ export async function runStageFour(
         // Mid — informational only, feeds EditableStrikeCell's spread%
         // denominator. Unchanged from before this fix.
         const strikeMid = (c.bid + c.ask) / 2 || c.mark || c.last || 0;
-        // Premium — same rule as the suggested strike's own premium
-        // above (noBid ? 0 : bid). Explicit NaN/non-numeric check, not
-        // a `||` chain: `(NaN + ask)/2` is falsy in JS, which is
-        // exactly how a bad quote silently fell through to raw Schwab
-        // mark before this fix (TMUS: bid/ask unusable on that
-        // snapshot, mark ask-skewed, card showed 0.43 against a
-        // 0.25/0.45 market). A missing/non-numeric bid means "no real
-        // market for this contract" — treat it as zero-bid, same as
-        // the hard-kill this mirrors, never backfilled from mark/last.
-        const strikeBid = Number.isFinite(c.bid) && c.bid > 0 ? c.bid : 0;
+        // Premium — fill-priced via the same computeFillPrice used for
+        // the suggested strike's own premium above: mid by default,
+        // falling back to bid (flagged) on a degenerate quote, 0 when
+        // bid itself is missing/non-numeric. Explicit NaN/non-numeric
+        // check inside computeFillPrice, not a `||` chain: `(NaN +
+        // ask)/2` is falsy in JS, which is exactly how a bad quote
+        // silently fell through to raw Schwab mark before the original
+        // bid-only fix (TMUS: bid/ask unusable on that snapshot, mark
+        // ask-skewed, card showed 0.43 against a 0.25/0.45 market).
+        const strikeBidRaw = Number.isFinite(c.bid) ? c.bid : 0;
+        const strikeAskRaw = Number.isFinite(c.ask) ? c.ask : 0;
+        const { fill: strikeFill, midInvalid: strikeFillInvalid } = computeFillPrice(
+          strikeBidRaw,
+          strikeAskRaw,
+        );
         availableStrikes!.push({
           strike: c.strikePrice,
           bid: c.bid,
           ask: c.ask,
           mark: Math.round(strikeMid * 100) / 100,
-          premiumBid: Math.round(strikeBid * 100) / 100,
+          last: Number.isFinite(c.last) ? Math.round(c.last * 100) / 100 : 0,
+          premiumFill: Math.round(strikeFill * 100) / 100,
+          fillInvalid: strikeFillInvalid,
           delta: Math.round(c.delta * 1000) / 1000,
         });
       }
@@ -1750,6 +1819,7 @@ export async function runStageFour(
     delta: Math.round(delta * 1000) / 1000,
     bid: Math.round(bid * 100) / 100,
     ask: Math.round(ask * 100) / 100,
+    last: Math.round(last * 100) / 100,
     bidAskSpreadPct: Math.round(spreadPctOfMid * 10) / 10,
     premiumYieldPct: Math.round(yieldPct * 1000) / 1000,
     note,
@@ -2691,8 +2761,8 @@ function computeSetupGrade(
 //   EM-multiple >= 1.0 — derived from the EM's own meaning: below 1x
 //     the strike sits INSIDE the priced-in move, a categorically
 //     different risk posture than "closer," not a tunable choice.
-// Never recommends a rung with premiumBid=0 (availableStrikes already
-// encodes Fix 3(b)'s no-bid-fallback rule) or one that would fail
+// Never recommends a rung with premiumFill=0 (availableStrikes already
+// encodes the no-bid-fallback rule) or one that would fail
 // Fix A's no-arbitrage floor (moot here — every rung is OTM, strike
 // below spot, so intrinsic is always 0).
 // gradeFromYield's C floor, not B. The B threshold (0.40%) asked for a
@@ -2746,22 +2816,25 @@ function walkStrikeLadder(
       ...s,
       pctOtm: ((spot - s.strike) / spot) * 100,
       emMultiple: ((spot - s.strike) / spot) / emPct,
-      yieldPct: s.strike > 0 ? (s.premiumBid / s.strike) * 100 : 0,
+      yieldPct: s.strike > 0 ? (s.premiumFill / s.strike) * 100 : 0,
       pop: 1 - Math.abs(s.delta),
       deltaMonotonicityViolation: false,
     }))
     .sort((a, b) => a.strike - b.strike);
 
   const referenceRung = rungsAll.find((r) => r.strike === referenceStrike) ?? null;
-  const referenceHasBid = (referenceRung?.premiumBid ?? 0) > 0;
+  const referenceHasBid = (referenceRung?.premiumFill ?? 0) > 0;
 
   // Zero-bid rungs are unquoted contracts — the same noBid rule
   // runStageFour already applies to the suggested strike itself
   // (bid<=0 -> premium forced to 0, hard-killed to opportunityGrade F).
   // Excluded from the walk entirely, not merely deprioritized: a $0
   // bid against a wide, stale ask isn't "a worse trade," it's not a
-  // trade.
-  const rungs = rungsAll.filter((r) => r.premiumBid > 0);
+  // trade. premiumFill is fill-priced (mid by default) but is exactly
+  // 0 only when the raw bid itself is 0 — computeFillPrice never
+  // invents a positive fill from nothing, so this filter still means
+  // "no real bid," not "mid rounded to zero."
+  const rungs = rungsAll.filter((r) => r.premiumFill > 0);
 
   // Delta-monotonicity invariant, not a tunable threshold: for a put, a
   // HIGHER strike can never have a LESS negative delta than a lower
@@ -2841,7 +2914,7 @@ function walkStrikeLadder(
       const reasonText = reasons.length > 0 ? reasons.join(", ") : "no rung clears every bar at once";
       text =
         `No bid at 2xEM ($${referenceStrike.toFixed(2)}). Nearest real bid: $${nearMiss.strike.toFixed(2)} ` +
-        `(${nearMiss.emMultiple.toFixed(2)}xEM), $${nearMiss.premiumBid.toFixed(2)} bid (${nearMiss.yieldPct.toFixed(2)}% yield, ` +
+        `(${nearMiss.emMultiple.toFixed(2)}xEM), $${nearMiss.premiumFill.toFixed(2)} mid (${nearMiss.yieldPct.toFixed(2)}% yield, ` +
         `${(nearMiss.pop * 100).toFixed(0)}% POP) — fails ${reasonText}. Skip — no vol to monetize within your risk tolerance.` +
         anomalyNote;
     } else if (rungs.length > 0) {
@@ -2880,7 +2953,7 @@ function walkStrikeLadder(
   const movedFromReference = best.strike !== referenceStrike;
   const expectedValue = computeCspExpectedValue({
     pop,
-    premium: best.premiumBid,
+    premium: best.premiumFill,
     emPct,
     lossMultiplier,
     currentPrice: spot,
@@ -2907,9 +2980,9 @@ function walkStrikeLadder(
   const text =
     (movedFromReference
       ? `No bid at 2xEM ($${referenceStrike.toFixed(2)}). Best tradeable strike: $${best.strike.toFixed(2)} ` +
-        `(${best.emMultiple.toFixed(2)}xEM), $${best.premiumBid.toFixed(2)} bid, ${(pop * 100).toFixed(0)}% POP, ` +
+        `(${best.emMultiple.toFixed(2)}xEM), $${best.premiumFill.toFixed(2)} mid, ${(pop * 100).toFixed(0)}% POP, ` +
         `${best.pctOtm.toFixed(1)}% OTM.` + evNote
-      : `2xEM strike ($${referenceStrike.toFixed(2)}) is tradeable: $${best.premiumBid.toFixed(2)} bid, ` +
+      : `2xEM strike ($${referenceStrike.toFixed(2)}) is tradeable: $${best.premiumFill.toFixed(2)} mid, ` +
         `${(pop * 100).toFixed(0)}% POP, ${best.pctOtm.toFixed(1)}% OTM.`) + anomalyNote;
 
   return {
@@ -2919,7 +2992,7 @@ function walkStrikeLadder(
     referenceHasBid,
     recommendedStrike: best.strike,
     recommendedEmMultiple: best.emMultiple,
-    recommendedPremiumBid: best.premiumBid,
+    recommendedPremiumFill: best.premiumFill,
     recommendedPctOtm: best.pctOtm,
     recommendedPop: pop,
     recommendedDelta: best.delta,

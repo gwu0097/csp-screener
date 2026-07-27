@@ -212,6 +212,24 @@ function ladderChipLabel(ladder: LadderRecommendation): string {
   return "No vol";
 }
 
+// Same precedence as ladderChipLabel, factored out so the Options Chain
+// tab can center its ±5-strike band on the same strike the ladder chip
+// is actually telling the user to look at — a moved recommendation, a
+// premium_below_pop_floor near-miss, or (no_vol / no ladder data yet)
+// the 2xEM reference strike itself.
+function recommendedStrikeFor(r: ScreenerResult): number | null {
+  const ladder = r.threeLayer?.ladderRecommendation;
+  if (ladder?.status === "moved") return ladder.recommendedStrike;
+  if (
+    ladder?.status === "skip_no_tradeable_strike" &&
+    ladder.outcome === "premium_below_pop_floor" &&
+    ladder.nearestRealBidStrike !== null
+  ) {
+    return ladder.nearestRealBidStrike;
+  }
+  return r.stageFour?.suggestedStrike ?? null;
+}
+
 function fmtPrice(n: number | null | undefined) {
   if (n === null || n === undefined || !Number.isFinite(n) || n === 0) return "--";
   return `$${n.toFixed(2)}`;
@@ -584,7 +602,7 @@ export function ScreenerView({ connected }: Props) {
   const [strikeOverrides, setStrikeOverrides] = useState<
     Record<
       string,
-      { strike: number; premium: number; delta: number; bidAskSpreadPct: number }
+      { strike: number; premium: number; last: number; delta: number; bidAskSpreadPct: number }
     >
   >({});
   // Transient toast for Track confirmations. One line above the table.
@@ -2597,6 +2615,7 @@ export function ScreenerView({ connected }: Props) {
                           const ov = strikeOverrides[id] ?? null;
                           const effStrike = ov?.strike ?? r.stageFour?.suggestedStrike ?? null;
                           const effPremium = ov?.premium ?? r.stageFour?.premium ?? null;
+                          const effLast = ov?.last ?? r.stageFour?.last ?? null;
                           const effDelta = ov?.delta ?? r.stageFour?.delta ?? null;
                           const effSpread = ov?.bidAskSpreadPct ?? r.stageFour?.bidAskSpreadPct ?? null;
                           return (
@@ -2621,10 +2640,18 @@ export function ScreenerView({ connected }: Props) {
                               <TableCell className={cn("text-base font-mono", pctDropColor(displayedPrice, effStrike))}>
                                 {fmtPctDrop(displayedPrice, effStrike)}
                               </TableCell>
-                              <TableCell className="text-base">
-                                {effPremium !== null && effPremium !== undefined
-                                  ? `$${fmtNum(effPremium)}`
-                                  : "—"}
+                              <TableCell className="text-base" title="mid / last — graded on mid; last is informational only. Full chain in the Options Chain tab.">
+                                {effPremium !== null && effPremium !== undefined ? (
+                                  <>
+                                    ${fmtNum(effPremium, 3)}
+                                    <span className="text-muted-foreground">
+                                      {" "}
+                                      / {effLast !== null && effLast !== undefined ? fmtNum(effLast, 2) : "—"}
+                                    </span>
+                                  </>
+                                ) : (
+                                  "—"
+                                )}
                               </TableCell>
                               <TableCell className={cn("text-base font-mono", yieldColor(effPremium, effStrike))}>
                                 {fmtYield(effPremium, effStrike)}
@@ -3230,6 +3257,7 @@ function ExpandedDetail({
             <TabsTrigger value="overview">📋 Overview</TabsTrigger>
             <TabsTrigger value="flow">🌊 Flow</TabsTrigger>
             <TabsTrigger value="history">📅 History</TabsTrigger>
+            <TabsTrigger value="chain">⛓️ Options Chain</TabsTrigger>
           </TabsList>
           {onAnalyze && (
             <button
@@ -3616,7 +3644,116 @@ function ExpandedDetail({
             todayEarningsDate={r.earningsDate}
           />
         </TabsContent>
+
+        <TabsContent
+          value="chain"
+          forceMount
+          className="space-y-4 data-[state=inactive]:hidden"
+        >
+          <OptionsChainTab r={r} />
+        </TabsContent>
       </Tabs>
+    </div>
+  );
+}
+
+// Puts only, ±5 listed strikes around the recommended strike (by
+// listing position, not a fixed dollar band, so the context window
+// stays consistent regardless of strike interval — a $2.50-wide chain
+// and a $10-wide chain both show 5 rungs each side). Reuses
+// stageFour.availableStrikes (the same compact chain snapshot already
+// on the client for EditableStrikeCell/CustomStrikeAnalyzer) — no new
+// fetch. bid/ask/last shown are the raw quotes; premiumFill (mid by
+// default) is what actually feeds grade/EV elsewhere, not shown here
+// since this tab is the raw-quote reference view, not another grade
+// surface.
+function OptionsChainTab({ r }: { r: ScreenerResult }) {
+  const availableStrikes = r.stageFour?.availableStrikes ?? [];
+  const recommended = recommendedStrikeFor(r);
+
+  if (availableStrikes.length === 0) {
+    return (
+      <div className="py-6 text-center text-sm text-muted-foreground">
+        No chain data available for this candidate yet — run analysis to fetch it.
+      </div>
+    );
+  }
+
+  // availableStrikes is already sorted ascending by strike (runStageFour's
+  // own guarantee) — find the recommended strike's position (or the
+  // closest listed strike, if the exact value isn't in this snapshot)
+  // so the band is always centered on something meaningful.
+  let centerIdx = 0;
+  if (recommended !== null) {
+    let bestDiff = Math.abs(availableStrikes[0].strike - recommended);
+    for (let i = 1; i < availableStrikes.length; i += 1) {
+      const diff = Math.abs(availableStrikes[i].strike - recommended);
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        centerIdx = i;
+      }
+    }
+  }
+  const start = Math.max(0, centerIdx - 5);
+  const end = Math.min(availableStrikes.length, centerIdx + 6);
+  const band = availableStrikes.slice(start, end);
+
+  return (
+    <div className="space-y-2">
+      <div className="text-xs text-muted-foreground">
+        Puts only · {band.length} strikes around the recommended strike
+        {recommended !== null ? ` (${fmtPrice(recommended)})` : ""}.
+      </div>
+      <table className="w-full text-sm">
+        <thead>
+          <tr className="border-b border-border text-left text-muted-foreground">
+            <th className="px-2 py-1 font-medium">Strike</th>
+            <th className="px-2 py-1 text-right font-medium">Bid</th>
+            <th className="px-2 py-1 text-right font-medium">Ask</th>
+            <th className="px-2 py-1 text-right font-medium">Last</th>
+          </tr>
+        </thead>
+        <tbody>
+          {band.map((s) => {
+            const isRecommended = recommended !== null && Math.abs(s.strike - recommended) < 0.005;
+            return (
+              <tr
+                key={s.strike}
+                className={cn(
+                  "border-b border-border/50",
+                  isRecommended && "bg-emerald-500/10 font-semibold",
+                )}
+              >
+                <td className="px-2 py-1 font-mono">
+                  {fmtPrice(s.strike)}
+                  {isRecommended && (
+                    <span className="ml-1.5 rounded bg-emerald-500/20 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-emerald-300">
+                      recommended
+                    </span>
+                  )}
+                  {s.fillInvalid && (
+                    <span
+                      className="ml-1.5 text-amber-400"
+                      title="Bid/ask quote invalid (missing or crossed ask) — grade/EV fell back to bid, not mid, for this strike"
+                    >
+                      ⚠
+                    </span>
+                  )}
+                </td>
+                <td className="px-2 py-1 text-right font-mono">
+                  {s.bid > 0 ? fmtPrice(s.bid) : "—"}
+                </td>
+                <td className="px-2 py-1 text-right font-mono">
+                  {s.ask > 0 ? fmtPrice(s.ask) : "—"}
+                </td>
+                <td className="px-2 py-1 text-right font-mono text-muted-foreground">
+                  {s.last > 0 ? fmtPrice(s.last) : "—"}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -3666,12 +3803,13 @@ function CustomStrikeAnalyzer({
       }
     }
     const pop = 1 - Math.abs(nearest.delta);
-    // Bid-priced, matching Fix 3(b) — nearest.mark is mid/informational
-    // only, never the tradeable premium (see StageFourResult.availableStrikes).
-    // ?? 0, not the old mark fallback: a stale cached row from before this
-    // fix won't have premiumBid at all — treat that as unavailable, same
-    // as a genuinely missing bid, never silently substitute mark/mid.
-    const premium = nearest.premiumBid ?? 0;
+    // Fill-priced (mid by default, see computeFillPrice in lib/screener.ts)
+    // — nearest.mark stays a separate, purely informational mid/spread
+    // denominator field. ?? 0, not a mark fallback: a stale cached row
+    // from before the premiumFill field existed won't have it at all —
+    // treat that as unavailable, same as a genuinely missing bid, never
+    // silently substitute mark/last.
+    const premium = nearest.premiumFill ?? 0;
     const breakeven = nearest.strike - premium;
     const distancePct =
       currentPrice > 0 ? ((currentPrice - nearest.strike) / currentPrice) * 100 : 0;
@@ -4076,11 +4214,11 @@ function EditableStrikeCell({
 }: {
   defaultStrike: number | null;
   override:
-    | { strike: number; premium: number; delta: number; bidAskSpreadPct: number }
+    | { strike: number; premium: number; last: number; delta: number; bidAskSpreadPct: number }
     | null;
   availableStrikes: NonNullable<StageFourResult["availableStrikes"]>;
   onApply: (
-    o: { strike: number; premium: number; delta: number; bidAskSpreadPct: number },
+    o: { strike: number; premium: number; last: number; delta: number; bidAskSpreadPct: number },
   ) => void;
   onReset: () => void;
 }) {
@@ -4107,17 +4245,21 @@ function EditableStrikeCell({
       Math.abs(s.strike - target) < Math.abs(best.strike - target) ? s : best,
     );
     // Spread% denominator stays mid — nearest.mark, unchanged. Premium
-    // is bid-priced (Fix 3(b)) via the separate premiumBid field; do not
-    // collapse these back into one field (see availableStrikes' type).
+    // is fill-priced (mid by default, see computeFillPrice) via the
+    // separate premiumFill field; do not collapse these back into one
+    // field (see availableStrikes' type).
     const spreadPct =
       nearest.mark > 0
         ? ((nearest.ask - nearest.bid) / nearest.mark) * 100
         : 0;
     onApply({
       strike: nearest.strike,
-      // ?? 0: a stale cached row predating this fix won't have
-      // premiumBid — treat as unavailable, never fall back to mid.
-      premium: nearest.premiumBid ?? 0,
+      // ?? 0: a stale cached row predating this field won't have
+      // premiumFill — treat as unavailable, never fall back to mid.
+      premium: nearest.premiumFill ?? 0,
+      // Informational only — never feeds premium/EV, same rule as the
+      // top-level `last` field.
+      last: nearest.last ?? 0,
       delta: nearest.delta,
       bidAskSpreadPct: spreadPct,
     });
