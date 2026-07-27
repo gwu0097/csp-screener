@@ -5,7 +5,7 @@
 // by runStagesThreeFour. ★ marks events within ±2pp of today's IV-
 // implied move (today's EM is the only fair comparison set).
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { AlertTriangle, CheckCircle2, Loader2, XCircle } from "lucide-react";
 import {
   Tooltip,
@@ -160,6 +160,25 @@ function fmtRatio(n: number | null): string {
   return n.toFixed(2);
 }
 
+// EM values come from sources of very different reliability -- schwab/
+// schwab_t0 are the real straddle formula, manual is hand-entered,
+// perplexity is an LLM recalling a number (confirmed wrong at least
+// once: GLW Q2 2025 read 11.8% against a true ~6%), and polygon has no
+// reproducible code path anywhere in this repo. Surfacing the source
+// inline is what lets a wrong perplexity/polygon value be told apart
+// from a trustworthy schwab one at a glance instead of looking
+// identical. "?" for a populated EM with no recorded source (doesn't
+// happen in current data, but an unknown-provenance number is exactly
+// the kind you'd want to notice, not silently omit).
+function emSourceTag(source: string | null): string {
+  if (source === "schwab") return "schwab";
+  if (source === "schwab_t0") return "schwab_t0";
+  if (source === "perplexity") return "perp";
+  if (source === "polygon") return "polygon";
+  if (source === "manual") return "manual";
+  return "?";
+}
+
 function gradeBadgeCls(g: CrushHistoryEvent["grade"]): string {
   if (g === "A") return "bg-emerald-500/15 text-emerald-300";
   if (g === "B") return "bg-teal-500/15 text-teal-300";
@@ -184,6 +203,7 @@ function EditableMoveCell({
   allowNegative,
   editHint,
   warnAbovePct,
+  trailingTag,
 }: {
   value: number | null; // fraction
   onSave: (percentValue: number | null) => Promise<void>;
@@ -200,6 +220,11 @@ function EditableMoveCell({
   // Warn-and-confirm only: never blocks a save, some names genuinely
   // have huge earnings moves.
   warnAbovePct?: number;
+  // Rendered inside the trigger button, right after the formatted
+  // value, same line — e.g. a small muted source tag. Trigger-only (not
+  // shown while editing); caller decides when to pass one (e.g. omit
+  // for a null value).
+  trailingTag?: ReactNode;
 }) {
   const [editing, setEditing] = useState(false);
   const [val, setVal] = useState("");
@@ -273,9 +298,10 @@ function EditableMoveCell({
         setEditing(true);
       }}
       title="Click to edit"
-      className={`w-full cursor-text text-right font-mono decoration-dotted hover:underline ${colorCls ?? ""}`}
+      className={`inline-flex w-full cursor-text items-center justify-end gap-1 font-mono decoration-dotted hover:underline ${colorCls ?? ""}`}
     >
       {formatDisplay(value)}
+      {trailingTag}
     </button>
   );
 
@@ -709,6 +735,13 @@ export function CrushHistoryTable({
                       nullTooltip="Implied move not available for this quarter — no historical options-data source (backfill discontinued). Click to enter it by hand."
                       editHint="Enter the ATM Straddle % from ThinkorSwim's earnings view (not the Implied Volatility % shown above it)."
                       warnAbovePct={40}
+                      trailingTag={
+                        e.impliedMovePct !== null ? (
+                          <span className="font-sans text-[9px] text-muted-foreground">
+                            ({emSourceTag(e.impliedMoveSource)})
+                          </span>
+                        ) : undefined
+                      }
                       onSave={(pct) => saveField(e, "em", pct)}
                     />
                   </td>
