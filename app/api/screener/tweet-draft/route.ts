@@ -131,11 +131,23 @@ function splitAtSentenceBoundaries(text: string, limit: number): string[] {
   return posts;
 }
 
-function enforcePostLimits(posts: unknown, limit: number): string[] {
-  if (!Array.isArray(posts)) return [];
-  return posts
-    .filter((p): p is string => typeof p === "string" && p.trim().length > 0)
-    .flatMap((p) => splitAtSentenceBoundaries(p, limit));
+// The model returns ONE continuous piece of text per variant — post
+// count is never the model's decision. It used to return a "posts"
+// array directly, with each entry split independently; that let the
+// model over-split (and restate the opener in every "continuation")
+// even when the combined content fit in a single post, since nothing
+// ever merged what it split apart. Now there is exactly one place
+// that decides how many posts a variant becomes: this function,
+// driven by actual text length vs `limit`. `raw` also accepts an
+// array as a defensive fallback (join before splitting) in case the
+// model reverts to the old shape despite the prompt.
+function enforcePostLimits(raw: unknown, limit: number): string[] {
+  const text = typeof raw === "string"
+    ? raw
+    : Array.isArray(raw)
+      ? raw.filter((p): p is string => typeof p === "string").join("\n\n")
+      : "";
+  return splitAtSentenceBoundaries(text, limit);
 }
 
 function buildPrompt(f: {
@@ -218,15 +230,17 @@ VARIANTS: generate exactly ${f.variants.length} variant(s), each using ONLY the 
 
 ${variantBlocks}
 
-CHARACTER LIMIT: ${Number.isFinite(f.charLimit) ? f.charLimit : "none — write as long as the content genuinely needs, no padding"} characters per individual post (the "posts" array entries), not per variant.
+CHARACTER LIMIT: ${Number.isFinite(f.charLimit) ? f.charLimit : "none — write as long as the content genuinely needs, no padding"} characters, applied automatically AFTER you write — see OUTPUT FORMAT below. Write the full case for each variant as ONE continuous piece of text — do not decide post boundaries yourself, do not write "Post 1/3", do not restate the trade line or grade partway through, do not pre-split into a thread. Just write it as continuous prose, in short complete sentences (a sentence never gets cut mid-way when it's split later, so keep each one self-contained — but don't artificially shorten every sentence either).
 ${
   shortForm
-    ? `This is short-form. Write the full case for each variant — trade, its strengths, the risk if any, and the why-anyway if any — then split it across multiple posts in that variant's "posts" array. Break ONLY at the end of a complete thought or sentence — never mid-sentence — and don't pad every post out to exactly the limit. The opening post should run roughly 200 characters (a hook that fills the whole limit doesn't get read) and must lead with the trade plus that variant's lead strength, before anything else. Never drop content to fit the limit — add more posts instead.`
-    : `This is long-form. Return exactly ONE post per variant (a single "posts" array entry with one string), but structure it internally with short line-broken sections covering the full arc — the same readable rhythm a thread would have, not one dense paragraph. Use the room the limit gives you: every fact listed for this variant (strengths, risk, why-anyway) should actually appear, with enough surrounding context to read as reasoning rather than a bare list — don't stop early or compress the case just because a shorter version would also technically fit. Padding with filler is still banned; the point is to not truncate genuine material for no reason.`
+    ? `This will likely need to split into multiple posts once it's measured against the limit — that's expected and handled automatically. Just make sure the opening sentences state the trade plus that variant's lead strength before anything else, so if it does split, the first chunk is a real hook on its own.`
+    : `This will likely fit in a single post once measured against the limit — structure the prose internally with short line-broken sections covering the full arc, the same readable rhythm a thread would have, not one dense paragraph. Use the room the limit gives you: every fact listed for this variant (strengths, risk, why-anyway) should actually appear, with enough surrounding context to read as reasoning rather than a bare list — don't stop early or compress the case just because a shorter version would also technically fit. Padding with filler is still banned; the point is to not truncate genuine material for no reason.`
 }
 
+OUTPUT FORMAT — one "text" string per variant, NOT a "posts" array. Do not pre-split; a separate process measures your text against the character limit and splits it into posts automatically, at sentence boundaries, only if it's actually too long. Writing it as multiple shorter strings yourself causes the exact failure this format exists to prevent: restating the opener in every "post" when the material would fit in one.
+
 Return ONLY this JSON, no other text, no markdown fences:
-{"variants":[{"angle":"<angle from the variant list above>","posts":["<post text>", "..."]}]}`;
+{"variants":[{"angle":"<angle from the variant list above>","text":"<the full continuous prose for this variant>"}]}`;
 }
 
 export async function POST(req: NextRequest) {
@@ -310,7 +324,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Draft generation failed — Perplexity unavailable" }, { status: 502 });
   }
 
-  let parsed: { variants?: Array<{ angle?: unknown; posts?: unknown }> };
+  let parsed: { variants?: Array<{ angle?: unknown; text?: unknown; posts?: unknown }> };
   try {
     parsed = JSON.parse(unwrapJson(ppl.text)) as typeof parsed;
   } catch {
@@ -329,7 +343,7 @@ export async function POST(req: NextRequest) {
   const outVariants = parsed.variants
     .map((v) => ({
       angle: typeof v.angle === "string" && v.angle ? v.angle : "trade_setup",
-      posts: enforcePostLimits(v.posts, charLimit),
+      posts: enforcePostLimits(typeof v.text === "string" ? v.text : v.posts, charLimit),
     }))
     .filter((v) => v.posts.length > 0);
 
