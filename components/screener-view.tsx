@@ -2391,6 +2391,7 @@ export function ScreenerView({ connected }: Props) {
                 <TableRow>
                   <TableHead className="w-8"></TableHead>
                   <TableHead className="w-14 text-sm text-muted-foreground">Track</TableHead>
+                  <SortableHeader label="Symbol" active={sortKey === "symbol"} dir={sortDir} onClick={() => onSort("symbol")} />
                   <SortableHeader
                     label="Grade"
                     active={sortKey === "grade"}
@@ -2409,7 +2410,6 @@ export function ScreenerView({ connected }: Props) {
                   >
                     Ladder
                   </TableHead>
-                  <SortableHeader label="Symbol" active={sortKey === "symbol"} dir={sortDir} onClick={() => onSort("symbol")} />
                   <SortableHeader label="Price" active={sortKey === "price"} dir={sortDir} onClick={() => onSort("price")} />
                   <TableHead>Earnings</TableHead>
                   <SortableHeader
@@ -2503,6 +2503,29 @@ export function ScreenerView({ connected }: Props) {
                             aria-label={`Track ${r.symbol}`}
                           />
                         </TableCell>
+                        <TableCell className="text-[15px] font-bold">
+                          <span className="inline-flex items-center gap-1">
+                            {r.symbol}
+                            {r.isWhitelisted && (
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Star className="h-3.5 w-3.5 fill-amber-300 text-amber-300" />
+                                </TooltipTrigger>
+                                <TooltipContent>Whitelisted</TooltipContent>
+                              </Tooltip>
+                            )}
+                            {r.industryStatus === "fail" && !r.isWhitelisted && (
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <AlertTriangle className="h-3.5 w-3.5 text-amber-400" />
+                                </TooltipTrigger>
+                                <TooltipContent>
+                                  Industry not on the preferred list (−2 Stage 2 penalty)
+                                </TooltipContent>
+                              </Tooltip>
+                            )}
+                          </span>
+                        </TableCell>
                         <TableCell>
                           {r.threeLayer ? (
                             <span
@@ -2542,29 +2565,6 @@ export function ScreenerView({ connected }: Props) {
                           ) : (
                             <span className="text-sm text-muted-foreground">—</span>
                           )}
-                        </TableCell>
-                        <TableCell className="text-[15px] font-bold">
-                          <span className="inline-flex items-center gap-1">
-                            {r.symbol}
-                            {r.isWhitelisted && (
-                              <Tooltip>
-                                <TooltipTrigger asChild>
-                                  <Star className="h-3.5 w-3.5 fill-amber-300 text-amber-300" />
-                                </TooltipTrigger>
-                                <TooltipContent>Whitelisted</TooltipContent>
-                              </Tooltip>
-                            )}
-                            {r.industryStatus === "fail" && !r.isWhitelisted && (
-                              <Tooltip>
-                                <TooltipTrigger asChild>
-                                  <AlertTriangle className="h-3.5 w-3.5 text-amber-400" />
-                                </TooltipTrigger>
-                                <TooltipContent>
-                                  Industry not on the preferred list (−2 Stage 2 penalty)
-                                </TooltipContent>
-                              </Tooltip>
-                            )}
-                          </span>
                         </TableCell>
                         <TableCell className="text-base">{fmtPrice(displayedPrice)}</TableCell>
                         <TableCell className="text-sm">
