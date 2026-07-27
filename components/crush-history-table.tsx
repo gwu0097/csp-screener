@@ -244,7 +244,7 @@ function EditableMoveCell({
         setEditing(true);
       }}
       title="Click to edit"
-      className={`w-full cursor-text font-mono decoration-dotted hover:underline ${colorCls ?? ""}`}
+      className={`w-full cursor-text text-right font-mono decoration-dotted hover:underline ${colorCls ?? ""}`}
     >
       {formatDisplay(value)}
     </button>
@@ -696,7 +696,7 @@ export function CrushHistoryTable({
                       <TooltipProvider delayDuration={200}>
                         <Tooltip>
                           <TooltipTrigger asChild>
-                            <span className="cursor-help text-muted-foreground">—</span>
+                            <span className="cursor-help text-right text-muted-foreground">—</span>
                           </TooltipTrigger>
                           <TooltipContent className="max-w-xs text-sm">
                             Ratio needs both actual and implied move. Implied move not available for this quarter.
