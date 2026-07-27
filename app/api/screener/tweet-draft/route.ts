@@ -5,15 +5,20 @@ import { requireUserId, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
-// Drafts trade-disclosure posts from facts already computed client-side
-// (grade, crush pattern, strike-vs-EM positioning, conviction note) —
-// no re-fetch of chain/news/history here. The LLM's only job is voice
-// and structure; every number it's allowed to reference is handed to
-// it pre-computed, and premium/size/POP are never included in the
-// prompt at all, so there's nothing for it to leak even by accident.
+// Drafts trade-disclosure posts from facts already computed and RANKED
+// client-side (which supporting facts are strong enough to include,
+// which single concern is the most material risk) — no re-fetch of
+// chain/news/history/Trade-Decision-Context here, the client already
+// pulled whatever it needed. The LLM's only job is voice and
+// structure: turn a pre-selected strengths list + a single risk into
+// a strengths -> risk -> why-anyway draft. Position size, contract
+// count, premium, and dollar amounts are simply never included in
+// what's sent, so there's nothing to leak even by accident — but live
+// figures (POP, options flow ratios, delta) that the client marked as
+// strong/risky ARE passed through and expected to appear verbatim.
 export const maxDuration = 60;
 
-type Angle = "crush_reliability" | "em_positioning" | "conviction" | "trade_setup";
+type Fact = { id: string; text: string };
 
 type Body = {
   symbol?: unknown;
@@ -24,16 +29,28 @@ type Body = {
   dte?: unknown;
   grade?: unknown;
   gradeIsPreview?: unknown;
-  crushPatternFact?: unknown; // string | null
-  emPositionFact?: unknown; // string | null
+  strengths?: unknown; // Fact[]
+  risk?: unknown; // { id, text, isDissent, keyMetric? } | null
   convictionNote?: unknown; // string
   charLimit?: unknown;
 };
 
 const VALID_GRADES = new Set(["A", "B", "C", "F", "Unrated"]);
+const GENERIC_RISK_TEXT =
+  "earnings introduces two-sided volatility risk regardless of setup quality — that's true of any trade into a print";
 
 function isIsoDate(v: unknown): v is string {
   return typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v);
+}
+
+function isFact(v: unknown): v is Fact {
+  return (
+    !!v &&
+    typeof v === "object" &&
+    typeof (v as Record<string, unknown>).id === "string" &&
+    typeof (v as Record<string, unknown>).text === "string" &&
+    (v as Record<string, unknown>).text !== ""
+  );
 }
 
 // Strip ```json fences the model sometimes wraps responses in — same
@@ -95,70 +112,82 @@ function buildPrompt(f: {
   symbol: string;
   strike: number;
   expiry: string | null;
-  earningsDate: string | null;
-  earningsTiming: string | null;
   dte: number | null;
   grade: string;
   gradeIsPreview: boolean;
-  crushPatternFact: string | null;
-  emPositionFact: string | null;
+  strengths: Fact[];
+  risk: { id: string; text: string; isDissent: boolean; keyMetric?: string };
   convictionNote: string;
   charLimit: number;
-  angles: Angle[];
+  variantCount: number;
 }): string {
-  const angleDescriptions: Record<Angle, string> = {
-    crush_reliability: `crush reliability — leads with: ${f.crushPatternFact}`,
-    em_positioning: `strike positioning — leads with: the strike ${f.emPositionFact}`,
-    conviction: `my own conviction/note — leads with the note itself, woven in naturally`,
-    trade_setup: `the trade setup itself — leads with the mechanics (symbol, strike, timing relative to earnings), not a pattern claim`,
-  };
-
-  const factLines: string[] = [];
-  if (f.crushPatternFact) factLines.push(`- Crush reliability pattern: ${f.crushPatternFact}`);
-  if (f.emPositionFact) factLines.push(`- Strike positioning: the strike ${f.emPositionFact}`);
-  if (f.convictionNote.trim()) {
-    factLines.push(
-      `- My own note on this trade: "${f.convictionNote.trim()}" — weave this in naturally in my voice, don't tack it on as a final separate line.`,
-    );
-  }
-
   const shortForm = f.charLimit <= 280;
+  const whyAnyway = f.convictionNote.trim()
+    ? `weave in my own note — "${f.convictionNote.trim()}" — naturally, in my voice, not tacked on as a separate final line`
+    : "the strength below that most directly outweighs the risk";
 
-  return `You are drafting real social media posts (for X/Twitter) that a retail options trader will publish under their own name, disclosing a trade they are placing. Write in first person, plain and specific.
+  const variantBlocks = Array.from({ length: f.variantCount }, (_, i) => {
+    // Rotate so each variant leads its strengths section with a
+    // different fact — real differentiation (which reason comes
+    // first), not reworded restatement of the same lead.
+    const ordered = [f.strengths[i], ...f.strengths.filter((_, j) => j !== i)].filter(Boolean);
+    const angle = ordered[0]?.id ?? "trade_setup";
+    const strengthLines =
+      ordered.length > 0
+        ? ordered.map((s) => `  - ${s.text}`).join("\n")
+        : "  - (none clear the bar for this candidate — keep this section brief and grounded in the assessment itself; do not invent a statistic to fill space)";
+    return `VARIANT ${i + 1} (angle="${angle}"):\n${strengthLines}`;
+  }).join("\n\n");
 
-THE TRADE:
-- ${f.symbol}, selling the $${f.strike} put
-${f.expiry ? `- Expiration: ${f.expiry}${f.dte !== null ? ` (${f.dte} days out)` : ""}` : ""}
-${f.earningsDate ? `- Reports earnings ${f.earningsTiming ?? ""} on ${f.earningsDate}` : ""}
+  return `You are drafting real social media posts (for X/Twitter) that a retail options trader will publish under their own name, disclosing a trade they are placing. Write in first person, plain and specific, and HONEST — this must read like genuine trader reasoning, not a pitch.
+
+THE TRADE — open with a single line in this style: "Earnings play: selling the $${f.strike} put in $${f.symbol}"${f.expiry ? `, expiration ${f.expiry}${f.dte !== null ? ` (${f.dte}d out)` : ""} if it fits naturally in that line` : ""}. Do NOT recite "Earnings are [timing] on [date], with expiration on [date]" as a separate sentence — that's assumed context and wastes characters. A plain "Earnings play:" opener is enough.
 
 MY ASSESSMENT: I have this graded as a ${f.grade}${f.gradeIsPreview ? " at this strike" : ""}. Present this as MY OWN read, in my voice — e.g. "I've got this as a ${f.grade}" — never as a system output like "Grade: ${f.grade}".
 
-FACTS YOU MAY USE — do not invent any number, statistic, or fact beyond what's listed here:
-${factLines.length > 0 ? factLines.join("\n") : "- (no additional pattern facts available — lead with the trade setup itself)"}
+STRUCTURE — every variant follows this exact arc, in this order:
+1. The trade (one line, per above)
+2. The genuine strengths — the supporting facts listed for that variant below, IN THE ORDER GIVEN (that variant leads with the first one)
+3. The real risk — stated plainly, not softened, not omitted
+4. Why taking it anyway — ${whyAnyway}
 
-STRICT CONTENT RULES — violating any of these is a failed draft:
-- NEVER mention: position size, number of contracts, premium collected, any dollar amount other than the strike price itself, probability of profit or "POP" (as a number or as a bare claim), delta, or account details.
-- NEVER use hype adjectives or vague confidence language: "setting up nicely", "watching this closely", "looks juicy", or similar.
+Do NOT write a one-sided pitch. Stating the risk honestly, then explaining why I'm taking the trade anyway, is what makes this credible — skipping either the risk or the "why anyway" is a failed draft.
+
+THE RISK (same for every variant):
+${
+  f.risk.isDissent
+    ? `- A dedicated review of this ticker's own history flagged a concern: ${f.risk.text}${f.risk.keyMetric ? ` The thing to watch this print: ${f.risk.keyMetric}.` : ""} Acknowledge this concern directly and specifically — do not ignore it, and do not just restate it without responding to it. Then give the honest reason I'm taking the trade anyway.`
+    : `- ${f.risk.text}`
+}
+
+FACTS RULE: do not invent any number, statistic, or claim beyond what's given in this prompt — for the strengths, the risk, or anything else.
+${f.convictionNote.trim() ? `\nMY OWN NOTE ON THIS TRADE: "${f.convictionNote.trim()}"` : ""}
+
+CONTENT RULES — violating any of these is a failed draft:
+- Live figures ARE allowed and encouraged where given above: probability of profit, options flow ratios, delta, where the strike sits vs the expected move. Use them exactly as given — never invent, round differently, or alter one.
+- Historical crush/EM pattern facts above are deliberately qualitative (a count of quarters, a description) — keep them that way in the draft; do not convert a count into a percentage or invent a ratio.
+- NEVER mention: position size, number of contracts, premium collected, or any dollar amount other than the strike price itself. No account details.
 - NEVER imply certainty about the outcome.
-- NEVER give advice or use imperative language aimed at readers ("you should...", "consider selling..."). Disclosing MY OWN trade is fine ("selling the $${f.strike} put into earnings"); advice to the reader is not.
-- NEVER use thread-bait phrasing ("a thread 🧵", "let me explain", "here's why", etc).
+- NEVER give advice or use imperative language aimed at readers ("you should...", "consider selling..."). Disclosing MY OWN trade is fine ("selling the $${f.strike} put"); advice to the reader is not.
+- NEVER use hype adjectives or vague confidence language ("setting up nicely", "watching this closely", "looks juicy").
+- NEVER use thread-bait phrasing ("a thread 🧵", "let me explain", "here's why").
 - No hashtags except a single ticker cashtag ($${f.symbol}) if it fits naturally. No hashtag spam.
 - Minimal to no emoji.
 - If a sentence could apply to literally any stock, cut it — be specific to this setup.
 
-VARIANTS: generate exactly ${f.angles.length} variants, each keyed to a different angle below. They must differ in WHICH REASON THEY LEAD WITH, not in wording — three rephrasings of the same lead is a failed draft.
-${f.angles.map((a, i) => `${i + 1}. angle="${a}" — ${angleDescriptions[a]}`).join("\n")}
-Every variant should still mention the trade and the grade; only the opening/leading reason changes.
+VARIANTS: generate exactly ${f.variantCount} variant(s). They differ in WHICH STRENGTH LEADS the strengths section, not in wording — three rephrasings of the same lead is a failed draft. The risk and why-anyway sections can repeat their content across variants (that's fine — it's the strengths lead that must differ):
+
+${variantBlocks}
 
 CHARACTER LIMIT: ${f.charLimit} characters per individual post (the "posts" array entries), not per variant.
 ${
   shortForm
-    ? `This is short-form. Write the full case for each variant, then split it across multiple posts in that variant's "posts" array. Break ONLY at the end of a complete thought or sentence — never mid-sentence — and don't pad every post out to exactly the limit. The opening post should run roughly 200 characters (a hook that fills the whole limit doesn't get read) and must lead with the trade plus that variant's single strongest reason, before anything else. Never drop analysis to fit the limit — add more posts instead of cutting content.`
-    : `This is long-form. Return exactly ONE post per variant (a single "posts" array entry with one string), but structure it internally with short line-broken sections — the same readable rhythm a thread would have, not one dense paragraph. The opening lines must state the trade plus that variant's single strongest reason, before anything else.`
+    ? `This is short-form. Write the full case for each variant — trade, all its strengths, the risk, and the why-anyway — then split it across multiple posts in that variant's "posts" array. Break ONLY at the end of a complete thought or sentence — never mid-sentence — and don't pad every post out to exactly the limit. The opening post should run roughly 200 characters (a hook that fills the whole limit doesn't get read) and must lead with the trade plus that variant's lead strength, before anything else. Never drop content to fit the limit — add more posts instead.`
+    : `This is long-form. Return exactly ONE post per variant (a single "posts" array entry with one string), but structure it internally with short line-broken sections covering the full arc (trade / strengths / risk / why-anyway) — the same readable rhythm a thread would have, not one dense paragraph.`
 }
 
 Return ONLY this JSON, no other text, no markdown fences:
-{"variants":[{"angle":"<one of: ${f.angles.join(", ")}>","posts":["<post text>", "..."]}]}`;
+{"variants":[{"angle":"<angle from the variant list above>","posts":["<post text>", "..."]}]}`;
 }
 
 export async function POST(req: NextRequest) {
@@ -186,41 +215,49 @@ export async function POST(req: NextRequest) {
   }
   const grade = typeof body.grade === "string" && VALID_GRADES.has(body.grade) ? body.grade : "Unrated";
   const gradeIsPreview = body.gradeIsPreview === true;
-  const crushPatternFact = typeof body.crushPatternFact === "string" ? body.crushPatternFact : null;
-  const emPositionFact = typeof body.emPositionFact === "string" ? body.emPositionFact : null;
   const convictionNote = typeof body.convictionNote === "string" ? body.convictionNote.slice(0, 500) : "";
   const expiry = isIsoDate(body.expiry) ? body.expiry : null;
   const earningsDate = isIsoDate(body.earningsDate) ? body.earningsDate : null;
-  const earningsTiming = typeof body.earningsTiming === "string" ? body.earningsTiming : null;
   const dte = Number.isFinite(Number(body.dte)) ? Number(body.dte) : null;
   // Default 280, allow up to 2000 — a per-generation control, not a
   // saved preference. Clamped server-side regardless of what the
   // client sends.
   const charLimit = Math.min(2000, Math.max(50, Number(body.charLimit) || 280));
 
-  const angles: Angle[] = [];
-  if (crushPatternFact) angles.push("crush_reliability");
-  if (emPositionFact) angles.push("em_positioning");
-  if (convictionNote.trim()) angles.push("conviction");
-  // Always-available fallback so there are never fewer than 2 angles
-  // to choose between, without ever forcing a fabricated fact.
-  if (angles.length < 2) angles.push("trade_setup");
-  const finalAngles = angles.slice(0, 3);
+  const strengths = (Array.isArray(body.strengths) ? body.strengths : [])
+    .filter(isFact)
+    .slice(0, 4);
+  const riskRaw = body.risk as
+    | { id?: unknown; text?: unknown; isDissent?: unknown; keyMetric?: unknown }
+    | null
+    | undefined;
+  const risk =
+    riskRaw && typeof riskRaw.text === "string" && riskRaw.text
+      ? {
+          id: typeof riskRaw.id === "string" ? riskRaw.id : "risk",
+          text: riskRaw.text,
+          isDissent: riskRaw.isDissent === true,
+          keyMetric: typeof riskRaw.keyMetric === "string" ? riskRaw.keyMetric : undefined,
+        }
+      : { id: "generic", text: GENERIC_RISK_TEXT, isDissent: false };
+
+  // At least 1, at most 3 — tied to how much genuine, distinct
+  // material is available. Padding to a fixed count with reworded
+  // filler is exactly the failure mode this rework exists to remove.
+  const variantCount = Math.max(1, Math.min(3, strengths.length || 1));
 
   const prompt = buildPrompt({
     symbol,
     strike,
     expiry,
-    earningsDate,
-    earningsTiming,
     dte,
     grade,
     gradeIsPreview,
-    crushPatternFact,
-    emPositionFact,
+    strengths,
+    risk,
     convictionNote,
     charLimit,
-    angles: finalAngles,
+    variantCount,
   });
 
   const ppl = await askPerplexityRaw(prompt, {
@@ -249,11 +286,10 @@ export async function POST(req: NextRequest) {
   }
 
   const variants = parsed.variants
-    .map((v) => {
-      const angle: Angle = finalAngles.includes(v.angle as Angle) ? (v.angle as Angle) : finalAngles[0];
-      const posts = enforcePostLimits(v.posts, charLimit);
-      return { angle, posts };
-    })
+    .map((v) => ({
+      angle: typeof v.angle === "string" && v.angle ? v.angle : "trade_setup",
+      posts: enforcePostLimits(v.posts, charLimit),
+    }))
     .filter((v) => v.posts.length > 0);
 
   if (variants.length === 0) {

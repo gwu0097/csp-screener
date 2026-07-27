@@ -37,6 +37,7 @@ import { cn } from "@/lib/utils";
 import type { ScreenerResult, StageFourResult, LadderRecommendation } from "@/lib/screener";
 import type { PerplexityNewsResult } from "@/lib/perplexity";
 import type { MarketContext } from "@/lib/market";
+import type { CrushContext, OutlierQuarter } from "@/lib/crush-context";
 import { CrushHistoryTable } from "@/components/crush-history-table";
 import { OptionsFlowSection } from "@/components/options-flow-section";
 import { PriceChart } from "@/components/price-chart";
@@ -3732,6 +3733,10 @@ function ExpandedDetail({
             penalty={tl.regimeFactors.gradePenalty}
             personalModifier={personalModifier}
             currentFinalGrade={displayFinalGrade(tl)}
+            regimeFactors={{
+              newsSentiment: tl.regimeFactors.newsSentiment,
+              overhangDescription: tl.regimeFactors.overhangDescription,
+            }}
           />
         </TabsContent>
       </Tabs>
@@ -4079,13 +4084,38 @@ function OptionsChainTab({
 }
 
 type TweetVariant = { angle: string; posts: string[] };
+type TweetFact = { id: string; text: string };
+type TweetRisk = TweetFact & { isDissent: boolean; keyMetric?: string };
+// kind="strength": score is a 0-1+ strength measure, higher = stronger,
+// only the top few survive selection. kind="risk": score is a severity
+// measure used to pick the single most material concern. A candidate
+// with neither strong support nor real severity is simply dropped —
+// that's the fix for weak evidence ("3 of 5 quarters") showing up as
+// if it were support.
+type FactCandidate = { kind: "strength" | "risk"; score: number; id: string; text: string; keyMetric?: string };
 
 const TWEET_ANGLE_LABELS: Record<string, string> = {
-  crush_reliability: "Leads with crush reliability",
-  em_positioning: "Leads with strike positioning",
-  conviction: "Leads with conviction note",
+  pop: "Leads with probability of profit",
+  crush_pattern: "Leads with crush reliability",
+  em_position: "Leads with strike positioning",
+  flow: "Leads with options flow",
+  news: "Leads with news/sentiment",
+  tdc_clean: "Leads with outlier-history review",
   trade_setup: "Leads with the trade setup",
 };
+function angleLabel(id: string): string {
+  return TWEET_ANGLE_LABELS[id] ?? `Leads with ${id.replace(/_/g, " ")}`;
+}
+
+// Auto-grows a textarea to fit its content — no scrollbar, no fixed
+// row-count guess. Runs on mount (callback ref) and again on every
+// keystroke (called from onChange) since a callback ref only fires on
+// mount/unmount, not on content changes.
+function autosizeTextarea(el: HTMLTextAreaElement | null) {
+  if (!el) return;
+  el.style.height = "auto";
+  el.style.height = `${el.scrollHeight}px`;
+}
 
 // No caching by design — regenerating is one call and sidesteps
 // stale-vs-strike invalidation questions entirely (there's no cached
@@ -4093,11 +4123,15 @@ const TWEET_ANGLE_LABELS: Record<string, string> = {
 // two-way bound to strikeOverrides — the same state EditableStrikeCell
 // and OptionsChainTab write through, not a local copy — so picking a
 // strike here moves the selection everywhere else and vice versa.
-// Every "fact" handed to the model is precomputed here from data
-// already on the client (crush history, EM%, price) — patterns, not
-// raw figures — and premium/size/POP are simply never included in
-// what's sent, so there's nothing for the model to leak even by
-// accident.
+//
+// Every candidate fact is SCORED before it reaches the model: only
+// facts that clear a real strength bar are offered as support, weak/
+// inconclusive ones are dropped rather than reported as if they were
+// evidence, and the single most material concern is surfaced honestly
+// as risk rather than hidden. Live figures (POP, options flow, delta,
+// EM positioning) are allowed in the output — only position size,
+// contract count, premium, and dollar amounts are structurally never
+// sent to the model at all.
 function TweetTab({
   r,
   strikeOverride,
@@ -4111,6 +4145,7 @@ function TweetTab({
   penalty,
   personalModifier,
   currentFinalGrade,
+  regimeFactors,
 }: {
   r: ScreenerResult;
   strikeOverride: StrikeOverride | null;
@@ -4124,6 +4159,7 @@ function TweetTab({
   penalty: number;
   personalModifier: "boost" | "drop" | null;
   currentFinalGrade: string;
+  regimeFactors: { newsSentiment: "positive" | "negative" | "neutral"; overhangDescription: string | null };
 }) {
   const [charLimit, setCharLimit] = useState(280);
   const [generating, setGenerating] = useState(false);
@@ -4134,9 +4170,19 @@ function TweetTab({
   // their edits.
   const [editedPosts, setEditedPosts] = useState<string[][]>([]);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  // Bumped on every successful generation and folded into each
+  // textarea's key so Regenerate force-remounts them — autosizeTextarea
+  // is a callback ref, which only fires on mount/unmount, not on a
+  // value update from Regenerate (as opposed to the user's own typing,
+  // which re-triggers it via onChange). Without the remount, a
+  // Regenerate that shrinks or grows the text would leave a stale
+  // height and reintroduce the scrollbar this exists to remove.
+  const [generationId, setGenerationId] = useState(0);
 
   const availableStrikes = r.stageFour?.availableStrikes ?? [];
   const effectiveStrike = strikeOverride?.strike ?? r.stageFour?.suggestedStrike ?? null;
+  const effectiveDelta = strikeOverride?.delta ?? r.stageFour?.delta ?? null;
+  const effectivePop = effectiveDelta !== null ? 1 - Math.abs(effectiveDelta) : null;
 
   // Grade at whatever strike is currently selected — same pipeline as
   // OptionsChainTab's preview / CustomStrikeAnalyzer's "Try:" box, so
@@ -4168,36 +4214,175 @@ function TweetTab({
     onSelectStrike(overrideFromStrike(nearest));
   }
 
+  // ---- Evidence candidates — every one scored, weak ones dropped ----
+
+  function popCandidate(): FactCandidate | null {
+    if (effectivePop === null) return null;
+    const pct = Math.round(effectivePop * 100);
+    const deltaTxt = effectiveDelta !== null ? ` (delta ${effectiveDelta.toFixed(2)})` : "";
+    if (effectivePop >= 0.9) {
+      return { kind: "strength", score: effectivePop, id: "pop", text: `a ${pct}% probability of profit at this strike${deltaTxt}` };
+    }
+    if (effectivePop < 0.75) {
+      return { kind: "risk", score: 0.75 - effectivePop, id: "pop", text: `only a ${pct}% probability of profit at this strike${deltaTxt}` };
+    }
+    return null;
+  }
+
   // Pattern, not figures: a count across recent reported quarters, not
   // a ratio or percentage. Only reported events (actualMovePct !== null)
-  // count — the pinned upcoming/TODAY row never has one.
-  const crushPatternFact = (() => {
+  // count — the pinned upcoming/TODAY row never has one. A mediocre
+  // record (neither clearly reliable nor clearly bad) is dropped
+  // entirely, not softened into either bucket — that's the fix for "3
+  // of 5" reading as support.
+  function crushCandidate(): FactCandidate | null {
     const history = (r.stageThree?.details?.crushHistory ?? []).filter(
       (h) => h.actualMovePct !== null && h.ratio !== null,
     );
-    if (history.length < 2) return null;
+    if (history.length < 3) return null;
     const recent = history.slice(0, 5);
     const inside = recent.filter((h) => (h.ratio ?? 0) <= 1).length;
-    const outside = recent.length - inside;
-    return inside >= outside
-      ? `stayed inside its expected move in ${inside} of the last ${recent.length} reported quarters`
-      : `exceeded its expected move in ${outside} of the last ${recent.length} reported quarters`;
-  })();
+    const insideRatio = inside / recent.length;
+    if (insideRatio >= 0.8) {
+      return {
+        kind: "strength",
+        score: insideRatio,
+        id: "crush_pattern",
+        text: `stayed inside its expected move in ${inside} of the last ${recent.length} reported quarters`,
+      };
+    }
+    if (insideRatio <= 0.4) {
+      const outside = recent.length - inside;
+      return {
+        kind: "risk",
+        score: 1 - insideRatio,
+        id: "crush_pattern",
+        text: `exceeded its expected move in ${outside} of the last ${recent.length} reported quarters`,
+      };
+    }
+    return null;
+  }
 
-  // Qualitative bucket, never a number — "about 2x the move" is still
-  // a figure by the letter of the no-figures rule, so this is worded
-  // as pure description with nothing to round or misquote.
-  const emPositionFact = (() => {
+  // Qualitative bucket, never a number — the strike's cushion (or lack
+  // of one) relative to the market's own priced move.
+  function emCandidate(): FactCandidate | null {
     const emPct = r.stageThree?.details?.expectedMovePct ?? null;
     if (emPct === null || emPct <= 0 || effectiveStrike === null || r.price <= 0) return null;
     const pctDrop = (r.price - effectiveStrike) / r.price;
     if (pctDrop <= 0) return null;
     const multiple = pctDrop / emPct;
-    if (multiple < 0.9) return "sits inside the market's expected move for this report";
-    if (multiple < 1.3) return "sits right around the edge of the market's expected move";
-    if (multiple < 2.0) return "sits comfortably outside the market's expected move";
-    return "sits well outside the market's expected move";
-  })();
+    if (multiple >= 1.3) {
+      return {
+        kind: "strength",
+        score: Math.min(multiple, 3) / 3,
+        id: "em_position",
+        text: "sits outside the market's priced move for this report",
+      };
+    }
+    if (multiple < 0.9) {
+      return {
+        kind: "risk",
+        score: 0.9 - multiple,
+        id: "em_position",
+        text: "sits inside the market's priced move for this report — a thinner cushion than the market is pricing",
+      };
+    }
+    return null;
+  }
+
+  // Live options flow — put/call volume and OI ratios are already on
+  // the client (stageThree.details.optionsFlow), no extra fetch.
+  function flowCandidate(): FactCandidate | null {
+    const flow = r.stageThree?.details?.optionsFlow;
+    if (!flow || flow.flowBias === "neutral") return null;
+    const ratioTxt = `put/call volume ratio of ${flow.putCallRatio.toFixed(2)}, put/call open interest ratio of ${flow.putCallOI.toFixed(2)}`;
+    if (flow.flowBias === "bullish") {
+      return { kind: "strength", score: 0.6, id: "flow", text: `options flow is reading bullish — ${ratioTxt}` };
+    }
+    return { kind: "risk", score: 0.5, id: "flow", text: `options flow is reading bearish — ${ratioTxt}, more downside positioning than usual` };
+  }
+
+  // News/sentiment. An active overhang is the strongest possible risk
+  // signal short of a Trade-Decision-Context dissent (it's already
+  // what forces regimeGrade to F elsewhere in the app) — surfaced with
+  // its own description rather than just the sentiment label.
+  function newsCandidate(): FactCandidate | null {
+    if (hasOverhang) {
+      return {
+        kind: "risk",
+        score: 0.95,
+        id: "news",
+        text: regimeFactors.overhangDescription ?? "recent news flagged an active overhang on this name",
+      };
+    }
+    if (regimeFactors.newsSentiment === "positive") {
+      return { kind: "strength", score: 0.4, id: "news", text: "recent news coverage reads positive, with no active overhang" };
+    }
+    if (regimeFactors.newsSentiment === "negative") {
+      return { kind: "risk", score: 0.45, id: "news", text: "recent news coverage reads negative" };
+    }
+    return null;
+  }
+
+  const [tdc, setTdc] = useState<CrushContext | null>(null);
+  const [tdcChecked, setTdcChecked] = useState(false);
+
+  function tdcCandidate(): FactCandidate | null {
+    if (!tdc) return null;
+    if (tdc.safe_to_trade === false || tdc.overall_risk === "high") {
+      return { kind: "risk", score: 0.99, id: "tdc", text: tdc.verdict, keyMetric: tdc.key_metric_to_watch };
+    }
+    if (tdc.safe_to_trade === true && tdc.overall_risk === "low") {
+      return {
+        kind: "strength",
+        score: tdc.confidence === "high" ? 0.5 : 0.3,
+        id: "tdc_clean",
+        text: "a dedicated review of this ticker's prior outlier quarters found current conditions don't resemble them",
+      };
+    }
+    return null;
+  }
+
+  async function fetchTdcIfNeeded(): Promise<CrushContext | null> {
+    if (tdcChecked) return tdc;
+    const outliers = (r.stageThree?.details?.crushHistory ?? []).filter(
+      (h) => (h.grade === "F" || h.grade === "D") && h.actualMovePct !== null && h.impliedMovePct !== null && h.ratio !== null,
+    );
+    if (outliers.length === 0) {
+      setTdcChecked(true);
+      return null;
+    }
+    const outlierQuarters: OutlierQuarter[] = outliers.map((h) => ({
+      date: h.earningsDate,
+      qtrLabel: h.qtrLabel,
+      actualMove: h.actualMovePct as number,
+      direction: (h.actualMovePct as number) >= 0 ? "up" : "down",
+      ratio: h.ratio as number,
+      impliedMove: h.impliedMovePct as number,
+    }));
+    try {
+      const res = await fetch("/api/screener/crush-context", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          symbol: r.symbol,
+          companyName: "",
+          currentEM: r.stageThree?.details?.expectedMovePct ?? 0,
+          earningsDate: r.earningsDate,
+          outlierQuarters,
+        }),
+        cache: "no-store",
+      });
+      const json = await res.json().catch(() => ({}) as Record<string, unknown>);
+      const fetched = res.ok && "context" in json ? (json.context as CrushContext) : null;
+      setTdc(fetched);
+      setTdcChecked(true);
+      return fetched;
+    } catch {
+      setTdcChecked(true);
+      return null;
+    }
+  }
 
   async function generate() {
     if (effectiveStrike === null) {
@@ -4207,6 +4392,25 @@ function TweetTab({
     setGenerating(true);
     setGenError(null);
     try {
+      // Trade Decision Context first — it's the highest-priority risk
+      // signal when present (item 5), so the rest of the selection
+      // needs to know about it before ranking candidates.
+      await fetchTdcIfNeeded();
+
+      const candidates = [popCandidate(), crushCandidate(), emCandidate(), flowCandidate(), newsCandidate(), tdcCandidate()].filter(
+        (c): c is FactCandidate => c !== null,
+      );
+      const strengths: TweetFact[] = candidates
+        .filter((c) => c.kind === "strength")
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 4)
+        .map((c) => ({ id: c.id, text: c.text }));
+      const riskCandidates = candidates.filter((c) => c.kind === "risk").sort((a, b) => b.score - a.score);
+      const risk: TweetRisk | null =
+        riskCandidates.length > 0
+          ? { id: riskCandidates[0].id, text: riskCandidates[0].text, isDissent: riskCandidates[0].id === "tdc", keyMetric: riskCandidates[0].keyMetric }
+          : null;
+
       const res = await fetch("/api/screener/tweet-draft", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -4214,13 +4418,11 @@ function TweetTab({
           symbol: r.symbol,
           strike: effectiveStrike,
           expiry: r.expiry,
-          earningsDate: r.earningsDate,
-          earningsTiming: r.earningsTiming,
           dte: r.daysToExpiry,
           grade: effectiveGrade,
           gradeIsPreview,
-          crushPatternFact,
-          emPositionFact,
+          strengths,
+          risk,
           convictionNote,
           charLimit,
         }),
@@ -4234,6 +4436,7 @@ function TweetTab({
       const body = json as { variants: TweetVariant[] };
       setVariants(body.variants);
       setEditedPosts(body.variants.map((v) => [...v.posts]));
+      setGenerationId((n) => n + 1);
     } catch (e) {
       setGenError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -4306,8 +4509,9 @@ function TweetTab({
         <div className="text-xs text-muted-foreground md:col-span-2">
           Grading this as{" "}
           <span className="font-mono text-foreground">{effectiveGrade}</span>
-          {gradeIsPreview ? " (preview, at the selected strike)" : ""} — no position size, premium,
-          dollar amounts, or POP% will appear in the draft.
+          {gradeIsPreview ? " (preview, at the selected strike)" : ""} — live figures like probability
+          of profit and options flow may appear; position size, contract count, premium, and dollar
+          amounts never will.
         </div>
       </div>
 
@@ -4334,7 +4538,7 @@ function TweetTab({
             return (
               <div key={vi} className="space-y-2 rounded-md border border-border bg-background/40 p-3">
                 <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                  {TWEET_ANGLE_LABELS[v.angle] ?? v.angle}
+                  {angleLabel(v.angle)}
                 </div>
                 {posts.map((post, pi) => {
                   const key = `${vi}-${pi}`;
@@ -4346,6 +4550,8 @@ function TweetTab({
                         </div>
                       )}
                       <textarea
+                        key={`${generationId}-${vi}-${pi}`}
+                        ref={autosizeTextarea}
                         value={post}
                         onChange={(e) => {
                           const text = e.target.value;
@@ -4355,9 +4561,10 @@ function TweetTab({
                             next[vi][pi] = text;
                             return next;
                           });
+                          autosizeTextarea(e.target);
                         }}
-                        rows={Math.max(3, Math.ceil(post.length / 50))}
-                        className="w-full resize-y rounded border border-border bg-background p-2 text-sm"
+                        rows={3}
+                        className="w-full resize-none overflow-hidden rounded border border-border bg-background p-2 text-sm"
                       />
                       <div className="flex items-center justify-between">
                         <span
