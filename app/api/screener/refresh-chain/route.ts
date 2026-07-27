@@ -72,17 +72,31 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // Mirrors StageFourResult["availableStrikes"]'s shape (strike/bid/
+  // ask/mark/last/premiumFill/fillInvalid/delta) so the client's
+  // click-to-select handler can treat a freshly-refreshed chain and
+  // the original analysis-time chain identically — same fields, same
+  // fill-basis math, no source-specific branching. delta is already
+  // on every Schwab contract (no extra fetch), so a strike clicked
+  // from a refreshed chain still yields a real per-strike Delta/POP.
   const strikes = contracts
     .map((c) => {
       const bid = Number.isFinite(c.bid) ? c.bid : 0;
       const ask = Number.isFinite(c.ask) ? c.ask : 0;
-      const { midInvalid } = computeFillPrice(bid, ask);
+      const { fill, midInvalid } = computeFillPrice(bid, ask);
+      const mark = Number.isFinite(c.mark) ? c.mark : (bid + ask) / 2;
+      // Same rounding as runStageFour's availableStrikes so a refreshed
+      // strike and an analysis-time strike never differ by floating-
+      // point noise alone.
       return {
         strike: c.strikePrice,
         bid,
         ask,
-        last: Number.isFinite(c.last) ? c.last : 0,
+        mark: Math.round(mark * 100) / 100,
+        last: Number.isFinite(c.last) ? Math.round(c.last * 100) / 100 : 0,
+        premiumFill: Math.round(fill * 100) / 100,
         fillInvalid: midInvalid,
+        delta: Number.isFinite(c.delta) ? Math.round(c.delta * 1000) / 1000 : 0,
       };
     })
     .sort((a, b) => a.strike - b.strike);

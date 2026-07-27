@@ -212,6 +212,19 @@ function ladderChipLabel(ladder: LadderRecommendation): string {
   return "No vol";
 }
 
+// Shared shape for a manually-selected strike, whether sourced from
+// typing into EditableStrikeCell or clicking a row in the Options
+// Chain tab — both write through the same strikeOverrides state, so
+// RESET (clearing the override) behaves identically regardless of
+// which UI picked the strike.
+type StrikeOverride = {
+  strike: number;
+  premium: number;
+  last: number;
+  delta: number;
+  bidAskSpreadPct: number;
+};
+
 // Same precedence as ladderChipLabel, factored out so the Options Chain
 // tab can center its ±5-strike band on the same strike the ladder chip
 // is actually telling the user to look at — a moved recommendation, a
@@ -599,12 +612,7 @@ export function ScreenerView({ connected }: Props) {
   // so subsequent re-renders don't have to rerun the lookup. Cleared
   // implicitly by Apply Watchlist / Run Analysis (orphan keys are
   // harmless; the table reads via key lookup).
-  const [strikeOverrides, setStrikeOverrides] = useState<
-    Record<
-      string,
-      { strike: number; premium: number; last: number; delta: number; bidAskSpreadPct: number }
-    >
-  >({});
+  const [strikeOverrides, setStrikeOverrides] = useState<Record<string, StrikeOverride>>({});
   // Transient toast for Track confirmations. One line above the table.
   const [trackToast, setTrackToast] = useState<string | null>(null);
   // Stream C (chain verification) progress strip — populated while
@@ -2686,6 +2694,10 @@ export function ScreenerView({ connected }: Props) {
                               r={r}
                               analyzing={analyzingSymbols.has(r.symbol.toUpperCase())}
                               onAnalyze={connected ? runAnalysisSingle : null}
+                              strikeOverride={strikeOverrides[id] ?? null}
+                              onSelectStrike={(o) =>
+                                setStrikeOverrides((prev) => ({ ...prev, [id]: o }))
+                              }
                             />
                           </TableCell>
                         </TableRow>
@@ -3097,10 +3109,14 @@ function ExpandedDetail({
   r,
   analyzing,
   onAnalyze,
+  strikeOverride,
+  onSelectStrike,
 }: {
   r: ScreenerResult;
   analyzing: boolean;
   onAnalyze: ((symbol: string, opts?: { force?: boolean }) => Promise<void>) | null;
+  strikeOverride: StrikeOverride | null;
+  onSelectStrike: (o: StrikeOverride) => void;
 }) {
   // Live campaign data — hooks must run unconditionally, so this sits
   // above the pre-analysis early return. The Layer 2 card's "your
@@ -3650,15 +3666,30 @@ function ExpandedDetail({
           forceMount
           className="space-y-4 data-[state=inactive]:hidden"
         >
-          <OptionsChainTab r={r} />
+          <OptionsChainTab
+            r={r}
+            strikeOverride={strikeOverride}
+            onSelectStrike={onSelectStrike}
+          />
         </TabsContent>
       </Tabs>
     </div>
   );
 }
 
+type ChainStrikeRow = {
+  strike: number;
+  bid: number;
+  ask: number;
+  mark: number;
+  last: number;
+  premiumFill: number;
+  fillInvalid: boolean;
+  delta: number;
+};
+
 type RefreshedChain = {
-  strikes: { strike: number; bid: number; ask: number; last: number; fillInvalid: boolean }[];
+  strikes: ChainStrikeRow[];
   asOf: string;
 };
 
@@ -3669,13 +3700,30 @@ type RefreshedChain = {
 // stageFour.availableStrikes (the same compact chain snapshot already
 // on the client for EditableStrikeCell/CustomStrikeAnalyzer) — no new
 // fetch on mount. "Refresh Chain" hits a dedicated single-symbol Schwab
-// pull (/api/screener/refresh-chain) to re-quote bid/ask/last in place
-// without touching grade/ladder/news — those only change on Refresh
-// Analysis. bid/ask/last shown are the raw quotes; premiumFill (mid by
-// default) is what actually feeds grade/EV elsewhere, not shown here
-// since this tab is the raw-quote reference view, not another grade
-// surface.
-function OptionsChainTab({ r }: { r: ScreenerResult }) {
+// pull (/api/screener/refresh-chain) to re-quote bid/ask/last/delta in
+// place without touching grade/ladder/news — those only change on
+// Refresh Analysis.
+//
+// Clicking a strike row writes through the same strikeOverrides state
+// EditableStrikeCell's typed entry uses — Strike/Premium/%Drop/Yield%/
+// Delta all recompute from data already in `s` (bid/ask/mark/last/
+// delta are on every contract Schwab returns, refreshed or not — no
+// extra fetch, no approximation). POP is delta-derived (1 − |delta|,
+// the same formula walkStrikeLadder uses per rung) and shown here as a
+// read-only recap, not written back to threeLayer.industryFactors —
+// that POP is deliberately the fixed 2xEM-reference number, not
+// whatever strike is currently selected (see computeSetupGrade). This
+// never re-grades; the recap is pure display arithmetic on already-
+// loaded numbers.
+function OptionsChainTab({
+  r,
+  strikeOverride,
+  onSelectStrike,
+}: {
+  r: ScreenerResult;
+  strikeOverride: StrikeOverride | null;
+  onSelectStrike: (o: StrikeOverride) => void;
+}) {
   const baseStrikes = r.stageFour?.availableStrikes ?? [];
   const recommended = recommendedStrikeFor(r);
   const [refreshed, setRefreshed] = useState<RefreshedChain | null>(null);
@@ -3710,6 +3758,33 @@ function OptionsChainTab({ r }: { r: ScreenerResult }) {
   }
 
   const availableStrikes = refreshed?.strikes ?? baseStrikes;
+
+  // Same fields EditableStrikeCell.commit() writes for a typed strike —
+  // clicking a chain row is the same override, just sourced from a
+  // click instead of keyboard entry. Spread% denominator stays `mark`,
+  // matching the typed-entry convention.
+  function selectStrike(s: ChainStrikeRow) {
+    const spreadPct = s.mark > 0 ? ((s.ask - s.bid) / s.mark) * 100 : 0;
+    onSelectStrike({
+      strike: s.strike,
+      premium: s.premiumFill ?? 0,
+      last: s.last ?? 0,
+      delta: s.delta,
+      bidAskSpreadPct: spreadPct,
+    });
+  }
+
+  const selectedStrike = strikeOverride?.strike ?? null;
+  const selectedPop =
+    strikeOverride !== null ? 1 - Math.abs(strikeOverride.delta) : null;
+  const selectedDropPct =
+    strikeOverride !== null && r.price > 0
+      ? ((r.price - strikeOverride.strike) / r.price) * 100
+      : null;
+  const selectedYieldPct =
+    strikeOverride !== null && strikeOverride.strike > 0
+      ? (strikeOverride.premium / strikeOverride.strike) * 100
+      : null;
 
   if (availableStrikes.length === 0) {
     return (
@@ -3777,6 +3852,45 @@ function OptionsChainTab({ r }: { r: ScreenerResult }) {
       {refreshError && (
         <div className="text-xs text-red-400">Chain refresh failed: {refreshError}</div>
       )}
+      {strikeOverride !== null && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded border border-sky-500/30 bg-sky-500/5 px-2 py-1.5 text-xs">
+          <span className="font-semibold text-sky-300">
+            Selected ${fmtNum(strikeOverride.strike)}
+          </span>
+          <span>
+            Premium <span className="font-mono">${fmtNum(strikeOverride.premium, 3)}</span>
+          </span>
+          <span>
+            %Drop{" "}
+            <span className="font-mono">
+              {selectedDropPct !== null ? `${selectedDropPct.toFixed(1)}%` : "—"}
+            </span>
+          </span>
+          <span>
+            Yield%{" "}
+            <span className="font-mono">
+              {selectedYieldPct !== null ? `${selectedYieldPct.toFixed(2)}%` : "—"}
+            </span>
+          </span>
+          <span>
+            Delta <span className="font-mono">{fmtNum(strikeOverride.delta, 3)}</span>
+          </span>
+          <span>
+            POP{" "}
+            <span className="font-mono">
+              {selectedPop !== null ? `${(selectedPop * 100).toFixed(0)}%` : "—"}
+            </span>
+          </span>
+          <span className="text-muted-foreground">
+            — this row&apos;s Strike/Premium/%Drop/Yield%/Delta now use this pick. Grade and
+            ladder are unchanged; ↺ reset in the Strike column reverts to{" "}
+            {r.stageFour?.suggestedStrike !== null && r.stageFour?.suggestedStrike !== undefined
+              ? fmtPrice(r.stageFour.suggestedStrike)
+              : "the suggested strike"}
+            .
+          </span>
+        </div>
+      )}
       <table className="w-full text-sm">
         <thead>
           <tr className="border-b border-border text-left text-muted-foreground">
@@ -3789,17 +3903,26 @@ function OptionsChainTab({ r }: { r: ScreenerResult }) {
         <tbody>
           {band.map((s) => {
             const isRecommended = recommended !== null && Math.abs(s.strike - recommended) < 0.005;
+            const isSelected = selectedStrike !== null && Math.abs(s.strike - selectedStrike) < 0.005;
             return (
               <tr
                 key={s.strike}
+                onClick={() => selectStrike(s)}
+                title={`Select $${s.strike} as this row's strike`}
                 className={cn(
-                  "border-b border-border/50",
+                  "cursor-pointer border-b border-border/50 hover:bg-foreground/5",
                   isRecommended && "bg-emerald-500/10 font-semibold",
+                  isSelected && "bg-sky-500/10 font-semibold",
                 )}
               >
                 <td className="px-2 py-1 font-mono">
                   {fmtPrice(s.strike)}
-                  {isRecommended && (
+                  {isSelected && (
+                    <span className="ml-1.5 rounded bg-sky-500/20 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-sky-300">
+                      selected
+                    </span>
+                  )}
+                  {isRecommended && !isSelected && (
                     <span className="ml-1.5 rounded bg-emerald-500/20 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-emerald-300">
                       recommended
                     </span>
@@ -4286,13 +4409,9 @@ function EditableStrikeCell({
   onReset,
 }: {
   defaultStrike: number | null;
-  override:
-    | { strike: number; premium: number; last: number; delta: number; bidAskSpreadPct: number }
-    | null;
+  override: StrikeOverride | null;
   availableStrikes: NonNullable<StageFourResult["availableStrikes"]>;
-  onApply: (
-    o: { strike: number; premium: number; last: number; delta: number; bidAskSpreadPct: number },
-  ) => void;
+  onApply: (o: StrikeOverride) => void;
   onReset: () => void;
 }) {
   const [editing, setEditing] = useState(false);
@@ -4593,6 +4712,10 @@ function SandboxTester({ connected }: { connected: boolean }) {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<ScreenerResult | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  // Sandbox result isn't part of the main table's strikeOverrides map
+  // (it's not a saved candidate row) — same click-to-select mechanism,
+  // scoped locally instead. Reset with each new sandbox run below.
+  const [sandboxStrikeOverride, setSandboxStrikeOverride] = useState<StrikeOverride | null>(null);
 
   async function analyze() {
     const sym = symbol.trim().toUpperCase();
@@ -4603,6 +4726,7 @@ function SandboxTester({ connected }: { connected: boolean }) {
     setLoading(true);
     setNote(null);
     setResult(null);
+    setSandboxStrikeOverride(null);
     const candidate = makeSandboxCandidate(sym);
     if (!connected) {
       setResult(candidate);
@@ -4706,7 +4830,13 @@ function SandboxTester({ connected }: { connected: boolean }) {
           )}
           {result.threeLayer ? (
             <div className="rounded border border-border">
-              <ExpandedDetail r={result} analyzing={false} onAnalyze={null} />
+              <ExpandedDetail
+                r={result}
+                analyzing={false}
+                onAnalyze={null}
+                strikeOverride={sandboxStrikeOverride}
+                onSelectStrike={setSandboxStrikeOverride}
+              />
             </div>
           ) : (
             <div className="space-y-3">
