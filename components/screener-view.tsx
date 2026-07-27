@@ -613,6 +613,10 @@ export function ScreenerView({ connected }: Props) {
   // implicitly by Apply Watchlist / Run Analysis (orphan keys are
   // harmless; the table reads via key lookup).
   const [strikeOverrides, setStrikeOverrides] = useState<Record<string, StrikeOverride>>({});
+  // Conviction note for the Tweet tab, keyed the same way as
+  // strikeOverrides — lives here (not local to ExpandedDetail) so it
+  // survives collapse/reopen, since ExpandedDetail unmounts on collapse.
+  const [convictionNotes, setConvictionNotes] = useState<Record<string, string>>({});
   // Transient toast for Track confirmations. One line above the table.
   const [trackToast, setTrackToast] = useState<string | null>(null);
   // Stream C (chain verification) progress strip — populated while
@@ -2698,6 +2702,17 @@ export function ScreenerView({ connected }: Props) {
                               onSelectStrike={(o) =>
                                 setStrikeOverrides((prev) => ({ ...prev, [id]: o }))
                               }
+                              onResetStrike={() =>
+                                setStrikeOverrides((prev) => {
+                                  const next = { ...prev };
+                                  delete next[id];
+                                  return next;
+                                })
+                              }
+                              convictionNote={convictionNotes[id] ?? ""}
+                              onConvictionNoteChange={(note) =>
+                                setConvictionNotes((prev) => ({ ...prev, [id]: note }))
+                              }
                             />
                           </TableCell>
                         </TableRow>
@@ -3125,12 +3140,18 @@ function ExpandedDetail({
   onAnalyze,
   strikeOverride,
   onSelectStrike,
+  onResetStrike,
+  convictionNote,
+  onConvictionNoteChange,
 }: {
   r: ScreenerResult;
   analyzing: boolean;
   onAnalyze: ((symbol: string, opts?: { force?: boolean }) => Promise<void>) | null;
   strikeOverride: StrikeOverride | null;
   onSelectStrike: (o: StrikeOverride) => void;
+  onResetStrike: () => void;
+  convictionNote: string;
+  onConvictionNoteChange: (note: string) => void;
 }) {
   // Live campaign data — hooks must run unconditionally, so this sits
   // above the pre-analysis early return. The Layer 2 card's "your
@@ -3288,6 +3309,7 @@ function ExpandedDetail({
             <TabsTrigger value="flow">🌊 Flow</TabsTrigger>
             <TabsTrigger value="history">📅 History</TabsTrigger>
             <TabsTrigger value="chain">⛓️ Options Chain</TabsTrigger>
+            <TabsTrigger value="tweet">✍️ Tweet</TabsTrigger>
           </TabsList>
           {onAnalyze && (
             <button
@@ -3691,6 +3713,27 @@ function ExpandedDetail({
             personalModifier={personalModifier}
           />
         </TabsContent>
+
+        <TabsContent
+          value="tweet"
+          forceMount
+          className="space-y-3 data-[state=inactive]:hidden"
+        >
+          <TweetTab
+            r={r}
+            strikeOverride={strikeOverride}
+            onSelectStrike={onSelectStrike}
+            onResetStrike={onResetStrike}
+            convictionNote={convictionNote}
+            onConvictionNoteChange={onConvictionNoteChange}
+            crushGrade={tl.industryFactors.crushGrade}
+            hasOverhang={tl.regimeFactors.hasActiveOverhang}
+            vix={tl.regimeFactors.vix}
+            penalty={tl.regimeFactors.gradePenalty}
+            personalModifier={personalModifier}
+            currentFinalGrade={displayFinalGrade(tl)}
+          />
+        </TabsContent>
       </Tabs>
     </div>
   );
@@ -3706,6 +3749,32 @@ type ChainStrikeRow = {
   fillInvalid: boolean;
   delta: number;
 };
+
+// Shared by every strike-selection surface (EditableStrikeCell's typed
+// entry, OptionsChainTab's click, TweetTab's strike field) so the
+// override object — and the spread% formula in particular — is
+// computed exactly once, not re-derived slightly differently in three
+// places.
+function overrideFromStrike(s: {
+  strike: number;
+  bid: number;
+  ask: number;
+  mark: number;
+  last: number;
+  premiumFill: number;
+  delta: number;
+}): StrikeOverride {
+  const spreadPct = s.mark > 0 ? ((s.ask - s.bid) / s.mark) * 100 : 0;
+  return {
+    strike: s.strike,
+    // ?? 0: a stale cached row predating premiumFill won't have it —
+    // treat as unavailable, never fall back to mid/bid.
+    premium: s.premiumFill ?? 0,
+    last: s.last ?? 0,
+    delta: s.delta,
+    bidAskSpreadPct: spreadPct,
+  };
+}
 
 type RefreshedChain = {
   strikes: ChainStrikeRow[];
@@ -3802,14 +3871,7 @@ function OptionsChainTab({
   // click instead of keyboard entry. Spread% denominator stays `mark`,
   // matching the typed-entry convention.
   function selectStrike(s: ChainStrikeRow) {
-    const spreadPct = s.mark > 0 ? ((s.ask - s.bid) / s.mark) * 100 : 0;
-    onSelectStrike({
-      strike: s.strike,
-      premium: s.premiumFill ?? 0,
-      last: s.last ?? 0,
-      delta: s.delta,
-      bidAskSpreadPct: spreadPct,
-    });
+    onSelectStrike(overrideFromStrike(s));
   }
 
   const selectedStrike = strikeOverride?.strike ?? null;
@@ -4012,6 +4074,316 @@ function OptionsChainTab({
           })}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+type TweetVariant = { angle: string; posts: string[] };
+
+const TWEET_ANGLE_LABELS: Record<string, string> = {
+  crush_reliability: "Leads with crush reliability",
+  em_positioning: "Leads with strike positioning",
+  conviction: "Leads with conviction note",
+  trade_setup: "Leads with the trade setup",
+};
+
+// No caching by design — regenerating is one call and sidesteps
+// stale-vs-strike invalidation questions entirely (there's no cached
+// draft to compare a changed strike against). Strike is genuinely
+// two-way bound to strikeOverrides — the same state EditableStrikeCell
+// and OptionsChainTab write through, not a local copy — so picking a
+// strike here moves the selection everywhere else and vice versa.
+// Every "fact" handed to the model is precomputed here from data
+// already on the client (crush history, EM%, price) — patterns, not
+// raw figures — and premium/size/POP are simply never included in
+// what's sent, so there's nothing for the model to leak even by
+// accident.
+function TweetTab({
+  r,
+  strikeOverride,
+  onSelectStrike,
+  onResetStrike,
+  convictionNote,
+  onConvictionNoteChange,
+  crushGrade,
+  hasOverhang,
+  vix,
+  penalty,
+  personalModifier,
+  currentFinalGrade,
+}: {
+  r: ScreenerResult;
+  strikeOverride: StrikeOverride | null;
+  onSelectStrike: (o: StrikeOverride) => void;
+  onResetStrike: () => void;
+  convictionNote: string;
+  onConvictionNoteChange: (note: string) => void;
+  crushGrade: "A" | "B" | "C" | "F";
+  hasOverhang: boolean;
+  vix: number | null;
+  penalty: number;
+  personalModifier: "boost" | "drop" | null;
+  currentFinalGrade: string;
+}) {
+  const [charLimit, setCharLimit] = useState(280);
+  const [generating, setGenerating] = useState(false);
+  const [genError, setGenError] = useState<string | null>(null);
+  const [variants, setVariants] = useState<TweetVariant[] | null>(null);
+  // Editable copies, keyed by [variant][post] — generation seeds these;
+  // the user can then tweak text freely without a re-render clobbering
+  // their edits.
+  const [editedPosts, setEditedPosts] = useState<string[][]>([]);
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+
+  const availableStrikes = r.stageFour?.availableStrikes ?? [];
+  const effectiveStrike = strikeOverride?.strike ?? r.stageFour?.suggestedStrike ?? null;
+
+  // Grade at whatever strike is currently selected — same pipeline as
+  // OptionsChainTab's preview / CustomStrikeAnalyzer's "Try:" box, so
+  // the grade the draft cites always matches the Strike field above it.
+  const effectiveGrade: string =
+    strikeOverride !== null && strikeOverride.strike > 0
+      ? (() => {
+          const pop = 1 - Math.abs(strikeOverride.delta);
+          const yieldPct = (strikeOverride.premium / strikeOverride.strike) * 100;
+          const { grade, unrated } = gradeFromRulesClient({
+            pop,
+            crushGrade,
+            opportunityGrade: gradeFromYieldClient(yieldPct),
+            hasOverhang,
+            vix,
+            penalty,
+            personalModifier,
+          });
+          return unrated ? "Unrated" : grade;
+        })()
+      : currentFinalGrade;
+  const gradeIsPreview = strikeOverride !== null;
+
+  function commitStrike(target: number) {
+    if (!Number.isFinite(target) || target <= 0 || availableStrikes.length === 0) return;
+    const nearest = availableStrikes.reduce((best, s) =>
+      Math.abs(s.strike - target) < Math.abs(best.strike - target) ? s : best,
+    );
+    onSelectStrike(overrideFromStrike(nearest));
+  }
+
+  // Pattern, not figures: a count across recent reported quarters, not
+  // a ratio or percentage. Only reported events (actualMovePct !== null)
+  // count — the pinned upcoming/TODAY row never has one.
+  const crushPatternFact = (() => {
+    const history = (r.stageThree?.details?.crushHistory ?? []).filter(
+      (h) => h.actualMovePct !== null && h.ratio !== null,
+    );
+    if (history.length < 2) return null;
+    const recent = history.slice(0, 5);
+    const inside = recent.filter((h) => (h.ratio ?? 0) <= 1).length;
+    const outside = recent.length - inside;
+    return inside >= outside
+      ? `stayed inside its expected move in ${inside} of the last ${recent.length} reported quarters`
+      : `exceeded its expected move in ${outside} of the last ${recent.length} reported quarters`;
+  })();
+
+  // Qualitative bucket, never a number — "about 2x the move" is still
+  // a figure by the letter of the no-figures rule, so this is worded
+  // as pure description with nothing to round or misquote.
+  const emPositionFact = (() => {
+    const emPct = r.stageThree?.details?.expectedMovePct ?? null;
+    if (emPct === null || emPct <= 0 || effectiveStrike === null || r.price <= 0) return null;
+    const pctDrop = (r.price - effectiveStrike) / r.price;
+    if (pctDrop <= 0) return null;
+    const multiple = pctDrop / emPct;
+    if (multiple < 0.9) return "sits inside the market's expected move for this report";
+    if (multiple < 1.3) return "sits right around the edge of the market's expected move";
+    if (multiple < 2.0) return "sits comfortably outside the market's expected move";
+    return "sits well outside the market's expected move";
+  })();
+
+  async function generate() {
+    if (effectiveStrike === null) {
+      setGenError("No strike selected yet.");
+      return;
+    }
+    setGenerating(true);
+    setGenError(null);
+    try {
+      const res = await fetch("/api/screener/tweet-draft", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          symbol: r.symbol,
+          strike: effectiveStrike,
+          expiry: r.expiry,
+          earningsDate: r.earningsDate,
+          earningsTiming: r.earningsTiming,
+          dte: r.daysToExpiry,
+          grade: effectiveGrade,
+          gradeIsPreview,
+          crushPatternFact,
+          emPositionFact,
+          convictionNote,
+          charLimit,
+        }),
+        cache: "no-store",
+      });
+      const json = await res.json().catch(() => ({}) as Record<string, unknown>);
+      if (!res.ok) {
+        setGenError(typeof json.error === "string" ? json.error : `HTTP ${res.status}`);
+        return;
+      }
+      const body = json as { variants: TweetVariant[] };
+      setVariants(body.variants);
+      setEditedPosts(body.variants.map((v) => [...v.posts]));
+    } catch (e) {
+      setGenError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setGenerating(false);
+    }
+  }
+
+  function copyPost(variantIdx: number, postIdx: number, text: string) {
+    navigator.clipboard.writeText(text).catch(() => {});
+    const key = `${variantIdx}-${postIdx}`;
+    setCopiedKey(key);
+    setTimeout(() => setCopiedKey((k) => (k === key ? null : k)), 1500);
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="grid gap-3 rounded-md border border-border bg-background/40 p-3 text-sm md:grid-cols-2">
+        <label className="flex items-center gap-2">
+          <span className="w-24 shrink-0 text-muted-foreground">Strike</span>
+          <input
+            type="number"
+            step="0.5"
+            defaultValue={effectiveStrike ?? ""}
+            key={effectiveStrike ?? "none"}
+            onBlur={(e) => {
+              const v = Number(e.target.value);
+              if (Number.isFinite(v)) commitStrike(v);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+            }}
+            className="w-24 rounded border border-border bg-background px-2 py-1 font-mono"
+          />
+          {strikeOverride !== null && (
+            <button
+              type="button"
+              onClick={onResetStrike}
+              className="rounded border border-border px-1.5 py-0.5 text-[10px] uppercase text-muted-foreground hover:bg-foreground/10 hover:text-foreground"
+              title="Reset to suggested 2x EM strike"
+            >
+              ↺ reset
+            </button>
+          )}
+        </label>
+        <label className="flex items-center gap-2">
+          <span className="w-24 shrink-0 text-muted-foreground">Char limit</span>
+          <input
+            type="number"
+            min={50}
+            max={2000}
+            step={10}
+            value={charLimit}
+            onChange={(e) =>
+              setCharLimit(Math.min(2000, Math.max(50, Number(e.target.value) || 280)))
+            }
+            className="w-24 rounded border border-border bg-background px-2 py-1 font-mono"
+          />
+          <span className="text-xs text-muted-foreground">default 280 · up to 2000</span>
+        </label>
+        <label className="flex flex-col gap-1 md:col-span-2">
+          <span className="text-muted-foreground">Conviction note (persists on this row)</span>
+          <input
+            type="text"
+            value={convictionNote}
+            onChange={(e) => onConvictionNoteChange(e.target.value)}
+            placeholder='e.g. "B grade but sizing down" or "cleanest setup this week"'
+            className="rounded border border-border bg-background px-2 py-1"
+          />
+        </label>
+        <div className="text-xs text-muted-foreground md:col-span-2">
+          Grading this as{" "}
+          <span className="font-mono text-foreground">{effectiveGrade}</span>
+          {gradeIsPreview ? " (preview, at the selected strike)" : ""} — no position size, premium,
+          dollar amounts, or POP% will appear in the draft.
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2">
+        <Button size="sm" onClick={() => void generate()} disabled={generating || effectiveStrike === null}>
+          {generating ? (
+            <>
+              <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+              Generating…
+            </>
+          ) : variants ? (
+            "Regenerate"
+          ) : (
+            "Generate"
+          )}
+        </Button>
+        {genError && <span className="text-sm text-red-400">{genError}</span>}
+      </div>
+
+      {variants && (
+        <div className="grid gap-3 md:grid-cols-2">
+          {variants.map((v, vi) => {
+            const posts = editedPosts[vi] ?? v.posts;
+            return (
+              <div key={vi} className="space-y-2 rounded-md border border-border bg-background/40 p-3">
+                <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  {TWEET_ANGLE_LABELS[v.angle] ?? v.angle}
+                </div>
+                {posts.map((post, pi) => {
+                  const key = `${vi}-${pi}`;
+                  return (
+                    <div key={pi} className="space-y-1">
+                      {posts.length > 1 && (
+                        <div className="text-[10px] text-muted-foreground">
+                          Post {pi + 1} of {posts.length}
+                        </div>
+                      )}
+                      <textarea
+                        value={post}
+                        onChange={(e) => {
+                          const text = e.target.value;
+                          setEditedPosts((prev) => {
+                            const next = prev.map((arr) => [...arr]);
+                            if (!next[vi]) next[vi] = [...v.posts];
+                            next[vi][pi] = text;
+                            return next;
+                          });
+                        }}
+                        rows={Math.max(3, Math.ceil(post.length / 50))}
+                        className="w-full resize-y rounded border border-border bg-background p-2 text-sm"
+                      />
+                      <div className="flex items-center justify-between">
+                        <span
+                          className={cn(
+                            "font-mono text-xs",
+                            post.length > charLimit ? "text-red-400" : "text-muted-foreground",
+                          )}
+                        >
+                          {post.length} / {charLimit}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => copyPost(vi, pi, post)}
+                          className="rounded border border-border px-2 py-0.5 text-xs text-muted-foreground hover:bg-foreground/10 hover:text-foreground"
+                        >
+                          {copiedKey === key ? "Copied" : "Copy"}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -4516,25 +4888,7 @@ function EditableStrikeCell({
     const nearest = availableStrikes.reduce((best, s) =>
       Math.abs(s.strike - target) < Math.abs(best.strike - target) ? s : best,
     );
-    // Spread% denominator stays mid — nearest.mark, unchanged. Premium
-    // is fill-priced (mid by default, see computeFillPrice) via the
-    // separate premiumFill field; do not collapse these back into one
-    // field (see availableStrikes' type).
-    const spreadPct =
-      nearest.mark > 0
-        ? ((nearest.ask - nearest.bid) / nearest.mark) * 100
-        : 0;
-    onApply({
-      strike: nearest.strike,
-      // ?? 0: a stale cached row predating this field won't have
-      // premiumFill — treat as unavailable, never fall back to mid.
-      premium: nearest.premiumFill ?? 0,
-      // Informational only — never feeds premium/EV, same rule as the
-      // top-level `last` field.
-      last: nearest.last ?? 0,
-      delta: nearest.delta,
-      bidAskSpreadPct: spreadPct,
-    });
+    onApply(overrideFromStrike(nearest));
     return true;
   }
 
@@ -4792,10 +5146,12 @@ function SandboxTester({ connected }: { connected: boolean }) {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<ScreenerResult | null>(null);
   const [note, setNote] = useState<string | null>(null);
-  // Sandbox result isn't part of the main table's strikeOverrides map
-  // (it's not a saved candidate row) — same click-to-select mechanism,
-  // scoped locally instead. Reset with each new sandbox run below.
+  // Sandbox result isn't part of the main table's strikeOverrides /
+  // convictionNotes maps (it's not a saved candidate row) — same
+  // mechanisms, scoped locally instead. Reset with each new sandbox
+  // run below.
   const [sandboxStrikeOverride, setSandboxStrikeOverride] = useState<StrikeOverride | null>(null);
+  const [sandboxConvictionNote, setSandboxConvictionNote] = useState("");
 
   async function analyze() {
     const sym = symbol.trim().toUpperCase();
@@ -4807,6 +5163,7 @@ function SandboxTester({ connected }: { connected: boolean }) {
     setNote(null);
     setResult(null);
     setSandboxStrikeOverride(null);
+    setSandboxConvictionNote("");
     const candidate = makeSandboxCandidate(sym);
     if (!connected) {
       setResult(candidate);
@@ -4916,6 +5273,9 @@ function SandboxTester({ connected }: { connected: boolean }) {
                 onAnalyze={null}
                 strikeOverride={sandboxStrikeOverride}
                 onSelectStrike={setSandboxStrikeOverride}
+                onResetStrike={() => setSandboxStrikeOverride(null)}
+                convictionNote={sandboxConvictionNote}
+                onConvictionNoteChange={setSandboxConvictionNote}
               />
             </div>
           ) : (
