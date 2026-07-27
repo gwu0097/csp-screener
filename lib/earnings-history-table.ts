@@ -41,6 +41,52 @@ export function gradeFromRatio(ratio: number | null): CrushHistoryEvent["grade"]
   return "F";
 }
 
+export type DirectionalMoveCoverage = {
+  // Most negative actualMovePct in the sample (a signed fraction, e.g.
+  // -0.05 for -5%) — null when the sample has no down-moves at all, NOT
+  // 0, so callers can't mistake "no data" for "moved exactly 0%".
+  worstDownsidePct: number | null;
+  downCount: number;
+  upCount: number;
+  // Whether strikeDistancePct (the strike's distance below spot, also
+  // a signed-magnitude fraction, e.g. 0.19 for 19%) is at or beyond the
+  // worst downside move ever observed. null exactly when
+  // worstDownsidePct is null — there's nothing to compare against, so
+  // this must never resolve to a bare true/false that could be read as
+  // "survived every downside move" on a zero-downside sample.
+  survivesWorstDownside: boolean | null;
+};
+
+// A CSP seller only loses on a DOWN move past the strike — an upside
+// rally is irrelevant to whether a given strike would have held. This
+// is deliberately a different, simpler statistic than
+// computeLossMultiplierLadder's conditional-overshoot-given-breach
+// (in EM-units, shrinkage-blended across ticker/sector/pool): this one
+// is just "what's the worst raw downside move this ticker has actually
+// printed, and does this exact strike distance clear it." Do not fold
+// the two together — they answer different questions and the ladder is
+// already calibrated; this function must never feed it.
+export function directionalMoveCoverage(
+  history: CrushHistoryEvent[],
+  strikeDistancePct: number,
+): DirectionalMoveCoverage {
+  const withMoves = history.filter(
+    (h): h is CrushHistoryEvent & { actualMovePct: number } => h.actualMovePct !== null,
+  );
+  const downs = withMoves.filter((h) => h.actualMovePct < 0);
+  const upCount = withMoves.length - downs.length;
+  if (downs.length === 0) {
+    return { worstDownsidePct: null, downCount: 0, upCount, survivesWorstDownside: null };
+  }
+  const worstDownsidePct = Math.min(...downs.map((h) => h.actualMovePct));
+  return {
+    worstDownsidePct,
+    downCount: downs.length,
+    upCount,
+    survivesWorstDownside: strikeDistancePct >= Math.abs(worstDownsidePct),
+  };
+}
+
 // Pulls the last `limit` earnings_history rows for a symbol with the
 // fields the crush table needs. Caller can run this in parallel with
 // other stage-3 work.

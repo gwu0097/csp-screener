@@ -804,7 +804,17 @@ export function CrushHistoryTable({
                     ) : (
                       <>
                         {isSimilar && (
-                          <span className="text-emerald-300/80">★ similar EM</span>
+                          <span className="text-emerald-300/80">
+                            ★ similar EM
+                            {e.actualMovePct !== null && (
+                              <span
+                                className={`ml-1 ${signedPctCls(e.actualMovePct)}`}
+                                title={e.actualMovePct >= 0 ? "Moved up" : "Moved down"}
+                              >
+                                {e.actualMovePct >= 0 ? "▲" : "▼"}
+                              </span>
+                            )}
+                          </span>
                         )}
                         {!isSimilar && e.impliedMovePct === null && (
                           <span>EM not available</span>

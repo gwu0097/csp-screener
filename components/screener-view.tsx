@@ -2971,6 +2971,41 @@ function gradeFromYieldClient(yieldPct: number): "A" | "B" | "C" | "F" {
   return "F";
 }
 
+type DirectionalMoveCoverage = {
+  worstDownsidePct: number | null;
+  downCount: number;
+  upCount: number;
+  survivesWorstDownside: boolean | null;
+};
+
+// Mirrors lib/earnings-history-table.ts's directionalMoveCoverage — not
+// imported: that module pulls the server-only supabase client into
+// this client bundle (same reason crush-history-table.tsx duplicates
+// quarterLabel instead of importing it). A CSP seller only loses on a
+// DOWN move past the strike, so this is deliberately a different,
+// simpler statistic than the calibrated EV loss-multiplier ladder —
+// see the canonical copy's comment for why the two must stay separate.
+function directionalMoveCoverageClient(
+  history: Array<{ actualMovePct: number | null }>,
+  strikeDistancePct: number,
+): DirectionalMoveCoverage {
+  const withMoves = history.filter(
+    (h): h is { actualMovePct: number } => h.actualMovePct !== null,
+  );
+  const downs = withMoves.filter((h) => h.actualMovePct < 0);
+  const upCount = withMoves.length - downs.length;
+  if (downs.length === 0) {
+    return { worstDownsidePct: null, downCount: 0, upCount, survivesWorstDownside: null };
+  }
+  const worstDownsidePct = Math.min(...downs.map((h) => h.actualMovePct));
+  return {
+    worstDownsidePct,
+    downCount: downs.length,
+    upCount,
+    survivesWorstDownside: strikeDistancePct >= Math.abs(worstDownsidePct),
+  };
+}
+
 type CustomStrikeAnalysis = {
   strike: number;
   distancePct: number;
@@ -3750,6 +3785,8 @@ function ExpandedDetail({
               newsSentiment: tl.regimeFactors.newsSentiment,
               overhangDescription: tl.regimeFactors.overhangDescription,
             }}
+            ivEdge={tl.industryFactors.ivEdge}
+            termStructure={tl.industryFactors.termStructure}
           />
         </TabsContent>
       </Tabs>
@@ -4120,13 +4157,20 @@ type FactCandidate = {
 // Which "case" a strength belongs to, so variants can be built from
 // DISTINCT subsets of facts (flow+positioning vs. probability+pattern)
 // instead of the same full list reordered.
+// Three groups roughly mirroring how a hand-written draft naturally
+// paragraphs the same material: pricing/positioning mechanics,
+// probability/track-record, and the macro/company backdrop.
 const STRENGTH_GROUP: Record<string, string> = {
   flow: "flow_positioning",
   em_position: "flow_positioning",
+  iv_edge: "flow_positioning",
+  term_structure: "flow_positioning",
   pop: "probability_pattern",
   crush_pattern: "probability_pattern",
   tdc_clean: "probability_pattern",
-  news: "probability_pattern",
+  directional: "probability_pattern",
+  vix: "regime_news",
+  news: "regime_news",
 };
 
 const TWEET_ANGLE_LABELS: Record<string, string> = {
@@ -4136,6 +4180,10 @@ const TWEET_ANGLE_LABELS: Record<string, string> = {
   flow: "Options flow",
   news: "News/sentiment",
   tdc_clean: "Outlier-history review",
+  directional: "Directional move history",
+  iv_edge: "IV edge",
+  term_structure: "Term structure",
+  vix: "VIX regime",
   risk_tension: "Risk / why-anyway",
   trade_setup: "The trade setup",
 };
@@ -4184,6 +4232,8 @@ function TweetTab({
   personalModifier,
   currentFinalGrade,
   regimeFactors,
+  ivEdge,
+  termStructure,
 }: {
   r: ScreenerResult;
   strikeOverride: StrikeOverride | null;
@@ -4200,6 +4250,8 @@ function TweetTab({
   personalModifier: "boost" | "drop" | null;
   currentFinalGrade: string;
   regimeFactors: { newsSentiment: "positive" | "negative" | "neutral"; overhangDescription: string | null };
+  ivEdge: number;
+  termStructure: number;
 }) {
   // Persists on the row (via onTweetCharLimitChange, same map as
   // convictionNote) — no local default-280 state here, or it would
@@ -4274,10 +4326,15 @@ function TweetTab({
 
   // Pattern, not figures: a count across recent reported quarters, not
   // a ratio or percentage. Only reported events (actualMovePct !== null)
-  // count — the pinned upcoming/TODAY row never has one. A mediocre
-  // record (neither clearly reliable nor clearly bad) is dropped
-  // entirely, not softened into either bucket — that's the fix for "3
-  // of 5" reading as support.
+  // count — the pinned upcoming/TODAY row never has one.
+  //
+  // Strength still requires a genuinely strong record (>=0.8) — that
+  // bar hasn't moved. But anything BELOW 0.8 is risk-eligible now, not
+  // just <=0.4. The earlier "never present 3-of-5 as support" fix was
+  // right; dropping it entirely instead of routing it to risk was an
+  // over-application — a mediocre record ("exceeded its expected move
+  // in 2 of the last 5 reported quarters") is real, citable risk
+  // material, not nothing.
   function crushCandidate(): FactCandidate | null {
     const history = (r.stageThree?.details?.crushHistory ?? []).filter(
       (h) => h.actualMovePct !== null && h.ratio !== null,
@@ -4294,16 +4351,13 @@ function TweetTab({
         text: `stayed inside its expected move in ${inside} of the last ${recent.length} reported quarters`,
       };
     }
-    if (insideRatio <= 0.4) {
-      const outside = recent.length - inside;
-      return {
-        kind: "risk",
-        score: 1 - insideRatio,
-        id: "crush_pattern",
-        text: `exceeded its expected move in ${outside} of the last ${recent.length} reported quarters`,
-      };
-    }
-    return null;
+    const outside = recent.length - inside;
+    return {
+      kind: "risk",
+      score: 1 - insideRatio,
+      id: "crush_pattern",
+      text: `exceeded its expected move in ${outside} of the last ${recent.length} reported quarters`,
+    };
   }
 
   // Qualitative bucket, never a number — the strike's cushion (or lack
@@ -4314,12 +4368,13 @@ function TweetTab({
     const pctDrop = (r.price - effectiveStrike) / r.price;
     if (pctDrop <= 0) return null;
     const multiple = pctDrop / emPct;
+    const distTxt = `${(pctDrop * 100).toFixed(0)}% below spot, about ${multiple.toFixed(1)}x the market's expected move for this report`;
     if (multiple >= 1.3) {
       return {
         kind: "strength",
         score: Math.min(multiple, 3) / 3,
         id: "em_position",
-        text: "sits outside the market's priced move for this report",
+        text: `sits roughly ${distTxt}`,
       };
     }
     if (multiple < 0.9) {
@@ -4327,7 +4382,99 @@ function TweetTab({
         kind: "risk",
         score: 0.9 - multiple,
         id: "em_position",
-        text: "sits inside the market's priced move for this report — a thinner cushion than the market is pricing",
+        text: `sits roughly ${distTxt} — a thinner cushion than the market is pricing`,
+      };
+    }
+    return null;
+  }
+
+  // A CSP seller only loses on a DOWN move past the strike — an upside
+  // rally is irrelevant. Uses the FULL crushHistory (not the recent-5
+  // window crushCandidate uses), since "has this strike level ever
+  // been breached" gets more meaningful, not less, with more history.
+  // Deliberately separate from crushGrade/computeLossMultiplierLadder
+  // — see directionalMoveCoverageClient's own comment.
+  function directionalCandidate(): FactCandidate | null {
+    if (effectiveStrike === null || r.price <= 0) return null;
+    const history = r.stageThree?.details?.crushHistory ?? [];
+    const withMoves = history.filter((h) => h.actualMovePct !== null);
+    if (withMoves.length < 3) return null;
+    const pctDrop = (r.price - effectiveStrike) / r.price;
+    if (pctDrop <= 0) return null;
+    const coverage = directionalMoveCoverageClient(history, pctDrop);
+    const distTxt = `${(pctDrop * 100).toFixed(0)}% below spot`;
+    if (coverage.worstDownsidePct === null) {
+      // No down-move in the sample at all — real information, but NOT
+      // "survived every downside move" (that would be a hollow claim
+      // on a zero-sample). Framed as an absence, not a guarantee.
+      return {
+        kind: "strength",
+        score: 0.3,
+        id: "directional",
+        text: `has shown no downside move at all in its last ${coverage.upCount} reported quarters — no historical downside precedent to weigh this strike against`,
+      };
+    }
+    const worstTxt = `${Math.abs(coverage.worstDownsidePct * 100).toFixed(1)}%`;
+    if (coverage.survivesWorstDownside) {
+      return {
+        kind: "strength",
+        score: 0.7,
+        id: "directional",
+        text: `the worst downside move in its recent reported history was ${worstTxt}, and at ${distTxt} this strike would have survived every one of them`,
+      };
+    }
+    return {
+      kind: "risk",
+      score: 0.6,
+      id: "directional",
+      text: `the worst downside move in its recent reported history was ${worstTxt}, farther than this strike's ${distTxt} cushion — it would have been breached`,
+    };
+  }
+
+  function ivEdgeCandidate(): FactCandidate | null {
+    if (ivEdge <= 0) return null;
+    if (ivEdge >= 1.3) {
+      return {
+        kind: "strength",
+        score: Math.min(ivEdge, 2) / 2,
+        id: "iv_edge",
+        text: `implied vol is running well above realized (IV edge ${ivEdge.toFixed(2)})`,
+      };
+    }
+    if (ivEdge < 1.0) {
+      return {
+        kind: "risk",
+        score: Math.min(1 - ivEdge, 1),
+        id: "iv_edge",
+        text: `implied vol isn't running much above realized (IV edge ${ivEdge.toFixed(2)}) — less of a premium cushion than usual`,
+      };
+    }
+    return null;
+  }
+
+  function termStructureCandidate(): FactCandidate | null {
+    if (termStructure >= 3) {
+      return {
+        kind: "strength",
+        score: termStructure / 5,
+        id: "term_structure",
+        text: "the term structure is inverted heading into earnings, with front-month IV priced richer than back-month",
+      };
+    }
+    return null;
+  }
+
+  function vixCandidate(): FactCandidate | null {
+    if (vix === null) return null;
+    if (vix < 20) {
+      return { kind: "strength", score: 0.3, id: "vix", text: `VIX is calm at ${vix.toFixed(1)}` };
+    }
+    if (vix > 25) {
+      return {
+        kind: "risk",
+        score: Math.min((vix - 25) / 15, 1),
+        id: "vix",
+        text: `VIX is elevated at ${vix.toFixed(1)}`,
       };
     }
     return null;
@@ -4510,34 +4657,37 @@ function TweetTab({
         deepOtmCandidate(),
         tailHedgeCandidate(),
         crushGradeCandidate(),
+        directionalCandidate(),
+        ivEdgeCandidate(),
+        termStructureCandidate(),
+        vixCandidate(),
       ].filter((c): c is FactCandidate => c !== null);
 
       const strengthCandidates = candidates
         .filter((c) => c.kind === "strength")
         .sort((a, b) => b.score - a.score);
-      // Single most material concern, if any — no generic fallback.
-      // When nothing clears a real risk bar, `risk` stays null and the
-      // draft simply has no risk section, per the rule that an empty
-      // slot beats a placeholder.
+      // Top TWO most material concerns, if any — so compound risk
+      // (e.g. a mediocre crush record AND the deep-OTM put cluster)
+      // can appear together, the way a hand-written draft would.
+      // Still no generic fallback: when nothing clears a real risk
+      // bar, `risks` stays empty and the draft has no risk section at
+      // all, per the rule that an empty slot beats a placeholder.
       const riskCandidates = candidates.filter((c) => c.kind === "risk").sort((a, b) => b.score - a.score);
-      const risk: TweetRisk | null =
-        riskCandidates.length > 0
-          ? {
-              id: riskCandidates[0].id,
-              text: riskCandidates[0].text,
-              isDissent: riskCandidates[0].isDissent === true,
-              keyMetric: riskCandidates[0].keyMetric,
-            }
-          : null;
+      const risks: TweetRisk[] = riskCandidates.slice(0, 2).map((c) => ({
+        id: c.id,
+        text: c.text,
+        isDissent: c.isDissent === true,
+        keyMetric: c.keyMetric,
+      }));
 
-      // Group strengths into DISTINCT subsets — flow+positioning vs.
-      // probability+pattern — so variants differ in which facts they
-      // draw on, not just which one is listed first. One variant per
-      // non-empty group, ranked by that group's best fact, plus (when
-      // a real risk exists) one risk-forward variant built around the
-      // risk/why-anyway tension instead of a strength pile. Variant
-      // count follows how much genuinely distinct material exists —
-      // never padded to a fixed number.
+      // Group strengths into DISTINCT subsets — flow/positioning vs.
+      // probability/pattern vs. regime/news — so variants differ in
+      // which facts they draw on, not just which one is listed first.
+      // One variant per non-empty group, ranked by that group's best
+      // fact, plus (when a real risk exists) one risk-forward variant
+      // built around the risk/why-anyway tension instead of a
+      // strength pile. Variant count follows how much genuinely
+      // distinct material exists — never padded to a fixed number.
       const byGroup = new Map<string, FactCandidate[]>();
       for (const c of strengthCandidates) {
         const g = STRENGTH_GROUP[c.id] ?? "other";
@@ -4549,13 +4699,19 @@ function TweetTab({
         .map((facts) => facts.sort((a, b) => b.score - a.score))
         .sort((a, b) => b[0].score - a[0].score);
 
-      const groupSlots = risk ? 2 : 3;
+      // The ~3-facts-per-variant cap under-fills a large char budget
+      // even when genuine material exists — scale it with the limit
+      // (Infinity-safe: an unset/invalid charLimit reads as "no
+      // limit," which should get the most generous cap).
+      const perVariantFactCap = !Number.isFinite(charLimit) || charLimit >= 1500 ? 6 : charLimit >= 800 ? 4 : 3;
+
+      const groupSlots = risks.length > 0 ? 2 : 3;
       const variants: TweetVariantSpec[] = groupedSpecs.slice(0, groupSlots).map((facts) => ({
         angle: facts[0].id,
-        strengths: facts.slice(0, 3).map((c) => ({ id: c.id, text: c.text })),
+        strengths: facts.slice(0, perVariantFactCap).map((c) => ({ id: c.id, text: c.text })),
         emphasis: "strengths",
       }));
-      if (risk) {
+      if (risks.length > 0) {
         const bestOverall = strengthCandidates[0];
         variants.push({
           angle: "risk_tension",
@@ -4578,7 +4734,7 @@ function TweetTab({
           grade: effectiveGrade,
           gradeIsPreview,
           variants: variants.slice(0, 3),
-          risk,
+          risks,
           convictionNote,
           charLimit,
         }),

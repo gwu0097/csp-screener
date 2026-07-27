@@ -32,7 +32,7 @@ type Body = {
   grade?: unknown;
   gradeIsPreview?: unknown;
   variants?: unknown; // VariantSpec[]
-  risk?: unknown; // Risk | null
+  risks?: unknown; // Risk[], 0-2
   convictionNote?: unknown; // string
   charLimit?: unknown;
 };
@@ -41,6 +41,12 @@ const VALID_GRADES = new Set(["A", "B", "C", "F", "Unrated"]);
 
 function isIsoDate(v: unknown): v is string {
   return typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v);
+}
+
+// "an A" / "an Unrated" / "a B" — the grade is always shown right
+// after this article, so get it right rather than always saying "a".
+function articleFor(word: string): string {
+  return /^[aeiou]/i.test(word) ? "an" : "a";
 }
 
 function isFact(v: unknown): v is Fact {
@@ -62,6 +68,17 @@ function isVariantSpec(v: unknown): v is VariantSpec {
     o.strengths.every(isFact) &&
     (o.emphasis === "strengths" || o.emphasis === "risk")
   );
+}
+
+function toRisk(v: unknown): Risk | null {
+  if (!isFact(v)) return null;
+  const o = v as Record<string, unknown>;
+  return {
+    id: v.id,
+    text: v.text,
+    isDissent: o.isDissent === true,
+    keyMetric: typeof o.keyMetric === "string" ? o.keyMetric : undefined,
+  };
 }
 
 // Strip ```json fences the model sometimes wraps responses in — same
@@ -129,15 +146,16 @@ function buildPrompt(f: {
   grade: string;
   gradeIsPreview: boolean;
   variants: VariantSpec[];
-  risk: Risk | null;
+  risks: Risk[];
   convictionNote: string;
   charLimit: number;
 }): string {
   const shortForm = f.charLimit <= 280;
-  const hasRisk = f.risk !== null;
+  const hasRisk = f.risks.length > 0;
   const whyAnyway = f.convictionNote.trim()
     ? `weave in my own note — "${f.convictionNote.trim()}" — naturally, in my voice, not tacked on as a separate final line`
     : "the strength that most directly outweighs the risk";
+  const article = articleFor(f.grade);
 
   const variantBlocks = f.variants
     .map((v, i) => {
@@ -154,24 +172,27 @@ function buildPrompt(f: {
     .join("\n\n");
 
   const riskBlock = hasRisk
-    ? `THE RISK (same for every variant — include it in each, in step 3 of the structure):
-${
-  f.risk!.isDissent
-    ? `- A dedicated review of this ticker's own history flagged a concern: ${f.risk!.text}${f.risk!.keyMetric ? ` The thing to watch this print: ${f.risk!.keyMetric}.` : ""} Acknowledge this concern directly and specifically — do not ignore it, and do not just restate it without responding to it. Then give the honest reason I'm taking the trade anyway.`
-    : `- ${f.risk!.text}`
-}`
+    ? `THE RISK (same for every variant — include ${f.risks.length > 1 ? "both concerns together" : "it"}, in step 3 of the structure):
+${f.risks
+  .map((r) =>
+    r.isDissent
+      ? `- A dedicated review of this ticker's own history flagged a concern: ${r.text}${r.keyMetric ? ` The thing to watch this print: ${r.keyMetric}.` : ""} Acknowledge this concern directly and specifically — do not ignore it, and do not just restate it without responding to it.`
+      : `- ${r.text}`,
+  )
+  .join("\n")}
+Then give the honest reason I'm taking the trade anyway.`
     : `THE RISK: none of the available signals cleared a real risk bar for this trade — there is nothing specific and material to report. DO NOT invent one, and do NOT fill this slot with a category-generic statement ("earnings is volatile", "options carry risk", "the stock could move against me", "there's always risk in any trade") — those are banned regardless of how the risk section is filled elsewhere. Every variant should simply SKIP the risk step and the why-anyway step entirely — go from strengths straight to the close (the conviction note, if given, or nothing extra).`;
 
   return `You are drafting real social media posts (for X/Twitter) that a retail options trader will publish under their own name, disclosing a trade they are placing. Write in first person, plain and specific, and HONEST — this must read like genuine trader reasoning, not a pitch.
 
 THE TRADE — open with a single line in this style: "Earnings play: selling the $${f.strike} put in $${f.symbol}"${f.expiry ? `, expiration ${f.expiry}${f.dte !== null ? ` (${f.dte}d out)` : ""} if it fits naturally in that line` : ""}. Do NOT recite "Earnings are [timing] on [date], with expiration on [date]" as a separate sentence — that's assumed context and wastes characters. A plain "Earnings play:" opener is enough.
 
-MY ASSESSMENT: I have this graded as a ${f.grade}${f.gradeIsPreview ? " at this strike" : ""}. Present this as MY OWN read, in my voice — e.g. "I've got this as a ${f.grade}" — never as a system output like "Grade: ${f.grade}".
+MY ASSESSMENT: I have this graded as ${article} ${f.grade}${f.gradeIsPreview ? " at this strike" : ""}. Present this as MY OWN read, in my voice — e.g. "I've got this as ${article} ${f.grade}" — never as a system output like "Grade: ${f.grade}".
 
 STRUCTURE — every variant follows this arc, in this order:
 1. The trade (one line, per above)
 2. The genuine strengths — the facts listed for that variant below
-3. The real risk (only if one is given below — see THE RISK)
+3. The real risk (only if one is given below — see THE RISK; may be two related concerns stated together)
 4. Why taking it anyway (only if there's a risk to weigh against — ${whyAnyway})
 
 ${hasRisk ? 'Do NOT write a one-sided pitch. Stating the risk honestly, then explaining why I\'m taking the trade anyway, is what makes this credible — skipping either the risk or the "why anyway" when a real risk IS given below is a failed draft.' : "There is no risk to state this time (see THE RISK below) — do not manufacture one just to fill the slot."}
@@ -201,7 +222,7 @@ CHARACTER LIMIT: ${Number.isFinite(f.charLimit) ? f.charLimit : "none — write 
 ${
   shortForm
     ? `This is short-form. Write the full case for each variant — trade, its strengths, the risk if any, and the why-anyway if any — then split it across multiple posts in that variant's "posts" array. Break ONLY at the end of a complete thought or sentence — never mid-sentence — and don't pad every post out to exactly the limit. The opening post should run roughly 200 characters (a hook that fills the whole limit doesn't get read) and must lead with the trade plus that variant's lead strength, before anything else. Never drop content to fit the limit — add more posts instead.`
-    : `This is long-form. Return exactly ONE post per variant (a single "posts" array entry with one string), but structure it internally with short line-broken sections covering the full arc — the same readable rhythm a thread would have, not one dense paragraph.`
+    : `This is long-form. Return exactly ONE post per variant (a single "posts" array entry with one string), but structure it internally with short line-broken sections covering the full arc — the same readable rhythm a thread would have, not one dense paragraph. Use the room the limit gives you: every fact listed for this variant (strengths, risk, why-anyway) should actually appear, with enough surrounding context to read as reasoning rather than a bare list — don't stop early or compress the case just because a shorter version would also technically fit. Padding with filler is still banned; the point is to not truncate genuine material for no reason.`
 }
 
 Return ONLY this JSON, no other text, no markdown fences:
@@ -244,30 +265,28 @@ export async function POST(req: NextRequest) {
   const rawCharLimit = Number(body.charLimit);
   const charLimit = Number.isFinite(rawCharLimit) && rawCharLimit > 0 ? rawCharLimit : Infinity;
 
+  // Server-side cap is a defensive backstop (this endpoint is
+  // auth-gated but still a network boundary), not a business rule —
+  // raised to match the client's own scaled cap (up to 6 at high char
+  // limits) so a legitimate large-budget request isn't silently
+  // clipped back down.
   const variants = (Array.isArray(body.variants) ? body.variants : [])
     .filter(isVariantSpec)
     .slice(0, 3)
-    .map((v) => ({ ...v, strengths: v.strengths.slice(0, 4) }));
+    .map((v) => ({ ...v, strengths: v.strengths.slice(0, 6) }));
   if (variants.length === 0) {
     return NextResponse.json({ error: "Missing variants" }, { status: 400 });
   }
 
-  const riskRaw = body.risk as
-    | { id?: unknown; text?: unknown; isDissent?: unknown; keyMetric?: unknown }
-    | null
-    | undefined;
-  // No generic fallback — a request with no genuine risk simply has
-  // risk=null, and the draft omits the risk section entirely rather
-  // than filling it with a category-generic placeholder.
-  const risk: Risk | null =
-    riskRaw && typeof riskRaw.text === "string" && riskRaw.text
-      ? {
-          id: typeof riskRaw.id === "string" ? riskRaw.id : "risk",
-          text: riskRaw.text,
-          isDissent: riskRaw.isDissent === true,
-          keyMetric: typeof riskRaw.keyMetric === "string" ? riskRaw.keyMetric : undefined,
-        }
-      : null;
+  // No generic fallback — a request with no genuine risk simply has an
+  // empty risks array, and the draft omits the risk section entirely
+  // rather than filling it with a category-generic placeholder. Up to
+  // two compound risks (e.g. a mediocre crush record AND the deep-OTM
+  // cluster) can appear together.
+  const risks = (Array.isArray(body.risks) ? body.risks : [])
+    .map(toRisk)
+    .filter((r): r is Risk => r !== null)
+    .slice(0, 2);
 
   const prompt = buildPrompt({
     symbol,
@@ -277,7 +296,7 @@ export async function POST(req: NextRequest) {
     grade,
     gradeIsPreview,
     variants,
-    risk,
+    risks,
     convictionNote,
     charLimit,
   });
