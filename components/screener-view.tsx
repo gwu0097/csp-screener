@@ -396,6 +396,37 @@ function resetBatchSizes() {
   }
 }
 
+// Tweet tab's char limit is a sticky user PREFERENCE, not a per-trade
+// setting — it previously lived in a per-row map (tweetCharLimits),
+// which reset to the default the moment you expanded a different
+// symbol and never survived a reload at all. One global value instead,
+// same localStorage pattern as the adaptive batch sizes above: read
+// once at mount via a lazy useState initializer, write through on
+// every change. No clamping/minimum here either — freeform by design,
+// same as the server side.
+const LS_TWEET_CHAR_LIMIT = "screener_tweet_char_limit";
+const DEFAULT_TWEET_CHAR_LIMIT = 280;
+function getTweetCharLimit(): number {
+  if (typeof window === "undefined") return DEFAULT_TWEET_CHAR_LIMIT;
+  try {
+    const raw = localStorage.getItem(LS_TWEET_CHAR_LIMIT);
+    if (raw === null) return DEFAULT_TWEET_CHAR_LIMIT;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : DEFAULT_TWEET_CHAR_LIMIT;
+  } catch {
+    return DEFAULT_TWEET_CHAR_LIMIT;
+  }
+}
+function setTweetCharLimit(n: number) {
+  try {
+    if (typeof window !== "undefined") {
+      localStorage.setItem(LS_TWEET_CHAR_LIMIT, String(n));
+    }
+  } catch {
+    /* quota / privacy */
+  }
+}
+
 // Cross-device hydration freshness window. Anything older shows the
 // "stale — Run Analysis to update" banner instead of the green one.
 const FRESH_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -614,13 +645,15 @@ export function ScreenerView({ connected }: Props) {
   // implicitly by Apply Watchlist / Run Analysis (orphan keys are
   // harmless; the table reads via key lookup).
   const [strikeOverrides, setStrikeOverrides] = useState<Record<string, StrikeOverride>>({});
-  // Conviction note + char limit for the Tweet tab, keyed the same way
-  // as strikeOverrides — lives here (not local to ExpandedDetail) so
-  // both survive collapse/reopen and regeneration, since ExpandedDetail
+  // Conviction note for the Tweet tab, keyed the same way as
+  // strikeOverrides — lives here (not local to ExpandedDetail) so it
+  // survives collapse/reopen and regeneration, since ExpandedDetail
   // unmounts on collapse and a local useState would reset on every
-  // remount.
+  // remount. Char limit used to live in an identical per-row map here
+  // too, but that's the wrong scope for a sticky preference — moved to
+  // a single localStorage-backed value (getTweetCharLimit/
+  // setTweetCharLimit above), owned entirely inside TweetTab now.
   const [convictionNotes, setConvictionNotes] = useState<Record<string, string>>({});
-  const [tweetCharLimits, setTweetCharLimits] = useState<Record<string, number>>({});
   // Transient toast for Track confirmations. One line above the table.
   const [trackToast, setTrackToast] = useState<string | null>(null);
   // Stream C (chain verification) progress strip — populated while
@@ -2717,10 +2750,6 @@ export function ScreenerView({ connected }: Props) {
                               onConvictionNoteChange={(note) =>
                                 setConvictionNotes((prev) => ({ ...prev, [id]: note }))
                               }
-                              tweetCharLimit={tweetCharLimits[id] ?? 280}
-                              onTweetCharLimitChange={(n) =>
-                                setTweetCharLimits((prev) => ({ ...prev, [id]: n }))
-                              }
                             />
                           </TableCell>
                         </TableRow>
@@ -3186,8 +3215,6 @@ function ExpandedDetail({
   onResetStrike,
   convictionNote,
   onConvictionNoteChange,
-  tweetCharLimit,
-  onTweetCharLimitChange,
 }: {
   r: ScreenerResult;
   analyzing: boolean;
@@ -3197,8 +3224,6 @@ function ExpandedDetail({
   onResetStrike: () => void;
   convictionNote: string;
   onConvictionNoteChange: (note: string) => void;
-  tweetCharLimit: number;
-  onTweetCharLimitChange: (n: number) => void;
 }) {
   // Live campaign data — hooks must run unconditionally, so this sits
   // above the pre-analysis early return. The Layer 2 card's "your
@@ -3773,8 +3798,6 @@ function ExpandedDetail({
             onResetStrike={onResetStrike}
             convictionNote={convictionNote}
             onConvictionNoteChange={onConvictionNoteChange}
-            tweetCharLimit={tweetCharLimit}
-            onTweetCharLimitChange={onTweetCharLimitChange}
             crushGrade={tl.industryFactors.crushGrade}
             hasOverhang={tl.regimeFactors.hasActiveOverhang}
             vix={tl.regimeFactors.vix}
@@ -4223,8 +4246,6 @@ function TweetTab({
   onResetStrike,
   convictionNote,
   onConvictionNoteChange,
-  tweetCharLimit,
-  onTweetCharLimitChange,
   crushGrade,
   hasOverhang,
   vix,
@@ -4241,8 +4262,6 @@ function TweetTab({
   onResetStrike: () => void;
   convictionNote: string;
   onConvictionNoteChange: (note: string) => void;
-  tweetCharLimit: number;
-  onTweetCharLimitChange: (n: number) => void;
   crushGrade: "A" | "B" | "C" | "F";
   hasOverhang: boolean;
   vix: number | null;
@@ -4253,10 +4272,14 @@ function TweetTab({
   ivEdge: number;
   termStructure: number;
 }) {
-  // Persists on the row (via onTweetCharLimitChange, same map as
-  // convictionNote) — no local default-280 state here, or it would
-  // reset on every regenerate and every collapse/reopen.
-  const charLimit = tweetCharLimit;
+  // Global sticky preference (localStorage), not per-row — read once
+  // at mount, written through on every change. See
+  // getTweetCharLimit/setTweetCharLimit above.
+  const [charLimit, setCharLimitState] = useState(() => getTweetCharLimit());
+  function setCharLimit(n: number) {
+    setCharLimitState(n);
+    setTweetCharLimit(n);
+  }
   const [generating, setGenerating] = useState(false);
   const [genError, setGenError] = useState<string | null>(null);
   const [variants, setVariants] = useState<TweetVariant[] | null>(null);
@@ -4801,11 +4824,11 @@ function TweetTab({
             value={charLimit}
             onChange={(e) => {
               const n = Number(e.target.value);
-              if (Number.isFinite(n)) onTweetCharLimitChange(n);
+              if (Number.isFinite(n)) setCharLimit(n);
             }}
             className="w-24 rounded border border-border bg-background px-2 py-1 font-mono"
           />
-          <span className="text-xs text-muted-foreground">freeform · persists on this row</span>
+          <span className="text-xs text-muted-foreground">freeform · sticky across rows &amp; reloads</span>
         </label>
         <label className="flex flex-col gap-1 md:col-span-2">
           <span className="text-muted-foreground">Conviction note (persists on this row)</span>
@@ -5670,7 +5693,8 @@ function SandboxTester({ connected }: { connected: boolean }) {
   // run below.
   const [sandboxStrikeOverride, setSandboxStrikeOverride] = useState<StrikeOverride | null>(null);
   const [sandboxConvictionNote, setSandboxConvictionNote] = useState("");
-  const [sandboxCharLimit, setSandboxCharLimit] = useState(280);
+  // Char limit is no longer sandbox-local — TweetTab reads/writes the
+  // same global localStorage preference everywhere, sandbox included.
 
   async function analyze() {
     const sym = symbol.trim().toUpperCase();
@@ -5683,7 +5707,6 @@ function SandboxTester({ connected }: { connected: boolean }) {
     setResult(null);
     setSandboxStrikeOverride(null);
     setSandboxConvictionNote("");
-    setSandboxCharLimit(280);
     const candidate = makeSandboxCandidate(sym);
     if (!connected) {
       setResult(candidate);
@@ -5796,8 +5819,6 @@ function SandboxTester({ connected }: { connected: boolean }) {
                 onResetStrike={() => setSandboxStrikeOverride(null)}
                 convictionNote={sandboxConvictionNote}
                 onConvictionNoteChange={setSandboxConvictionNote}
-                tweetCharLimit={sandboxCharLimit}
-                onTweetCharLimitChange={setSandboxCharLimit}
               />
             </div>
           ) : (

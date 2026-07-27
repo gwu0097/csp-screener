@@ -253,7 +253,9 @@ VARIANTS: generate exactly ${f.variants.length} variant(s), each using ONLY the 
 
 ${variantBlocks}
 
-CHARACTER LIMIT: ${Number.isFinite(f.charLimit) ? f.charLimit : "none — write as long as the content genuinely needs, no padding"} characters, applied automatically AFTER you write — see OUTPUT FORMAT below. Write the full case for each variant as ONE continuous piece of text — do not decide post boundaries yourself, do not write "Post 1/3", do not restate the trade line or grade partway through, do not pre-split into a thread. Just write it as continuous prose, in short complete sentences (a sentence never gets cut mid-way when it's split later, so keep each one self-contained — but don't artificially shorten every sentence either).
+CHARACTER LIMIT: ${Number.isFinite(f.charLimit) ? f.charLimit : "none — write as long as the content genuinely needs, no padding"} characters, applied automatically AFTER you write — see OUTPUT FORMAT below. Write the full case for each variant as ONE continuous piece of text — do not decide post boundaries yourself, do not write "Post 1/3", do not restate the trade line or grade partway through, do not pre-split into a thread. Just write it as continuous prose.
+
+SENTENCE LENGTH: the process that splits your text into posts can only break between sentences, never mid-sentence — so a single long sentence has to land whole in one post, which can strand a short post with wasted room if the sentence right after it doesn't fit alongside it. Keep sentences short and roughly EVEN in length — aim for around 80-130 characters each, well under a fifth of the limit — rather than a few long ones. Splitting a single idea across two shorter sentences instead of one long one gives the splitter more places to pack tightly; it costs nothing in meaning.
 ${
   shortForm
     ? `This will likely need to split into multiple posts once it's measured against the limit — that's expected and handled automatically. Just make sure the opening sentences state the trade plus that variant's lead strength before anything else, so if it does split, the first chunk is a real hook on its own.`
