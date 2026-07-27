@@ -1499,7 +1499,7 @@ const FILL_BASIS_AGGRESSIVENESS_X = 0;
 // same "no bid = no real market" reasoning as the existing hard-kill,
 // which still fires downstream on that 0 regardless of this guard).
 // midInvalid=true flags the fallback so it's visible, not silent.
-function computeFillPrice(
+export function computeFillPrice(
   bid: number,
   ask: number,
 ): { fill: number; midInvalid: boolean } {

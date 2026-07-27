@@ -3657,19 +3657,59 @@ function ExpandedDetail({
   );
 }
 
+type RefreshedChain = {
+  strikes: { strike: number; bid: number; ask: number; last: number; fillInvalid: boolean }[];
+  asOf: string;
+};
+
 // Puts only, ±5 listed strikes around the recommended strike (by
 // listing position, not a fixed dollar band, so the context window
 // stays consistent regardless of strike interval — a $2.50-wide chain
-// and a $10-wide chain both show 5 rungs each side). Reuses
+// and a $10-wide chain both show 5 rungs each side). Defaults to
 // stageFour.availableStrikes (the same compact chain snapshot already
 // on the client for EditableStrikeCell/CustomStrikeAnalyzer) — no new
-// fetch. bid/ask/last shown are the raw quotes; premiumFill (mid by
+// fetch on mount. "Refresh Chain" hits a dedicated single-symbol Schwab
+// pull (/api/screener/refresh-chain) to re-quote bid/ask/last in place
+// without touching grade/ladder/news — those only change on Refresh
+// Analysis. bid/ask/last shown are the raw quotes; premiumFill (mid by
 // default) is what actually feeds grade/EV elsewhere, not shown here
 // since this tab is the raw-quote reference view, not another grade
 // surface.
 function OptionsChainTab({ r }: { r: ScreenerResult }) {
-  const availableStrikes = r.stageFour?.availableStrikes ?? [];
+  const baseStrikes = r.stageFour?.availableStrikes ?? [];
   const recommended = recommendedStrikeFor(r);
+  const [refreshed, setRefreshed] = useState<RefreshedChain | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+
+  async function refreshChain() {
+    if (!r.expiry) return;
+    setRefreshing(true);
+    setRefreshError(null);
+    try {
+      const res = await fetch("/api/screener/refresh-chain", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ symbol: r.symbol, expiry: r.expiry }),
+        cache: "no-store",
+      });
+      const json = await res.json().catch(() => ({}) as Record<string, unknown>);
+      if (!res.ok) {
+        setRefreshError(
+          typeof json.error === "string" ? json.error : `HTTP ${res.status}`,
+        );
+        return;
+      }
+      const body = json as RefreshedChain;
+      setRefreshed({ strikes: body.strikes, asOf: body.asOf });
+    } catch (e) {
+      setRefreshError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  const availableStrikes = refreshed?.strikes ?? baseStrikes;
 
   if (availableStrikes.length === 0) {
     return (
@@ -3680,9 +3720,11 @@ function OptionsChainTab({ r }: { r: ScreenerResult }) {
   }
 
   // availableStrikes is already sorted ascending by strike (runStageFour's
-  // own guarantee) — find the recommended strike's position (or the
-  // closest listed strike, if the exact value isn't in this snapshot)
-  // so the band is always centered on something meaningful.
+  // own guarantee, and refresh-chain's response mirrors it) — find the
+  // recommended strike's position (or the closest listed strike, if the
+  // exact value isn't in this snapshot) so the band is always centered
+  // on something meaningful. `recommended` itself never changes here —
+  // it's grade/ladder output, untouched by a chain-only refresh.
   let centerIdx = 0;
   if (recommended !== null) {
     let bestDiff = Math.abs(availableStrikes[0].strike - recommended);
@@ -3700,10 +3742,41 @@ function OptionsChainTab({ r }: { r: ScreenerResult }) {
 
   return (
     <div className="space-y-2">
-      <div className="text-xs text-muted-foreground">
-        Puts only · {band.length} strikes around the recommended strike
-        {recommended !== null ? ` (${fmtPrice(recommended)})` : ""}.
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-xs text-muted-foreground">
+          Puts only · {band.length} strikes around the recommended strike
+          {recommended !== null ? ` (${fmtPrice(recommended)})` : ""}.
+          {refreshed && (
+            <span className="ml-1">
+              Chain as of {new Date(refreshed.asOf).toLocaleTimeString()}.
+            </span>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={refreshChain}
+          disabled={refreshing}
+          className={cn(
+            "inline-flex shrink-0 items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground transition hover:text-foreground",
+            refreshing && "opacity-60",
+          )}
+        >
+          {refreshing ? (
+            <>
+              <Loader2 className="h-3 w-3 animate-spin" />
+              Refreshing…
+            </>
+          ) : (
+            <>
+              <RefreshCcw className="h-3 w-3" />
+              Refresh Chain
+            </>
+          )}
+        </button>
       </div>
+      {refreshError && (
+        <div className="text-xs text-red-400">Chain refresh failed: {refreshError}</div>
+      )}
       <table className="w-full text-sm">
         <thead>
           <tr className="border-b border-border text-left text-muted-foreground">
