@@ -12,7 +12,7 @@ import {
   type SymbolSnapshot,
 } from "@/lib/market-snapshot";
 import { requireUserId, authErrorResponse } from "@/lib/auth";
-import { ensurePortfolioWatchlist } from "@/lib/watchlists";
+import { ensurePortfolioWatchlist, computeFlags, type Flag } from "@/lib/watchlists";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -33,21 +33,8 @@ type Action = "TAKE_PROFIT" | "DCA" | "CUT" | "HOLD";
 
 // Multi-flag system replaces the prior Bull/Neutral/Bear classifier.
 // Multiple flags can fire on a single row; the UI shows up to two and
-// stuffs the rest into a tooltip.
-type FlagKind =
-  | "COMPOUNDER"
-  | "TURNAROUND"
-  | "VALUE_TRAP"
-  | "STRETCHED"
-  | "DEAD_WEIGHT"
-  | "FALLING_KNIFE";
-
-type Flag = {
-  kind: FlagKind;
-  label: string;
-  description: string;
-};
-
+// stuffs the rest into a tooltip. computeFlags/Flag live in
+// lib/watchlists.ts so Earnings Watch can display the same flags.
 type EnrichedRow = WatchlistRow & {
   companyName: string | null;
   price: number | null;
@@ -79,105 +66,6 @@ type Alert = {
   changePct: number | null;
   timeframeForCatalyst: "1d" | "1w" | "1m";
 };
-
-// Multi-flag classifier. Each rule checks for a specific
-// long-horizon pattern and the combination of flags on a row tells the
-// story. Severity-ordered so DEAD_WEIGHT and FALLING_KNIFE land first
-// when both are visible (only 2 fit on the row).
-function computeFlags(input: {
-  pctFromFiftyTwoWeekHigh: number | null;
-  pctVs200dSma: number | null;
-  momentum3mPct: number | null;
-  return3yPct: number | null;
-  vsSpy3yPct: number | null;
-  trailingPE: number | null;
-  pegRatio: number | null;
-}): Flag[] {
-  const out: Flag[] = [];
-  const offHigh = input.pctFromFiftyTwoWeekHigh;
-  const sma = input.pctVs200dSma;
-  const mom = input.momentum3mPct;
-  const r3y = input.return3yPct;
-  const vsSpy = input.vsSpy3yPct;
-  const pe = input.trailingPE;
-  const peg = input.pegRatio;
-
-  // Severity-ordered. Visible slot 1+2 belong to the top two flags on
-  // the row; everything else falls into the tooltip.
-
-  // DEAD_WEIGHT — chronic underperformer, no recovery signal.
-  if (
-    vsSpy !== null && vsSpy < -30 &&
-    mom !== null && mom < -5 &&
-    sma !== null && sma < -10
-  ) {
-    out.push({
-      kind: "DEAD_WEIGHT",
-      label: "Dead Weight",
-      description: "Chronically underperforming SPY with no recovery signal.",
-    });
-  }
-  // FALLING_KNIFE — deep drawdown, vs200d weak, momentum negative.
-  if (
-    offHigh !== null && offHigh < -50 &&
-    sma !== null && sma < -20 &&
-    mom !== null && mom < -20
-  ) {
-    out.push({
-      kind: "FALLING_KNIFE",
-      label: "Falling Knife",
-      description: "Down 50%+ from highs and still falling — review position.",
-    });
-  }
-  // VALUE_TRAP — cheap on PEG but the market disagrees.
-  if (
-    peg !== null && peg < 2 &&
-    r3y !== null && r3y < 0 &&
-    vsSpy !== null && vsSpy < -20
-  ) {
-    out.push({
-      kind: "VALUE_TRAP",
-      label: "Value Trap",
-      description: "Low valuation but the market disagrees — multi-year underperformance.",
-    });
-  }
-  // STRETCHED — at highs and expensive.
-  if (
-    offHigh !== null && offHigh > -5 &&
-    pe !== null && pe > 35
-  ) {
-    out.push({
-      kind: "STRETCHED",
-      label: "Stretched",
-      description: "Within 5% of 52w high and trading at >35× earnings — consider trimming.",
-    });
-  }
-  // TURNAROUND — beaten down long-term, recent recovery.
-  if (
-    r3y !== null && r3y < -20 &&
-    mom !== null && mom > 15
-  ) {
-    out.push({
-      kind: "TURNAROUND",
-      label: "Turnaround",
-      description: "Down >20% over 3 years, but the last quarter has flipped positive.",
-    });
-  }
-  // COMPOUNDER — consistently beating the market.
-  if (
-    vsSpy !== null && vsSpy > 20 &&
-    sma !== null && sma > 0 &&
-    mom !== null && mom > 0
-  ) {
-    out.push({
-      kind: "COMPOUNDER",
-      label: "Compounder",
-      description: "Beats SPY by >20% over 3 years, above 200d, positive momentum.",
-    });
-  }
-
-  return out;
-}
 
 // Action signal — order of evaluation matches severity. CUT first
 // (most actionable warning), then DCA (opportunity), then TAKE_PROFIT

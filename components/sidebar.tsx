@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { LucideIcon } from "lucide-react";
 import {
+  AlarmClock,
   BarChart3,
   BookMarked,
   BookOpen,
@@ -151,6 +152,11 @@ const ANALYSIS_BUY_ZONE: NavItem = {
   href: "/analysis/buy-zone",
   label: "Buy Zone",
   icon: Crosshair,
+};
+const ANALYSIS_EARNINGS_WATCH: NavItem = {
+  href: "/analysis/earnings-watch",
+  label: "Earnings Watch",
+  icon: AlarmClock,
 };
 
 // ------------ TOOLS ------------
@@ -373,6 +379,7 @@ export function Sidebar() {
 
           <SectionHeader label="Analysis" mode={mode} />
           <SidebarLink item={ANALYSIS_BUY_ZONE} pathname={pathname} mode={mode} />
+          <SidebarLink item={ANALYSIS_EARNINGS_WATCH} pathname={pathname} mode={mode} />
 
           <SectionHeader label="Tools" mode={mode} />
           <SidebarLink item={RESEARCH} pathname={pathname} mode={mode} />
