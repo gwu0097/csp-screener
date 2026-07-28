@@ -124,6 +124,10 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
   const [parsed, setParsed] = useState<ParsedTrade[] | null>(null);
   const [parsedStocks, setParsedStocks] = useState<ParsedStockTrade[] | null>(null);
   const [rejections, setRejections] = useState<Array<{ symbol: string; reason: string }>>([]);
+  // Flagged for manual review before the user hits confirm — e.g. a
+  // row-count mismatch or a possible duplicate/garbled row. Never
+  // auto-blocks the import; just makes the risk visible.
+  const [warnings, setWarnings] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   // Populated alongside `error` when the bulk-create route returns
   // 422 with structured per-row errors. The render path turns each
@@ -207,6 +211,8 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
     setParsed(null);
     setParsedStocks(null);
     setError(null);
+    setRejections([]);
+    setWarnings([]);
   }
 
   async function parse() {
@@ -231,6 +237,7 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
         trades?: ParsedTrade[];
         stockTrades?: ParsedStockTrade[];
         rejections?: Array<{ symbol: string; reason: string }>;
+        warnings?: string[];
         error?: string;
       };
       if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
@@ -246,6 +253,7 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
       setParsedStocks(stocks);
       const rej = json.rejections ?? [];
       setRejections(rej);
+      setWarnings(json.warnings ?? []);
       if (trades.length === 0 && stocks.length === 0 && rej.length === 0) {
         setError("No trades detected — try a sharper image or a different broker view");
       }
@@ -711,6 +719,22 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
               Stock sells match against open stock_long positions by (symbol, broker)
               and post realized P&L = (price − cost basis) × shares. Buys are not
               supported here — buy-side shares only enter via option assignment.
+            </div>
+          </div>
+        )}
+
+        {warnings.length > 0 && (
+          <div className="mt-2 space-y-1 rounded border border-red-500/40 bg-red-500/10 px-2 py-1.5 text-sm text-red-100">
+            <div className="font-semibold uppercase tracking-wide text-red-200">
+              {warnings.length} warning{warnings.length === 1 ? "" : "s"} — review before confirming
+            </div>
+            {warnings.map((w, i) => (
+              <div key={i}>🚩 {w}</div>
+            ))}
+            <div className="pt-0.5 text-[11px] text-red-200/80">
+              These rows are still included below — nothing was auto-removed. Check
+              them against the broker screenshot and delete any that don&apos;t
+              correspond to a real row before confirming.
             </div>
           </div>
         )}

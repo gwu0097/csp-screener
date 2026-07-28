@@ -78,10 +78,13 @@ A row is an OPTION trade when ALL of these are visible together:
 When the indicators conflict, prefer the OPTION interpretation only if BOTH a numeric strike AND a PUT/CALL designation are visible. Otherwise default to STOCK.
 
 OUTPUT FORMAT:
-Return one mixed JSON array. Each element is either an OPTION fill or a STOCK fill — discriminate with a top-level "trade_type" field. Schemas:
+Return one mixed JSON array. The FIRST element is always a META record counting the FILLED rows you read (see below). Every element after that is either an OPTION fill or a STOCK fill — discriminate with a top-level "trade_type" field. Schemas:
 
+META:    { "trade_type": "meta", "source_row_count": N }
 OPTION:  { "trade_type": "option", "action": "open"|"close", "contracts": N, "symbol": str, "strike": N, "expiry": "YYYY-MM-DD", "optionType": "put"|"call", "premium": N, "timePlaced": "YYYY-MM-DDTHH:MM:SS", "spread_group": str (optional) }
 STOCK:   { "trade_type": "stock",  "action": "buy"|"sell",    "shares":    N, "symbol": str, "price":  N, "date":   "YYYY-MM-DD" }
+
+source_row_count: the total count of individual FILLED rows you are about to extract, counted BEFORE you emit anything — walk the table top to bottom and count physical/logical rows (a multi-leg order's two legs count as 2, a SINGLE row counts as 1; do not count the META record itself, and do not count skipped CANCELED/EXPIRED/REJECTED rows). This must equal the number of OPTION + STOCK elements you emit after it. It exists purely as a self-check — if you find yourself about to emit a trade that doesn't correspond to a row you counted, drop it instead of inflating the count to match.
 
 spread_group: include ONLY for multi-leg spread rows (CALENDAR / DIAGONAL / VERTICAL / etc.). Use a short string label like "ROLL_1", "ROLL_2", "VERT_1" — both legs of the same order must share the SAME label so downstream can link them. For non-spread SINGLE rows, omit the field.
 
@@ -95,15 +98,25 @@ For multi-leg orders:
   • Emit EACH leg as a SEPARATE trade in the output array (a DIAGONAL produces TWO trade entries, a VERTICAL with 2 legs produces TWO entries, etc.).
   • Each leg has its OWN Side, Qty (with sign), Symbol, Exp, StrikeType, Price — read each independently.
   • Per-leg action comes from THAT leg's text/sign (a DIAGONAL typically has one SELL TO OPEN leg and one BUY TO CLOSE leg; they emit as action='open' and action='close' respectively).
-  • PRICE QUIRK: for multi-leg orders, one leg often shows 'CREDIT' / 'DEBIT' in the Price column (or 'NET CREDIT' / 'NET DEBIT') instead of a numeric LMT price — that's the SPREAD'S net credit/debit, not the individual leg's premium. The other leg shows the real numeric LMT price. For the leg that shows CREDIT/DEBIT (no per-leg numeric price), set premium = 0 in your output. The numeric-price leg gets its actual price.
+  • PRICE — PER-LEG FIRST, ALWAYS: each leg's own Price column is the source of truth for that leg's premium. Most multi-leg orders (vertical rolls especially) print a real numeric LMT price on BOTH legs — e.g. ".62" on the open leg AND ".24" on the close leg — with a separate summary line elsewhere (often literally "CREDIT" or "Net: X.XX CREDIT") showing only the NET of the two legs. That net/summary value is NOT either leg's premium — never let it override a numeric price that leg's OWN Price column shows.
+  • Only when a leg's OWN Price column itself is missing a number and instead literally reads 'CREDIT' / 'DEBIT' / 'NET CREDIT' / 'NET DEBIT' in place of a price — i.e. that specific leg has no numeric price anywhere on its row — set premium = 0 for that leg only. Do not infer this from a CREDIT/DEBIT label appearing on a different leg's row or on a separate net/summary line; the zero-premium fallback applies strictly to the leg whose own price cell lacks a number.
 
-Worked example (DIAGONAL row spans two lines, one Status applies to both):
+Worked example A — vertical roll, BOTH legs have real per-leg prices (net CREDIT is a separate summary, not a leg's price):
+  12:17:31  VERTICAL  SELL  -2 TO OPEN   BE  31 JUL 26  100 PUT  .62 LMT   DAY  FILLED
+                       BUY   +2 TO CLOSE  BE  31 JUL 26   90 PUT  .24
+                       Net: .38 CREDIT
+Emits TWO trades, each with its OWN real price (note the shared spread_group):
+  { action: 'open',  symbol: 'BE', strike: 100, expiry: '2026-07-31', optionType: 'put', contracts: 2, premium: 0.62, timePlaced: '2026-07-28T12:17:31', spread_group: 'VERT_1' }
+  { action: 'close', symbol: 'BE', strike: 90,  expiry: '2026-07-31', optionType: 'put', contracts: 2, premium: 0.24, timePlaced: '2026-07-28T12:17:31', spread_group: 'VERT_1' }
+(Both legs keep their own printed price. "Net: .38 CREDIT" is the spread's net — it is not either leg's premium and must never be written into a leg's premium field.)
+
+Worked example B — DIAGONAL row where one leg truly has no numeric price of its own (the CREDIT/DEBIT fallback applies here):
   5/8/26 12:54:27  DIAGONAL  SELL  -3 TO OPEN   ANET  15 MAY 26 (Weeklys)  150 PUT  4.75 LMT  DAY  FILLED
                               BUY   +3 TO CLOSE  ANET   8 MAY 26 (Weeklys)  146 PUT  CREDIT
-Emits TWO trades (note the shared spread_group):
+Emits TWO trades:
   { action: 'open',  symbol: 'ANET', strike: 150, expiry: '2026-05-15', optionType: 'put', contracts: 3, premium: 4.75, timePlaced: '2026-05-08', spread_group: 'DIAG_1' }
   { action: 'close', symbol: 'ANET', strike: 146, expiry: '2026-05-08', optionType: 'put', contracts: 3, premium: 0,    timePlaced: '2026-05-08', spread_group: 'DIAG_1' }
-(The CREDIT leg gets premium=0 because the per-leg price isn't shown — the user will edit the close price manually.)
+(The CLOSE leg's OWN Price column literally reads "CREDIT" — no number is printed anywhere for that leg — so premium=0 is correct here; the user will edit the close price manually. This is different from Example A, where both legs had real numbers and only the separate net summary said CREDIT.)
 
 CALENDAR (condensed display variant — different from the per-row layout above):
 Schwab sometimes shows a CALENDAR roll as ONE header row plus a "TRADE FILLS" detail block, instead of two physical rows. The header looks like:
@@ -172,7 +185,7 @@ For each stock row:
 - date: YYYY-MM-DD from the Time Placed column (date only).
 - Do NOT emit strike, expiry, optionType, premium, or timePlaced for stock rows.
 
-Return ONLY a JSON array, no explanation, no markdown.
+Return ONLY a JSON array, no explanation, no markdown. Remember: the first element is always the META record with source_row_count.
 
 Extract EVERY row in the table. Do not stop early. There may be 10-30 rows. Return all of them.
 
@@ -719,8 +732,37 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // `parsed` is narrowed to an array above but TS loses that through a
+    // reassignment inside a conditional block below — bind it to a
+    // properly-typed local once and use that from here on.
+    let rows: unknown[] = parsed;
+
     type Rejection = { symbol: string; reason: string };
     const rejections: Rejection[] = [];
+    // Flagged for the user to review before confirming import — never
+    // auto-rejected or auto-corrected, just surfaced.
+    const warnings: string[] = [];
+
+    // Row-count self-check: the Schwab prompt asks the model to lead
+    // with a { trade_type: 'meta', source_row_count: N } record — its
+    // own count of FILLED rows before it emits any trades. If the
+    // number of option+stock items it actually emits doesn't match,
+    // something was duplicated or dropped (this is how the GLW $100P
+    // phantom — a hallucinated extra copy of a real UPS row — slipped
+    // through on 2026-07-28). Older prompts that don't emit a meta
+    // record leave sourceRowCount null and skip the check entirely.
+    let sourceRowCount: number | null = null;
+    const metaIndex = rows.findIndex((item) => {
+      if (!item || typeof item !== "object") return false;
+      const tt = (item as Record<string, unknown>).trade_type;
+      return typeof tt === "string" && tt.toLowerCase() === "meta";
+    });
+    if (metaIndex !== -1) {
+      const metaRaw = rows[metaIndex] as Record<string, unknown>;
+      const n = Number(metaRaw.source_row_count);
+      if (Number.isFinite(n) && n >= 0) sourceRowCount = Math.round(n);
+      rows = rows.filter((_, i) => i !== metaIndex);
+    }
 
     // Classify each raw item as option vs stock. The Schwab options
     // prompt now emits a mixed array discriminated by trade_type;
@@ -746,9 +788,15 @@ export async function POST(req: NextRequest) {
 
     const optionItems: unknown[] = [];
     const stockItems: unknown[] = [];
-    for (const item of parsed) {
+    for (const item of rows) {
       if (isStockItem(item)) stockItems.push(item);
       else optionItems.push(item);
+    }
+
+    if (sourceRowCount !== null && optionItems.length + stockItems.length !== sourceRowCount) {
+      warnings.push(
+        `Row-count mismatch: the model counted ${sourceRowCount} FILLED row(s) in the screenshot but emitted ${optionItems.length + stockItems.length} trade(s). One or more trades may not correspond to a real broker row (or a real row was dropped) — review every line below carefully before confirming.`,
+      );
     }
 
     let trades: ParsedTrade[];
@@ -757,7 +805,7 @@ export async function POST(req: NextRequest) {
       // Legacy stock-only request — keep returning trades[] for callers
       // that still rely on the prior shape.
       trades = [];
-      stockTrades = parsed
+      stockTrades = rows
         .map((r) => coerceStockTrade(r, broker))
         .filter((t): t is ParsedStockTrade => t !== null);
     } else {
@@ -808,6 +856,26 @@ export async function POST(req: NextRequest) {
         .filter((t): t is ParsedStockTrade => t !== null);
     }
 
+    // Duplicate-emission heuristic: two option trades sharing the same
+    // strike AND contract count but a DIFFERENT symbol have no honest
+    // explanation as two real, independent broker rows — it's cheap
+    // for two unrelated tickers to coincidentally share a strike, but
+    // sharing strike AND contract count on the same day is the exact
+    // fingerprint left by the GLW $100P phantom (a garbled duplicate of
+    // a UPS $100P/3-contract close). Flag both sides for review; never
+    // drop or merge automatically.
+    for (let i = 0; i < trades.length; i++) {
+      for (let j = i + 1; j < trades.length; j++) {
+        const a = trades[i];
+        const b = trades[j];
+        if (a.symbol !== b.symbol && a.strike === b.strike && a.contracts === b.contracts) {
+          warnings.push(
+            `Possible duplicate/garbled row: ${a.symbol} ${a.strike}${a.optionType === "call" ? "C" : "P"} x${a.contracts} (${a.action}, $${a.premium}) and ${b.symbol} ${b.strike}${b.optionType === "call" ? "C" : "P"} x${b.contracts} (${b.action}, $${b.premium}) share the same strike and contract count but different symbols — verify both against the broker screenshot before confirming.`,
+          );
+        }
+      }
+    }
+
     // Per-trade log so we can compare what Gemini emitted vs what
     // the parser ended up with after normalization. Catches cases
     // where the raw response and the coerced result diverge.
@@ -824,15 +892,18 @@ export async function POST(req: NextRequest) {
     for (const r of rejections) {
       console.log(`[parse-screenshot] rejected: ${r.symbol} — ${r.reason}`);
     }
+    for (const w of warnings) {
+      console.log(`[parse-screenshot] warning: ${w}`);
+    }
 
     // NB: model_trades is the array parsed from the model's response, not the
     // count of bytes received. If model_trades=0 we got a valid response
     // with no trades — check the logged raw content to see what the model
     // actually produced.
     console.log(
-      `[parse-screenshot] broker=${broker} tradeType=${tradeType} model_trades=${parsed.length} option_accepted=${trades.length} stock_accepted=${stockTrades.length} rejected=${rejections.length}`,
+      `[parse-screenshot] broker=${broker} tradeType=${tradeType} sourceRowCount=${sourceRowCount ?? "n/a"} model_trades=${rows.length} option_accepted=${trades.length} stock_accepted=${stockTrades.length} rejected=${rejections.length} warnings=${warnings.length}`,
     );
-    return NextResponse.json({ trades, stockTrades, rejections });
+    return NextResponse.json({ trades, stockTrades, rejections, warnings });
   } catch (e) {
     console.error("[parse-screenshot] failed:", e);
     return NextResponse.json(
