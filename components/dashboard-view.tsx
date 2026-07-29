@@ -12,6 +12,8 @@ import {
   ArrowRight,
   Brain,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   Crosshair,
   LineChart,
   Loader2,
@@ -228,7 +230,10 @@ function SectionHeader({
   );
 }
 
-function MetricBox({
+// Single label:value pair with no box/padding — for the condensed
+// CSP Status / Market Context strip, which needs several stats per
+// row instead of one MetricBox each.
+function CompactStat({
   label,
   value,
   valueClass,
@@ -238,10 +243,61 @@ function MetricBox({
   valueClass?: string;
 }) {
   return (
-    <div className="flex-1 rounded-md bg-muted px-3 py-2.5">
-      <div className="text-sm text-muted-foreground">{label}</div>
-      <div className={cn("mt-0.5 text-xl font-medium", valueClass)}>{value}</div>
+    <div className="flex items-baseline gap-1.5 text-sm">
+      <span className="text-muted-foreground">{label}</span>
+      <span className={cn("font-mono font-semibold", valueClass)}>{value}</span>
     </div>
+  );
+}
+
+// Collapse/expand state is plain useState — intentionally NOT persisted
+// (no localStorage/cookie), so every page load starts from `defaultOpen`
+// regardless of what the user last did. The toggle target is only the
+// icon+title+chevron; `right` (a "View all →" link on some sections)
+// stays independently clickable and never toggles collapse.
+function CollapsibleSection({
+  icon,
+  title,
+  defaultOpen,
+  collapsedSummary,
+  right,
+  children,
+}: {
+  icon: React.ReactNode;
+  title: React.ReactNode;
+  defaultOpen: boolean;
+  collapsedSummary?: React.ReactNode;
+  right?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <Panel>
+      <div className="flex items-center justify-between gap-2">
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          className="flex flex-1 items-center gap-2 text-left"
+        >
+          {open ? (
+            <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          ) : (
+            <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          )}
+          <span className="flex items-center gap-2 text-[13px] font-medium uppercase tracking-[0.05em] text-muted-foreground">
+            {icon}
+            {title}
+          </span>
+          {!open && collapsedSummary && (
+            <span className="text-[11px] normal-case tracking-normal text-muted-foreground/80">
+              {collapsedSummary}
+            </span>
+          )}
+        </button>
+        {right}
+      </div>
+      {open && <div className="mt-3">{children}</div>}
+    </Panel>
   );
 }
 
@@ -556,11 +612,32 @@ export function DashboardView() {
   // same signal Earnings Watch itself uses for that concept — not the
   // page's broader `held` (which also flips true from an options
   // position alone). A name on Prospects or another non-Portfolio list
-  // is a candidate, not something this card is about. The endpoint
-  // already sorts soonest-first; filtering preserves that order.
-  const earningsWeekHeld = (earningsWeek.data?.rows ?? []).filter(
-    (r) => r.portfolioStockHolding !== null,
-  );
+  // is a candidate, not something this card is about.
+  //
+  // The endpoint sorts by day only — within a day it doesn't separate
+  // BMO from AMC, so a BMO name (already reported before today's open)
+  // and an AMC name (still reporting tonight) looked identical. Sort
+  // by (date, session-within-day) instead: BMO is earliest in its day,
+  // AMC latest, unknown/DMH timing in between.
+  function sessionRank(timing: EarningsWatchRow["earningsTiming"]): number {
+    if (timing === "BMO") return 0;
+    if (timing === "AMC") return 2;
+    return 1;
+  }
+  const earningsWeekHeld = (earningsWeek.data?.rows ?? [])
+    .filter((r) => r.portfolioStockHolding !== null)
+    .sort((a, b) => {
+      const dateCmp = (a.earningsDate ?? "9999-99-99").localeCompare(b.earningsDate ?? "9999-99-99");
+      if (dateCmp !== 0) return dateCmp;
+      return sessionRank(a.earningsTiming) - sessionRank(b.earningsTiming);
+    });
+  // Today's BMO has already happened (it prints before today's open,
+  // so by the time this dashboard is viewed it's in the past); today's
+  // AMC hasn't (it prints tonight after close) — these need to look
+  // different, not identical "reports today" rows.
+  const todayIsoStr = easternToday();
+  const earningsToday = earningsWeekHeld.filter((r) => r.earningsDate === todayIsoStr);
+  const earningsLater = earningsWeekHeld.filter((r) => r.earningsDate !== todayIsoStr);
 
   // ---------- Market tiles ----------
   const m = market.data;
@@ -617,89 +694,116 @@ export function DashboardView() {
         </div>
       </div>
 
-      {/* ---------- ROW 1: three cards ---------- */}
+      {/* ---------- Condensed glance stats: CSP / Market / Long-term ----------
+          Always visible (not collapsible — this is quick-glance data),
+          but dense: one compact row per card instead of large padded
+          MetricBoxes, so this whole strip stays short and doesn't push
+          the attention panel / today's earnings below the fold. */}
       <div className="grid gap-4 md:grid-cols-3">
         {/* Card 1 — CSP Status (clickable) */}
         <Link href="/positions" className="group block">
-          <Panel className="h-full transition-colors group-hover:border-foreground/30">
+          <Panel className="h-full py-3 transition-colors group-hover:border-foreground/30">
             <SectionHeader icon={<LineChart className="h-4 w-4" />}>
               CSP Status
             </SectionHeader>
             {positions.status === "loading" ? (
-              <SkeletonLines n={4} />
+              <SkeletonLines n={2} />
             ) : positions.status === "error" ? (
-              <p className="text-base text-muted-foreground">—</p>
+              <p className="text-sm text-muted-foreground">—</p>
             ) : (
-              <>
-                <div className="flex gap-2">
-                  <MetricBox label="Positions" value={pos.length} />
-                  <MetricBox
-                    label="Unrealized P&L"
+              <div className="space-y-1">
+                <div className="flex flex-wrap gap-x-4 gap-y-1">
+                  <CompactStat label="Positions" value={pos.length} />
+                  <CompactStat
+                    label="Unrealized"
                     value={fmtMoney(unrealized)}
                     valueClass={pnlColor(unrealized)}
                   />
+                  <CompactStat label="Expiring ≤2d" value={expiringSoon} />
                 </div>
-                <div className="mt-3 space-y-1 text-base">
-                  <div className="text-muted-foreground">
-                    Expiring today + tmrw:{" "}
-                    <span className="font-semibold text-foreground">
-                      {expiringSoon}
-                    </span>
+                {needsAttn > 0 ? (
+                  <div className="text-sm font-medium text-rose-400">
+                    {needsAttn} need{needsAttn === 1 ? "s" : ""} attention
                   </div>
-                  {needsAttn > 0 ? (
-                    <div className="font-medium text-rose-400">
-                      {needsAttn} need{needsAttn === 1 ? "s" : ""} attention
-                    </div>
-                  ) : (
-                    <div className="font-medium text-emerald-400">
-                      All healthy ✓
-                    </div>
-                  )}
-                </div>
-              </>
+                ) : (
+                  <div className="text-sm font-medium text-emerald-400">All healthy ✓</div>
+                )}
+              </div>
             )}
           </Panel>
         </Link>
 
-        {/* Card 2 — Long-term alerts (clickable) */}
+        {/* Card 2 — Market Context (no link) */}
+        <Panel className="h-full py-3">
+          <SectionHeader icon={<LineChart className="h-4 w-4" />}>
+            Market context
+          </SectionHeader>
+          {market.status === "loading" ? (
+            <SkeletonLines n={2} />
+          ) : market.status === "error" || !m ? (
+            <p className="text-sm text-muted-foreground">—</p>
+          ) : (
+            <div className="flex flex-wrap gap-x-4 gap-y-1">
+              <CompactStat
+                label="SPY"
+                value={fmtPct(m.spy.changePct)}
+                valueClass={pnlColor(m.spy.changePct)}
+              />
+              <CompactStat
+                label="QQQ"
+                value={fmtPct(m.qqq.changePct)}
+                valueClass={pnlColor(m.qqq.changePct)}
+              />
+              <CompactStat
+                label="XLK"
+                value={fmtPct(m.xlk.changePct)}
+                valueClass={pnlColor(m.xlk.changePct)}
+              />
+              <CompactStat
+                label="IWF"
+                value={fmtPct(m.iwf.changePct)}
+                valueClass={pnlColor(m.iwf.changePct)}
+              />
+              <CompactStat
+                label="10Y"
+                value={tnxYield !== null ? `${tnxYield.toFixed(2)}%` : "—"}
+                valueClass={pnlColor(m.tnx.changePct)}
+              />
+            </div>
+          )}
+        </Panel>
+
+        {/* Card 3 — Long-term alerts (clickable) */}
         <Link href="/longterm/watchlist" className="group block">
-          <Panel className="h-full transition-colors group-hover:border-foreground/30">
+          <Panel className="h-full py-3 transition-colors group-hover:border-foreground/30">
             <SectionHeader icon={<AlertTriangle className="h-4 w-4" />}>
               Long-term alerts
             </SectionHeader>
             {watch.status === "loading" ? (
-              <SkeletonLines n={4} />
+              <SkeletonLines n={2} />
             ) : watch.status === "error" ? (
-              <p className="text-base text-muted-foreground">—</p>
+              <p className="text-sm text-muted-foreground">—</p>
             ) : alertRows.length === 0 ? (
-              <p className="text-base text-muted-foreground">
-                No active alerts.
-              </p>
+              <p className="text-sm text-muted-foreground">No active alerts.</p>
             ) : (
               <>
-                <div className="space-y-1.5">
-                  {alertRows.slice(0, 4).map(({ row, flag }) => (
-                    <div
-                      key={row.symbol}
-                      className="flex items-center gap-2 text-base"
-                    >
-                      <span className="w-[50px] shrink-0 font-mono font-semibold">
+                <div className="space-y-1">
+                  {alertRows.slice(0, 3).map(({ row, flag }) => (
+                    <div key={row.symbol} className="flex items-center gap-2 text-sm">
+                      <span className="w-[42px] shrink-0 font-mono font-semibold">
                         {row.symbol}
                       </span>
-                      <Badge
-                        kind={row.action}
-                        label={row.action.replace(/_/g, " ")}
-                      />
-                      <span className="flex-1 truncate text-sm text-muted-foreground">
+                      <Badge kind={row.action} label={row.action.replace(/_/g, " ")} />
+                      <span className="flex-1 truncate text-xs text-muted-foreground">
                         {flag!.label}
                       </span>
-                      <span className="w-16 text-right">
+                      <span className="w-14 text-right text-xs">
                         <ChangeCell pct={row.changePct} />
                       </span>
                     </div>
                   ))}
                 </div>
-                <div className="mt-3 flex items-center gap-1 text-sm font-medium text-muted-foreground group-hover:text-foreground">
+                <div className="mt-1.5 flex items-center gap-1 text-xs font-medium text-muted-foreground group-hover:text-foreground">
                   {alertRows.length} active alert
                   {alertRows.length === 1 ? "" : "s"}
                   <ArrowRight className="h-3 w-3" /> view all
@@ -708,52 +812,9 @@ export function DashboardView() {
             )}
           </Panel>
         </Link>
-
-        {/* Card 3 — Market Context (no link) */}
-        <Panel className="h-full">
-          <SectionHeader icon={<LineChart className="h-4 w-4" />}>
-            Market context
-          </SectionHeader>
-          {market.status === "loading" ? (
-            <SkeletonLines n={4} />
-          ) : market.status === "error" || !m ? (
-            <p className="text-base text-muted-foreground">—</p>
-          ) : (
-            <>
-              <div className="flex gap-2">
-                <MetricBox
-                  label="SPY today"
-                  value={fmtPct(m.spy.changePct)}
-                  valueClass={pnlColor(m.spy.changePct)}
-                />
-                <MetricBox
-                  label="QQQ today"
-                  value={fmtPct(m.qqq.changePct)}
-                  valueClass={pnlColor(m.qqq.changePct)}
-                />
-              </div>
-              <div className="mt-3 space-y-1.5 text-base">
-                <div className="flex items-center justify-between">
-                  <span className="text-muted-foreground">Tech (XLK)</span>
-                  <ChangeCell pct={m.xlk.changePct} />
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-muted-foreground">Growth (IWF)</span>
-                  <ChangeCell pct={m.iwf.changePct} />
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-muted-foreground">10Y yield</span>
-                  <span className={cn("font-mono", pnlColor(m.tnx.changePct))}>
-                    {tnxYield !== null ? `${tnxYield.toFixed(2)}%` : "—"}
-                  </span>
-                </div>
-              </div>
-            </>
-          )}
-        </Panel>
       </div>
 
-      {/* ---------- ROW 2: attention panel ---------- */}
+      {/* ---------- Positions needing attention (always visible) ---------- */}
       <Panel
         className={cn(
           attention.length > 0 && "border-rose-500/40",
@@ -828,26 +889,110 @@ export function DashboardView() {
         )}
       </Panel>
 
-      {/* ---------- Swing watch ---------- */}
-      <Panel>
+      {/* ---------- Today's earnings (always visible, highlighted) ---------- */}
+      <Panel className={cn(earningsToday.length > 0 && "border-amber-500/40")}>
         <SectionHeader
-          icon={<Activity className="h-4 w-4" />}
+          icon={<AlarmClock className="h-4 w-4 text-amber-400" />}
           right={
             <Link
-              href="/swings/ideas"
+              href="/analysis/earnings-watch"
               className="text-[11px] font-medium text-muted-foreground hover:text-foreground"
             >
               View all →
             </Link>
           }
         >
-          Swing watch
-          {swingCandidates.length > 0 && (
-            <span className="ml-1 rounded bg-muted px-1.5 py-0.5 text-[10px] text-foreground">
-              {swingCandidates.length}
-            </span>
-          )}
+          <span className={earningsToday.length > 0 ? "text-amber-300" : undefined}>
+            Today&apos;s earnings — held names
+          </span>
         </SectionHeader>
+        {earningsWeek.status === "loading" ? (
+          <SkeletonLines n={2} />
+        ) : earningsWeek.status === "error" ? (
+          <p className="text-sm text-muted-foreground">—</p>
+        ) : earningsToday.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No held names report today.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-[11px] uppercase tracking-wider text-muted-foreground">
+                  <th className="py-1.5 pr-3 font-medium">Symbol</th>
+                  <th className="py-1.5 pr-3 font-medium">Status</th>
+                  <th className="py-1.5 pr-3 font-medium">Allocation</th>
+                  <th className="py-1.5 pr-3 font-medium">Options</th>
+                  <th className="py-1.5 text-right font-medium">Call</th>
+                </tr>
+              </thead>
+              <tbody>
+                {earningsToday.map((r) => {
+                  // BMO prints before today's open — by the time this
+                  // dashboard is viewed, that has already happened.
+                  // AMC prints tonight after close — still ahead.
+                  const reported = r.earningsTiming === "BMO";
+                  const upcoming = r.earningsTiming === "AMC";
+                  return (
+                    <tr
+                      key={r.symbol}
+                      onClick={() => router.push(`/analysis/earnings-watch?symbol=${r.symbol}`)}
+                      className={cn(
+                        "cursor-pointer border-t border-border/60 hover:bg-background/60",
+                        upcoming && "bg-amber-500/[0.06]",
+                        reported && "text-muted-foreground",
+                      )}
+                    >
+                      <td className="py-1.5 pr-3 font-mono font-semibold">{r.symbol}</td>
+                      <td className="py-1.5 pr-3">
+                        <span
+                          className={cn(
+                            "rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase",
+                            upcoming
+                              ? "border-amber-500/40 bg-amber-500/15 text-amber-300"
+                              : "border-border bg-muted text-muted-foreground",
+                          )}
+                        >
+                          {reported ? "Reported · BMO" : upcoming ? "Tonight · AMC" : r.earningsTiming ?? "Today"}
+                        </span>
+                      </td>
+                      <td className="py-1.5 pr-3 text-[11px] capitalize text-muted-foreground">
+                        {r.portfolioStockHolding?.allocation ?? "—"}
+                      </td>
+                      <td className="py-1.5 pr-3">
+                        {r.heldPositions.some((p) => p.positionType === "option") ? (
+                          <span className="rounded border border-violet-500/40 bg-violet-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-violet-300">
+                            Open CSP
+                          </span>
+                        ) : (
+                          <span className="text-[11px] text-muted-foreground">stock only</span>
+                        )}
+                      </td>
+                      <td className="py-1.5 text-right">
+                        {r.badge ? <Badge kind={r.badge.verdict} label={r.badge.verdict} /> : "—"}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Panel>
+
+      {/* ---------- Swing watch ---------- */}
+      <CollapsibleSection
+        icon={<Activity className="h-4 w-4" />}
+        title="Swing watch"
+        defaultOpen={false}
+        collapsedSummary={swingCandidates.length > 0 ? `— ${swingCandidates.length} candidates` : undefined}
+        right={
+          <Link
+            href="/swings/ideas"
+            className="text-[11px] font-medium text-muted-foreground hover:text-foreground"
+          >
+            View all →
+          </Link>
+        }
+      >
         {swings.status === "loading" ? (
           <SkeletonLines n={3} />
         ) : swings.status === "error" ? (
@@ -914,23 +1059,23 @@ export function DashboardView() {
             })}
           </div>
         )}
-      </Panel>
+      </CollapsibleSection>
 
       {/* ---------- Buy Zone top 5 ---------- */}
-      <Panel>
-        <SectionHeader
-          icon={<Crosshair className="h-4 w-4" />}
-          right={
-            <Link
-              href="/analysis/buy-zone"
-              className="text-[11px] font-medium text-muted-foreground hover:text-foreground"
-            >
-              View all →
-            </Link>
-          }
-        >
-          Buy Zone — top 5
-        </SectionHeader>
+      <CollapsibleSection
+        icon={<Crosshair className="h-4 w-4" />}
+        title="Buy Zone — top 5"
+        defaultOpen={false}
+        collapsedSummary={buyZoneTop5.length > 0 ? `— ${buyZoneTop5.length} names` : undefined}
+        right={
+          <Link
+            href="/analysis/buy-zone"
+            className="text-[11px] font-medium text-muted-foreground hover:text-foreground"
+          >
+            View all →
+          </Link>
+        }
+      >
         {buyZone.status === "loading" ? (
           <SkeletonLines n={3} />
         ) : buyZone.status === "error" ? (
@@ -977,30 +1122,30 @@ export function DashboardView() {
             </table>
           </div>
         )}
-      </Panel>
+      </CollapsibleSection>
 
-      {/* ---------- Earnings this week (held names only) ---------- */}
-      <Panel>
-        <SectionHeader
-          icon={<AlarmClock className="h-4 w-4" />}
-          right={
-            <Link
-              href="/analysis/earnings-watch"
-              className="text-[11px] font-medium text-muted-foreground hover:text-foreground"
-            >
-              View all →
-            </Link>
-          }
-        >
-          Earnings this week — held names
-        </SectionHeader>
+      {/* ---------- Earnings this week, beyond today (held names only) ---------- */}
+      <CollapsibleSection
+        icon={<AlarmClock className="h-4 w-4" />}
+        title="Earnings this week"
+        defaultOpen={false}
+        collapsedSummary={earningsLater.length > 0 ? `— ${earningsLater.length} more` : "— none beyond today"}
+        right={
+          <Link
+            href="/analysis/earnings-watch"
+            className="text-[11px] font-medium text-muted-foreground hover:text-foreground"
+          >
+            View all →
+          </Link>
+        }
+      >
         {earningsWeek.status === "loading" ? (
           <SkeletonLines n={3} />
         ) : earningsWeek.status === "error" ? (
           <p className="text-sm text-muted-foreground">—</p>
-        ) : earningsWeekHeld.length === 0 ? (
+        ) : earningsLater.length === 0 ? (
           <p className="text-sm text-muted-foreground">
-            No Portfolio watchlist names report earnings in the next 7 days.
+            No Portfolio watchlist names report earnings later this week.
           </p>
         ) : (
           <div className="overflow-x-auto">
@@ -1015,7 +1160,7 @@ export function DashboardView() {
                 </tr>
               </thead>
               <tbody>
-                {earningsWeekHeld.map((r) => (
+                {earningsLater.map((r) => (
                   <tr
                     key={r.symbol}
                     onClick={() => router.push(`/analysis/earnings-watch?symbol=${r.symbol}`)}
@@ -1049,7 +1194,7 @@ export function DashboardView() {
             </table>
           </div>
         )}
-      </Panel>
+      </CollapsibleSection>
 
       <Dialog open={buyZoneModalRow !== null} onOpenChange={(o) => !o && setBuyZoneModalRow(null)}>
         <DialogContent className="max-h-[85vh] max-w-4xl overflow-y-auto">
@@ -1077,13 +1222,17 @@ export function DashboardView() {
         </DialogContent>
       </Dialog>
 
-      {/* ---------- ROW 3: two panels ---------- */}
+      {/* ---------- Collapsible row: Top movers + AI brief ---------- */}
       <div className="grid gap-4 md:grid-cols-2">
         {/* Left — Top movers today */}
-        <Panel>
-          <SectionHeader icon={<LineChart className="h-4 w-4" />}>
-            Top movers today
-          </SectionHeader>
+        <CollapsibleSection
+          icon={<LineChart className="h-4 w-4" />}
+          title="Top movers today"
+          defaultOpen={false}
+          collapsedSummary={
+            withChange.length > 0 ? `— ${gainers.length} up, ${losers.length} down` : undefined
+          }
+        >
           {watch.status === "loading" ? (
             <SkeletonLines n={5} />
           ) : watch.status === "error" ? (
@@ -1115,18 +1264,16 @@ export function DashboardView() {
               </div>
             </div>
           )}
-        </Panel>
+        </CollapsibleSection>
 
         {/* Right — AI Morning Brief */}
-        <Panel>
-          <SectionHeader
-            icon={<Brain className="h-4 w-4" />}
-            right={
-              <span className="text-[11px] text-muted-foreground">cached 4h</span>
-            }
-          >
-            AI morning brief
-          </SectionHeader>
+        <CollapsibleSection
+          icon={<Brain className="h-4 w-4" />}
+          title="AI morning brief"
+          defaultOpen={false}
+          collapsedSummary={brief ? "— ready" : undefined}
+          right={<span className="text-[11px] text-muted-foreground">cached 4h</span>}
+        >
           {briefError && (
             <div className="mb-2 rounded border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-sm text-rose-200">
               {briefError}
@@ -1169,7 +1316,7 @@ export function DashboardView() {
               Generate Morning Brief
             </button>
           )}
-        </Panel>
+        </CollapsibleSection>
       </div>
     </div>
   );
