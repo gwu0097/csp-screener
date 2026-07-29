@@ -2,10 +2,12 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   Activity,
+  AlarmClock,
   AlertTriangle,
   ArrowRight,
   Brain,
@@ -23,6 +25,7 @@ import {
   useBuyZoneResearch,
   type BuyZoneRow,
 } from "@/components/buy-zone-view";
+import type { EarningsWatchRow } from "@/components/earnings-watch-view";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
 // Markdown body for the AI morning brief — mirrors the styling used for
@@ -99,6 +102,13 @@ type SwingsResp = { ideas: SwingIdeaLite[] };
 // full row shape (analyst fields, watchlist tags, etc), not a
 // narrower dashboard-local subset.
 type BuyZoneResp = { rows: BuyZoneRow[] };
+
+// EarningsWatchRow imported from components/earnings-watch-view — this
+// card reuses that page's own /api/analysis/earnings-watch endpoint
+// rather than a parallel query, then filters client-side to Portfolio-
+// watchlist holdings only (see the comment where earningsWeekHeld is
+// derived below).
+type EarningsWatchResp = { rows: EarningsWatchRow[] };
 
 type Slot<T> = { status: "loading" | "ok" | "error"; data: T | null };
 const LOADING: Slot<never> = { status: "loading", data: null };
@@ -259,6 +269,8 @@ export function DashboardView() {
   const [buyZone, setBuyZone] = useState<Slot<BuyZoneResp>>(LOADING);
   const [buyZoneModalRow, setBuyZoneModalRow] = useState<BuyZoneRow | null>(null);
   const buyZoneResearch = useBuyZoneResearch();
+  const [earningsWeek, setEarningsWeek] = useState<Slot<EarningsWatchResp>>(LOADING);
+  const router = useRouter();
 
   const [brief, setBrief] = useState<string | null>(null);
   const [briefAt, setBriefAt] = useState<string | null>(null);
@@ -307,6 +319,10 @@ export function DashboardView() {
         fetch("/api/analysis/buy-zone", { cache: "no-store" })
           .then((r) => r.json())
           .then((j) => setBuyZone({ status: "ok", data: j as BuyZoneResp }))
+          .catch(() => {}),
+        fetch("/api/analysis/earnings-watch", { cache: "no-store" })
+          .then((r) => r.json())
+          .then((j) => setEarningsWeek({ status: "ok", data: j as EarningsWatchResp }))
           .catch(() => {}),
         fetch("/api/context/daily", { cache: "no-store" })
           .then((r) => r.json())
@@ -371,6 +387,11 @@ export function DashboardView() {
       "/api/analysis/buy-zone",
       setBuyZone,
       (j) => j as BuyZoneResp,
+    );
+    void load<EarningsWatchResp>(
+      "/api/analysis/earnings-watch",
+      setEarningsWeek,
+      (j) => j as EarningsWatchResp,
     );
     void (async () => {
       try {
@@ -529,6 +550,17 @@ export function DashboardView() {
   const buyZoneTop5 = [...(buyZone.data?.rows ?? [])]
     .sort((a, b) => b.buyZoneComposite - a.buyZoneComposite)
     .slice(0, 5);
+
+  // ---------- Earnings this week (held names only) ----------
+  // "Held" here means Portfolio watchlist membership specifically — the
+  // same signal Earnings Watch itself uses for that concept — not the
+  // page's broader `held` (which also flips true from an options
+  // position alone). A name on Prospects or another non-Portfolio list
+  // is a candidate, not something this card is about. The endpoint
+  // already sorts soonest-first; filtering preserves that order.
+  const earningsWeekHeld = (earningsWeek.data?.rows ?? []).filter(
+    (r) => r.portfolioStockHolding !== null,
+  );
 
   // ---------- Market tiles ----------
   const m = market.data;
@@ -938,6 +970,78 @@ export function DashboardView() {
                     </td>
                     <td className="py-1.5 text-right font-mono font-semibold">
                       {r.buyZoneComposite.toFixed(1)}/10
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Panel>
+
+      {/* ---------- Earnings this week (held names only) ---------- */}
+      <Panel>
+        <SectionHeader
+          icon={<AlarmClock className="h-4 w-4" />}
+          right={
+            <Link
+              href="/analysis/earnings-watch"
+              className="text-[11px] font-medium text-muted-foreground hover:text-foreground"
+            >
+              View all →
+            </Link>
+          }
+        >
+          Earnings this week — held names
+        </SectionHeader>
+        {earningsWeek.status === "loading" ? (
+          <SkeletonLines n={3} />
+        ) : earningsWeek.status === "error" ? (
+          <p className="text-sm text-muted-foreground">—</p>
+        ) : earningsWeekHeld.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            No Portfolio watchlist names report earnings in the next 7 days.
+          </p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-[11px] uppercase tracking-wider text-muted-foreground">
+                  <th className="py-1.5 pr-3 font-medium">Symbol</th>
+                  <th className="py-1.5 pr-3 font-medium">Reports</th>
+                  <th className="py-1.5 pr-3 font-medium">Allocation</th>
+                  <th className="py-1.5 pr-3 font-medium">Options</th>
+                  <th className="py-1.5 text-right font-medium">Call</th>
+                </tr>
+              </thead>
+              <tbody>
+                {earningsWeekHeld.map((r) => (
+                  <tr
+                    key={r.symbol}
+                    onClick={() => router.push(`/analysis/earnings-watch?symbol=${r.symbol}`)}
+                    className="cursor-pointer border-t border-border/60 hover:bg-background/60"
+                  >
+                    <td className="py-1.5 pr-3 font-mono font-semibold">{r.symbol}</td>
+                    <td className="py-1.5 pr-3 text-[11px] text-muted-foreground">
+                      {r.earningsDate ?? "—"}
+                      {r.earningsTiming && r.earningsTiming !== "unknown"
+                        ? ` (${r.earningsTiming})`
+                        : ""}
+                    </td>
+                    <td className="py-1.5 pr-3 text-[11px] capitalize text-muted-foreground">
+                      {r.portfolioStockHolding?.allocation ?? "—"}
+                    </td>
+                    <td className="py-1.5 pr-3">
+                      {r.heldPositions.some((p) => p.positionType === "option") ? (
+                        <span className="rounded border border-violet-500/40 bg-violet-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-violet-300">
+                          Open CSP
+                        </span>
+                      ) : (
+                        <span className="text-[11px] text-muted-foreground">stock only</span>
+                      )}
+                    </td>
+                    <td className="py-1.5 text-right">
+                      {r.badge ? <Badge kind={r.badge.verdict} label={r.badge.verdict} /> : "—"}
                     </td>
                   </tr>
                 ))}

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { ChevronDown, ChevronRight, Loader2, RefreshCw, Search } from "lucide-react";
 import { CrushHistoryTable } from "@/components/crush-history-table";
 import { cn } from "@/lib/utils";
@@ -57,7 +58,7 @@ type Badge = {
   composite: number;
 };
 
-type EarningsWatchRow = {
+export type EarningsWatchRow = {
   symbol: string;
   companyName: string | null;
   price: number | null;
@@ -173,8 +174,8 @@ export function EarningsWatchView() {
     void load(false);
   }, [load]);
 
-  async function runLookup() {
-    const symbol = lookupInput.trim().toUpperCase();
+  const runLookup = useCallback(async (symbolOverride?: string) => {
+    const symbol = (symbolOverride ?? lookupInput).trim().toUpperCase();
     if (!symbol) return;
     setLookupLoading(true);
     setLookupError(null);
@@ -191,7 +192,22 @@ export function EarningsWatchView() {
     } finally {
       setLookupLoading(false);
     }
-  }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lookupInput]);
+
+  // Deep link from the dashboard's "Earnings this week" card
+  // (/analysis/earnings-watch?symbol=X) — pre-fill and run the same
+  // lookup a manual search would, so the full per-name context (the
+  // whole point of following the link) is right there on arrival.
+  const searchParams = useSearchParams();
+  useEffect(() => {
+    const sym = searchParams.get("symbol")?.trim().toUpperCase();
+    if (!sym) return;
+    setLookupInput(sym);
+    void runLookup(sym);
+    // Only ever re-run if the URL's symbol itself changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   // After an inline earnings-history edit (via the embedded
   // CrushHistoryTable), the downside history / data-quality warning /
@@ -274,7 +290,7 @@ export function EarningsWatchView() {
         <div className="overflow-x-auto rounded-md border border-border bg-background/40">
           <table className="w-full min-w-[1100px] text-sm">
             <tbody>
-              <EarningsWatchRowItem row={lookupRow} pinned onReEvaluate={reEvaluateSymbol} />
+              <EarningsWatchRowItem key={lookupRow.symbol} row={lookupRow} pinned onReEvaluate={reEvaluateSymbol} />
             </tbody>
           </table>
         </div>
@@ -336,7 +352,10 @@ function EarningsWatchRowItem({
   pinned?: boolean;
   onReEvaluate: (symbol: string) => Promise<void>;
 }) {
-  const [expanded, setExpanded] = useState(false);
+  // Pinned (searched-for) rows start expanded — the whole point of a
+  // lookup, including a deep link from the dashboard card, is to see
+  // that name's detail immediately.
+  const [expanded, setExpanded] = useState(!!pinned);
 
   return (
     <>
