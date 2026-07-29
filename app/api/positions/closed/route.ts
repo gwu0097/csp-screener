@@ -6,13 +6,18 @@ import {
   type Fill,
   type PositionRow,
 } from "@/lib/positions";
+import { getCurrentPrice } from "@/lib/yahoo";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 30;
 
 // Lightweight closed-positions endpoint. Parallels /api/positions/open
-// but skips the Schwab chain + Yahoo batch fetch — closed positions have
-// no live price/Greeks to resolve. Used by the Positions page's
+// but skips the Schwab chain + Yahoo batch fetch for most rows — a
+// closed option has no live price/Greeks to resolve. The one
+// exception: assigned short calls get a single live Yahoo quote each
+// (batched by unique symbol below) to compute the called-away
+// opportunity cost, which is only meaningful against the current
+// price and has to be recomputed on every read. Used by the Positions page's
 // collapsed "closed" section, fetched lazily when the user expands it.
 type ClosedPositionView = {
   id: string;
@@ -52,6 +57,26 @@ type ClosedPositionView = {
     analystSentiment: string | null;
     recoveryLikelihood: string | null;
     stockPctFromStrike: number | null;
+  } | null;
+  // Only populated for assigned short calls — a put assignment already
+  // gets an ongoing live position (the new stock_long), so its outcome
+  // is already tracked; a called-away call has no ongoing position, so
+  // there's no visibility into what happened after unless computed
+  // here. Recomputed from the LIVE price on every read (not stored),
+  // per the framing that this is only knowable after the fact and
+  // changes as the stock moves — never a one-time snapshot.
+  calledAwayOutcome: {
+    currentPrice: number | null; // null if the live quote failed
+    sharesAssigned: number;
+    // (current − strike) × shares. Positive = the stock is now worth
+    // more than the strike (upside given up by being called away).
+    // Negative = the stock is now worth less than the strike (called
+    // away was the better outcome — not a loss to report as good OR
+    // bad, just the number).
+    opportunityCost: number | null;
+    // premium collected minus opportunityCost — the actual bottom
+    // line net of what was received for writing the call.
+    netOutcome: number | null;
   } | null;
 };
 
@@ -112,6 +137,61 @@ export async function GET() {
       fill_date: f.fill_date,
     });
     fillsByPosition.set(f.position_id, arr);
+  }
+
+  // Called-away outcome — live quote fetched ONLY for assigned short
+  // calls (a small subset of the closed list), keeping this route
+  // otherwise as lightweight as its header comment promises. Batched
+  // by unique symbol so a symbol assigned more than once isn't quoted
+  // twice.
+  const assignedCallSymbols = Array.from(
+    new Set(
+      positions
+        .filter(
+          (p) =>
+            (p.status as string) === "assigned" &&
+            (p.option_type ?? "put") === "call" &&
+            (p.direction ?? "short") === "short",
+        )
+        .map((p) => p.symbol.toUpperCase()),
+    ),
+  );
+  const currentPriceBySymbol = new Map<string, number | null>();
+  if (assignedCallSymbols.length > 0) {
+    await Promise.all(
+      assignedCallSymbols.map(async (sym) => {
+        try {
+          currentPriceBySymbol.set(sym, await getCurrentPrice(sym));
+        } catch (e) {
+          console.warn(
+            `[positions/closed] getCurrentPrice(${sym}) failed: ${e instanceof Error ? e.message : e}`,
+          );
+          currentPriceBySymbol.set(sym, null);
+        }
+      }),
+    );
+  }
+  function calledAwayOutcomeFor(p: PositionRowFull): ClosedPositionView["calledAwayOutcome"] {
+    if (
+      (p.status as string) !== "assigned" ||
+      (p.option_type ?? "put") !== "call" ||
+      (p.direction ?? "short") !== "short"
+    ) {
+      return null;
+    }
+    const currentPrice = currentPriceBySymbol.get(p.symbol.toUpperCase()) ?? null;
+    const sharesAssigned = p.total_contracts * 100;
+    const strike = Number(p.strike);
+    const opportunityCost =
+      currentPrice !== null ? (currentPrice - strike) * sharesAssigned : null;
+    // realized_pnl on an assigned option IS the premium collected —
+    // Option A accounting closes it at a synthetic $0, so nothing else
+    // contributes. Reusing it here (rather than recomputing
+    // avgPremiumSold × shares) guarantees this always matches whatever
+    // the position's own realized P&L says.
+    const premiumCollected = p.realized_pnl ?? 0;
+    const netOutcome = opportunityCost !== null ? premiumCollected - opportunityCost : null;
+    return { currentPrice, sharesAssigned, opportunityCost, netOutcome };
   }
 
   // Entry-grade fallback — mirrors the open route. Positions opened
@@ -216,6 +296,7 @@ export async function GET() {
       entryStockPrice: p.entry_stock_price,
       fills: fills.sort((a, b) => a.fill_date.localeCompare(b.fill_date)),
       postEarningsRec: recsByPosition.get(p.id) ?? null,
+      calledAwayOutcome: calledAwayOutcomeFor(p),
     };
   });
 

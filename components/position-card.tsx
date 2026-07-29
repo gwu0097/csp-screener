@@ -131,6 +131,14 @@ export type ClosedPositionClientView = {
   entryStockPrice: number | null;
   fills: Fill[];
   postEarningsRec: PostEarningsRecView | null;
+  // Only non-null for an assigned short call. Recomputed from a live
+  // quote on every fetch — see app/api/positions/closed/route.ts.
+  calledAwayOutcome: {
+    currentPrice: number | null;
+    sharesAssigned: number;
+    opportunityCost: number | null;
+    netOutcome: number | null;
+  } | null;
 };
 
 type Props =
@@ -1147,6 +1155,64 @@ function RecDot({ rec }: { rec: PostEarningsRecView }) {
   );
 }
 
+// Shares called away leave no ongoing position to watch, unlike a put
+// assignment (which creates a live stock_long the app already tracks).
+// This fills that gap with the same info a live position would show —
+// current price vs. what you got — recomputed against the live quote
+// on every render, never a frozen snapshot. Deliberately neutral: no
+// "loss"/"missed"/warning language anywhere here. Being called away
+// isn't a failure state — sometimes the stock fell afterward and
+// assignment was the better outcome; the numbers say which, the copy
+// doesn't editorialize. Net outcome uses the same green/red P&L
+// convention as every other dollar figure on this card, not a
+// special warning color.
+function CalledAwayOutcomeRows({
+  outcome,
+  strike,
+  symbol,
+}: {
+  outcome: {
+    currentPrice: number | null;
+    sharesAssigned: number;
+    opportunityCost: number | null;
+    netOutcome: number | null;
+  };
+  strike: number;
+  symbol: string;
+}) {
+  return (
+    <>
+      <div className="mb-0.5 mt-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+        Since called away
+      </div>
+      <Row
+        k={`${symbol} now`}
+        v={
+          outcome.currentPrice !== null
+            ? `${fmtDollars(outcome.currentPrice)} (strike ${fmtDollars(strike)})`
+            : "—"
+        }
+      />
+      <Row
+        k={`Opportunity cost (${outcome.sharesAssigned} sh)`}
+        v={outcome.opportunityCost !== null ? fmtDollarsSigned(outcome.opportunityCost) : "—"}
+      />
+      <Row
+        k="Net outcome"
+        v={
+          outcome.netOutcome !== null ? (
+            <span className={outcome.netOutcome >= 0 ? "text-emerald-300" : "text-rose-300"}>
+              {fmtDollarsSigned(outcome.netOutcome)}
+            </span>
+          ) : (
+            "—"
+          )
+        }
+      />
+    </>
+  );
+}
+
 function Row({ k, v }: { k: string; v: React.ReactNode }) {
   return (
     <div className="flex justify-between gap-2 text-sm">
@@ -1201,6 +1267,13 @@ function PositionDetailsColumn({
               {fmtDollarsSigned((p as ClosedPositionClientView).realizedPnl)}
             </span>
           }
+        />
+      )}
+      {kind === "closed" && (p as ClosedPositionClientView).calledAwayOutcome && (
+        <CalledAwayOutcomeRows
+          outcome={(p as ClosedPositionClientView).calledAwayOutcome!}
+          strike={p.strike}
+          symbol={p.symbol}
         />
       )}
       {kind === "open" && pnlPct !== null && (
