@@ -42,7 +42,7 @@ export const revalidate = 0;
 const LOOKAHEAD_DAYS = 7;
 const HISTORY_LIMIT = 9; // 8 past quarters + 1 possible not-yet-reported row
 
-type ItemRow = { symbol: string; watchlist_id: string };
+type ItemRow = { symbol: string; watchlist_id: string; allocation: string | null; notes: string | null };
 
 type PositionRow = {
   id: string;
@@ -67,6 +67,17 @@ type HeldPosition = {
   avgPremiumSold: number | null;
 };
 
+// Portfolio watchlist membership IS the stock-holding signal for
+// long-term equity — those shares were never imported as a broker
+// position, they just live in this watchlist. Distinct from
+// heldPositions (below), which come from the positions table (broker-
+// imported options, or stock assigned from one) and DO carry a real
+// cost basis. A name can have either, both, or neither.
+type PortfolioStockHolding = {
+  allocation: "Large" | "Medium" | "Small" | null;
+  notes: string | null;
+};
+
 export type EarningsWatchRow = {
   symbol: string;
   companyName: string | null;
@@ -79,6 +90,7 @@ export type EarningsWatchRow = {
   onPortfolioWatchlist: boolean;
   thesisFlags: Flag[];
   held: boolean;
+  portfolioStockHolding: PortfolioStockHolding | null;
   heldPositions: HeldPosition[];
   sizeTier: SizeTier;
   downside: DownsideSummary;
@@ -111,13 +123,28 @@ function notionalOf(p: PositionRow): number {
   return Math.abs((p.entry_stock_price ?? 0) * p.total_contracts);
 }
 
-function sizeTierFor(notional: number, allNotionals: number[]): SizeTier {
-  if (allNotionals.length === 0) return null;
-  const sorted = [...allNotionals].sort((a, b) => a - b);
-  const rank = sorted.filter((n) => n <= notional).length / sorted.length;
-  if (rank >= 2 / 3) return "large";
-  if (rank >= 1 / 3) return "medium";
-  return "small";
+// Prefers a real position's notional-percentile tier (live, precise)
+// when one exists; falls back to the Portfolio watchlist's own
+// allocation field for watchlist-only holdings, which has no notional
+// to rank at all (no share count or cost basis stored there) but
+// already encodes a size tier the user set directly — reusing it beats
+// fabricating a number from data that doesn't exist.
+function sizeTierFor(
+  notional: number,
+  allNotionals: number[],
+  watchlistAllocation: string | null,
+): SizeTier {
+  if (notional > 0 && allNotionals.length > 0) {
+    const sorted = [...allNotionals].sort((a, b) => a - b);
+    const rank = sorted.filter((n) => n <= notional).length / sorted.length;
+    if (rank >= 2 / 3) return "large";
+    if (rank >= 1 / 3) return "medium";
+    return "small";
+  }
+  if (watchlistAllocation === "Large") return "large";
+  if (watchlistAllocation === "Medium") return "medium";
+  if (watchlistAllocation === "Small") return "small";
+  return null;
 }
 
 async function buildRow(
@@ -125,6 +152,8 @@ async function buildRow(
   ctx: {
     watchlistNames: string[];
     onPortfolioWatchlist: boolean;
+    portfolioAllocation: string | null;
+    portfolioNotes: string | null;
     snap: SymbolSnapshot | null;
     positionsBySymbol: Map<string, PositionRow[]>;
     allNotionals: number[];
@@ -162,7 +191,14 @@ async function buildRow(
       ? currentEmPct / historicalAvgEmPct
       : null;
   let ivLabel: IvRichnessLabel = "unavailable";
-  let ivNote = "Current pre-earnings IV/EM hasn't been captured yet — that normally happens the trading day of the report.";
+  // True IV-percentile-vs-own-history infrastructure doesn't exist in
+  // this codebase (no options-chain fetch outside the Schwab-gated CSP
+  // screener pipeline) — this is a proxy built entirely from
+  // earnings_history rows already fetched above for downside history,
+  // and it has two distinct, actionable "unavailable" causes below.
+  // Neither is a dead end: both are fixable, and the copy says how.
+  let ivNote =
+    "Current pre-earnings IV/EM hasn't been captured yet — that normally happens automatically the trading day of the report (the crush-t0 cron), so this fills in on its own as the date gets closer. It can't be backfilled early.";
   if (richnessRatio !== null) {
     if (richnessRatio >= 1.15) {
       ivLabel = "elevated";
@@ -175,11 +211,11 @@ async function buildRow(
       ivNote = `Current implied move ${(currentEmPct! * 100).toFixed(1)}% is in line with this name's own ${historicalEms.length}-quarter average (${(historicalAvgEmPct! * 100).toFixed(1)}%).`;
     }
   } else if (historicalAvgEmPct === null) {
-    ivNote = "No historical implied-move data on file for this name either.";
+    ivNote =
+      "No historical implied-move data on file for this name to compare against, even if a current reading existed. Fill in past quarters' EM in the editable table below (same editor as the CSP screener) to build a baseline — richness can only be judged against real history, not fabricated.";
   }
 
   const openPositions = ctx.positionsBySymbol.get(sym) ?? [];
-  const held = openPositions.length > 0;
   const heldPositions: HeldPosition[] = openPositions.map((p) => {
     const isStock = p.position_type === "stock_long" || p.position_type === "stock_short";
     const costBasis = isStock ? p.entry_stock_price : null;
@@ -199,8 +235,20 @@ async function buildRow(
       avgPremiumSold: isStock ? null : p.avg_premium_sold,
     };
   });
+  // Portfolio watchlist membership is a distinct, real holding signal
+  // — long-term stock tracked there was never imported as a broker
+  // position, so heldPositions alone would miss it entirely. No cost
+  // basis exists for it (the watchlist only stores allocation/notes),
+  // so nothing is fabricated for that side — just allocation + notes.
+  const portfolioStockHolding = ctx.onPortfolioWatchlist
+    ? {
+        allocation: (ctx.portfolioAllocation as PortfolioStockHolding["allocation"]) ?? null,
+        notes: ctx.portfolioNotes,
+      }
+    : null;
+  const held = openPositions.length > 0 || portfolioStockHolding !== null;
   const totalNotional = openPositions.reduce((s, p) => s + notionalOf(p), 0);
-  const sizeTier = held ? sizeTierFor(totalNotional, ctx.allNotionals) : null;
+  const sizeTier = held ? sizeTierFor(totalNotional, ctx.allNotionals, ctx.portfolioAllocation) : null;
 
   const flags = ctx.onPortfolioWatchlist
     ? computeFlags({
@@ -235,6 +283,7 @@ async function buildRow(
     onPortfolioWatchlist: ctx.onPortfolioWatchlist,
     thesisFlags: flags,
     held,
+    portfolioStockHolding,
     heldPositions,
     sizeTier,
     downside,
@@ -267,18 +316,29 @@ export async function GET(req: NextRequest) {
   const nameById = new Map(lists.map((w) => [w.id, w.name]));
   const portfolioListId = lists.find((w) => w.is_portfolio)?.id ?? null;
 
-  const itemsRes = await sb.from("long_term_watchlist").select("symbol,watchlist_id").eq("user_id", userId);
+  const itemsRes = await sb
+    .from("long_term_watchlist")
+    .select("symbol,watchlist_id,allocation,notes")
+    .eq("user_id", userId);
   if (itemsRes.error) return NextResponse.json({ error: itemsRes.error.message }, { status: 500 });
   const items = (itemsRes.data ?? []) as ItemRow[];
 
   const bySymbol = new Map<string, Set<string>>();
   const portfolioSymbols = new Set<string>();
+  // Only the Portfolio watchlist's own row represents real ownership —
+  // a symbol can also sit on a custom watchlist (e.g. "Prospects")
+  // with its own unrelated allocation/notes, which must not leak in
+  // here as if it meant the user holds the stock.
+  const portfolioMetaBySymbol = new Map<string, { allocation: string | null; notes: string | null }>();
   for (const it of items) {
     const sym = it.symbol.toUpperCase();
     const name = nameById.get(it.watchlist_id) ?? it.watchlist_id;
     if (!bySymbol.has(sym)) bySymbol.set(sym, new Set());
     bySymbol.get(sym)!.add(name);
-    if (portfolioListId && it.watchlist_id === portfolioListId) portfolioSymbols.add(sym);
+    if (portfolioListId && it.watchlist_id === portfolioListId) {
+      portfolioSymbols.add(sym);
+      portfolioMetaBySymbol.set(sym, { allocation: it.allocation, notes: it.notes });
+    }
   }
 
   // All of the user's open positions, once — used both to determine
@@ -306,6 +366,8 @@ export async function GET(req: NextRequest) {
     const row = await buildRow(lookupSymbol, {
       watchlistNames: Array.from(bySymbol.get(lookupSymbol) ?? []).sort(),
       onPortfolioWatchlist: portfolioSymbols.has(lookupSymbol),
+      portfolioAllocation: portfolioMetaBySymbol.get(lookupSymbol)?.allocation ?? null,
+      portfolioNotes: portfolioMetaBySymbol.get(lookupSymbol)?.notes ?? null,
       snap,
       positionsBySymbol,
       allNotionals,
@@ -337,6 +399,8 @@ export async function GET(req: NextRequest) {
       buildRow(sym, {
         watchlistNames: Array.from(bySymbol.get(sym) ?? []).sort(),
         onPortfolioWatchlist: portfolioSymbols.has(sym),
+        portfolioAllocation: portfolioMetaBySymbol.get(sym)?.allocation ?? null,
+        portfolioNotes: portfolioMetaBySymbol.get(sym)?.notes ?? null,
         snap: snapMap.get(sym) ?? null,
         positionsBySymbol,
         allNotionals,

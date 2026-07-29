@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { ChevronDown, ChevronRight, Loader2, RefreshCw, Search } from "lucide-react";
+import { CrushHistoryTable } from "@/components/crush-history-table";
 import { cn } from "@/lib/utils";
 
 type Flag = { kind: string; label: string; description: string };
@@ -14,6 +15,15 @@ type HeldPosition = {
   costBasis: number | null;
   currentGainLossPct: number | null;
   avgPremiumSold: number | null;
+};
+
+// Portfolio watchlist membership = the user holds the stock. Distinct
+// from HeldPosition (positions table — broker-imported options, or
+// stock assigned from one, which DOES carry a real cost basis). No
+// cost basis exists for a watchlist-only holding, so none is shown.
+type PortfolioStockHolding = {
+  allocation: "Large" | "Medium" | "Small" | null;
+  notes: string | null;
 };
 
 type DownsideSummary = {
@@ -59,6 +69,7 @@ type EarningsWatchRow = {
   onPortfolioWatchlist: boolean;
   thesisFlags: Flag[];
   held: boolean;
+  portfolioStockHolding: PortfolioStockHolding | null;
   heldPositions: HeldPosition[];
   sizeTier: "small" | "medium" | "large" | null;
   downside: DownsideSummary;
@@ -182,6 +193,23 @@ export function EarningsWatchView() {
     }
   }
 
+  // After an inline earnings-history edit (via the embedded
+  // CrushHistoryTable), the downside history / data-quality warning /
+  // badge for that one row are stale until re-fetched — recomputation
+  // isn't automatic, so this re-pulls just that symbol and patches it
+  // in place wherever it's currently shown (default list and/or the
+  // pinned lookup row).
+  const reEvaluateSymbol = useCallback(async (symbol: string) => {
+    const res = await fetch(`/api/analysis/earnings-watch?symbol=${encodeURIComponent(symbol)}`, {
+      cache: "no-store",
+    });
+    const json = (await res.json()) as { row?: EarningsWatchRow; error?: string };
+    if (!res.ok || json.error || !json.row) return;
+    const updated = json.row;
+    setRows((prev) => (prev ? prev.map((r) => (r.symbol === updated.symbol ? updated : r)) : prev));
+    setLookupRow((prev) => (prev && prev.symbol === updated.symbol ? updated : prev));
+  }, []);
+
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -246,7 +274,7 @@ export function EarningsWatchView() {
         <div className="overflow-x-auto rounded-md border border-border bg-background/40">
           <table className="w-full min-w-[1100px] text-sm">
             <tbody>
-              <EarningsWatchRowItem row={lookupRow} pinned />
+              <EarningsWatchRowItem row={lookupRow} pinned onReEvaluate={reEvaluateSymbol} />
             </tbody>
           </table>
         </div>
@@ -290,7 +318,7 @@ export function EarningsWatchView() {
               </tr>
             )}
             {rows?.map((r) => (
-              <EarningsWatchRowItem key={r.symbol} row={r} />
+              <EarningsWatchRowItem key={r.symbol} row={r} onReEvaluate={reEvaluateSymbol} />
             ))}
           </tbody>
         </table>
@@ -299,7 +327,15 @@ export function EarningsWatchView() {
   );
 }
 
-function EarningsWatchRowItem({ row, pinned }: { row: EarningsWatchRow; pinned?: boolean }) {
+function EarningsWatchRowItem({
+  row,
+  pinned,
+  onReEvaluate,
+}: {
+  row: EarningsWatchRow;
+  pinned?: boolean;
+  onReEvaluate: (symbol: string) => Promise<void>;
+}) {
   const [expanded, setExpanded] = useState(false);
 
   return (
@@ -350,12 +386,26 @@ function EarningsWatchRowItem({ row, pinned }: { row: EarningsWatchRow; pinned?:
         </td>
         <td className="px-2 py-1.5 text-center">
           {row.held ? (
-            <div>
-              <span className="rounded border border-sky-500/40 bg-sky-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-sky-300">
-                HELD
-              </span>
+            <div className="space-y-0.5">
+              <div className="flex flex-wrap items-center justify-center gap-1">
+                {row.portfolioStockHolding && (
+                  <span className="rounded border border-sky-500/40 bg-sky-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-sky-300">
+                    STOCK
+                  </span>
+                )}
+                {row.heldPositions.some((p) => p.positionType === "option") && (
+                  <span className="rounded border border-violet-500/40 bg-violet-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-violet-300">
+                    CSP
+                  </span>
+                )}
+                {row.heldPositions.some((p) => p.positionType !== "option") && (
+                  <span className="rounded border border-sky-500/40 bg-sky-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-sky-300">
+                    SHARES
+                  </span>
+                )}
+              </div>
               {row.sizeTier && (
-                <div className="mt-0.5 text-[10px] capitalize text-muted-foreground">{row.sizeTier}</div>
+                <div className="text-[10px] capitalize text-muted-foreground">{row.sizeTier}</div>
               )}
             </div>
           ) : (
@@ -399,7 +449,7 @@ function EarningsWatchRowItem({ row, pinned }: { row: EarningsWatchRow; pinned?:
       {expanded && (
         <tr className="border-b border-border/40 bg-background/30">
           <td colSpan={10} className="px-3 py-3">
-            <EarningsWatchDetail row={row} />
+            <EarningsWatchDetail row={row} onReEvaluate={onReEvaluate} />
           </td>
         </tr>
       )}
@@ -407,8 +457,15 @@ function EarningsWatchRowItem({ row, pinned }: { row: EarningsWatchRow; pinned?:
   );
 }
 
-function EarningsWatchDetail({ row }: { row: EarningsWatchRow }) {
+function EarningsWatchDetail({
+  row,
+  onReEvaluate,
+}: {
+  row: EarningsWatchRow;
+  onReEvaluate: (symbol: string) => Promise<void>;
+}) {
   const dq = row.dataQuality;
+  const [reEvaluating, setReEvaluating] = useState(false);
   return (
     <div className="grid grid-cols-1 gap-4 text-sm md:grid-cols-2">
       <div className="space-y-2">
@@ -447,10 +504,33 @@ function EarningsWatchDetail({ row }: { row: EarningsWatchRow }) {
         <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
           Position context
         </div>
-        <div className="space-y-1 rounded border border-border bg-background/60 p-2">
+        <div className="space-y-2 rounded border border-border bg-background/60 p-2">
           {!row.held && <div className="text-muted-foreground">Not currently held.</div>}
+          {row.portfolioStockHolding && (
+            <div className="border-b border-border/40 pb-2 last:border-0 last:pb-0">
+              <div className="text-[10px] font-semibold uppercase tracking-wide text-sky-300">
+                Stock holding — Portfolio watchlist
+              </div>
+              <div>
+                Allocation:{" "}
+                <span className="capitalize">{row.portfolioStockHolding.allocation ?? "unset"}</span>
+              </div>
+              <div className="text-[11px] text-muted-foreground">
+                No cost basis or share count is tracked for this holding — the watchlist only
+                stores allocation and notes, so no gain/loss figure is shown here.
+              </div>
+              {row.portfolioStockHolding.notes && (
+                <div className="mt-0.5 text-[11px] italic text-muted-foreground">
+                  &quot;{row.portfolioStockHolding.notes}&quot;
+                </div>
+              )}
+            </div>
+          )}
           {row.heldPositions.map((p, i) => (
-            <div key={i} className="border-b border-border/40 pb-1 last:border-0 last:pb-0">
+            <div key={i} className="border-b border-border/40 pb-2 last:border-0 last:pb-0">
+              <div className="text-[10px] font-semibold uppercase tracking-wide text-violet-300">
+                {p.positionType === "option" ? "Options position" : "Stock position"} — broker-tracked
+              </div>
               {p.positionType === "option" ? (
                 <div>
                   Short {p.strike}P × {p.contracts}, exp {p.expiry ?? "—"} — premium sold{" "}
@@ -469,9 +549,10 @@ function EarningsWatchDetail({ row }: { row: EarningsWatchRow }) {
           ))}
           {row.held && row.sizeTier && (
             <div className="pt-1 text-[11px] text-muted-foreground">
-              Size tier: <span className="capitalize">{row.sizeTier}</span> (relative to your
-              other open positions by notional — no portfolio-NAV figure exists to compare
-              against instead).
+              Size tier: <span className="capitalize">{row.sizeTier}</span>{" "}
+              {row.heldPositions.length > 0
+                ? "(relative to your other open positions by notional — no portfolio-NAV figure exists to compare against instead)."
+                : "(from the Portfolio watchlist's own allocation field — no notional exists to rank without a broker position)."}
             </div>
           )}
         </div>
@@ -539,6 +620,55 @@ function EarningsWatchDetail({ row }: { row: EarningsWatchRow }) {
           </div>
         </div>
       )}
+
+      <div className="space-y-2 md:col-span-2">
+        <div className="flex items-center justify-between">
+          <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+            Earnings history — same editable table as the CSP screener
+          </div>
+          <button
+            type="button"
+            onClick={async () => {
+              setReEvaluating(true);
+              try {
+                await onReEvaluate(row.symbol);
+              } finally {
+                setReEvaluating(false);
+              }
+            }}
+            disabled={reEvaluating}
+            className="inline-flex items-center gap-1.5 rounded-md border border-border px-2 py-1 text-[11px] font-medium transition-colors hover:border-foreground/40 hover:text-foreground disabled:opacity-60"
+          >
+            {reEvaluating ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              <RefreshCw className="h-3 w-3" />
+            )}
+            Re-evaluate from edits
+          </button>
+        </div>
+        <div className="text-[11px] text-muted-foreground">
+          Editing a quarter&apos;s EM/Actual or its source tag here saves directly to the same
+          data the CSP screener uses — it does not just affect this page. The downside history,
+          data-quality warning, and CUT/TRIM/HOLD badge above are computed at page-load time, so
+          click Re-evaluate after editing to pull them back in sync with what you just changed.
+        </div>
+        <div className="rounded border border-border bg-background/60 p-2">
+          {row.earningsDate ? (
+            <CrushHistoryTable
+              events={null}
+              todayEmPct={row.ivRichness.currentEmPct}
+              todaySymbol={row.symbol}
+              todayEarningsDate={row.earningsDate}
+            />
+          ) : (
+            <div className="text-muted-foreground">
+              No known upcoming earnings date for {row.symbol} — the editable history table needs
+              one to anchor the pinned row.
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
