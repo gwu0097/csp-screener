@@ -250,12 +250,43 @@ function CompactStat({
   );
 }
 
-// Collapse/expand state is plain useState — intentionally NOT persisted
-// (no localStorage/cookie), so every page load starts from `defaultOpen`
-// regardless of what the user last did. The toggle target is only the
-// icon+title+chevron; `right` (a "View all →" link on some sections)
-// stays independently clickable and never toggles collapse.
+// Per-section open/closed state, persisted across reloads — same
+// localStorage pattern as the tweet char limit (screener-view.tsx's
+// LS_TWEET_CHAR_LIMIT): read once at mount via a lazy useState
+// initializer, write through on every toggle. Keyed per section so
+// each one remembers its own state independently. A first visit (no
+// stored value yet) falls back to `defaultOpen`.
+//
+// Only used by sections that are genuinely optional — Positions
+// Needing Attention and the earnings panel are NOT wrapped in this
+// component at all, specifically so they can never be hidden by a
+// stale collapse state from a previous visit.
+const LS_SECTION_PREFIX = "dashboard_section_open_";
+function getSectionOpen(key: string, defaultOpen: boolean): boolean {
+  if (typeof window === "undefined") return defaultOpen;
+  try {
+    const raw = localStorage.getItem(LS_SECTION_PREFIX + key);
+    if (raw === null) return defaultOpen;
+    return raw === "1";
+  } catch {
+    return defaultOpen;
+  }
+}
+function setSectionOpen(key: string, open: boolean) {
+  try {
+    if (typeof window !== "undefined") {
+      localStorage.setItem(LS_SECTION_PREFIX + key, open ? "1" : "0");
+    }
+  } catch {
+    /* quota / privacy */
+  }
+}
+
+// The toggle target is only the icon+title+chevron; `right` (a "View
+// all →" link on some sections) stays independently clickable and
+// never toggles collapse.
 function CollapsibleSection({
+  storageKey,
   icon,
   title,
   defaultOpen,
@@ -263,6 +294,7 @@ function CollapsibleSection({
   right,
   children,
 }: {
+  storageKey: string;
   icon: React.ReactNode;
   title: React.ReactNode;
   defaultOpen: boolean;
@@ -270,13 +302,17 @@ function CollapsibleSection({
   right?: React.ReactNode;
   children: React.ReactNode;
 }) {
-  const [open, setOpen] = useState(defaultOpen);
+  const [open, setOpenState] = useState(() => getSectionOpen(storageKey, defaultOpen));
+  function setOpen(next: boolean) {
+    setOpenState(next);
+    setSectionOpen(storageKey, next);
+  }
   return (
     <Panel>
       <div className="flex items-center justify-between gap-2">
         <button
           type="button"
-          onClick={() => setOpen((o) => !o)}
+          onClick={() => setOpen(!open)}
           className="flex flex-1 items-center gap-2 text-left"
         >
           {open ? (
@@ -326,6 +362,10 @@ export function DashboardView() {
   const [buyZoneModalRow, setBuyZoneModalRow] = useState<BuyZoneRow | null>(null);
   const buyZoneResearch = useBuyZoneResearch();
   const [earningsWeek, setEarningsWeek] = useState<Slot<EarningsWatchResp>>(LOADING);
+  // null = no manual choice yet, use the computed default below (which
+  // depends on earningsToday.length — not knowable at mount before
+  // earningsWeek has loaded, so this can't be a lazy useState initializer).
+  const [manualShowAllEarnings, setManualShowAllEarnings] = useState<boolean | null>(null);
   const router = useRouter();
 
   const [brief, setBrief] = useState<string | null>(null);
@@ -509,9 +549,6 @@ export function DashboardView() {
   const expiringSoon = pos.filter(
     (p) => p.expiry === today || p.expiry === tomorrow,
   ).length;
-  const needsAttn = pos.filter(
-    (p) => p.urgency === "EMERGENCY_CUT" || p.urgency === "MONITOR",
-  ).length;
 
   // ---------- Card 2 (alerts) ----------
   const wl = watch.data?.watchlist ?? [];
@@ -543,6 +580,12 @@ export function DashboardView() {
       const order = { EMERGENCY_CUT: 0, CUT: 1, MONITOR: 2, HOLD: 3 };
       return order[a.urgency] - order[b.urgency];
     });
+  // Named inline on the CSP Status stat strip so the count answers
+  // "which ones" without making the user look at the panel below —
+  // deliberately the same set (see the Panel below), just above ~4
+  // names a comma list would break the compact strip, so it falls
+  // back to the bare count there.
+  const attentionSymbols = Array.from(new Set(attention.map((p) => p.symbol)));
 
   // ---------- Top movers ----------
   const withChange = wl.filter((r) => r.changePct !== null);
@@ -638,6 +681,11 @@ export function DashboardView() {
   const todayIsoStr = easternToday();
   const earningsToday = earningsWeekHeld.filter((r) => r.earningsDate === todayIsoStr);
   const earningsLater = earningsWeekHeld.filter((r) => r.earningsDate !== todayIsoStr);
+  // Default: collapsed if today already has rows to show (later names
+  // sit behind the toggle); expanded automatically if today has
+  // nothing, so the panel never looks empty with everything hidden.
+  const showAllEarnings = manualShowAllEarnings ?? earningsToday.length === 0;
+  const earningsRowsToShow = showAllEarnings ? [...earningsToday, ...earningsLater] : earningsToday;
 
   // ---------- Market tiles ----------
   const m = market.data;
@@ -721,9 +769,10 @@ export function DashboardView() {
                   />
                   <CompactStat label="Expiring ≤2d" value={expiringSoon} />
                 </div>
-                {needsAttn > 0 ? (
+                {attention.length > 0 ? (
                   <div className="text-sm font-medium text-rose-400">
-                    {needsAttn} need{needsAttn === 1 ? "s" : ""} attention
+                    {attention.length} need{attention.length === 1 ? "s" : ""} attention
+                    {attentionSymbols.length <= 4 && `: ${attentionSymbols.join(", ")}`}
                   </div>
                 ) : (
                   <div className="text-sm font-medium text-emerald-400">All healthy ✓</div>
@@ -889,7 +938,11 @@ export function DashboardView() {
         )}
       </Panel>
 
-      {/* ---------- Today's earnings (always visible, highlighted) ---------- */}
+      {/* ---------- Earnings this week (always visible, non-collapsible) ----------
+          One panel, not two. Today's reporters always render inline;
+          the rest of the week sits behind an in-panel "show more"
+          toggle — never a second section, and never hidden entirely
+          when today has nothing to show (see earningsRowsToShow). */}
       <Panel className={cn(earningsToday.length > 0 && "border-amber-500/40")}>
         <SectionHeader
           icon={<AlarmClock className="h-4 w-4 text-amber-400" />}
@@ -903,83 +956,105 @@ export function DashboardView() {
           }
         >
           <span className={earningsToday.length > 0 ? "text-amber-300" : undefined}>
-            Today&apos;s earnings — held names
+            Earnings this week — held names
           </span>
         </SectionHeader>
         {earningsWeek.status === "loading" ? (
           <SkeletonLines n={2} />
         ) : earningsWeek.status === "error" ? (
           <p className="text-sm text-muted-foreground">—</p>
-        ) : earningsToday.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No held names report today.</p>
+        ) : earningsToday.length === 0 && earningsLater.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            No Portfolio watchlist names report earnings this week.
+          </p>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-[11px] uppercase tracking-wider text-muted-foreground">
-                  <th className="py-1.5 pr-3 font-medium">Symbol</th>
-                  <th className="py-1.5 pr-3 font-medium">Status</th>
-                  <th className="py-1.5 pr-3 font-medium">Allocation</th>
-                  <th className="py-1.5 pr-3 font-medium">Options</th>
-                  <th className="py-1.5 text-right font-medium">Call</th>
-                </tr>
-              </thead>
-              <tbody>
-                {earningsToday.map((r) => {
-                  // BMO prints before today's open — by the time this
-                  // dashboard is viewed, that has already happened.
-                  // AMC prints tonight after close — still ahead.
-                  const reported = r.earningsTiming === "BMO";
-                  const upcoming = r.earningsTiming === "AMC";
-                  return (
-                    <tr
-                      key={r.symbol}
-                      onClick={() => router.push(`/analysis/earnings-watch?symbol=${r.symbol}`)}
-                      className={cn(
-                        "cursor-pointer border-t border-border/60 hover:bg-background/60",
-                        upcoming && "bg-amber-500/[0.06]",
-                        reported && "text-muted-foreground",
-                      )}
-                    >
-                      <td className="py-1.5 pr-3 font-mono font-semibold">{r.symbol}</td>
-                      <td className="py-1.5 pr-3">
-                        <span
-                          className={cn(
-                            "rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase",
-                            upcoming
-                              ? "border-amber-500/40 bg-amber-500/15 text-amber-300"
-                              : "border-border bg-muted text-muted-foreground",
-                          )}
-                        >
-                          {reported ? "Reported · BMO" : upcoming ? "Tonight · AMC" : r.earningsTiming ?? "Today"}
-                        </span>
-                      </td>
-                      <td className="py-1.5 pr-3 text-[11px] capitalize text-muted-foreground">
-                        {r.portfolioStockHolding?.allocation ?? "—"}
-                      </td>
-                      <td className="py-1.5 pr-3">
-                        {r.heldPositions.some((p) => p.positionType === "option") ? (
-                          <span className="rounded border border-violet-500/40 bg-violet-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-violet-300">
-                            Open CSP
-                          </span>
-                        ) : (
-                          <span className="text-[11px] text-muted-foreground">stock only</span>
+          <>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-[11px] uppercase tracking-wider text-muted-foreground">
+                    <th className="py-1.5 pr-3 font-medium">Symbol</th>
+                    <th className="py-1.5 pr-3 font-medium">{earningsToday.length > 0 ? "Status" : "Reports"}</th>
+                    <th className="py-1.5 pr-3 font-medium">Allocation</th>
+                    <th className="py-1.5 pr-3 font-medium">Options</th>
+                    <th className="py-1.5 text-right font-medium">Call</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {earningsRowsToShow.map((r) => {
+                    const isToday = r.earningsDate === todayIsoStr;
+                    // BMO prints before today's open — by the time this
+                    // dashboard is viewed, that has already happened.
+                    // AMC prints tonight after close — still ahead.
+                    const reported = isToday && r.earningsTiming === "BMO";
+                    const upcoming = isToday && r.earningsTiming === "AMC";
+                    return (
+                      <tr
+                        key={r.symbol}
+                        onClick={() => router.push(`/analysis/earnings-watch?symbol=${r.symbol}`)}
+                        className={cn(
+                          "cursor-pointer border-t border-border/60 hover:bg-background/60",
+                          upcoming && "bg-amber-500/[0.06]",
+                          reported && "text-muted-foreground",
                         )}
-                      </td>
-                      <td className="py-1.5 text-right">
-                        {r.badge ? <Badge kind={r.badge.verdict} label={r.badge.verdict} /> : "—"}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+                      >
+                        <td className="py-1.5 pr-3 font-mono font-semibold">{r.symbol}</td>
+                        <td className="py-1.5 pr-3">
+                          {isToday ? (
+                            <span
+                              className={cn(
+                                "rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase",
+                                upcoming
+                                  ? "border-amber-500/40 bg-amber-500/15 text-amber-300"
+                                  : "border-border bg-muted text-muted-foreground",
+                              )}
+                            >
+                              {reported ? "Reported · BMO" : upcoming ? "Tonight · AMC" : r.earningsTiming ?? "Today"}
+                            </span>
+                          ) : (
+                            <span className="text-[11px] text-muted-foreground">
+                              {r.earningsDate ?? "—"}
+                              {r.earningsTiming && r.earningsTiming !== "unknown" ? ` (${r.earningsTiming})` : ""}
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-1.5 pr-3 text-[11px] capitalize text-muted-foreground">
+                          {r.portfolioStockHolding?.allocation ?? "—"}
+                        </td>
+                        <td className="py-1.5 pr-3">
+                          {r.heldPositions.some((p) => p.positionType === "option") ? (
+                            <span className="rounded border border-violet-500/40 bg-violet-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-violet-300">
+                              Open CSP
+                            </span>
+                          ) : (
+                            <span className="text-[11px] text-muted-foreground">stock only</span>
+                          )}
+                        </td>
+                        <td className="py-1.5 text-right">
+                          {r.badge ? <Badge kind={r.badge.verdict} label={r.badge.verdict} /> : "—"}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            {earningsToday.length > 0 && earningsLater.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setManualShowAllEarnings(!showAllEarnings)}
+                className="mt-2 text-[11px] font-medium text-muted-foreground hover:text-foreground"
+              >
+                {showAllEarnings ? "Show fewer ▲" : `${earningsLater.length} more this week ▼`}
+              </button>
+            )}
+          </>
         )}
       </Panel>
 
       {/* ---------- Swing watch ---------- */}
       <CollapsibleSection
+        storageKey="swing-watch"
         icon={<Activity className="h-4 w-4" />}
         title="Swing watch"
         defaultOpen={false}
@@ -1063,9 +1138,10 @@ export function DashboardView() {
 
       {/* ---------- Buy Zone top 5 ---------- */}
       <CollapsibleSection
+        storageKey="buy-zone"
         icon={<Crosshair className="h-4 w-4" />}
         title="Buy Zone — top 5"
-        defaultOpen={false}
+        defaultOpen={true}
         collapsedSummary={buyZoneTop5.length > 0 ? `— ${buyZoneTop5.length} names` : undefined}
         right={
           <Link
@@ -1124,78 +1200,6 @@ export function DashboardView() {
         )}
       </CollapsibleSection>
 
-      {/* ---------- Earnings this week, beyond today (held names only) ---------- */}
-      <CollapsibleSection
-        icon={<AlarmClock className="h-4 w-4" />}
-        title="Earnings this week"
-        defaultOpen={false}
-        collapsedSummary={earningsLater.length > 0 ? `— ${earningsLater.length} more` : "— none beyond today"}
-        right={
-          <Link
-            href="/analysis/earnings-watch"
-            className="text-[11px] font-medium text-muted-foreground hover:text-foreground"
-          >
-            View all →
-          </Link>
-        }
-      >
-        {earningsWeek.status === "loading" ? (
-          <SkeletonLines n={3} />
-        ) : earningsWeek.status === "error" ? (
-          <p className="text-sm text-muted-foreground">—</p>
-        ) : earningsLater.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            No Portfolio watchlist names report earnings later this week.
-          </p>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-[11px] uppercase tracking-wider text-muted-foreground">
-                  <th className="py-1.5 pr-3 font-medium">Symbol</th>
-                  <th className="py-1.5 pr-3 font-medium">Reports</th>
-                  <th className="py-1.5 pr-3 font-medium">Allocation</th>
-                  <th className="py-1.5 pr-3 font-medium">Options</th>
-                  <th className="py-1.5 text-right font-medium">Call</th>
-                </tr>
-              </thead>
-              <tbody>
-                {earningsLater.map((r) => (
-                  <tr
-                    key={r.symbol}
-                    onClick={() => router.push(`/analysis/earnings-watch?symbol=${r.symbol}`)}
-                    className="cursor-pointer border-t border-border/60 hover:bg-background/60"
-                  >
-                    <td className="py-1.5 pr-3 font-mono font-semibold">{r.symbol}</td>
-                    <td className="py-1.5 pr-3 text-[11px] text-muted-foreground">
-                      {r.earningsDate ?? "—"}
-                      {r.earningsTiming && r.earningsTiming !== "unknown"
-                        ? ` (${r.earningsTiming})`
-                        : ""}
-                    </td>
-                    <td className="py-1.5 pr-3 text-[11px] capitalize text-muted-foreground">
-                      {r.portfolioStockHolding?.allocation ?? "—"}
-                    </td>
-                    <td className="py-1.5 pr-3">
-                      {r.heldPositions.some((p) => p.positionType === "option") ? (
-                        <span className="rounded border border-violet-500/40 bg-violet-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-violet-300">
-                          Open CSP
-                        </span>
-                      ) : (
-                        <span className="text-[11px] text-muted-foreground">stock only</span>
-                      )}
-                    </td>
-                    <td className="py-1.5 text-right">
-                      {r.badge ? <Badge kind={r.badge.verdict} label={r.badge.verdict} /> : "—"}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </CollapsibleSection>
-
       <Dialog open={buyZoneModalRow !== null} onOpenChange={(o) => !o && setBuyZoneModalRow(null)}>
         <DialogContent className="max-h-[85vh] max-w-4xl overflow-y-auto">
           {buyZoneModalRow && (
@@ -1226,6 +1230,7 @@ export function DashboardView() {
       <div className="grid gap-4 md:grid-cols-2">
         {/* Left — Top movers today */}
         <CollapsibleSection
+          storageKey="top-movers"
           icon={<LineChart className="h-4 w-4" />}
           title="Top movers today"
           defaultOpen={false}
@@ -1268,6 +1273,7 @@ export function DashboardView() {
 
         {/* Right — AI Morning Brief */}
         <CollapsibleSection
+          storageKey="ai-brief"
           icon={<Brain className="h-4 w-4" />}
           title="AI morning brief"
           defaultOpen={false}
