@@ -419,11 +419,18 @@ function fmtTimeShort(iso: string): string {
 // Section label + ordering for the broker groups. Anything not in
 // this list (or missing a broker) falls into the "Other" bucket and
 // renders last.
-const BROKER_ORDER = ["schwab", "schwab2", "robinhood"] as const;
+// "covered_calls" is a pseudo-broker, not a real account — short
+// calls written against stock held across various real brokers,
+// logged here deliberately without tracking which broker they came
+// from (see the import destination-account selector). It behaves
+// exactly like a real account bucket: own section, own rollup,
+// included in All.
+const BROKER_ORDER = ["schwab", "schwab2", "robinhood", "covered_calls"] as const;
 const BROKER_LABEL: Record<string, string> = {
   schwab: "Schwab",
   schwab2: "Schwab 2",
   robinhood: "Robinhood",
+  covered_calls: "Covered Calls",
   other: "Other",
 };
 
@@ -461,6 +468,14 @@ const ACCOUNT_ACCENT: Record<string, AccountAccent> = {
     text: "text-emerald-300",
     tabActive: "bg-emerald-500/15 text-emerald-200 border-emerald-500/40",
     dot: "bg-emerald-400",
+  },
+  covered_calls: {
+    panelBorder: "border-amber-500/30",
+    panelBg: "bg-amber-500/[0.025]",
+    topBar: "bg-amber-500/60",
+    text: "text-amber-300",
+    tabActive: "bg-amber-500/15 text-amber-200 border-amber-500/40",
+    dot: "bg-amber-400",
   },
   other: {
     panelBorder: "border-border",
@@ -898,6 +913,11 @@ export function PositionsView() {
             failedCount: number;
             totalRealizedPnl: number;
             assignments?: Array<{ positionId: string }>;
+            calledAway?: Array<{
+              symbol: string;
+              stockLotAdjusted: boolean;
+              note: string;
+            }>;
           }
         | { error: string };
       if (!res.ok || "error" in json) {
@@ -955,8 +975,13 @@ export function PositionsView() {
       if (json.assignedCount > 0)
         parts.push(`${json.assignedCount} assigned`);
       const summary = parts.join(" · ") || "0 closed";
+      const calledAway = json.calledAway ?? [];
+      const calledAwaySummary =
+        calledAway.length > 0
+          ? ` · ${calledAway.length} called away (${calledAway.filter((c) => c.stockLotAdjusted).length} stock lot${calledAway.filter((c) => c.stockLotAdjusted).length === 1 ? "" : "s"} auto-adjusted)`
+          : "";
       setMessage(
-        `✓ ${summary} · ${sign}$${json.totalRealizedPnl.toFixed(2)} P&L${failedSuffix}${stockSummary}`,
+        `✓ ${summary} · ${sign}$${json.totalRealizedPnl.toFixed(2)} P&L${failedSuffix}${stockSummary}${calledAwaySummary}`,
       );
     } catch (e) {
       setError(
@@ -1664,8 +1689,10 @@ export function PositionsView() {
         onCancel={() => setMarkAssignedTarget(null)}
         onConfirm={async (res) => {
           setMarkAssignedTarget(null);
-          // onImportSuccess refetches /api/positions/open, so the put
-          // drops out and the new stock_long appears immediately.
+          // onImportSuccess refetches /api/positions/open, so the
+          // option drops out and any stock-side change (a new
+          // stock_long for a put, or a reduced lot for a call) appears
+          // immediately.
           if (res.ok) onImportSuccess(res.message);
         }}
       />

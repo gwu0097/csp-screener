@@ -9,7 +9,7 @@
 import { createServerClient } from "@/lib/supabase";
 import { recordPositionOutcome } from "@/lib/post-earnings";
 import { fetchChainSafe, pickPutContract } from "@/lib/snapshots";
-import { realizedPnl, type Fill } from "@/lib/positions";
+import { realizedPnl, safetyNumerator, type Fill } from "@/lib/positions";
 
 export type ExpiryClassification = "auto_expire" | "verify_assignment" | "pending";
 
@@ -17,12 +17,18 @@ export type ExpiryClassification = "auto_expire" | "verify_assignment" | "pendin
 // rule logic in isolation and so classifyExpiredPosition stays a thin
 // wrapper over a snapshot fetch.
 //
+// pctFromStrike here is safety-signed via safetyNumerator(): positive
+// = OTM/safe, negative = ITM, for either put or call — NOT the raw
+// (stock-strike)/strike fraction, which is only correct for puts. The
+// optionType param defaults to 'put' so existing callers (tests,
+// probes) that don't pass it keep their historical behavior.
+//
 // Rule cascade (first match wins):
 //   1. pctFromStrike > 0.05                           → auto_expire
-//      Stock is >5% OTM at expiry — a put that far out is certainly
-//      worthless, so we don't need an option_price to confirm. This
-//      catches deep-OTM strikes that drop out of the chain entirely
-//      (option_price is null in the snapshot).
+//      >5% OTM at expiry — certainly worthless, so we don't need an
+//      option_price to confirm. This catches deep-OTM strikes that
+//      drop out of the chain entirely (option_price is null in the
+//      snapshot).
 //   2. pctFromStrike > 0.02 AND optionPrice < $0.15   → auto_expire
 //      Moderately OTM with a confirmed near-zero option price.
 //      $0.15 (not $0.05) tolerates intraday snapshots that haven't
@@ -35,6 +41,7 @@ export type ExpiryClassification = "auto_expire" | "verify_assignment" | "pendin
 export function classifyFromSnapshot(
   strike: number,
   snapshot: { stock_price: number | null; option_price: number | null } | null,
+  optionType: "put" | "call" = "put",
 ): {
   classification: ExpiryClassification;
   pctFromStrike: number | null;
@@ -45,7 +52,7 @@ export function classifyFromSnapshot(
   if (stockPrice === null || !Number.isFinite(stockPrice) || strike <= 0) {
     return { classification: "pending", pctFromStrike: null };
   }
-  const pctFromStrike = (stockPrice - strike) / strike;
+  const pctFromStrike = safetyNumerator(stockPrice, strike, optionType) / strike;
   if (pctFromStrike > 0.05) {
     return { classification: "auto_expire", pctFromStrike };
   }
@@ -115,13 +122,21 @@ export function computeAutoExpirePnl(
 ): number {
   return Math.round(avgPremiumSold * totalContracts * 100 * 100) / 100;
 }
+// optionType defaults to 'put' — historical callers unchanged. A put
+// assigned loses (strike - price); a call assigned/called-away loses
+// the other direction (price - strike), since the loss is "shares
+// worth less than what you're forced to sell/buy them for."
 export function computeAssignmentPnl(
   strike: number,
   stockPriceAtExpiry: number,
   avgPremiumSold: number,
   totalContracts: number,
+  optionType: "put" | "call" = "put",
 ): number {
-  const optionLoss = (strike - stockPriceAtExpiry) * totalContracts * 100;
+  const optionLoss =
+    optionType === "call"
+      ? (stockPriceAtExpiry - strike) * totalContracts * 100
+      : (strike - stockPriceAtExpiry) * totalContracts * 100;
   const premiumCollected = avgPremiumSold * totalContracts * 100;
   return Math.round((premiumCollected - optionLoss) * 100) / 100;
 }
@@ -139,6 +154,7 @@ type ExpiredOpenPosition = {
   notes: string | null;
   broker: string | null;
   position_type: string | null;
+  option_type: string | null;
 };
 
 
@@ -152,6 +168,7 @@ export async function fetchFreshExpirySnapshot(
   symbol: string,
   strike: number,
   expiry: string,
+  optionType: "put" | "call" = "put",
 ): Promise<{ stock_price: number | null; option_price: number | null }> {
   const chain = await fetchChainSafe(symbol);
   if (!chain) return { stock_price: null, option_price: null };
@@ -160,7 +177,11 @@ export async function fetchFreshExpirySnapshot(
     chain.underlying?.last ??
     chain.underlyingPrice ??
     null;
-  const contract = pickPutContract(chain, strike, expiry);
+  // Default 'put' keeps every pre-existing caller intact; a covered
+  // call must pass 'call' or this fetches the wrong side of the chain
+  // entirely (a put contract at the call's strike/expiry — garbage,
+  // not just a sign error).
+  const contract = pickPutContract(chain, strike, expiry, optionType);
   const option_price = contract?.mark ?? null;
   return { stock_price, option_price };
 }
@@ -186,7 +207,7 @@ export async function getExpiredPositions(
   let q = sb
     .from("positions")
     .select(
-      "id,symbol,strike,expiry,total_contracts,avg_premium_sold,status,opened_date,closed_date,notes,broker,position_type",
+      "id,symbol,strike,expiry,total_contracts,avg_premium_sold,status,opened_date,closed_date,notes,broker,position_type,option_type",
     )
     .eq("status", "open");
   if (userId) q = q.eq("user_id", userId);
@@ -215,6 +236,7 @@ export async function getExpiredPositions(
 // No snapshot at all → pending (can't decide without data).
 export async function classifyExpiredPosition(
   position: { id: string; strike: number },
+  optionType: "put" | "call" = "put",
 ): Promise<{
   classification: ExpiryClassification;
   pctFromStrike: number | null;
@@ -235,6 +257,7 @@ export async function classifyExpiredPosition(
   const { classification, pctFromStrike } = classifyFromSnapshot(
     Number(position.strike),
     snapshot,
+    optionType,
   );
   return {
     classification,
@@ -251,7 +274,7 @@ export async function autoExpirePosition(
   const sb = createServerClient();
   const posRes = await sb
     .from("positions")
-    .select("id,symbol,strike,expiry,total_contracts,avg_premium_sold,notes,direction,status")
+    .select("id,symbol,strike,expiry,total_contracts,avg_premium_sold,notes,direction,status,option_type")
     .eq("id", positionId)
     .eq("user_id", userId)
     .limit(1);
@@ -264,6 +287,7 @@ export async function autoExpirePosition(
   }
   const direction: "long" | "short" =
     pos.direction === "long" ? "long" : "short";
+  const optionType: "put" | "call" = pos.option_type === "call" ? "call" : "put";
 
   // Compute REMAINING contracts off the fill set rather than reading
   // total_contracts (which is the historical "ever opened" count and
@@ -296,7 +320,10 @@ export async function autoExpirePosition(
   // Compute total realized P&L by augmenting fills with a synthetic
   // close at premium=0 for the expiring remainder. realizedPnl()
   // handles the sign by direction — short ⇒ +premium retained, long
-  // ⇒ -premium paid (the long lapsed worthless).
+  // ⇒ -premium paid (the long lapsed worthless). Direction-only, so
+  // this is already correct for both puts and calls (see
+  // safetyNumerator's comment for the one class of math that DOES
+  // need an option_type branch — distance/OTM, not P&L sign).
   const augmentedFills: Fill[] = [
     ...priorFills,
     {
@@ -311,7 +338,7 @@ export async function autoExpirePosition(
 
   // Pull pct-from-strike from the latest snapshot so the note has the
   // number that justified the auto-close (useful for later audit).
-  const { pctFromStrike } = await classifyExpiredPosition(pos);
+  const { pctFromStrike } = await classifyExpiredPosition(pos, optionType);
   const pctStr =
     pctFromStrike !== null ? `${(pctFromStrike * 100).toFixed(2)}%` : "unknown";
   const noteAdd = `Auto-expired worthless (${remaining} contract${remaining === 1 ? "" : "s"}). Stock ${pctStr} OTM at last snapshot.`;
@@ -369,11 +396,19 @@ export async function recordAssignment(
   positionId: string,
   stockPriceAtExpiry: number,
   userId: string,
-): Promise<{ ok: boolean; realized_pnl: number; contracts_closed: number; reason?: string }> {
+): Promise<{
+  ok: boolean;
+  realized_pnl: number;
+  contracts_closed: number;
+  reason?: string;
+  optionType?: "put" | "call";
+  symbol?: string;
+  strike?: number;
+}> {
   const sb = createServerClient();
   const posRes = await sb
     .from("positions")
-    .select("id,symbol,strike,expiry,total_contracts,avg_premium_sold,notes,direction,status")
+    .select("id,symbol,strike,expiry,total_contracts,avg_premium_sold,notes,direction,status,option_type")
     .eq("id", positionId)
     .eq("user_id", userId)
     .limit(1);
@@ -386,6 +421,7 @@ export async function recordAssignment(
   }
   const direction: "long" | "short" =
     pos.direction === "long" ? "long" : "short";
+  const optionType: "put" | "call" = pos.option_type === "call" ? "call" : "put";
 
   // Same remaining-from-fills logic as autoExpirePosition.
   const fillsRes = await sb
@@ -413,12 +449,15 @@ export async function recordAssignment(
   const strike = Number(pos.strike);
   const stockPrice = Number(stockPriceAtExpiry);
 
-  // Option A accounting: the put closes with full premium retained
-  // (synthetic close at $0, same as worthless). The market loss
-  // doesn't live on the put — it carries forward as the stock
-  // position's cost basis = strike. Stock unrealized P&L = (spot −
-  // strike) × shares accounts for the entire assignment loss.
-  // Avoids double-counting against realized_pnl on the put.
+  // Option A accounting: the option closes with full premium retained
+  // (synthetic close at $0, same as worthless) — this generalizes to
+  // calls with no change, since realizedPnl() only depends on
+  // direction, which is short either way. The market impact doesn't
+  // live on the option leg here — for a put it carries forward as a
+  // NEW stock position's cost basis (strike); for a call it's the
+  // sale price on shares CALLED AWAY from an existing lot (handled by
+  // the caller — this function only closes the option). Avoids
+  // double-counting against realized_pnl on the option.
   const augmentedFills: Fill[] = [
     ...priorFills,
     {
@@ -431,7 +470,10 @@ export async function recordAssignment(
   const realized_pnl =
     Math.round(realizedPnl(augmentedFills, direction) * 100) / 100;
 
-  const noteAdd = `Assigned (${remaining} contract${remaining === 1 ? "" : "s"}). Stock at $${stockPrice.toFixed(2)} vs $${strike.toFixed(2)} strike. Shares received at assignment.`;
+  const noteAdd =
+    optionType === "call"
+      ? `Called away (${remaining} contract${remaining === 1 ? "" : "s"}). Stock at $${stockPrice.toFixed(2)} vs $${strike.toFixed(2)} strike. Shares sold at strike.`
+      : `Assigned (${remaining} contract${remaining === 1 ? "" : "s"}). Stock at $${stockPrice.toFixed(2)} vs $${strike.toFixed(2)} strike. Shares received at assignment.`;
   const notes = pos.notes ? `${pos.notes} | ${noteAdd}` : noteAdd;
 
   const u = await sb
@@ -474,7 +516,14 @@ export async function recordAssignment(
     );
   }
 
-  return { ok: true, realized_pnl, contracts_closed: remaining };
+  return {
+    ok: true,
+    realized_pnl,
+    contracts_closed: remaining,
+    optionType,
+    symbol: pos.symbol,
+    strike,
+  };
 }
 
 export type AutoExpiredSummary = {
@@ -518,6 +567,7 @@ export type PendingConfirmation = {
   stockPrice: number | null;
   optionPrice: number | null;
   broker: string | null;
+  optionType: "put" | "call";
 };
 
 export type AutoExpireReport = {
@@ -615,14 +665,16 @@ export async function runAutoExpire(userId: string): Promise<AutoExpireReport> {
   await Promise.all(
     positions.map(async (p) => {
       try {
+        const posOptionType: "put" | "call" = p.option_type === "call" ? "call" : "put";
         const fresh = await fetchFreshExpirySnapshot(
           p.symbol,
           Number(p.strike),
           p.expiry,
+          posOptionType,
         );
         const pct =
           fresh.stock_price !== null && Number(p.strike) > 0
-            ? ((fresh.stock_price - Number(p.strike)) / Number(p.strike)) * 100
+            ? (safetyNumerator(fresh.stock_price, Number(p.strike), posOptionType) / Number(p.strike)) * 100
             : null;
         console.log(
           `[expire] fresh snapshot: ${JSON.stringify({
@@ -649,9 +701,11 @@ export async function runAutoExpire(userId: string): Promise<AutoExpireReport> {
       stock_price: null,
       option_price: null,
     };
+    const posOptionType: "put" | "call" = p.option_type === "call" ? "call" : "put";
     const { classification, pctFromStrike } = classifyFromSnapshot(
       Number(p.strike),
       fresh,
+      posOptionType,
     );
     console.log(
       `[expire] classified: ${p.symbol} ${p.strike} → ${classification} (pct=${pctFromStrike !== null ? (pctFromStrike * 100).toFixed(2) + "%" : "—"})`,
@@ -692,6 +746,7 @@ export async function runAutoExpire(userId: string): Promise<AutoExpireReport> {
       stockPrice: fresh.stock_price,
       optionPrice: fresh.option_price,
       broker: p.broker ?? null,
+      optionType: posOptionType,
     });
   }
 

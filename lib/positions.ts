@@ -282,6 +282,67 @@ export async function recalculatePositionFromFills(
   return { ok: true, status, totalOpened, remaining };
 }
 
+// Covered-call assignment ("called away") is the mirror image of a
+// put assignment: instead of creating a new stock_long lot, shares
+// leave an EXISTING one. Used by both the early "Mark as assigned"
+// button (mark-assigned/route.ts) and the bulk expiry-confirmation
+// flow (confirm-expire/route.ts) so the lot-matching rule can't drift
+// between the two entry points.
+//
+// Only acts when exactly one open stock_long lot for the symbol has
+// enough remaining shares to cover the assignment — auto-picking
+// among multiple candidate lots (or partially covering one) would
+// silently mis-book cost basis, so ambiguous cases are left for the
+// user to resolve manually via Sell Shares instead.
+export async function reduceStockLotForCallAssignment(
+  sb: RecalcClient,
+  userId: string,
+  symbol: string,
+  shares: number,
+  strike: number,
+  assignmentDate: string,
+): Promise<
+  | { ok: true; stockPositionId: string }
+  | { ok: false; reason: "no_lot" | "ambiguous_lot" | "insert_failed"; detail?: string }
+> {
+  const lotsRes = await sb
+    .from("positions")
+    .select("id,total_contracts")
+    .eq("user_id", userId)
+    .eq("symbol", symbol)
+    .eq("position_type", "stock_long")
+    .eq("status", "open");
+  const lots = ((lotsRes as { data: unknown }).data ?? []) as Array<{
+    id: string;
+    total_contracts: number;
+  }>;
+  const eligible = lots.filter((l) => l.total_contracts >= shares);
+  if (eligible.length === 0) return { ok: false, reason: "no_lot" };
+  if (eligible.length > 1) return { ok: false, reason: "ambiguous_lot" };
+
+  const lot = eligible[0];
+  const closeFill = await sb.from("fills").insert({
+    position_id: lot.id,
+    user_id: userId,
+    fill_type: "close",
+    contracts: shares,
+    premium: strike,
+    fill_date: assignmentDate,
+  });
+  if ((closeFill as { error: { message: string } | null }).error) {
+    return {
+      ok: false,
+      reason: "insert_failed",
+      detail: (closeFill as { error: { message: string } }).error.message,
+    };
+  }
+  const recalc = await recalculatePositionFromFills(lot.id, sb);
+  if (!recalc.ok) {
+    console.warn(`[reduceStockLotForCallAssignment] recalc failed for ${lot.id}: ${recalc.error}`);
+  }
+  return { ok: true, stockPositionId: lot.id };
+}
+
 // ---------- Recommendation engine ----------
 
 export type Urgency = "EMERGENCY_CUT" | "CUT" | "MONITOR" | "HOLD";
@@ -296,7 +357,11 @@ export const URGENCY_ORDER: Record<Urgency, number> = {
 
 export type PositionSignals = {
   profitPct: number;            // % of premium captured: 50 = half the credit pocketed
-  distanceToStrikePct: number;  // (stock - strike) / stock * 100
+  // Safety-signed distance: positive = OTM/safe, negative = ITM —
+  // already flipped for calls by the caller via safetyNumerator().
+  // See that function's comment for why the raw (stock-strike)/stock
+  // sign can't be used directly once calls exist.
+  distanceToStrikePct: number;
   dte: number;
   entryDelta: number | null;
   currentDelta: number | null;
@@ -305,6 +370,7 @@ export type PositionSignals = {
   currentStockPrice: number;
   twoDayDrop: boolean;          // two consecutive down days in the last few bars
   opportunityAvailable: boolean;// screener has today's Strong/Marginal candidates
+  optionType: "put" | "call";
 };
 
 // Decides what to do with an open CSP. Order of checks matters — first match
@@ -321,8 +387,13 @@ export function recommendPosition(s: PositionSignals): { urgency: Urgency; reaso
     absEntryDelta !== null && absCurrDelta !== null && absEntryDelta > 0
       ? absCurrDelta >= 1.5 * absEntryDelta
       : false;
+  // "Away" means away from the strike, in the safe direction — up for
+  // a put (strike is below), down for a call (strike is above).
   const stockTrendingAway =
-    s.entryStockPrice !== null && s.currentStockPrice > s.entryStockPrice;
+    s.entryStockPrice !== null &&
+    (s.optionType === "call"
+      ? s.currentStockPrice < s.entryStockPrice
+      : s.currentStockPrice > s.entryStockPrice);
   const thetaStillWorking =
     s.currentTheta !== null && s.currentTheta < 0 && s.dte > 0;
   const safeDistance = s.distanceToStrikePct >= 10;
@@ -438,7 +509,7 @@ export type BadgeResult = {
 };
 
 export type PositionBadgeInput = {
-  position: { strike: number; expiry: string };
+  position: { strike: number; expiry: string; optionType?: "put" | "call" };
   latestSnapshot: {
     stock_price: number | null;
     option_price: number | null;
@@ -464,17 +535,37 @@ function firstSentence(s: string): string {
   return s.slice(0, idx + 1).trim();
 }
 
+// Signed "safety numerator" — positive means OTM/safe, negative means
+// ITM/danger, for EITHER put or call. A short put is safe with spot
+// ABOVE strike; a short call is safe with spot BELOW strike, so the
+// sign of (stockPrice - strike) must flip for calls. Every distance-
+// to-strike computation touching an option position (this file,
+// app/api/positions/open/route.ts, lib/expire-positions.ts) must go
+// through this rather than inlining the raw fraction — that's exactly
+// the class of bug that made every one of those hardcoded to put-only
+// semantics before covered calls existed. Callers divide by whatever
+// denominator (strike or spot) and scale (fraction or percent) they
+// already use — this only fixes the sign.
+export function safetyNumerator(
+  stockPrice: number,
+  strike: number,
+  optionType: "put" | "call",
+): number {
+  return optionType === "call" ? strike - stockPrice : stockPrice - strike;
+}
+
 export function computePositionBadge(input: PositionBadgeInput): BadgeResult {
   const { position, latestSnapshot, postEarningsRec, currentStockPrice } = input;
   const today = todayUtcIso();
   const isExpiryDay = position.expiry === today;
+  const optionType = position.optionType ?? "put";
 
   const stockPrice =
     currentStockPrice ?? latestSnapshot?.stock_price ?? null;
   const optionPrice = latestSnapshot?.option_price ?? null;
   const pctFromStrike =
     stockPrice !== null && position.strike > 0
-      ? (stockPrice - position.strike) / position.strike
+      ? safetyNumerator(stockPrice, position.strike, optionType) / position.strike
       : null;
 
   // ---------- PRIORITY 1: expiry day ----------

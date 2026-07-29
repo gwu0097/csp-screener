@@ -1,22 +1,29 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
-import { realizedPnl, type Fill } from "@/lib/positions";
+import { realizedPnl, reduceStockLotForCallAssignment, type Fill } from "@/lib/positions";
 import { requireUserId, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
-// Manual early-assignment for an open short put. Schwab doesn't always
-// emit a fill the import catches when a put is assigned before expiry,
-// so the user marks it by hand:
-//   1. $0.00 close fill on the put (assignment date) — full premium
+// Manual early-assignment for an open short put OR short call. Schwab
+// doesn't always emit a fill the import catches when an option is
+// assigned before expiry, so the user marks it by hand:
+//   1. $0.00 close fill on the option (assignment date) — full premium
 //      stays as realized P&L, matching the expiry-day Option A
-//      accounting in lib/expire-positions.recordAssignment.
-//   2. Put status → 'assigned', closed_date = assignment date.
-//   3. stock_long position created at strike (shares = remaining ×
-//      100), linked via assignment_source_id — same shape as
-//      /api/positions/create-from-assignment, idempotent on the link.
-// The market loss is NOT booked on the put: it carries forward as the
-// stock's cost basis (= strike), so nothing is double-counted.
+//      accounting in lib/expire-positions.recordAssignment. Direction-
+//      only math, identical for puts and calls.
+//   2. Option status → 'assigned', closed_date = assignment date.
+//   3. Put: a NEW stock_long position is created at strike (shares =
+//      remaining × 100) — the assignment means BUYING shares. Same
+//      shape as /api/positions/create-from-assignment.
+//      Call: shares are CALLED AWAY — the opposite direction. There is
+//      no new stock position to create; instead an existing open
+//      stock_long lot for the same symbol (if one is tracked, any
+//      broker — covered calls are written against shares held wherever
+//      they actually live) gets a close fill for `shares` at `strike`,
+//      reusing recalculatePositionFromFills' already-correct stock P&L
+//      math. If no matching lot exists, the option leg still closes
+//      correctly; there's just nothing to reduce.
 
 type Body = { assignmentDate?: unknown };
 
@@ -95,9 +102,10 @@ export async function POST(
       { status: 400 },
     );
   }
-  if ((pos.option_type ?? "put") !== "put" || (pos.direction ?? "short") !== "short") {
+  const optionType: "put" | "call" = pos.option_type === "call" ? "call" : "put";
+  if ((pos.direction ?? "short") !== "short") {
     return NextResponse.json(
-      { error: "Only open SHORT PUTS can be marked as assigned" },
+      { error: "Only open short options can be marked as assigned" },
       { status: 400 },
     );
   }
@@ -158,15 +166,20 @@ export async function POST(
     );
   }
 
-  // 2. Put → assigned. realized_pnl = full premium retained (the $0
-  // close adds nothing to the buy-back side).
+  // 2. Option → assigned. realized_pnl = full premium retained (the $0
+  // close adds nothing to the buy-back side). Direction-only, correct
+  // for both puts and calls.
   const allFills: Fill[] = [
     ...priorFills,
     { fill_type: "close", contracts: remaining, premium: 0, fill_date: assignmentDate },
   ];
   const realized = Math.round(realizedPnl(allFills, "short") * 100) / 100;
   const strike = Number(pos.strike);
-  const noteAdd = `Marked assigned early (${remaining} contract${remaining === 1 ? "" : "s"}) on ${assignmentDate}. Shares received at $${strike.toFixed(2)} strike.`;
+  const shares = remaining * 100;
+  const noteAdd =
+    optionType === "call"
+      ? `Called away early (${remaining} contract${remaining === 1 ? "" : "s"}) on ${assignmentDate}. Shares sold at $${strike.toFixed(2)} strike.`
+      : `Marked assigned early (${remaining} contract${remaining === 1 ? "" : "s"}) on ${assignmentDate}. Shares received at $${strike.toFixed(2)} strike.`;
   const upd = await sb
     .from("positions")
     .update({
@@ -180,68 +193,112 @@ export async function POST(
     .eq("user_id", userId);
   if (upd.error) {
     return NextResponse.json(
-      { error: `put update failed: ${upd.error.message}` },
+      { error: `option update failed: ${upd.error.message}` },
       { status: 500 },
     );
   }
 
-  // 3. stock_long at strike — Option A cost basis. Same row shape as
-  // create-from-assignment (strike=0 + position_type is how stock rows
-  // are modelled; entry_stock_price carries the basis).
-  const shares = remaining * 100;
-  const stockInsert = await sb
-    .from("positions")
-    .insert({
-      symbol: pos.symbol,
-      strike: 0,
-      expiry: assignmentDate,
-      option_type: "put",
-      broker: pos.broker ?? "schwab",
-      total_contracts: shares,
-      avg_premium_sold: null,
-      status: "open",
-      opened_date: assignmentDate,
-      notes: `Assigned early from ${pos.symbol} $${strike.toFixed(2)}P ${pos.expiry}`,
-      position_type: "stock_long",
-      assignment_source_id: pos.id,
-      entry_stock_price: strike,
+  if (optionType === "put") {
+    // 3a. Put: stock_long at strike — Option A cost basis. Same row
+    // shape as create-from-assignment (strike=0 + position_type is how
+    // stock rows are modelled; entry_stock_price carries the basis).
+    const stockInsert = await sb
+      .from("positions")
+      .insert({
+        symbol: pos.symbol,
+        strike: 0,
+        expiry: assignmentDate,
+        option_type: "put",
+        broker: pos.broker ?? "schwab",
+        total_contracts: shares,
+        avg_premium_sold: null,
+        status: "open",
+        opened_date: assignmentDate,
+        notes: `Assigned early from ${pos.symbol} $${strike.toFixed(2)}P ${pos.expiry}`,
+        position_type: "stock_long",
+        assignment_source_id: pos.id,
+        entry_stock_price: strike,
+        user_id: userId,
+      })
+      .select("id")
+      .single();
+    if (stockInsert.error || !stockInsert.data) {
+      return NextResponse.json(
+        {
+          error: `stock position insert failed: ${stockInsert.error?.message ?? "unknown"} — the put was closed; create the stock row via the assignment tools`,
+        },
+        { status: 500 },
+      );
+    }
+    const stockId = (stockInsert.data as { id: string }).id;
+
+    // Open fill so the share ledger (remaining shares / sell flows)
+    // works exactly like every other stock_long.
+    const openFill = await sb.from("fills").insert({
+      position_id: stockId,
       user_id: userId,
-    })
-    .select("id")
-    .single();
-  if (stockInsert.error || !stockInsert.data) {
-    return NextResponse.json(
-      {
-        error: `stock position insert failed: ${stockInsert.error?.message ?? "unknown"} — the put was closed; create the stock row via the assignment tools`,
-      },
-      { status: 500 },
-    );
-  }
-  const stockId = (stockInsert.data as { id: string }).id;
+      fill_type: "open",
+      contracts: shares,
+      premium: strike,
+      fill_date: assignmentDate,
+    });
+    if (openFill.error) {
+      return NextResponse.json(
+        { error: `stock open-fill failed: ${openFill.error.message}` },
+        { status: 500 },
+      );
+    }
 
-  // Open fill so the share ledger (remaining shares / sell flows)
-  // works exactly like every other stock_long.
-  const openFill = await sb.from("fills").insert({
-    position_id: stockId,
-    user_id: userId,
-    fill_type: "open",
-    contracts: shares,
-    premium: strike,
-    fill_date: assignmentDate,
-  });
-  if (openFill.error) {
-    return NextResponse.json(
-      { error: `stock open-fill failed: ${openFill.error.message}` },
-      { status: 500 },
-    );
+    return NextResponse.json({
+      ok: true,
+      message: `${pos.symbol}: ${remaining} put${remaining === 1 ? "" : "s"} assigned → ${shares} shares @ $${strike.toFixed(2)}`,
+      stockPositionId: stockId,
+      shares,
+      costBasis: strike,
+      putRealizedPnl: realized,
+    });
+  }
+
+  // 3b. Call: shares are CALLED AWAY — the opposite direction from a
+  // put assignment. No new position is created; reduceStockLotForCallAssignment
+  // reduces an existing open stock_long lot for this symbol (any
+  // broker — the call is tracked separately from wherever the shares
+  // actually live) by `shares`, sold at `strike`. Ambiguous/missing
+  // lots are left for the user via Sell Shares — same shared rule the
+  // bulk expiry-confirmation flow uses (confirm-expire/route.ts), so
+  // the two entry points can't drift.
+  const reduced = await reduceStockLotForCallAssignment(
+    sb,
+    userId,
+    pos.symbol,
+    shares,
+    strike,
+    assignmentDate,
+  );
+  if (!reduced.ok) {
+    const reasonMsg =
+      reduced.reason === "no_lot"
+        ? `No single tracked stock lot covers ${shares} shares — use Sell Shares to record the sale if you track this position's stock.`
+        : reduced.reason === "ambiguous_lot"
+          ? `Multiple stock lots could cover ${shares} shares — use Sell Shares to pick the right one.`
+          : `The linked stock lot couldn't be updated (${reduced.detail ?? "unknown error"}) — use Sell Shares to record it.`;
+    return NextResponse.json({
+      ok: true,
+      message: `${pos.symbol}: ${remaining} call${remaining === 1 ? "" : "s"} called away. ${reasonMsg}`,
+      shares,
+      strikePrice: strike,
+      callRealizedPnl: realized,
+      stockLotAdjusted: false,
+    });
   }
 
   return NextResponse.json({
     ok: true,
-    message: `${pos.symbol}: ${remaining} put${remaining === 1 ? "" : "s"} assigned → ${shares} shares @ $${strike.toFixed(2)}`,
-    stockPositionId: stockId,
+    message: `${pos.symbol}: ${remaining} call${remaining === 1 ? "" : "s"} called away → ${shares} shares sold @ $${strike.toFixed(2)}`,
+    stockPositionId: reduced.stockPositionId,
     shares,
-    costBasis: strike,
-    putRealizedPnl: realized,
+    strikePrice: strike,
+    callRealizedPnl: realized,
+    stockLotAdjusted: true,
   });
 }

@@ -24,11 +24,12 @@ type Props = {
   };
 };
 
-const BROKERS = ["schwab", "schwab2", "robinhood", "fidelity", "other"] as const;
+const BROKERS = ["schwab", "schwab2", "robinhood", "covered_calls", "fidelity", "other"] as const;
 const BROKER_LABELS: Record<(typeof BROKERS)[number], string> = {
   schwab: "Schwab",
   schwab2: "Schwab 2",
   robinhood: "Robinhood",
+  covered_calls: "Covered Calls",
   fidelity: "Fidelity",
   other: "Other",
 };

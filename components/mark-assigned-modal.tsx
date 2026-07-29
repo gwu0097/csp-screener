@@ -1,9 +1,12 @@
 "use client";
 
-// Early-assignment confirmation for an open short put. Fired from the
-// "Assigned" button on an open put row. Shows exactly what will happen
-// (close N puts at $0.00, open N×100 shares at strike) with an
-// editable assignment date, then POSTs /api/positions/{id}/mark-assigned.
+// Early-assignment confirmation for an open short put OR short call.
+// Fired from the "Assigned" button on an open option row. Puts:
+// closes N puts at $0.00 and opens N×100 shares at strike (assignment
+// = buying). Calls: closes N calls at $0.00 and records N×100 shares
+// CALLED AWAY at strike from an existing stock lot if one is tracked
+// (assignment = selling — the opposite direction). Editable assignment
+// date, then POSTs /api/positions/{id}/mark-assigned.
 
 import { useEffect, useState } from "react";
 import { Loader2 } from "lucide-react";
@@ -22,6 +25,7 @@ export type MarkAssignedTarget = {
   strike: number;
   expiry: string;
   remainingContracts: number;
+  optionType: "put" | "call";
 };
 
 type Props = {
@@ -100,31 +104,52 @@ export function MarkAssignedModal({ open, target, onCancel, onConfirm }: Props) 
       <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle>
-            Mark {target.symbol} ${target.strike.toFixed(2)}P ×{" "}
-            {target.remainingContracts} as assigned
+            Mark {target.symbol} ${target.strike.toFixed(2)}
+            {target.optionType === "call" ? "C" : "P"} × {target.remainingContracts} as
+            assigned
           </DialogTitle>
         </DialogHeader>
 
         <div className="space-y-3 text-sm">
-          <p className="text-muted-foreground">
-            This will close{" "}
-            <span className="font-mono text-foreground">
-              {target.remainingContracts} put
-              {target.remainingContracts === 1 ? "" : "s"}
-            </span>{" "}
-            at <span className="font-mono text-foreground">$0.00</span>{" "}
-            (assignment) and open{" "}
-            <span className="font-mono text-foreground">{shares} shares</span>{" "}
-            of {target.symbol} at{" "}
-            <span className="font-mono text-foreground">
-              ${target.strike.toFixed(2)}
-            </span>
-            .
-          </p>
+          {target.optionType === "call" ? (
+            <p className="text-muted-foreground">
+              This will close{" "}
+              <span className="font-mono text-foreground">
+                {target.remainingContracts} call
+                {target.remainingContracts === 1 ? "" : "s"}
+              </span>{" "}
+              at <span className="font-mono text-foreground">$0.00</span>{" "}
+              (assignment) and record{" "}
+              <span className="font-mono text-foreground">{shares} shares</span>{" "}
+              of {target.symbol} called away at{" "}
+              <span className="font-mono text-foreground">
+                ${target.strike.toFixed(2)}
+              </span>{" "}
+              — sold from an existing tracked stock position, if exactly one covers
+              this many shares.
+            </p>
+          ) : (
+            <p className="text-muted-foreground">
+              This will close{" "}
+              <span className="font-mono text-foreground">
+                {target.remainingContracts} put
+                {target.remainingContracts === 1 ? "" : "s"}
+              </span>{" "}
+              at <span className="font-mono text-foreground">$0.00</span>{" "}
+              (assignment) and open{" "}
+              <span className="font-mono text-foreground">{shares} shares</span>{" "}
+              of {target.symbol} at{" "}
+              <span className="font-mono text-foreground">
+                ${target.strike.toFixed(2)}
+              </span>
+              .
+            </p>
+          )}
           <p className="text-xs text-muted-foreground">
-            Premium already collected stays as the put&apos;s realized P&amp;L.
-            The stock&apos;s cost basis is the strike — the market move lives
-            on the share position, nothing is double-counted.
+            Premium already collected stays as the option&apos;s realized P&amp;L.
+            {target.optionType === "call"
+              ? " The sale price is the strike — the market move lives on the share position, nothing is double-counted."
+              : " The stock's cost basis is the strike — the market move lives on the share position, nothing is double-counted."}
           </p>
           <label className="block space-y-1">
             <span className="text-xs text-muted-foreground">Assignment date</span>

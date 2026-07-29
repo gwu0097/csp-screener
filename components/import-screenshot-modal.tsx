@@ -60,23 +60,44 @@ const TIMEZONES = [
 ] as const;
 const LS_TIMEZONE_KEY = "import_timezone";
 
-const BROKERS = ["schwab", "schwab2", "robinhood"] as const;
-const BROKER_LABELS: Record<(typeof BROKERS)[number], string> = {
+// Destination account — the `broker` value ultimately stamped on each
+// imported position/fill. Deliberately separate from screenshot
+// format below: "Covered Calls" positions can arrive from a Schwab OR
+// a Robinhood screenshot, so the destination can't be inferred from
+// which OCR prompt was used.
+const ACCOUNTS = ["schwab", "schwab2", "robinhood", "covered_calls"] as const;
+const ACCOUNT_LABELS: Record<(typeof ACCOUNTS)[number], string> = {
   schwab: "Schwab",
   schwab2: "Schwab 2",
   robinhood: "Robinhood",
+  covered_calls: "Covered Calls",
 };
 
-// Short per-broker help — rendered beneath the upload dropzone so users
-// know what the parser expects for the selected broker.
-const BROKER_INSTRUCTIONS: Record<(typeof BROKERS)[number], string> = {
+// Screenshot format — which OCR prompt to use. Schwab and Schwab 2
+// share one prompt (same broker UI, two accounts), so this only ever
+// needs to distinguish Schwab-shaped vs Robinhood-shaped images.
+const SCREENSHOT_FORMATS = ["schwab", "robinhood"] as const;
+const FORMAT_LABELS: Record<(typeof SCREENSHOT_FORMATS)[number], string> = {
+  schwab: "Schwab / ThinkorSwim",
+  robinhood: "Robinhood",
+};
+const FORMAT_INSTRUCTIONS: Record<(typeof SCREENSHOT_FORMATS)[number], string> = {
   schwab:
     "Screenshot your ThinkorSwim / Schwab Order History table. Parser pulls every FILLED row.",
-  schwab2:
-    "Same parser as Schwab — uses ThinkorSwim / Schwab Order History layout. Imports tag the secondary Schwab account.",
   robinhood:
     "Screenshot your Robinhood position detail cards. Scroll to capture multiple open positions in one image — each card becomes its own fill.",
 };
+
+// Every ACCOUNT that maps 1:1 to a screenshot format — picking one of
+// these auto-syncs the format selector for convenience. "covered_calls"
+// has no natural format (it's a destination, not a source) and is
+// deliberately absent, so the format selector stays at whatever the
+// user last set when they choose it.
+function naturalFormatFor(account: string): (typeof SCREENSHOT_FORMATS)[number] | null {
+  if (account === "robinhood") return "robinhood";
+  if (account === "schwab" || account === "schwab2") return "schwab";
+  return null;
+}
 
 function readAsDataUrl(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -88,7 +109,19 @@ function readAsDataUrl(blob: Blob): Promise<string> {
 }
 
 export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) {
-  const [broker, setBroker] = useState<string>("schwab");
+  // Destination account (stamped onto trades) and screenshot format
+  // (drives OCR prompt selection) are independent — see the constants
+  // above. pickAccount auto-syncs format for the common case where
+  // they match; the format dropdown stays independently changeable so
+  // e.g. a Robinhood-shaped covered-call screenshot still OCRs correctly.
+  const [account, setAccount] = useState<string>("schwab");
+  const [screenshotFormat, setScreenshotFormat] =
+    useState<(typeof SCREENSHOT_FORMATS)[number]>("schwab");
+  function pickAccount(a: string) {
+    setAccount(a);
+    const natural = naturalFormatFor(a);
+    if (natural) setScreenshotFormat(natural);
+  }
   // Source timezone of the screenshot — drives ET-date conversion
   // server-side in bulk-create. Default ET so US-domestic users
   // don't need to interact. Persisted in localStorage so a HK
@@ -228,10 +261,17 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
       // Send the FULL data URL so the server can forward the real mime type
       // to Minimax. Minimax returns 400 if the declared mime doesn't match
       // the image bytes (e.g. JPEG-over-the-wire labeled as PNG).
+      //
+      // `broker` here selects the OCR PROMPT (screenshot format), not
+      // the destination account — parse-screenshot stamps this same
+      // value onto each returned trade's `.broker` field too, but
+      // that's overwritten below with the actual destination account
+      // right after the response comes back, before anything is shown
+      // or sent to bulk-create.
       const res = await fetch("/api/trades/parse-screenshot", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image: dataUrl, broker }),
+        body: JSON.stringify({ image: dataUrl, broker: screenshotFormat }),
       });
       const json = (await res.json()) as {
         trades?: ParsedTrade[];
@@ -243,10 +283,12 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
       if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
       const trades = (json.trades ?? []).map((t) => ({
         ...t,
+        broker: account,
         timePlaced: t.timePlaced && t.timePlaced.length >= 10 ? t.timePlaced : todayIso(),
       }));
       const stocks = (json.stockTrades ?? []).map((s) => ({
         ...s,
+        broker: account,
         date: s.date && s.date.length >= 10 ? s.date : todayIso(),
       }));
       setParsed(trades);
@@ -384,15 +426,31 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
         </DialogHeader>
 
         <div className="flex flex-wrap items-center gap-3 text-base">
-          <label className="text-sm text-muted-foreground">Broker</label>
+          <label className="text-sm text-muted-foreground">Account</label>
           <select
-            value={broker}
-            onChange={(e) => setBroker(e.target.value)}
+            value={account}
+            onChange={(e) => pickAccount(e.target.value)}
             className="rounded-md border border-border bg-background px-2 py-1"
+            title="Destination account — where these positions land in Positions. Independent of screenshot format below."
           >
-            {BROKERS.map((b) => (
-              <option key={b} value={b}>
-                {BROKER_LABELS[b]}
+            {ACCOUNTS.map((a) => (
+              <option key={a} value={a}>
+                {ACCOUNT_LABELS[a]}
+              </option>
+            ))}
+          </select>
+          <label className="text-sm text-muted-foreground">Screenshot format</label>
+          <select
+            value={screenshotFormat}
+            onChange={(e) =>
+              setScreenshotFormat(e.target.value as (typeof SCREENSHOT_FORMATS)[number])
+            }
+            className="rounded-md border border-border bg-background px-2 py-1"
+            title="Which broker's screenshot layout this is — determines how the OCR reads it. Set independently from Account, e.g. for a Robinhood screenshot going into Covered Calls."
+          >
+            {SCREENSHOT_FORMATS.map((f) => (
+              <option key={f} value={f}>
+                {FORMAT_LABELS[f]}
               </option>
             ))}
           </select>
@@ -440,8 +498,7 @@ export function ImportScreenshotModal({ open, onOpenChange, onSuccess }: Props) 
               />
             </div>
             <div className="mt-2 text-sm text-muted-foreground">
-              {BROKER_INSTRUCTIONS[broker as (typeof BROKERS)[number]] ??
-                BROKER_INSTRUCTIONS.schwab}
+              {FORMAT_INSTRUCTIONS[screenshotFormat] ?? FORMAT_INSTRUCTIONS.schwab}
             </div>
           </>
         )}

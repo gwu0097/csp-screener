@@ -28,10 +28,14 @@ export type PendingConfirmationRow = {
   // REMAINING contract count — already net of any close fills.
   totalContracts: number;
   avgPremiumSold?: number | null;
+  // Safety-signed: positive = OTM/worthless-bound, negative = ITM/
+  // assignment-bound, for either put or call — see safetyNumerator()
+  // in lib/positions.ts. NOT the raw (stock-strike) fraction.
   pctFromStrike: number | null;
   stockPrice: number | null;
   optionPrice: number | null;
   broker: string | null;
+  optionType: "put" | "call";
 };
 
 export type ConfirmItem = {
@@ -48,9 +52,10 @@ const BROKER_LABEL: Record<string, string> = {
   schwab: "SCHWAB",
   schwab2: "SCHWAB 2",
   robinhood: "ROBINHOOD",
+  covered_calls: "COVERED CALLS",
 };
 
-const BROKER_ORDER = ["schwab", "schwab2", "robinhood"] as const;
+const BROKER_ORDER = ["schwab", "schwab2", "robinhood", "covered_calls"] as const;
 
 function shortExpiry(iso: string): string {
   const d = new Date(iso + "T00:00:00Z");
@@ -68,15 +73,18 @@ function fmtPctOtm(p: number | null): string {
   return `${pct > 0 ? "+" : ""}${pct.toFixed(1)}% OTM`;
 }
 
-// Deterministic ITM/OTM rule for puts:
-//   stockPrice > strike  → expired worthless
-//   stockPrice <= strike → assigned
-// Rows with no stockPrice (Yahoo + Schwab both failed) default to
-// 'assigned' as the defensive choice — better to mis-tag as a no-op
-// assignment than silently let a real assignment slip through as
-// worthless.
+// Deterministic ITM/OTM rule, for either put or call:
+//   pctFromStrike > 0  → OTM → expired worthless
+//   pctFromStrike <= 0 → ITM → assigned
+// r.pctFromStrike is already safety-signed by the server (see
+// safetyNumerator() in lib/positions.ts) — a raw `stockPrice > strike`
+// comparison here would be put-only and backwards for a covered call.
+// Rows with no stockPrice (Yahoo + Schwab both failed) leave
+// pctFromStrike null and default to 'assigned' as the defensive
+// choice — better to mis-tag as a no-op assignment than silently let
+// a real assignment slip through as worthless.
 function isExpiredWorthless(r: PendingConfirmationRow): boolean {
-  return r.stockPrice !== null && r.stockPrice > r.strike;
+  return r.pctFromStrike !== null && r.pctFromStrike > 0;
 }
 
 type Props = {
@@ -278,7 +286,9 @@ export function ExpireConfirmationModal({ open, rows, onCancel, onConfirm }: Pro
                           <span>
                             <span className="font-semibold text-foreground">{r.symbol}</span>{" "}
                             <span className="text-muted-foreground">
-                              ${r.strike}P {shortExpiry(r.expiry)} ×{r.totalContracts}
+                              ${r.strike}
+                              {r.optionType === "call" ? "C" : "P"} {shortExpiry(r.expiry)} ×
+                              {r.totalContracts}
                             </span>
                           </span>
                         </label>
@@ -294,15 +304,19 @@ export function ExpireConfirmationModal({ open, rows, onCancel, onConfirm }: Pro
                           ) : (
                             <span
                               className="inline-flex items-center gap-1 rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-amber-200"
-                              title="Stock at or below strike — position will be recorded as assigned with intrinsic-value P&L."
+                              title={
+                                r.optionType === "call"
+                                  ? "Stock at or above strike — shares will be recorded as called away with intrinsic-value P&L."
+                                  : "Stock at or below strike — position will be recorded as assigned with intrinsic-value P&L."
+                              }
                             >
                               <AlertTriangle className="h-3 w-3" />
-                              Assigned
+                              {r.optionType === "call" ? "Called Away" : "Assigned"}
                             </span>
                           )}
                         </span>
                       </div>
-                      {!worthless && (
+                      {!worthless && r.optionType === "put" && (
                         <div className="ml-6 space-y-0.5 text-sm">
                           <div className="text-muted-foreground">
                             Cost basis ={" "}
@@ -331,6 +345,14 @@ export function ExpireConfirmationModal({ open, rows, onCancel, onConfirm }: Pro
                               <span className="font-mono">${costBasis.toFixed(2)}</span>
                             </span>
                           </label>
+                        </div>
+                      )}
+                      {!worthless && r.optionType === "call" && (
+                        <div className="ml-6 space-y-0.5 text-sm text-muted-foreground">
+                          {shares} shares of {r.symbol} will be sold at{" "}
+                          <span className="font-mono">${costBasis.toFixed(2)}</span> from an
+                          existing tracked stock position, if exactly one covers this many
+                          shares — otherwise use Sell Shares afterward.
                         </div>
                       )}
                     </li>

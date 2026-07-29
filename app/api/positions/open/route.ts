@@ -13,6 +13,7 @@ import {
   postEarningsMomentum,
   isTwoDayDrop,
   remainingContracts,
+  safetyNumerator,
   URGENCY_ORDER,
   type BadgeColor,
   type Urgency,
@@ -677,9 +678,13 @@ export async function GET(req: NextRequest) {
     ) {
       // Mark missing — fall back to an intrinsic-value estimate so
       // the position card still shows a number on expiry day when
-      // option chains stop quoting. ITM puts: subtract intrinsic
-      // from the entry premium. OTM puts: assume worthless and
-      // credit full premium.
+      // option chains stop quoting. ITM: subtract intrinsic from the
+      // entry premium. OTM: assume worthless and credit full premium.
+      // ITM/OTM flips between put and call — a put is ITM when spot
+      // is BELOW strike, a call is ITM when spot is ABOVE strike, so
+      // this must branch on option_type rather than always testing
+      // `currentStockPrice < strike` (that was put-only and would
+      // silently report a losing, ITM covered call as 100% profit).
       //
       // Long-direction fallback intentionally NOT implemented — the
       // CSP-specific "credit full premium when OTM" rule doesn't
@@ -693,8 +698,15 @@ export async function GET(req: NextRequest) {
       // that case the chain doesn't agree with the stored row and
       // an estimate would also be wrong — better to show "—" with
       // a warning badge.
-      if (currentStockPrice < strike) {
-        const intrinsic = strike - currentStockPrice;
+      const isItm =
+        positionOptionType === "call"
+          ? currentStockPrice > strike
+          : currentStockPrice < strike;
+      if (isItm) {
+        const intrinsic =
+          positionOptionType === "call"
+            ? currentStockPrice - strike
+            : strike - currentStockPrice;
         pnlDollars = (premiumSold - intrinsic) * remaining * 100;
         pnlPct = ((premiumSold - intrinsic) / premiumSold) * 100;
         pnlSource = "intrinsic";
@@ -710,9 +722,14 @@ export async function GET(req: NextRequest) {
       );
     }
 
+    // Safety-signed: positive = OTM/safe, negative = ITM, for either
+    // put or call — see safetyNumerator()'s comment. This value feeds
+    // both recommendPosition()'s thresholds and the "% OTM" label on
+    // the position card, so getting the sign wrong for calls breaks
+    // both the urgency badge and the displayed number.
     const distanceToStrikePct =
       currentStockPrice !== null && currentStockPrice > 0
-        ? ((currentStockPrice - strike) / currentStockPrice) * 100
+        ? (safetyNumerator(currentStockPrice, strike, positionOptionType) / currentStockPrice) * 100
         : null;
 
     // Per-position mark/entry/pnl log — runs for every position on
@@ -789,6 +806,7 @@ export async function GET(req: NextRequest) {
       currentStockPrice: currentStockPrice ?? 0,
       twoDayDrop,
       opportunityAvailable,
+      optionType: positionOptionType,
     });
 
     const thetaDecayTotal =
@@ -797,7 +815,7 @@ export async function GET(req: NextRequest) {
     // Priority-cascade badge — replaces the mechanical urgency-derived
     // status for the collapsed row.
     const badgeResult = computePositionBadge({
-      position: { strike, expiry },
+      position: { strike, expiry, optionType: positionOptionType },
       latestSnapshot: latestSnapshotByPosition.get(p.id) ?? null,
       postEarningsRec: recsByPosition.get(p.id)
         ? {

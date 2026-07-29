@@ -93,6 +93,13 @@ If a row is unmistakably a stock fill, emit only the stock schema (no strike / e
 SPREAD HANDLING:
 The 'Spread' column tells you the order type:
 - 'SINGLE' = one option leg, one row → emit ONE trade.
+
+Worked example — SINGLE row, a covered call (not every SINGLE row is a put; read StrikeType literally, don't assume):
+  12:31:05  SINGLE  SELL  -5 TO OPEN   MSFT  31 JUL 26  520 CALL  1.85 LMT  DAY  FILLED
+Emits ONE trade:
+  { action: 'open', symbol: 'MSFT', strike: 520, expiry: '2026-07-31', optionType: 'call', contracts: 5, premium: 1.85, timePlaced: '2026-07-28T12:31:05' }
+(Same extraction rules as a put SINGLE row in every respect — strike, contracts, premium, action all read identically. Only optionType differs, and it comes straight from the literal "CALL" in the StrikeType column, same as "PUT" would.)
+
 - 'DIAGONAL', 'VERTICAL', 'CALENDAR', 'IRON_CONDOR', etc. = MULTI-LEG order. Schwab displays each leg on its own physical line, sharing the Time Placed / Spread / Status of the first leg. The Status (FILLED/etc.) applies to BOTH/ALL legs together.
 For multi-leg orders:
   • Emit EACH leg as a SEPARATE trade in the output array (a DIAGONAL produces TWO trade entries, a VERTICAL with 2 legs produces TWO entries, etc.).
@@ -219,8 +226,11 @@ FORMAT A — Position Detail cards.
   - contracts: absolute value of the Contracts field ("-10" → 10).
   - premium: numeric value of "Average credit", strip "$" ("$0.17" → 0.17).
   - expiry: "Expiration date" → YYYY-MM-DD; if the year is missing (e.g. "4/24"), use ${currentYear}. So "4/24" → "${currentYear}-04-24".
-  - strike: breakeven_price + average_credit, rounded to the nearest $0.50 increment (standard option strike granularity). Examples: breakeven=53.83 + credit=0.17 → 54.00; breakeven=347.13 + credit=0.37 → 347.50.
-  - optionType: default "put" for a CSP screening context. Use "call" only if the card explicitly says "Call".
+  - optionType: read from the card's own title/header text (e.g. "{SYMBOL} \${STRIKE} Put" or "{SYMBOL} \${STRIKE} Call") — every card shows this. Do NOT default to 'put'. CSPs are the common case here, but covered calls are tracked through this exact same card layout, and guessing wrong silently mislabels the position with no visible error. Read the actual word on the card.
+  - strike: derived from breakeven_price and average_credit using the formula for the type you just read, rounded to the nearest $0.50 increment (standard option strike granularity):
+      PUT:  strike = breakeven_price + average_credit (a short put's breakeven sits BELOW its strike by the premium collected). Examples: breakeven=53.83 + credit=0.17 → 54.00; breakeven=347.13 + credit=0.37 → 347.50.
+      CALL: strike = breakeven_price − average_credit (a short call's breakeven sits ABOVE its strike by the premium collected). Example: breakeven=54.17 − credit=0.17 → 54.00.
+    If the card also shows an explicit strike in its title (e.g. "$54 Put"), prefer that over the derived value — it's the more direct read.
   - timePlaced: "Date sold" → YYYY-MM-DD, same year-inference as expiry.
   - broker: "robinhood".
 

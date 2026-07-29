@@ -152,8 +152,10 @@ type Props =
       // and the modal survives row re-renders from /api/positions/open
       // refreshes. Optional so the closed-list path can omit it.
       onCloseOption?: (target: import("./close-option-modal").CloseOptionTarget) => void;
-      // Early-assignment action — SHORT PUTS only (parent renders the
-      // confirmation modal). Optional like onCloseOption.
+      // Early-assignment action — any open short option, put or call
+      // (parent renders the confirmation modal, which branches on
+      // option type: put = shares received, call = shares called
+      // away). Optional like onCloseOption.
       onMarkAssigned?: (
         target: import("./mark-assigned-modal").MarkAssignedTarget,
       ) => void;
@@ -810,12 +812,11 @@ export function PositionCard(props: Props) {
             >
               Close
             </button>
-            {/* Early assignment — only meaningful on a sold put.
+            {/* Early assignment — any open short option (put or call).
                 span[role=button] (same pattern as the trash control)
                 because the collapsed row is itself a <button> and the
                 HTML parser ejects nested buttons, breaking hydration. */}
             {props.onMarkAssigned &&
-              props.position.optionType === "put" &&
               props.position.direction === "short" && (
                 <span
                   role="button"
@@ -829,6 +830,7 @@ export function PositionCard(props: Props) {
                       strike: props.position.strike,
                       expiry: props.position.expiry,
                       remainingContracts: props.position.remainingContracts,
+                      optionType: props.position.optionType,
                     });
                   }}
                   onKeyDown={(e) => {
@@ -841,10 +843,15 @@ export function PositionCard(props: Props) {
                         strike: props.position.strike,
                         expiry: props.position.expiry,
                         remainingContracts: props.position.remainingContracts,
+                        optionType: props.position.optionType,
                       });
                     }
                   }}
-                  title="Mark as assigned — close the puts at $0.00 and receive shares at the strike"
+                  title={
+                    props.position.optionType === "call"
+                      ? "Mark as assigned — close the calls at $0.00 and record shares called away at the strike"
+                      : "Mark as assigned — close the puts at $0.00 and receive shares at the strike"
+                  }
                   className="cursor-pointer rounded border border-amber-500/30 bg-amber-500/5 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-amber-300/80 hover:border-amber-400/50 hover:text-amber-200"
                 >
                   Assigned

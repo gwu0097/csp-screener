@@ -3,6 +3,7 @@ import {
   autoExpirePosition,
   recordAssignment,
 } from "@/lib/expire-positions";
+import { reduceStockLotForCallAssignment } from "@/lib/positions";
 import { createServerClient } from "@/lib/supabase";
 import { requireUserId, authErrorResponse } from "@/lib/auth";
 
@@ -129,6 +130,7 @@ export async function POST(req: NextRequest) {
             contracts_closed: r.contracts_closed,
             stock_price_used: stockPrice,
             reason: r.reason,
+            optionType: r.optionType,
           };
         }
         // assigned without a stockPrice → no safe way to compute
@@ -170,16 +172,28 @@ export async function POST(req: NextRequest) {
   ).length;
   const assignedCount = ok.filter((r) => r.action === "assigned").length;
 
-  // For every successful assignment, look up the put's symbol /
+  // For every successful assignment, look up the option's symbol /
   // strike / etc. so the UI can render the stock-prompt rows. The
   // CONTRACTS count comes from result.contracts_closed (computed off
   // remaining = opened − prior_closes inside recordAssignment) — NOT
   // from total_contracts on the row, which is the historical "ever
   // opened" count and over-counts after partial closes / rolls.
+  //
+  // Puts and calls diverge from here: a put assignment means BUYING
+  // shares — `assignments[]` feeds the existing AssignmentStockPromptModal,
+  // which creates a new stock_long position (unchanged). A call
+  // assignment means shares are CALLED AWAY — the opposite direction —
+  // so instead of prompting to create shares, this reduces an existing
+  // stock_long lot for that symbol right here (reduceStockLotForCallAssignment,
+  // the same shared rule mark-assigned/route.ts uses for the early-
+  // assignment button) and reports the outcome in `calledAway[]`
+  // rather than opening a stock-creation prompt.
   const assignedResults = ok.filter((r) => r.action === "assigned");
   const contractsByPosition = new Map<string, number>();
+  const optionTypeByPosition = new Map<string, "put" | "call">();
   for (const r of assignedResults) {
     contractsByPosition.set(r.positionId, r.contracts_closed ?? 0);
+    optionTypeByPosition.set(r.positionId, r.optionType === "call" ? "call" : "put");
   }
   const assignedIds = assignedResults.map((r) => r.positionId);
   type AssignmentDetail = {
@@ -193,13 +207,22 @@ export async function POST(req: NextRequest) {
     shares: number;
     expiry: string;
   };
+  type CalledAwayDetail = {
+    positionId: string;
+    symbol: string;
+    strike: number;
+    contracts: number;
+    shares: number;
+    expiry: string;
+    stockLotAdjusted: boolean;
+    note: string;
+  };
   const assignments: AssignmentDetail[] = [];
+  const calledAway: CalledAwayDetail[] = [];
   if (assignedIds.length > 0) {
     const detailRes = await sb
       .from("positions")
-      .select(
-        "id,symbol,broker,strike,expiry,avg_premium_sold",
-      )
+      .select("id,symbol,broker,strike,expiry,avg_premium_sold")
       .in("id", assignedIds)
       .eq("user_id", userId);
     type Row = {
@@ -213,6 +236,35 @@ export async function POST(req: NextRequest) {
     for (const row of (detailRes.data ?? []) as Row[]) {
       const strike = Number(row.strike);
       const contracts = contractsByPosition.get(row.id) ?? 0;
+      const shares = contracts * 100;
+      const optionType = optionTypeByPosition.get(row.id) ?? "put";
+      if (optionType === "call") {
+        const reduced = await reduceStockLotForCallAssignment(
+          sb,
+          userId,
+          row.symbol,
+          shares,
+          strike,
+          row.expiry,
+        );
+        calledAway.push({
+          positionId: row.id,
+          symbol: row.symbol,
+          strike,
+          contracts,
+          shares,
+          expiry: row.expiry,
+          stockLotAdjusted: reduced.ok,
+          note: reduced.ok
+            ? `${shares} shares sold @ $${strike.toFixed(2)}`
+            : reduced.reason === "no_lot"
+              ? `No single tracked stock lot covers ${shares} shares — use Sell Shares if you track this position's stock.`
+              : reduced.reason === "ambiguous_lot"
+                ? `Multiple stock lots could cover ${shares} shares — use Sell Shares to pick the right one.`
+                : `Stock lot couldn't be updated (${reduced.detail ?? "unknown error"}) — use Sell Shares to record it.`,
+        });
+        continue;
+      }
       const avgPremium =
         row.avg_premium_sold !== null ? Number(row.avg_premium_sold) : null;
       // Option A: cost basis = strike. Premium is realized on the
@@ -227,7 +279,7 @@ export async function POST(req: NextRequest) {
         contracts,
         avgPremiumSold: avgPremium,
         costBasis: strike,
-        shares: contracts * 100,
+        shares,
         expiry: row.expiry,
       });
     }
@@ -240,5 +292,6 @@ export async function POST(req: NextRequest) {
     totalRealizedPnl: Math.round(totalPnl * 100) / 100,
     results,
     assignments,
+    calledAway,
   });
 }
