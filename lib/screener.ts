@@ -222,8 +222,8 @@ export type StageFourResult = {
     // when bid itself is missing/non-numeric — never backfilled from
     // mark/last, same "no bid = no real market" reasoning as the
     // hard-kill it mirrors. This is what CustomStrikeAnalyzer/
-    // EditableStrikeCell/walkStrikeLadder must use for premium; `mark`
-    // stays mid-for-display, `last` stays informational-only.
+    // EditableStrikeCell/evaluateReferenceStrike must use for premium;
+    // `mark` stays mid-for-display, `last` stays informational-only.
     premiumFill: number;
     // True when this strike's mid was untrustworthy (crossed or
     // missing ask) and premiumFill fell back to bid instead — surfaced
@@ -386,72 +386,39 @@ export type ThreeLayerGrade = {
   // question than finalGrade does. finalGrade/unrated/opportunityGrade
   // are UNCHANGED by this addition — Fix 2's gate still governs them
   // exactly as before. POP here is evaluated at the 2xEM reference
-  // strike (stable, comparable across candidates) — NOT the same POP
-  // as ladderRecommendation's, which is strike-specific to whatever the
-  // ladder recommends. Two different numbers serving two purposes.
+  // strike (stable, comparable across candidates) — the ONLY strike
+  // this app ever recommends; see referenceStrikeCheck below.
   setupGrade: Grade;
-  // Walks the chain from the 2xEM strike toward the money looking for a
-  // real-bid rung worth trading. See PASS_3.md for the full derivation.
-  ladderRecommendation: LadderRecommendation;
+  // Checks whether the 2xEM strike itself has a real, tradeable bid —
+  // and reports its premium/POP/%OTM when it does. Previously this
+  // walked the chain toward the money looking for a closer rung to
+  // recommend instead; that inward walk was removed (see PASS_3.md's
+  // follow-up note) because it silently overrode the user's own 2xEM
+  // rule for the sake of finding *any* tradeable premium, including
+  // strikes with a $0.10 bid / no last trade. The 2xEM strike is the
+  // recommendation, full stop — this field is diagnostic only (is it
+  // liquid, at what price) and never recommends a different strike.
+  referenceStrikeCheck: ReferenceStrikeCheck;
 };
 
 // Client-facing categorization, computed here where the thresholds live —
 // the UI must never re-derive this from a raw yield/POP comparison (those
 // thresholds have already moved twice in this pass; a client-side copy
 // would silently drift out of sync).
-export type LadderOutcome = "moved" | "premium_below_pop_floor" | "no_vol";
-
-export type LadderRecommendation =
+export type ReferenceStrikeCheck =
   | {
-      status: "moved";
-      outcome: LadderOutcome;
+      status: "tradeable";
       referenceStrike: number;
-      referenceHasBid: boolean;
-      recommendedStrike: number;
-      recommendedEmMultiple: number;
       // Fill-priced (mid by default — see computeFillPrice), not bid.
-      recommendedPremiumFill: number;
-      recommendedPctOtm: number;
-      recommendedPop: number;
-      recommendedDelta: number;
-      // True whenever the recommended strike differs from the 2xEM
-      // reference: Fix B's lossMultiplier (0.331) was measured as
-      // overshoot PAST A 2xEM THRESHOLD specifically — every breach
-      // event in that calibration pool was defined relative to 2xEM.
-      // Applying the same multiplier at a closer strike is a valid
-      // formula application but an extrapolation beyond what was
-      // actually measured (a closer strike breaches more often, with a
-      // plausibly different typical overshoot-in-EM-units than the
-      // 2xEM-specific figure). Not a bug, not fixed here — surfaced so
-      // a moved-strike EV is never read as equally trustworthy as a
-      // 2xEM EV. See PASS_3.md's logged follow-up: the multiplier
-      // should eventually be a function of strike distance.
-      evExtrapolated: boolean;
-      // Computed via the SAME EV formula as industryFactors.expectedValue
-      // (computeCspExpectedValue), just fed this strike's real pop/premium
-      // instead of the 2xEM default. Fix A/B/C math itself is untouched.
-      expectedValue: number;
-      // Strikes in the walk range whose delta violates monotonicity
-      // (less negative than the strike immediately below it) — a
-      // corrupted/stale quote, not a market condition, per
-      // isDeltaMonotonicityViolation. Never recommendable; listed here
-      // so the exclusion is visible rather than silent, same pattern as
-      // impliedMoveMethod="iv_formula_degraded" elsewhere in this file.
-      deltaAnomalyStrikes: number[];
+      premiumFill: number;
+      pctOtm: number;
+      pop: number;
+      delta: number;
       text: string;
     }
   | {
-      status: "skip_no_tradeable_strike";
-      outcome: LadderOutcome;
+      status: "no_bid";
       referenceStrike: number;
-      // Nearest real bid found ANYWHERE between the reference strike
-      // and spot, even if it failed the yield/delta/EM-multiple floor —
-      // diagnostic only, distinguishes "there's money here but only at
-      // a reckless distance" from "there's no bid anywhere at all."
-      nearestRealBidStrike: number | null;
-      nearestRealBidPop: number | null;
-      nearestRealBidEmMultiple: number | null;
-      deltaAnomalyStrikes: number[];
       text: string;
     };
 
@@ -2669,10 +2636,9 @@ export async function getPersonalHistory(
   }
 }
 
-// Fix A/B/C's EV formula, factored out so PASS_3's ladder-recommended-
-// strike EV can reuse the exact same math (not a re-derivation) instead
-// of being fed the 2xEM defaults. Unchanged from calculateThreeLayerGrade's
-// original inline version.
+// Fix A/B/C's EV formula, factored out from calculateThreeLayerGrade's
+// original inline version. Used for the base 2xEM-strike EV only — this
+// app never computes EV for any other strike.
 function computeCspExpectedValue(params: {
   pop: number;
   premium: number;
@@ -2694,8 +2660,8 @@ function computeCspExpectedValue(params: {
 // cascade calculateThreeLayerGrade uses for finalGrade, minus every
 // opportunity/premium clause. Premium is compensation, not opportunity;
 // this answers a different question. POP passed in must be the 2xEM-
-// reference POP (stable, comparable across candidates) — not whatever
-// strike the ladder ends up recommending.
+// reference POP (stable, comparable across candidates) — the only
+// strike this app ever recommends.
 function computeSetupGrade(
   crushGrade: Grade,
   probabilityOfProfit: number,
@@ -2752,254 +2718,46 @@ function computeSetupGrade(
   return setupGrade;
 }
 
-// PASS_3: walks availableStrikes from the 2xEM reference strike toward
-// the money looking for the FIRST (least aggressive, not max-yield —
-// see PASS_3.md §2 for why max-yield overshoots) rung clearing all
-// three derived bars:
-//   yield >= 0.40%   — gradeFromYield's existing B threshold, reused
-//   |delta| <= 0.25  — scoreDelta's existing zero-credit cutoff, reused
-//   EM-multiple >= 1.0 — derived from the EM's own meaning: below 1x
-//     the strike sits INSIDE the priced-in move, a categorically
-//     different risk posture than "closer," not a tunable choice.
-// Never recommends a rung with premiumFill=0 (availableStrikes already
-// encodes the no-bid-fallback rule) or one that would fail
-// Fix A's no-arbitrage floor (moot here — every rung is OTM, strike
-// below spot, so intrinsic is always 0).
-// gradeFromYield's C floor, not B. The B threshold (0.40%) asked for a
-// better trade than the strategy actually takes — real A-graded fills
-// (GEV 0.29%, INTC 0.27%, CME 0.26%, TMUS 0.25%, PM 0.21%) all land in
-// the C bucket by yield alone; grading them A comes from crush/POP/
-// history, not premium richness. Combined with the 95% POP floor below,
-// requiring B-grade yield on top asked for a strictly better trade than
-// the strategy's own precedent ever clears.
-const LADDER_MIN_YIELD_PCT = YIELD_GRADE_C_THRESHOLD_PCT;
-// POP floor, not a delta-scoring cutoff. scoreDelta's |delta|<=0.25 is a
-// credit-scoring boundary (it still pays out 2pts up to 0.25) and permits
-// POP down to ~75% — a materially different risk posture than the 95%+
-// win rate the 2xEM strategy targets. The floor here is pinned directly
-// to that stated target, not discounted: a moved strike is meant to be
-// "the same strategy, closer in," not "trade a lower-conviction setup for
-// premium." 1 - |delta| is the standard POP proxy used everywhere else
-// in this file.
-const LADDER_MIN_POP = 0.95;
-const LADDER_MIN_EM_MULTIPLE = 1.0;
-
-function walkStrikeLadder(
+// PASS_3: reports whether the 2xEM reference strike itself has a real,
+// tradeable bid — and its premium/POP/%OTM when it does. This used to
+// walk availableStrikes toward the money looking for a closer rung to
+// recommend instead of the 2xEM strike; that inward walk is removed.
+// It was overriding the user's own 2xEM rule to find *any* tradeable
+// premium — on one real case it walked 9 strikes toward the money to
+// land on a $0.10 bid / $1.55 ask contract with no last trade, which
+// is not a better trade, it's a worse one wearing a passing badge.
+// 2xEM is the recommendation, full stop; this function never proposes
+// an alternative — it only says whether THAT strike is liquid.
+function evaluateReferenceStrike(
   availableStrikes: NonNullable<StageFourResult["availableStrikes"]> | undefined,
   spot: number,
-  emPct: number,
   referenceStrike: number,
-  lossMultiplier: number,
-  commission: number,
-): LadderRecommendation {
+): ReferenceStrikeCheck {
   const strikes = availableStrikes ?? [];
-  if (spot <= 0 || emPct <= 0 || strikes.length === 0) {
+  const rung = strikes.find((s) => s.strike === referenceStrike) ?? null;
+  // premiumFill is fill-priced (mid by default) but is exactly 0 only
+  // when the raw bid itself is 0 — computeFillPrice never invents a
+  // positive fill from nothing, so this test means "no real bid," not
+  // "mid rounded to zero." Same noBid rule runStageFour already applies
+  // to the suggested strike (bid<=0 -> premium forced to 0, hard-killed
+  // to opportunityGrade F).
+  if (!rung || rung.premiumFill <= 0) {
     return {
-      status: "skip_no_tradeable_strike",
-      outcome: "no_vol",
+      status: "no_bid",
       referenceStrike,
-      nearestRealBidStrike: null,
-      nearestRealBidPop: null,
-      nearestRealBidEmMultiple: null,
-      deltaAnomalyStrikes: [],
-      text: `No bid at 2xEM ($${referenceStrike.toFixed(2)}). Cannot evaluate the ladder — spot/EM/chain unavailable.`,
+      text: `No bid at 2xEM ($${referenceStrike.toFixed(2)}).`,
     };
   }
-
-  // Moving "closer" means a HIGHER strike than the deep-OTM 2xEM
-  // reference (never further out — premium only decreases moving away
-  // from the money). Ascending strike order = walking from 2xEM toward
-  // the money.
-  const rungsAll = strikes
-    .filter((s) => s.strike >= referenceStrike && s.strike < spot)
-    .map((s) => ({
-      ...s,
-      pctOtm: ((spot - s.strike) / spot) * 100,
-      emMultiple: ((spot - s.strike) / spot) / emPct,
-      yieldPct: s.strike > 0 ? (s.premiumFill / s.strike) * 100 : 0,
-      pop: 1 - Math.abs(s.delta),
-      deltaMonotonicityViolation: false,
-    }))
-    .sort((a, b) => a.strike - b.strike);
-
-  const referenceRung = rungsAll.find((r) => r.strike === referenceStrike) ?? null;
-  const referenceHasBid = (referenceRung?.premiumFill ?? 0) > 0;
-
-  // Zero-bid rungs are unquoted contracts — the same noBid rule
-  // runStageFour already applies to the suggested strike itself
-  // (bid<=0 -> premium forced to 0, hard-killed to opportunityGrade F).
-  // Excluded from the walk entirely, not merely deprioritized: a $0
-  // bid against a wide, stale ask isn't "a worse trade," it's not a
-  // trade. premiumFill is fill-priced (mid by default) but is exactly
-  // 0 only when the raw bid itself is 0 — computeFillPrice never
-  // invents a positive fill from nothing, so this filter still means
-  // "no real bid," not "mid rounded to zero."
-  const rungs = rungsAll.filter((r) => r.premiumFill > 0);
-
-  // Delta-monotonicity invariant, not a tunable threshold: for a put, a
-  // HIGHER strike can never have a LESS negative delta than a lower
-  // strike — a further-OTM put is never more likely to finish ITM than
-  // a closer one. A violation means the quote is stale/corrupted, not
-  // that the market is doing something unusual (this is exactly what
-  // produced the earlier CHTR "$96, 97% POP" result — POP is
-  // delta-derived, and LADDER_MIN_POP is the ladder's only safety gate,
-  // so a corrupted delta lets a bad quote pass a real check). Compared
-  // against the last KNOWN-GOOD delta, skipping over already-flagged
-  // rungs, so one bad quote doesn't mask the next one behind it.
-  let lastGoodDelta: number | null = null;
-  const deltaAnomalyStrikes: number[] = [];
-  for (const r of rungs) {
-    const violation = lastGoodDelta !== null && r.delta > lastGoodDelta;
-    r.deltaMonotonicityViolation = violation;
-    if (violation) {
-      deltaAnomalyStrikes.push(r.strike);
-    } else {
-      lastGoodDelta = r.delta;
-    }
-  }
-  const anomalyNote =
-    deltaAnomalyStrikes.length > 0
-      ? ` (excluded ${deltaAnomalyStrikes.length} stale-delta quote${deltaAnomalyStrikes.length > 1 ? "s" : ""} from the walk: ${deltaAnomalyStrikes.map((s) => `$${s.toFixed(2)}`).join(", ")})`
-      : "";
-
-  const eligible = rungs.filter(
-    (r) =>
-      !r.deltaMonotonicityViolation &&
-      r.pop >= LADDER_MIN_POP &&
-      r.yieldPct >= LADDER_MIN_YIELD_PCT &&
-      r.emMultiple >= LADDER_MIN_EM_MULTIPLE,
-  );
-
-  if (eligible.length === 0) {
-    // Diagnostic for the skip case: report the closest NEAR MISS, not
-    // just "the first strike with any bid" (which is usually the
-    // reference strike itself — true but uninformative, since a real,
-    // larger bid often exists further in that fails only one bar by a
-    // small margin). Respect the EM floor as non-negotiable when
-    // picking the near miss — a strike inside 1xEM isn't "close," it's
-    // a different risk posture — then take the highest yield among
-    // what's left as the closest-to-qualifying candidate. Never a
-    // monotonicity-flagged rung — recommending the near miss on a
-    // corrupted delta would repeat the exact problem this guards.
-    const clean = rungs.filter((r) => !r.deltaMonotonicityViolation);
-    const emSafe = clean.filter((r) => r.emMultiple >= LADDER_MIN_EM_MULTIPLE);
-    const nearMiss =
-      emSafe.length > 0
-        ? emSafe.reduce((a, b) => (b.yieldPct > a.yieldPct ? b : a))
-        : (clean.sort((a, b) => a.strike - b.strike)[0] ?? null);
-    // "premium_below_pop_floor" only when POP is the SOLE blocker — real,
-    // safe-distance premium exists, just at a risk posture outside the
-    // strategy. Anything else (no near miss, or the near miss also fails
-    // yield/EM) is genuinely "no_vol": there's nothing worth trading here
-    // regardless of risk tolerance.
-    const outcome: LadderOutcome =
-      nearMiss !== null &&
-      nearMiss.yieldPct >= LADDER_MIN_YIELD_PCT &&
-      nearMiss.emMultiple >= LADDER_MIN_EM_MULTIPLE &&
-      nearMiss.pop < LADDER_MIN_POP
-        ? "premium_below_pop_floor"
-        : "no_vol";
-    let text: string;
-    if (nearMiss) {
-      const reasons: string[] = [];
-      if (nearMiss.yieldPct < LADDER_MIN_YIELD_PCT) {
-        reasons.push(`yield ${nearMiss.yieldPct.toFixed(2)}% < ${LADDER_MIN_YIELD_PCT}% floor`);
-      }
-      if (nearMiss.pop < LADDER_MIN_POP) {
-        reasons.push(`POP ${(nearMiss.pop * 100).toFixed(0)}% < ${(LADDER_MIN_POP * 100).toFixed(0)}% floor`);
-      }
-      if (nearMiss.emMultiple < LADDER_MIN_EM_MULTIPLE) {
-        reasons.push(`${nearMiss.emMultiple.toFixed(2)}xEM < 1.0xEM floor`);
-      }
-      const reasonText = reasons.length > 0 ? reasons.join(", ") : "no rung clears every bar at once";
-      text =
-        `No bid at 2xEM ($${referenceStrike.toFixed(2)}). Nearest real bid: $${nearMiss.strike.toFixed(2)} ` +
-        `(${nearMiss.emMultiple.toFixed(2)}xEM), $${nearMiss.premiumFill.toFixed(2)} mid (${nearMiss.yieldPct.toFixed(2)}% yield, ` +
-        `${(nearMiss.pop * 100).toFixed(0)}% POP) — fails ${reasonText}. Skip — no vol to monetize within your risk tolerance.` +
-        anomalyNote;
-    } else if (rungs.length > 0) {
-      text =
-        `No bid at 2xEM ($${referenceStrike.toFixed(2)}). Real bids exist toward the money but every one fails the ` +
-        `delta-monotonicity check — treating as unquoted. Skip.` + anomalyNote;
-    } else {
-      text = `No bid at 2xEM ($${referenceStrike.toFixed(2)}). No real bid anywhere in the chain toward the money. Skip.`;
-    }
-    return {
-      status: "skip_no_tradeable_strike",
-      outcome,
-      referenceStrike,
-      nearestRealBidStrike: nearMiss?.strike ?? null,
-      nearestRealBidPop: nearMiss?.pop ?? null,
-      nearestRealBidEmMultiple: nearMiss?.emMultiple ?? null,
-      deltaAnomalyStrikes,
-      text,
-    };
-  }
-
-  const best = eligible[0];
-  // Direction invariant: for a put, "closer to the money" is a HIGHER
-  // strike, never lower — `rungs` is already filtered to
-  // strike >= referenceStrike, so this should be unreachable. Asserted
-  // explicitly rather than trusted implicitly: a below-reference
-  // recommendation must fail loudly, never ship silently.
-  if (best.strike < referenceStrike) {
-    throw new Error(
-      `walkStrikeLadder invariant violated: recommendedStrike $${best.strike} < ` +
-        `referenceStrike $${referenceStrike} — a put recommendation must never move ` +
-        `further OTM than the 2xEM reference.`,
-    );
-  }
-  const pop = best.pop;
-  const movedFromReference = best.strike !== referenceStrike;
-  const expectedValue = computeCspExpectedValue({
-    pop,
-    premium: best.premiumFill,
-    emPct,
-    lossMultiplier,
-    currentPrice: spot,
-    commission,
-  });
-
-  // The loss model was calibrated to overshoot PAST 2xEM specifically;
-  // applying it to a much closer strike is an extrapolation that plausibly
-  // OVERSTATES the assignment loss (closer strikes breach more often, but
-  // typically by less per breach — see PASS_3.md's logged follow-up). A
-  // negative EV here is therefore less trustworthy than a positive one,
-  // not equally trustworthy-but-bad — the text must not read as "trade
-  // this, EV agrees" when the sign is exactly what's in question.
-  let evNote = "";
-  if (movedFromReference) {
-    evNote =
-      expectedValue < 0
-        ? ` Modeled EV is -$${Math.abs(expectedValue).toFixed(2)}, but that's likely pessimistic: it applies the ` +
-          `2xEM-calibrated loss model to a strike only ${best.emMultiple.toFixed(2)}xEM out, inside where that ` +
-          `multiplier was measured. Judge this on POP/yield/OTM above, not the EV sign.`
-        : ` EV $${expectedValue.toFixed(2)} — still extrapolates the 2xEM-calibrated loss model to a closer strike, ` +
-          `so treat the magnitude as approximate, not precise.`;
-  }
-  const text =
-    (movedFromReference
-      ? `No bid at 2xEM ($${referenceStrike.toFixed(2)}). Best tradeable strike: $${best.strike.toFixed(2)} ` +
-        `(${best.emMultiple.toFixed(2)}xEM), $${best.premiumFill.toFixed(2)} mid, ${(pop * 100).toFixed(0)}% POP, ` +
-        `${best.pctOtm.toFixed(1)}% OTM.` + evNote
-      : `2xEM strike ($${referenceStrike.toFixed(2)}) is tradeable: $${best.premiumFill.toFixed(2)} mid, ` +
-        `${(pop * 100).toFixed(0)}% POP, ${best.pctOtm.toFixed(1)}% OTM.`) + anomalyNote;
-
+  const pop = 1 - Math.abs(rung.delta);
+  const pctOtm = spot > 0 ? ((spot - referenceStrike) / spot) * 100 : 0;
   return {
-    status: "moved",
-    outcome: "moved",
+    status: "tradeable",
     referenceStrike,
-    referenceHasBid,
-    recommendedStrike: best.strike,
-    recommendedEmMultiple: best.emMultiple,
-    recommendedPremiumFill: best.premiumFill,
-    recommendedPctOtm: best.pctOtm,
-    recommendedPop: pop,
-    recommendedDelta: best.delta,
-    evExtrapolated: movedFromReference,
-    expectedValue,
-    deltaAnomalyStrikes,
-    text,
+    premiumFill: rung.premiumFill,
+    pctOtm,
+    pop,
+    delta: rung.delta,
+    text: `2xEM strike ($${referenceStrike.toFixed(2)}) is tradeable: $${rung.premiumFill.toFixed(2)} mid, ${(pop * 100).toFixed(0)}% POP, ${pctOtm.toFixed(1)}% OTM.`,
   };
 }
 
@@ -3451,8 +3209,8 @@ export function calculateThreeLayerGrade(
   // PASS_3: setupGrade answers "is this name's earnings setup favorable"
   // — same cascade as finalGrade, minus the opportunity/premium gate.
   // POP here is the 2xEM-reference POP (probabilityOfProfit, unchanged
-  // above) — stable and comparable across candidates, NOT the same POP
-  // the ladder recommendation reports for whichever strike it picks.
+  // above) — stable and comparable across candidates. The 2xEM strike
+  // is the only strike this app ever recommends; see referenceStrikeCheck.
   const setupGrade = computeSetupGrade(
     crushGrade,
     probabilityOfProfit,
@@ -3463,17 +3221,15 @@ export function calculateThreeLayerGrade(
     historyScope,
   );
 
-  // Walks the chain from the 2xEM strike (== `strike` above) toward the
-  // money for a real-bid rung worth trading. finalGrade/unrated/
-  // opportunityGrade/expectedValue above are completely unchanged by
-  // this — Fix 2's gate still governs them exactly as before this pass.
-  const ladderRecommendation = walkStrikeLadder(
+  // Diagnostic only — is the 2xEM strike (== `strike` above) itself
+  // liquid, and at what price. finalGrade/unrated/opportunityGrade/
+  // expectedValue above are entirely unaffected by this; it never
+  // recommends a different strike (see evaluateReferenceStrike's
+  // comment for why the inward walk this used to do was removed).
+  const referenceStrikeCheck = evaluateReferenceStrike(
     stageFourResult.availableStrikes,
     currentPrice,
-    emPct,
     strike,
-    lossMultiplier,
-    commission,
   );
 
   return {
@@ -3526,6 +3282,6 @@ export function calculateThreeLayerGrade(
     recommendationReason,
     expirySource,
     setupGrade,
-    ladderRecommendation,
+    referenceStrikeCheck,
   };
 }

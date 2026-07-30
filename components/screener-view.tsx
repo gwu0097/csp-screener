@@ -34,7 +34,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import type { ScreenerResult, StageFourResult, LadderRecommendation } from "@/lib/screener";
+import type { ScreenerResult, StageFourResult, ReferenceStrikeCheck } from "@/lib/screener";
 import type { PerplexityNewsResult } from "@/lib/perplexity";
 import type { MarketContext } from "@/lib/market";
 import type { CrushContext, OutlierQuarter } from "@/lib/crush-context";
@@ -193,24 +193,24 @@ function displayFinalGrade(tl: { finalGrade: string; unrated?: boolean } | null 
   return tl.finalGrade;
 }
 
-// Pass 3: tradeability at whatever strike actually has a real bid, not just
-// the 2xEM reference the Grade column reflects. `outcome` is computed
-// server-side in walkStrikeLadder — never re-derive it from a raw
-// yield/POP comparison here (those thresholds have moved twice already).
-function ladderOutcomeBadgeColor(outcome: LadderRecommendation["outcome"]): string {
-  if (outcome === "moved") return "border-emerald-500/40 bg-emerald-500/20 text-emerald-300";
-  if (outcome === "premium_below_pop_floor") return "border-amber-500/40 bg-amber-500/20 text-amber-300";
-  return "border-border bg-background text-muted-foreground"; // no_vol
+// Pass 3: is the 2xEM reference strike (the ONLY strike this app ever
+// recommends) actually liquid. `status` is computed server-side in
+// evaluateReferenceStrike — never re-derive it from a raw yield/POP
+// comparison here. This used to report a DIFFERENT, closer-to-the-
+// money strike the app walked to when 2xEM itself had no bid; that
+// walk was removed — a thin/no-bid 2xEM strike is now just reported as
+// such, not silently swapped for one with a $0.10 bid and no last
+// trade. The user picks a different strike themselves if they want one.
+function referenceStrikeBadgeColor(status: ReferenceStrikeCheck["status"]): string {
+  if (status === "tradeable") return "border-emerald-500/40 bg-emerald-500/20 text-emerald-300";
+  return "border-border bg-background text-muted-foreground"; // no_bid
 }
 
-function ladderChipLabel(ladder: LadderRecommendation): string {
-  if (ladder.status === "moved") {
-    return `${fmtPrice(ladder.recommendedStrike)} (${ladder.recommendedEmMultiple.toFixed(1)}x) ${(ladder.recommendedPop * 100).toFixed(0)}%`;
+function referenceStrikeChipLabel(check: ReferenceStrikeCheck): string {
+  if (check.status === "tradeable") {
+    return `${fmtPrice(check.premiumFill)} mid · ${(check.pop * 100).toFixed(0)}% POP`;
   }
-  if (ladder.outcome === "premium_below_pop_floor" && ladder.nearestRealBidStrike !== null) {
-    return `${fmtPrice(ladder.nearestRealBidStrike)} · ${((ladder.nearestRealBidPop ?? 0) * 100).toFixed(0)}% POP`;
-  }
-  return "No vol";
+  return "No bid";
 }
 
 // Shared shape for a manually-selected strike, whether sourced from
@@ -226,21 +226,12 @@ type StrikeOverride = {
   bidAskSpreadPct: number;
 };
 
-// Same precedence as ladderChipLabel, factored out so the Options Chain
-// tab can center its ±5-strike band on the same strike the ladder chip
-// is actually telling the user to look at — a moved recommendation, a
-// premium_below_pop_floor near-miss, or (no_vol / no ladder data yet)
-// the 2xEM reference strike itself.
+// The 2xEM strike is the only recommendation this app makes — no
+// ladder walk to a different rung. Factored out so the Options Chain
+// tab centers its ±5-strike band on the same strike every other
+// surface (Strike column default, TweetTab default, CustomStrikeAnalyzer)
+// already anchors on.
 function recommendedStrikeFor(r: ScreenerResult): number | null {
-  const ladder = r.threeLayer?.ladderRecommendation;
-  if (ladder?.status === "moved") return ladder.recommendedStrike;
-  if (
-    ladder?.status === "skip_no_tradeable_strike" &&
-    ladder.outcome === "premium_below_pop_floor" &&
-    ladder.nearestRealBidStrike !== null
-  ) {
-    return ladder.nearestRealBidStrike;
-  }
   return r.stageFour?.suggestedStrike ?? null;
 }
 
@@ -697,9 +688,14 @@ export function ScreenerView({ connected }: Props) {
   const [tracked, setTracked] = useState<Set<string>>(new Set());
   // Per-row strike overrides applied via inline-edit. Snapshots premium /
   // delta / spread% from the chosen entry in stageFour.availableStrikes
-  // so subsequent re-renders don't have to rerun the lookup. Cleared
-  // implicitly by Apply Watchlist / Run Analysis (orphan keys are
-  // harmless; the table reads via key lookup).
+  // so subsequent re-renders don't have to rerun the lookup. Explicitly
+  // cleared for any row being re-analyzed (runAnalysisOn/
+  // runAnalysisSingle, below) — a stale override otherwise silently
+  // survives fresh stageFour data landing under the same symbol+
+  // earningsDate id, showing a strike from a previous run's chain that
+  // no longer matches. Apply Watchlist does NOT clear anything: it only
+  // adds/removes rows, never replaces an existing row's stageFour, so
+  // there's nothing stale to clear there.
   const [strikeOverrides, setStrikeOverrides] = useState<Record<string, StrikeOverride>>({});
   // Conviction note for the Tweet tab, keyed the same way as
   // strikeOverrides — lives here (not local to ExpandedDetail) so it
@@ -1929,6 +1925,29 @@ export function ScreenerView({ connected }: Props) {
     setAnalyzingSymbols(
       new Set(candidatesToAnalyze.map((r) => r.symbol.toUpperCase())),
     );
+    // A stale strikeOverrides entry for a row being re-analyzed would
+    // otherwise silently survive the fresh stageFour/availableStrikes
+    // this call is about to fetch — the comment on strikeOverrides'
+    // declaration claims Run Analysis clears it, but nothing actually
+    // did (confirmed root cause of a real case: a row showed a $84
+    // strike with no user click after a re-analyze, left over from an
+    // earlier click on the same symbol+earningsDate id). Clear here,
+    // before the fetch, so a re-analyzed row always starts back at its
+    // fresh 2xEM suggestion.
+    const reanalyzedIds = new Set(
+      candidatesToAnalyze.map((r) => `${r.symbol}-${r.earningsDate}`),
+    );
+    setStrikeOverrides((prev) => {
+      const next = { ...prev };
+      let changed = false;
+      reanalyzedIds.forEach((id) => {
+        if (id in next) {
+          delete next[id];
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
 
     // ---- Pass 2 — Schwab options + stages 3/4 ----
     let p2: {
@@ -2034,6 +2053,19 @@ export function ScreenerView({ connected }: Props) {
       next.add(upper);
       return next;
     });
+    // Same stale-override risk as runAnalysisOn (see its comment) — this
+    // row's id keeps the same symbol+earningsDate across a single-row
+    // refresh, so a prior click's override would otherwise silently
+    // survive fresh stageFour data landing below.
+    {
+      const staleId = `${candidate.symbol}-${candidate.earningsDate}`;
+      setStrikeOverrides((prev) => {
+        if (!(staleId in prev)) return prev;
+        const next = { ...prev };
+        delete next[staleId];
+        return next;
+      });
+    }
     try {
       const res = await fetch("/api/screener/analyze-single", {
         method: "POST",
@@ -2529,9 +2561,9 @@ export function ScreenerView({ connected }: Props) {
                     }
                   />
                   <TableHead
-                    title="Where the real trade is, if not at the 2xEM strike above. Walks the chain from 2xEM toward the money for the closest rung clearing yield >= 0.20%, POP >= 95%, EM >= 1.0x."
+                    title="Is the 2xEM strike above actually tradeable — a real bid, and at what premium/POP. Never a different strike: 2xEM is the recommendation, full stop."
                   >
-                    Ladder
+                    Liquidity
                   </TableHead>
                   <SortableHeader label="Price" active={sortKey === "price"} dir={sortDir} onClick={() => onSort("price")} />
                   <TableHead>Earnings</TableHead>
@@ -2664,25 +2696,20 @@ export function ScreenerView({ connected }: Props) {
                           )}
                         </TableCell>
                         <TableCell>
-                          {r.threeLayer?.ladderRecommendation ? (
+                          {r.threeLayer?.referenceStrikeCheck ? (
                             <Tooltip>
                               <TooltipTrigger asChild>
                                 <span
                                   className={cn(
                                     "inline-flex cursor-default items-center gap-1 rounded-md border px-2 py-1 text-sm font-semibold",
-                                    ladderOutcomeBadgeColor(r.threeLayer.ladderRecommendation.outcome),
+                                    referenceStrikeBadgeColor(r.threeLayer.referenceStrikeCheck.status),
                                   )}
                                 >
-                                  {ladderChipLabel(r.threeLayer.ladderRecommendation)}
-                                  {r.threeLayer.ladderRecommendation.deltaAnomalyStrikes.length > 0 && (
-                                    <span className="text-rose-400">
-                                      ⚠{r.threeLayer.ladderRecommendation.deltaAnomalyStrikes.length}
-                                    </span>
-                                  )}
+                                  {referenceStrikeChipLabel(r.threeLayer.referenceStrikeCheck)}
                                 </span>
                               </TooltipTrigger>
                               <TooltipContent className="max-w-xs whitespace-normal text-sm">
-                                {r.threeLayer.ladderRecommendation.text}
+                                {r.threeLayer.referenceStrikeCheck.text}
                               </TooltipContent>
                             </Tooltip>
                           ) : (
@@ -3931,7 +3958,7 @@ type RefreshedChain = {
 // Delta all recompute from data already in `s` (bid/ask/mark/last/
 // delta are on every contract Schwab returns, refreshed or not — no
 // extra fetch, no approximation). POP is delta-derived (1 − |delta|,
-// the same formula walkStrikeLadder uses per rung) and shown here as a
+// the same formula evaluateReferenceStrike uses) and shown here as a
 // read-only recap, not written back to threeLayer.industryFactors —
 // that POP is deliberately the fixed 2xEM-reference number, not
 // whatever strike is currently selected (see computeSetupGrade). This
@@ -4140,8 +4167,8 @@ function OptionsChainTab({
           </span>
           <span className="text-muted-foreground">
             — this row&apos;s Strike/Premium/%Drop/Yield%/Delta now use this pick. The row&apos;s
-            actual grade and ladder are unchanged — only the preview above reflects this strike.
-            ↺ reset in the Strike column reverts to{" "}
+            actual grade and Liquidity column are unchanged — only the preview above reflects
+            this strike. ↺ reset in the Strike column reverts to{" "}
             {r.stageFour?.suggestedStrike !== null && r.stageFour?.suggestedStrike !== undefined
               ? fmtPrice(r.stageFour.suggestedStrike)
               : "the suggested strike"}
