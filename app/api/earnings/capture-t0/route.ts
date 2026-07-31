@@ -19,7 +19,10 @@ export const maxDuration = 60;
 // Auth: Authorization: Bearer $CRON_SECRET (middleware lets this path
 // through without a session; the secret is the only gate).
 // Query: ?dryRun=1 computes and returns everything without writing;
-//        ?symbol=ADBE&date=YYYY-MM-DD targets one event (testing).
+//        ?symbol=ADBE&date=YYYY-MM-DD targets one event (testing);
+//        &timing=amc|bmo optionally sets the test event's timing
+//        (defaults to "unknown" — treated as AMC by runT1Capture's
+//        session gate).
 export async function POST(req: NextRequest) {
   const denied = requireCronSecret(req);
   if (denied) return denied;
@@ -27,9 +30,12 @@ export async function POST(req: NextRequest) {
   const dryRun = req.nextUrl.searchParams.get("dryRun") === "1";
   const symbol = req.nextUrl.searchParams.get("symbol");
   const date = req.nextUrl.searchParams.get("date");
+  const timingParam = req.nextUrl.searchParams.get("timing");
+  const timing: "amc" | "bmo" | "unknown" =
+    timingParam === "amc" || timingParam === "bmo" ? timingParam : "unknown";
   const only =
     symbol && date && /^\d{4}-\d{2}-\d{2}$/.test(date)
-      ? [{ symbol, earnings_date: date }]
+      ? [{ symbol, earnings_date: date, timing }]
       : undefined;
 
   const report = await runT0Capture({ dryRun, only });

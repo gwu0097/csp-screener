@@ -98,6 +98,21 @@ function addDaysIso(iso: string, days: number): string {
   return d.toISOString().slice(0, 10);
 }
 
+// Cadence guard (PASS_2D) — REMOVED (PASS_2E). Base rate of wrong
+// earnings_date values is 27/2438 (1.1%); the guard flagged 11.4% of
+// the table at tolerance=12 and 17.7% at tolerance=7 (best-case
+// precision ~9%), and at the literal default (12) it missed both
+// motivating cases (GD 9-day deviation, XOM 7-day deviation — both
+// under the threshold). A false positive here is expensive: it nulls
+// price/implied-move data, pulling the row out of
+// buildQuarterlyMoveRatio's pool entirely — an 11%+ flag rate would
+// have shrunk an already-thin pool (44% of candidates already sit at
+// n<=2) for no net detection benefit. The quarter-end guard (still
+// active, 8/8 validated, near-deterministic) already handles 23/27 of
+// the real bad dates; the remaining single-name drift class (GD/XOM
+// style) has no working detector yet — see git history for the prior
+// checkCadence implementation if revisiting this.
+
 // First Friday on or after the given date. Used to locate the post-earnings
 // expiry for recovery analysis. Mirrors lib/screener.ts::nextFridayOnOrAfter.
 function nextFridayOnOrAfterIso(iso: string): string {
@@ -607,21 +622,45 @@ export async function updateEncyclopedia(symbol: string): Promise<UpdateSummary>
       if (m !== null && Math.abs(m) >= 0.01) continue;
     }
 
-    const price = hour
-      ? await fetchYahooPriceActionTimed(sym, earnings_date, hour)
-      : await fetchYahooPriceAction(sym, earnings_date);
-    const implied_move_pct = await fetchImpliedMove(sym, earnings_date);
-    const breach = calculateBreachAnalysis({
-      price_before: price.price_before,
-      price_after: price.price_after,
-      price_at_expiry: price.price_at_expiry,
-      implied_move_pct,
-      actual_move_pct: price.actual_move_pct,
-    });
+    // Write-time quarter-end guard (PASS_2D): calMatch failing means
+    // earnings_date fell back to r.period, the raw FISCAL QUARTER END —
+    // never a real announcement date. Never write move data computed
+    // against an untrusted date, even if fetchYahooPriceAction's
+    // largest-gap scan happens to find a plausible-looking move; that
+    // scan can only be trusted when it's anchored to a date we know is
+    // real. Skip the price/implied-move fetch entirely (no point
+    // spending the calls) and tag the row low-confidence instead of
+    // writing it as trusted. Same principle for a defensive isQuarterEndDate
+    // check in case a future calMatch source ever resolves to one directly.
+    const dateUntrusted = !calMatch || isQuarterEndDate(earnings_date);
+    const price = dateUntrusted
+      ? { price_before: null, price_after: null, actual_move_pct: null, price_at_expiry: null }
+      : hour
+        ? await fetchYahooPriceActionTimed(sym, earnings_date, hour)
+        : await fetchYahooPriceAction(sym, earnings_date);
+    const implied_move_pct = dateUntrusted ? null : await fetchImpliedMove(sym, earnings_date);
+    const breach = dateUntrusted
+      ? { move_ratio: null, two_x_em_strike: null, breached_two_x_em: null, recovered_by_expiry: null }
+      : calculateBreachAnalysis({
+          price_before: price.price_before,
+          price_after: price.price_after,
+          price_at_expiry: price.price_at_expiry,
+          implied_move_pct,
+          actual_move_pct: price.actual_move_pct,
+        });
+
+    if (dateUntrusted) {
+      console.warn(
+        `[encyclopedia] ${sym} ${earnings_date}: no calendar re-map (Yahoo calendar doesn't cover this quarter) — ` +
+          `withholding move data, tagging date_confidence=low instead of writing against an unverified quarter-end date.`,
+      );
+    }
 
     // A row is "complete" when the core quantitative fields are present;
-    // narrative/IV fields are Phase-2 concerns.
+    // narrative/IV fields are Phase-2 concerns. An untrusted-date row is
+    // never complete — its core fields are deliberately null.
     const is_complete =
+      !dateUntrusted &&
       r.actual !== null &&
       r.estimate !== null &&
       price.price_before !== null &&
@@ -659,6 +698,7 @@ export async function updateEncyclopedia(symbol: string): Promise<UpdateSummary>
       news_summary: null,
       perplexity_pulled_at: null,
       data_source: "finnhub",
+      date_confidence: dateUntrusted ? "low" : "confirmed",
       is_complete,
     };
     const up = await sb
@@ -1217,6 +1257,8 @@ export async function reingestHistoricalDates(
 type HistoryRow = {
   symbol: string;
   earnings_date: string;
+  timing: "amc" | "bmo" | "unknown" | null;
+  date_confidence: "confirmed" | "low" | null;
   price_before: number | null;
   price_after: number | null;
   implied_move_pct: number | null;
@@ -1261,6 +1303,7 @@ async function readHistoryRow(
 async function upsertHistoryStub(
   symbol: string,
   earningsDate: string,
+  timing: "amc" | "bmo" | "unknown" = "unknown",
 ): Promise<void> {
   const sb = createServerClient();
   const existing = await readHistoryRow(symbol, earningsDate);
@@ -1273,6 +1316,7 @@ async function upsertHistoryStub(
         earnings_date: earningsDate,
         data_source: "encyclopedia-live",
         is_complete: false,
+        timing,
       },
       { onConflict: "symbol,earnings_date" },
     );
@@ -1361,11 +1405,12 @@ export type T0Result =
 export async function captureEarningsT0(
   symbol: string,
   earningsDate: string,
-  opts?: { dryRun?: boolean },
+  opts?: { dryRun?: boolean; timing?: "amc" | "bmo" | "unknown" },
 ): Promise<T0Result> {
   const sym = symbol.toUpperCase();
   const dryRun = opts?.dryRun === true;
-  if (!dryRun) await upsertHistoryStub(sym, earningsDate);
+  const timing = opts?.timing ?? "unknown";
+  if (!dryRun) await upsertHistoryStub(sym, earningsDate, timing);
   const row = await readHistoryRow(sym, earningsDate);
   if (!row && !dryRun) {
     return { captured: false, skipped: true, reason: "row_not_found" };
@@ -1454,6 +1499,12 @@ export async function captureEarningsT0(
       implied_move_source: "schwab_t0",
       iv_before,
       two_x_em_strike,
+      // Prefer this call's real calendar-sourced timing; fall back to
+      // whatever the row already carried (e.g. a stub seeded by
+      // persistLiveImpliedMove, which has no calendar context) rather
+      // than clobbering a known value with "unknown".
+      timing: timing !== "unknown" ? timing : (row?.timing ?? "unknown"),
+      t0_captured_at: new Date().toISOString(),
     })
     .eq("symbol", sym)
     .eq("earnings_date", earningsDate);
@@ -1465,6 +1516,12 @@ export async function captureEarningsT0(
 }
 
 // ---------- T1: post-earnings capture ----------
+
+// Configurable floor for the too-early-capture guard below — a real
+// earnings reaction essentially never lands under 1% AND shows flat-
+// or-rising IV in the same read; a capture that does is far more
+// likely a pre-print snapshot than a genuinely quiet quarter.
+export const TOO_EARLY_ACTUAL_FLOOR = 0.01;
 
 export type T1Result =
   | {
@@ -1553,6 +1610,23 @@ export async function captureEarningsT1(
   const iv_crush_magnitude = (iv_before - iv_after) / iv_before;
   const breached_two_x_em = price_after < two_x_em_strike;
 
+  // Recurrence guard (PASS_2C): a too-early capture (T1 running before
+  // the market has had a chance to react — same-session on an AMC name
+  // being the primary case, but this catches any timing miss) shows a
+  // near-zero realized move paired with flat-to-rising IV. Reject and
+  // log rather than write a phantom row — the eligibility gate in
+  // runT1Capture should already prevent this for AMC names, but this is
+  // a backstop, not a replacement for that fix. The row stays eligible
+  // (iv_after still null) and is retried on the next cron run.
+  if (iv_crush_magnitude <= 0 && Math.abs(actual_move_pct) < TOO_EARLY_ACTUAL_FLOOR) {
+    console.warn(
+      `[encyclopedia:T1] ${sym} ${earningsDate}: rejected — looks like a too-early capture ` +
+        `(iv_crush_magnitude=${iv_crush_magnitude.toFixed(4)} <= 0, |actual_move_pct|=${Math.abs(actual_move_pct).toFixed(4)} ` +
+        `< floor ${TOO_EARLY_ACTUAL_FLOOR}). Not writing — will retry on the next eligible cron run.`,
+    );
+    return { captured: false, skipped: true, reason: "too_early_capture" };
+  }
+
   if (opts?.dryRun === true) {
     return {
       captured: true,
@@ -1576,6 +1650,7 @@ export async function captureEarningsT1(
       iv_crush_magnitude,
       breached_two_x_em,
       is_complete: true,
+      t1_captured_at: new Date().toISOString(),
     })
     .eq("symbol", sym)
     .eq("earnings_date", earningsDate);
@@ -1598,7 +1673,8 @@ export async function captureEarningsT1(
 // Quarter-end dates from Phase 1's /stock/earnings ingestion always land
 // on the last day of Mar/Jun/Sep/Dec. Those aren't announcement dates, so
 // "next Friday after earnings" computes a wildly wrong expiry. Skip them.
-function isQuarterEndDate(iso: string): boolean {
+// Exported for direct testing of the write-time guard in updateEncyclopedia.
+export function isQuarterEndDate(iso: string): boolean {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
   if (!m) return false;
   const month = Number(m[2]);

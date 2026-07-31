@@ -137,6 +137,75 @@ export async function getCrushHistory(
   });
 }
 
+// ---------- PASS_2E: population mean move_ratio (shrinkage prior) ----------
+//
+// Feeds applyShrinkage's populationMean — the "regress toward" target
+// for low-n tickers (see lib/screener.ts's shrinkage docblock: n=1
+// candidates graded 4.64 mean historicalMoveScore vs 3.17 at n=5+,
+// because move_ratio is right-skewed and a single draw disproportion-
+// ately lands below the mean).
+//
+// PostgREST on this project caps any single request at 1000 rows
+// (db-max-rows) regardless of the requested limit — confirmed live,
+// not assumed. The wrapper (lib/supabase.ts) has no .range()/offset
+// support, so this paginates with a keyset cursor on `id` (a UUID —
+// lexicographic ordering is arbitrary but stable and gives a complete,
+// non-overlapping partition across pages, which is all pagination
+// needs here; the actual VALUE of id carries no meaning).
+//
+// Cached in-process for 30 minutes — this is a full-table-ish scan
+// (~2-3 requests as of this audit), too expensive to redo once per
+// candidate in a screener batch that may grade 100+ candidates.
+type PopulationMeanCache = { value: number; n: number; at: number } | null;
+let populationMeanCache: PopulationMeanCache = null;
+const POPULATION_MEAN_CACHE_TTL_MS = 30 * 60 * 1000;
+
+export async function getPopulationMeanMoveRatio(opts?: { forceFresh?: boolean }): Promise<{ mean: number; n: number }> {
+  if (!opts?.forceFresh && populationMeanCache && Date.now() - populationMeanCache.at < POPULATION_MEAN_CACHE_TTL_MS) {
+    return { mean: populationMeanCache.value, n: populationMeanCache.n };
+  }
+  const sb = createServerClient();
+  type Row = { id: string; actual_move_pct: number | null; implied_move_pct: number | null; move_ratio: number | null };
+  let sum = 0;
+  let count = 0;
+  let cursor: string | null = null;
+  const PAGE = 1000;
+  for (;;) {
+    let q = sb
+      .from("earnings_history")
+      .select("id,actual_move_pct,implied_move_pct,move_ratio")
+      .order("id", { ascending: true })
+      .limit(PAGE);
+    if (cursor !== null) q = q.gt("id", cursor);
+    const res = await q;
+    if (res.error) {
+      console.warn(`[earnings-history-table] getPopulationMeanMoveRatio page failed: ${res.error.message}`);
+      break;
+    }
+    const rows = (res.data ?? []) as Row[];
+    for (const r of rows) {
+      const ratio =
+        r.move_ratio ??
+        (r.actual_move_pct !== null && r.implied_move_pct !== null && r.implied_move_pct > 0
+          ? Math.abs(r.actual_move_pct) / r.implied_move_pct
+          : null);
+      if (ratio !== null && Number.isFinite(ratio)) {
+        sum += ratio;
+        count += 1;
+      }
+    }
+    if (rows.length < PAGE) break;
+    cursor = rows[rows.length - 1].id;
+  }
+  // Fallback only reachable if the table has zero valid pairs at all
+  // (shouldn't happen in practice) — 1.0 is the "realized exactly
+  // matched implied" neutral point, not a guess at any real bias.
+  const mean = count > 0 ? sum / count : 1.0;
+  populationMeanCache = { value: mean, n: count, at: Date.now() };
+  console.log(`[earnings-history-table] population mean move_ratio recomputed: mean=${mean.toFixed(4)} n=${count}`);
+  return { mean, n: count };
+}
+
 // ---------- Fix B: empirical E[loss|breach] shrinkage ladder ----------
 //
 // Reads (implied_move_pct, actual_move_pct) pairs directly — NOT the

@@ -41,6 +41,26 @@ function addDaysIso(iso: string, days: number): string {
   return d.toISOString().slice(0, 10);
 }
 
+// Session gate, not date gate — the actual fix for T1's same-session-
+// AMC contamination bug. BMO: the print already happened before
+// today's open, so same-day (earnings_date === todayEt) capture is
+// correct — unchanged from before. AMC (or unknown timing, treated
+// conservatively as AMC): the print hasn't happened yet as of this
+// morning if earnings_date === todayEt, so the earliest eligible
+// capture is the NEXT session (earnings_date < todayEt). Deliberately
+// NOT a blanket "exclude earnings_date === today" filter — that would
+// also break same-day BMO capture, which must keep working. Exported
+// standalone (not inlined in runT1Capture) so it's directly testable
+// against known cases without needing a live Schwab connection or DB.
+export function isT1SessionEligible(
+  row: { earnings_date: string; timing: string | null },
+  todayEt: string,
+): boolean {
+  const timing = (row.timing ?? "unknown").toLowerCase();
+  if (timing === "bmo") return row.earnings_date <= todayEt;
+  return row.earnings_date < todayEt;
+}
+
 export type CaptureItem = {
   symbol: string;
   earnings_date: string;
@@ -148,7 +168,7 @@ export async function runT0Capture(opts?: {
   dryRun?: boolean;
   // Test hook: capture exactly these {symbol, date} pairs, skipping
   // calendar + relevance selection. Used by the dry-run simulator.
-  only?: Array<{ symbol: string; earnings_date: string }>;
+  only?: Array<{ symbol: string; earnings_date: string; timing?: "amc" | "bmo" | "unknown" }>;
 }): Promise<CaptureReport> {
   const dryRun = opts?.dryRun === true;
   const report: CaptureReport = {
@@ -168,18 +188,22 @@ export async function runT0Capture(opts?: {
     return { ...report, ok: false, skipReason: "schwab_disconnected" };
   }
 
-  let candidates: Array<{ symbol: string; earnings_date: string }>;
+  let candidates: Array<{ symbol: string; earnings_date: string; timing: "amc" | "bmo" | "unknown" }>;
   if (opts?.only && opts.only.length > 0) {
     candidates = opts.only.map((c) => ({
       symbol: c.symbol.toUpperCase(),
       earnings_date: c.earnings_date,
+      timing: c.timing ?? "unknown",
     }));
   } else {
     const todayEt = todayEasternIso();
     const tomorrowEt = addDaysIso(todayEt, 1);
-    const byKey = new Map<string, { symbol: string; earnings_date: string }>();
+    const byKey = new Map<string, { symbol: string; earnings_date: string; timing: "amc" | "bmo" | "unknown" }>();
 
-    // Source 1: live earnings calendar ∩ app-known symbols.
+    // Source 1: live earnings calendar ∩ app-known symbols. Carries
+    // real AMC/BMO timing straight from Finnhub — this is now
+    // persisted (captureEarningsT0 writes it), which is what lets
+    // runT1Capture gate on session instead of date.
     const [{ relevant }, calendar] = await Promise.all([
       buildMaintenanceSymbolSets(),
       getTodayEarnings().catch(() => []),
@@ -187,10 +211,15 @@ export async function runT0Capture(opts?: {
     for (const e of calendar) {
       const sym = e.symbol.toUpperCase();
       if (!relevant.has(sym)) continue;
-      byKey.set(`${sym}|${e.date}`, { symbol: sym, earnings_date: e.date });
+      const timing: "amc" | "bmo" | "unknown" = e.timing === "AMC" ? "amc" : e.timing === "BMO" ? "bmo" : "unknown";
+      byKey.set(`${sym}|${e.date}`, { symbol: sym, earnings_date: e.date, timing });
     }
 
     // Source 2: pre-ingested earnings_history rows for the window.
+    // These bypass the calendar fetch above, so there's no real timing
+    // to attach — "unknown" is deliberately conservative (treated as
+    // AMC by runT1Capture's session gate, i.e. it defers a session
+    // rather than risk a same-session AMC capture).
     const sb = createServerClient();
     const pre = await sb
       .from("earnings_history")
@@ -200,7 +229,9 @@ export async function runT0Capture(opts?: {
       .is("iv_before", null);
     for (const r of (pre.data ?? []) as Array<{ symbol: string; earnings_date: string }>) {
       const sym = r.symbol.toUpperCase();
-      byKey.set(`${sym}|${r.earnings_date}`, { symbol: sym, earnings_date: r.earnings_date });
+      const key = `${sym}|${r.earnings_date}`;
+      if (byKey.has(key)) continue; // Source 1 already has real timing for this pair
+      byKey.set(key, { symbol: sym, earnings_date: r.earnings_date, timing: "unknown" });
     }
     candidates = Array.from(byKey.values());
   }
@@ -216,7 +247,7 @@ export async function runT0Capture(opts?: {
       break;
     }
     try {
-      const r = await captureEarningsT0(c.symbol, c.earnings_date, { dryRun });
+      const r = await captureEarningsT0(c.symbol, c.earnings_date, { dryRun, timing: c.timing });
       if (r.captured) {
         const linked = await linkOpenPositions(c.symbol, c.earnings_date, dryRun);
         report.captured.push({
@@ -350,9 +381,12 @@ export async function runT1Capture(opts?: {
   const sb = createServerClient();
   // The REST wrapper has no .not() — fetch the null-iv_after window and
   // require iv_before in memory (same pattern as runEncyclopediaMaintenance).
+  // .lte("earnings_date", todayEt) here is a coarse SQL-level fetch
+  // window only — the real per-row eligibility (session-aware, not
+  // date-aware) is applied below in isSessionEligible.
   const raw = await sb
     .from("earnings_history")
-    .select("symbol,earnings_date,iv_before,implied_move_pct")
+    .select("symbol,earnings_date,iv_before,implied_move_pct,timing")
     .gte("earnings_date", addDaysIso(todayEt, -4))
     .lte("earnings_date", todayEt)
     .is("iv_after", null);
@@ -365,7 +399,10 @@ export async function runT1Capture(opts?: {
     earnings_date: string;
     iv_before: number | null;
     implied_move_pct: number | null;
-  }>).filter((r) => r.iv_before !== null && r.implied_move_pct !== null);
+    timing: string | null;
+  }>)
+    .filter((r) => r.iv_before !== null && r.implied_move_pct !== null)
+    .filter((r) => isT1SessionEligible(r, todayEt));
 
   report.candidates = candidates.length;
   const startedAt = Date.now();

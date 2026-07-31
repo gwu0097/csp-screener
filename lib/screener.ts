@@ -30,6 +30,7 @@ import {
   persistFlowSnapshot,
   persistLiveImpliedMove,
   computeLossMultiplierLadder,
+  getPopulationMeanMoveRatio,
   type CrushHistoryEvent,
   type LossMultiplierResult,
 } from "@/lib/earnings-history-table";
@@ -71,7 +72,12 @@ export type StageTwoResult = {
 
 export type StageThreeResult = {
   score: number;
-  maxScore: 25;
+  // Dynamic: sum of only the sub-score maximums that were actually
+  // computable for this candidate (see combineCrushComponents). 25 when
+  // every component had data; lower when one or more were excluded for
+  // lack of data. Never a component scored as 0 for missing data — it's
+  // dropped from both score and maxScore instead.
+  maxScore: number;
   pass: boolean;
   crushGrade: "A" | "B" | "C" | "F";
   threshold: number;
@@ -84,27 +90,65 @@ export type StageThreeResult = {
     termStructureScore: number;
     ivEdgeScore: number;
     surpriseScore: number;
+    // Which of the five components actually had enough data to be
+    // scored — a component with computed=false was excluded from both
+    // score and maxScore, never scored as a penalizing 0.
+    scoreComponentsComputed: {
+      historicalMove: boolean;
+      consistency: boolean;
+      termStructure: boolean;
+      ivEdge: boolean;
+      surprise: boolean;
+    };
     medianHistoricalMovePct: number | null;
-    // Fix C: mean of each historical event's OWN realized/implied-at-
-    // the-time ratio (getCrushHistory, Schwab-verified quarters only —
-    // see computeCrushRatioCap), applied as a CAP on crushGrade, not
-    // folded into the additive score above. Populated post-hoc in
-    // runStagesThreeFour (needs crushHistory, fetched after this
-    // function returns) — placeholder null/0/false here.
-    // NEVER medianHistoricalMovePct / today's current emPct — that
-    // conflates calibration quality with vol-regime drift (PASS_2A: NOW
-    // read 0.6-0.73x that way vs its real 1.55x per-event mean).
+    // Diagnostic only (display/sort) — median of Yahoo's raw
+    // historicalMoves actual-move array. NOT the scoring input anymore;
+    // see historicalMoveRatio.
+    // RAW per-quarter realized/implied-at-the-time ratio, MEANED across
+    // every quarter with a valid pair (any implied_move_source — see
+    // buildQuarterlyMoveRatio). Diagnostic — historicalMoveScore is now
+    // built from historicalMoveRatioShrunk below, not this value
+    // directly (PASS_2E: raw per-ticker means are systematically
+    // inflated at low n — see applyShrinkage's docblock).
+    historicalMoveRatio: number | null;
+    // Count of quarters that contributed a valid ratio to the mean
+    // above. 0 means historicalMove was excluded from the composite
+    // entirely (see scoreComponentsComputed.historicalMove).
+    historicalMoveRatioN: number;
+    // The estimate historicalMoveScore is ACTUALLY computed from —
+    // historicalMoveRatio shrunk toward populationMeanRatio by
+    // shrinkageK "worth" of population evidence. null iff
+    // historicalMoveRatioN===0 (nothing to shrink, component excluded).
+    historicalMoveRatioShrunk: number | null;
+    populationMeanRatio: number;
+    shrinkageK: number;
+    // Full per-quarter diagnostic breakdown — source used, exclusion
+    // reason, DB-vs-Yahoo divergence flag. Powers the crush caption and
+    // the CLI re-grade validator; not rendered directly in the UI.
+    historicalMoveRatioQuarters: QuarterRatioDetail[];
+    // Mean of each SCHWAB-VERIFIED (schwab/schwab_t0 source only)
+    // historical event's own realized/implied-at-the-time ratio — a
+    // narrower, higher-trust population than historicalMoveRatio above.
+    // Feeds computeVerifiedModifier, applied post-hoc in
+    // runStagesThreeFour once crushHistory is available — placeholder
+    // null/0 here.
     crushRatio: number | null;
-    crushRatioSeverity: "none" | "moderate" | "severe" | null;
+    // Human-readable band the verified ratio landed in (e.g. "severe
+    // miss (>2.0x)"), or null when crushRatioVerifiedN is 0.
+    crushRatioSeverity: string | null;
     crushRatioCapSampleWeight: number;
     // Count of Schwab-verified quarters the ratio/weight above are based
     // on — distinct from historicalMoves.length. 0 is the common case
     // today (~19% of tickers have any); visible so a 0 isn't mistaken
     // for "no data available" rather than "no VERIFIED data available."
+    // At 0, computeVerifiedModifier returns delta 0 — genuinely neutral,
+    // not a ceiling.
     crushRatioVerifiedN: number;
-    crushRatioCap: "A" | "B" | "C" | null;
-    // True when the cap actually lowered the grade the composite score
-    // (or the encyclopedia fallback) would otherwise have produced.
+    // Grade steps applied by computeVerifiedModifier (+raises/-lowers/0
+    // neutral) — replaces the old ceiling-only crushRatioCap.
+    crushVerifiedModifierDelta: number;
+    // True when the modifier actually changed the grade the composite
+    // score (or the encyclopedia fallback) would otherwise have produced.
     crushRatioCapApplied: boolean;
     // Implied move actually used downstream (crush scoring, stage 4
     // strike selection). Straddle-derived when available; see
@@ -659,147 +703,118 @@ function crushThresholdForDte(dte: number): number {
 // penalised stocks where one or two of the five sub-scores were
 // thin. New brackets demand a 72% finish for an A, 56% for a B, and
 // 40% for a C; stocks below 10/25 still skip out as F.
-function gradeFromCrushScore(score: number): StageThreeResult["crushGrade"] {
-  if (score >= 18) return "A";
-  if (score >= 14) return "B";
-  if (score >= 10) return "C";
+//
+// maxScore defaults to 25 (all five components computed) but callers
+// now pass the ACTUAL available-points max after excluding components
+// that had no data — see combineCrushComponents. The 72/56/40% cut
+// points are expressed as fractions of maxScore so a candidate missing
+// a component is graded against what could be measured, not silently
+// scored as if the missing component were a zero.
+function gradeFromCrushScore(score: number, maxScore: number = 25): StageThreeResult["crushGrade"] {
+  if (maxScore <= 0) return "F";
+  const pct = score / maxScore;
+  if (pct >= 18 / 25) return "A";
+  if (pct >= 14 / 25) return "B";
+  if (pct >= 10 / 25) return "C";
   return "F";
 }
 
-// ---------- Fix C: realized/implied ratio as a CAP, not a blend input ----------
+// ---------- Verified-evidence modifier ----------
 //
-// historicalMoveScore (one of five additive sub-scores, 8/25 points) was
-// the only place the realized/implied ratio entered the crush grade — a
-// bad ratio could still be outvoted by the other four (audit finding:
-// "1.24x avg, inside 67% of 3 events, dangerous" still produced Crush B).
-// This applies the ratio as a POST-HOC ceiling on whatever grade the
-// composite produces, so a bad calibration bounds the grade regardless of
-// termStructureScore/ivEdgeScore/etc.
-//
-// PASS_2A revision: the ratio is the MEAN of each historical event's OWN
-// realized-move / implied-move-AT-THE-TIME (getCrushHistory's per-quarter
-// `ratio` field) — never medianHistoricalMovePct / today's current emPct.
-// That earlier version conflated calibration quality with vol-regime
-// drift over time: NOW's real per-event ratios (1.87x Q1'26, 1.23x Q4'25,
-// mean 1.55x) read as a benign 0.6-0.73x when divided by today's current
-// EM instead, because today's IV happens to be higher than those two
-// quarters' implied moves — a fact about vol regime, not about whether
-// NOW's vol was underpriced at the time. Per-event ratios don't have that
-// problem: each is compared against what was actually priced in that
-// quarter.
-//
-// MEAN, not median: with n this thin (rarely more than 2-3 usable
-// quarters — see the source-quality filter below), a single severe print
-// should move the number. That's signal a name has an ugly tail in its
-// history, not an outlier to smooth away; median at n=2 just picks the
-// less alarming of two data points, which is the wrong instinct here.
-//
-// Source-quality filter (PASS_2A follow-up audit): only quarters with
-// implied_move_source IN ("schwab", "schwab_t0") count. Audited the full
-// distribution — of 144 earnings_history rows with any implied_move_pct,
-// 64% are implied_move_source="perplexity" (an LLM asked to recall a
-// historical %, filtered only by its own self-reported confidence and a
-// [5,25]% plausibility band — not verified against real market data) and
-// 17% are "polygon" (no code path anywhere in this repo produces that
-// value — unknown, unverifiable origin). Only 19% are schwab-sourced,
-// live-captured, trustworthy quarters. Building the cap on the other 81%
-// would launder unverified numbers through correct aggregation math.
-// Consequence, stated plainly: with ~19% coverage skewed toward recent
-// quarters (schwab capture only started this pass), most tickers will
-// have 0-1 verified quarters — the ratio-severity tiers will be dormant
-// almost everywhere today, same shape as Fix B's dormant loss-depth
-// multiplier. That's the honest result of only trusting verified data,
-// not a reason to loosen the filter.
-//
-// Severity bands derived from the ratio's own meaning, not fit to any
-// fixture:
-//   ratio <= 1.0            realized has NOT exceeded implied on average
-//                            — no evidence of underpricing, no cap.
-//   1.0 < ratio <= 2.0       "moderate" — realized runs hotter than
-//                            implied, up to double.
-//   ratio > 2.0              "severe" — realized moves TWICE what was
-//                            priced in, on average. 2.0 is not an
-//                            arbitrary pick: it's the same "how far is
-//                            far" multiplier this pass already uses as
-//                            the canonical breach reference (Stage 4's
-//                            2xEM strike, Fix B's breach-past-2xEM
-//                            definition) — reused here, not invented.
-//
-// Sample-size interaction reuses Layer 2's exact weight ladder
-// (getPersonalHistory's tradeCount>=5/2/1 -> 1.0/0.5/0.25), applied to
-// the count of SCHWAB-VERIFIED quarters — not historicalMoves.length,
-// not total quarters with any implied move:
-//   weight 1.0 (n>=5): full ratio-cap applies as derived (B or C).
-//   weight 0.5 (n 2-4): severe evidence still caps at C (a >2x miss is
-//     its own corroboration even at modest n) but moderate evidence does
-//     NOT cap on its own at this weight — however THIN SAMPLES ALSO
-//     IMPOSE A SEPARATE CEILING of B regardless of ratio value ("must not
-//     grant a top grade either" — uncertainty cuts both ways).
-//   weight 0.25 (n==1): a single verified event can't force the
-//     strictest cap alone (severe caps at B here, not C) but the same
-//     thin-sample B ceiling still applies.
-//   n==0 (no schwab-verified quarters at all — the common case today):
-//     NOT treated as "nothing to cap on" — this is the THINNEST possible
-//     case, so the same B ceiling applies here too, for the stated
-//     reason (zero verified history), not silently deferred to some
-//     other mechanism.
+// Historical note: an earlier "Fix C" cap (computeCrushRatioCap/
+// capGrade) applied the schwab-verified ratio as a CEILING only — it
+// could lower a grade but never raise one, and its thin-sample branch
+// ceilinged at B even at verifiedN===0, which scored "no evidence
+// either way" identically to "weak negative evidence." That made
+// missing data an active penalty, not neutral, and was removed
+// entirely (not just unwired) — see git history for the prior
+// implementation and Test/test-crush-ratio-cap.ts (also removed) for
+// its old test coverage. computeVerifiedModifier below replaces it: it
+// can move the grade UP when verified evidence is good, and returns a
+// hard 0 (no modifier at all) when verifiedN===0 — absence of evidence
+// is not evidence of a bad setup.
 const GRADE_ORDER: Record<"A" | "B" | "C" | "F", number> = { A: 3, B: 2, C: 1, F: 0 };
-
-export function capGrade(actual: "A" | "B" | "C" | "F", cap: "A" | "B" | "C" | "F" | null): "A" | "B" | "C" | "F" {
-  if (cap === null) return actual;
-  return GRADE_ORDER[actual] <= GRADE_ORDER[cap] ? actual : cap;
-}
-
-export type CrushRatioCapResult = {
+export type VerifiedModifierResult = {
   ratio: number | null;
-  severity: "none" | "moderate" | "severe" | null;
-  sampleWeight: number;
-  cap: "A" | "B" | "C" | null; // null = uncapped
   verifiedN: number;
+  weight: number;
+  // Grade steps on the A(3)/B(2)/C(1)/F(0) ordinal scale — positive
+  // raises, negative lowers, 0 is neutral.
+  delta: number;
+  band: string;
+  reason: string;
 };
 
-// schwabRatios: each historical event's actualMovePct / impliedMovePct,
-// pre-filtered by the caller to implied_move_source IN
-// ("schwab","schwab_t0") — see getCrushHistory. Never pass a
-// medianMove/currentEM ratio here.
-export function computeCrushRatioCap(schwabRatios: number[]): CrushRatioCapResult {
-  const n = schwabRatios.length;
-  const ratio = n > 0 ? schwabRatios.reduce((sum, r) => sum + r, 0) / n : null;
-  const sampleWeight = n >= 5 ? 1.0 : n >= 2 ? 0.5 : n === 1 ? 0.25 : 0;
+// verifiedRatios: each schwab/schwab_t0-sourced quarter's own
+// actual/implied ratio (same population computeCrushRatioCap used —
+// see the source-quality filter comment above). A single verified
+// quarter can lower a grade (a severe miss is real signal even at
+// n=1) but cannot raise one (one good print isn't enough evidence to
+// certify a top grade) — that asymmetry is intentional, not a bug.
+export function computeVerifiedModifier(verifiedRatios: number[]): VerifiedModifierResult {
+  const n = verifiedRatios.length;
+  if (n === 0) {
+    return {
+      ratio: null,
+      verifiedN: 0,
+      weight: 0,
+      delta: 0,
+      band: "no verified quarters",
+      reason: "0 schwab-verified quarters — neutral, no modifier applied",
+    };
+  }
+  const ratio = verifiedRatios.reduce((sum, r) => sum + r, 0) / n;
+  const weight = n >= 5 ? 1.0 : n >= 2 ? 0.5 : 0.25;
 
-  let severity: "none" | "moderate" | "severe" | null = null;
-  let ratioCap: "A" | "B" | "C" | null = null;
-  if (ratio !== null) {
-    severity = ratio <= 1.0 ? "none" : ratio <= 2.0 ? "moderate" : "severe";
-    if (severity === "severe") {
-      ratioCap = sampleWeight >= 0.5 ? "C" : "B";
-    } else if (severity === "moderate") {
-      ratioCap = sampleWeight >= 1.0 ? "B" : null;
-    }
+  let baseDelta: number;
+  let band: string;
+  if (ratio <= 0.6) {
+    baseDelta = 1;
+    band = "excellent (<=0.6x)";
+  } else if (ratio <= 1.0) {
+    baseDelta = 0;
+    band = "in line (0.6x-1.0x)";
+  } else if (ratio <= 2.0) {
+    baseDelta = -1;
+    band = "moderate miss (1.0x-2.0x)";
+  } else {
+    baseDelta = -2;
+    band = "severe miss (>2.0x)";
   }
 
-  // "Must not grant a top grade either" — thin samples (n<5), INCLUDING
-  // n=0, can't certify an A regardless of how favorable (or absent) the
-  // ratio looks.
-  const thinCeiling: "A" | "B" | "C" | null = sampleWeight < 1.0 ? "B" : null;
+  let delta: number;
+  if (baseDelta === 0) {
+    delta = 0;
+  } else if (baseDelta === 1) {
+    delta = weight >= 0.5 ? 1 : 0; // a single good quarter can't raise alone
+  } else if (baseDelta === -1) {
+    delta = -1; // any verified evidence of a moderate miss counts, even n=1
+  } else {
+    delta = weight >= 0.5 ? -2 : -1; // severe: n=1 still meaningful (-1), n>=2 full -2
+  }
 
-  const cap =
-    ratioCap === null
-      ? thinCeiling
-      : thinCeiling === null
-        ? ratioCap
-        : GRADE_ORDER[ratioCap] <= GRADE_ORDER[thinCeiling]
-          ? ratioCap
-          : thinCeiling;
-
-  return { ratio, severity, sampleWeight, cap, verifiedN: n };
+  return {
+    ratio,
+    verifiedN: n,
+    weight,
+    delta,
+    band,
+    reason: `${n} schwab-verified quarter(s), mean ratio ${ratio.toFixed(3)}x (${band}) -> ${delta >= 0 ? "+" : ""}${delta} grade step(s)`,
+  };
 }
 
-// Score the median historical move against today's IV-implied move.
-// We don't store per-event historical IV (Phase 2), so the denominator
-// is the CURRENT weekly emPct for every event in the window — same as
-// the per-event ratio shown in [DEBUG:SPOT crush].
-//
+const GRADE_STEPS: Array<"A" | "B" | "C" | "F"> = ["F", "C", "B", "A"];
+
+// Applies computeVerifiedModifier's delta to a letter grade, clamped to
+// the A..F range. delta===0 always returns the input grade unchanged —
+// the neutral case is a true no-op, not a re-derivation.
+export function applyGradeModifier(grade: "A" | "B" | "C" | "F", delta: number): "A" | "B" | "C" | "F" {
+  if (delta === 0) return grade;
+  const idx = GRADE_ORDER[grade];
+  const next = Math.max(0, Math.min(3, idx + delta));
+  return GRADE_STEPS[next];
+}
+
 // Bucketing tracks the user-facing crush narrative:
 //   ratio < 0.7   stock historically undershoots the implied move (A)
 //   ratio < 0.85  comfortable margin                             (B)
@@ -808,14 +823,223 @@ export function computeCrushRatioCap(schwabRatios: number[]): CrushRatioCapResul
 //   ratio ≥ 1.2   stock consistently overshoots                  (F)
 // Mapped onto the existing 0-8 sub-score scale (no D in the
 // composite grade type — D collapses to a small partial-credit point).
-function scoreHistoricalMove(medianMovePct: number | null, emPct: number | null): number {
-  if (medianMovePct === null || emPct === null || emPct <= 0) return 0;
-  const ratio = medianMovePct / emPct;
+// ratio is a per-quarter-ratio MEAN (buildQuarterlyMoveRatio) — never
+// medianHistoricalMovePct/today's-current-emPct (that construction
+// mixed one quarter's implied move into every OTHER quarter's actual
+// move, which is a vol-regime read, not a calibration read — see
+// buildQuarterlyMoveRatio's docblock).
+function historicalMoveScoreFromRatio(ratio: number | null): number {
+  if (ratio === null) return 0;
   if (ratio < 0.7) return 8;
   if (ratio < 0.85) return 5;
   if (ratio < 1.0) return 2;
   if (ratio < 1.2) return 1;
   return 0;
+}
+
+// ---------- Shrinkage (PASS_2E) — implemented, DISABLED at k=0 ----------
+//
+// n-distribution audit: mean historicalMoveScore was 4.64 at n=1 vs
+// 3.17 at n=5+ — low-n candidates aren't just noisier, they're
+// systematically INFLATED. Mechanism: move_ratio is right-skewed
+// (population mean sits above its median), so a single draw lands
+// below the mean more often than not and disproportionately catches
+// the top scoring band (<0.7 -> 8pts). More quarters regress toward
+// the population mean. Standard empirical-Bayes shrinkage toward the
+// population mean fixes this without an arbitrary n-based cutoff:
+//   adjusted = (n * tickerMean + k * populationMean) / (n + k)
+// k is the "worth of evidence" a single population-mean draw carries,
+// in units of quarters — k=2 means a ticker needs roughly 2 of its own
+// quarters before its own mean starts to dominate the population prior.
+// n=0 is NOT shrunk — there is no tickerMean to shrink, the component
+// stays excluded via the existing neutral-missing-data path untouched.
+//
+// PASS_2F: held back at k=0 (a verified exact no-op — see
+// applyShrinkage below). At k=2 it reintroduced per-letter
+// non-monotonicity (B below A, F below C) that the pre-shrinkage state
+// didn't have, and monotonicity was the one outcome signal favoring
+// the new grades — not worth trading away for a variance correction
+// with no outcome evidence of its own. The mechanism, the population-
+// mean function, and the k config all stay in place so this can be
+// revisited (e.g. a different prior, a data-driven k) without
+// rebuilding it. Runtime cost is also gated off at k=0 — see the
+// shrinkageEnabled check in runStagesThreeFour, which skips
+// getPopulationMeanMoveRatio's paginated table scan entirely when the
+// result can't affect the score.
+export const DEFAULT_SHRINKAGE_K = 0;
+
+export function applyShrinkage(
+  tickerMean: number | null,
+  n: number,
+  populationMean: number,
+  k: number = DEFAULT_SHRINKAGE_K,
+): number | null {
+  if (tickerMean === null || n <= 0) return null;
+  // k===0 special-cased to return tickerMean directly rather than
+  // (n*tickerMean + 0*populationMean)/(n+0) — algebraically identical,
+  // but NOT bit-exact: floating-point rounding in the multiply-then-
+  // divide can perturb the result (e.g. n=3, tickerMean=1.4 rounds to
+  // 1.3999999999999997), which would silently mean "shrinkage
+  // disabled" isn't quite a true no-op. This makes it exact.
+  if (k === 0) return tickerMean;
+  return (n * tickerMean + k * populationMean) / (n + k);
+}
+
+// ---------- Per-quarter move-ratio construction ----------
+//
+// The prior construction divided a multi-quarter MEDIAN actual move by
+// TODAY's single live implied move — a wrong-denominator bug (every
+// historical quarter got compared against a vol level it never
+// actually traded at). This builds one ratio PER QUARTER, each against
+// that quarter's OWN implied move, then means them.
+export type QuarterRatioDetail = {
+  earningsDate: string;
+  impliedMovePct: number | null;
+  dbActualMovePct: number | null;
+  // Diagnostic only (see divergent/divergencePct below) — NEVER used to
+  // fill actualUsed. PASS_2B finding: EarningsMove.actualMovePct
+  // (lib/yahoo.ts) is UNSIGNED by construction (Math.abs(pct)), while
+  // dbActualMovePct is signed. Comparing them directly manufactures a
+  // large spurious "divergence" whenever the DB's real move was
+  // negative — roughly half of all quarters — independent of whether
+  // the underlying magnitudes actually agree. Kept for visibility, not
+  // corrected here (see the PASS_2B sign-inversion diagnostic).
+  yahooActualMovePct: number | null;
+  actualUsed: number | null;
+  actualSource: "db" | null;
+  ratio: number | null; // null when this quarter is excluded
+  excludedReason: string | null;
+  // True when a DB actual and a Yahoo actual both exist for this
+  // quarter and diverge by more than the threshold — logged only, per
+  // the signed-vs-unsigned caveat above; do not read this as "the DB
+  // value is wrong."
+  divergent: boolean;
+  divergencePct: number | null; // relative, |db-yahoo|/|db|
+};
+
+export type QuarterlyMoveRatioResult = {
+  meanRatio: number | null;
+  n: number; // count of quarters that produced a valid ratio
+  quarters: QuarterRatioDetail[]; // full diagnostic list, newest first
+};
+
+export const DEFAULT_DIVERGENCE_THRESHOLD = 0.2; // 20% relative, configurable per call
+
+// crushHistory: getCrushHistory's per-quarter DB rows (earnings_history),
+// ANY implied_move_source — the schwab-only filter belongs to the
+// verified modifier below, not here; this mean is meant to use every
+// quarter with a real implied/actual pair regardless of source
+// trustworthiness tier.
+// historicalMoves: Yahoo-derived per-quarter actual moves — used ONLY
+// for the divergence DIAGNOSTIC (yahooActualMovePct/divergent fields
+// below), never to fill a missing DB actual. PASS_2B removed the old
+// Yahoo fallback: EarningsMove.actualMovePct is unsigned (see
+// QuarterRatioDetail's docblock), so filling a missing signed DB value
+// with an unsigned Yahoo one could silently corrupt the mean with a
+// sign-flipped magnitude. The neutral-missing-data composite (see
+// combineCrushComponents) makes this costless — an unpaired quarter is
+// simply excluded, same as it would be with no Yahoo data at all.
+// Yahoo never supplies an implied move regardless, so a quarter absent
+// from the DB entirely could never produce a ratio either way.
+export function buildQuarterlyMoveRatio(
+  crushHistory: CrushHistoryEvent[],
+  historicalMoves: EarningsMove[],
+  excludeEarningsDate: string,
+  divergenceThreshold: number = DEFAULT_DIVERGENCE_THRESHOLD,
+): QuarterlyMoveRatioResult {
+  const yahooByDate = new Map(historicalMoves.map((m) => [m.date, m.actualMovePct]));
+  const seenDates = new Set<string>();
+  const quarters: QuarterRatioDetail[] = [];
+
+  for (const h of crushHistory) {
+    if (h.earningsDate === excludeEarningsDate) continue; // today's own not-yet-settled event
+    seenDates.add(h.earningsDate);
+    const implied = h.impliedMovePct;
+    const dbActual = h.actualMovePct;
+    const yahooActual = yahooByDate.get(h.earningsDate) ?? null;
+
+    let divergent = false;
+    let divergencePct: number | null = null;
+    if (dbActual !== null && yahooActual !== null) {
+      const denom = Math.max(Math.abs(dbActual), 1e-6);
+      divergencePct = Math.abs(dbActual - yahooActual) / denom;
+      divergent = divergencePct > divergenceThreshold;
+    }
+
+    if (implied === null || implied <= 0) {
+      quarters.push({
+        earningsDate: h.earningsDate,
+        impliedMovePct: implied,
+        dbActualMovePct: dbActual,
+        yahooActualMovePct: yahooActual,
+        actualUsed: null,
+        actualSource: null,
+        ratio: null,
+        excludedReason: "no implied move on record for this quarter",
+        divergent,
+        divergencePct,
+      });
+      continue;
+    }
+
+    // DB-only — no Yahoo fallback (see docblock above).
+    const actualUsed = dbActual;
+    const actualSource: "db" | null = dbActual !== null ? "db" : null;
+    if (actualUsed === null) {
+      quarters.push({
+        earningsDate: h.earningsDate,
+        impliedMovePct: implied,
+        dbActualMovePct: dbActual,
+        yahooActualMovePct: yahooActual,
+        actualUsed: null,
+        actualSource: null,
+        ratio: null,
+        excludedReason: "no actual move on record in earnings_history for this quarter",
+        divergent,
+        divergencePct,
+      });
+      continue;
+    }
+
+    quarters.push({
+      earningsDate: h.earningsDate,
+      impliedMovePct: implied,
+      dbActualMovePct: dbActual,
+      yahooActualMovePct: yahooActual,
+      actualUsed,
+      actualSource,
+      ratio: Math.abs(actualUsed) / implied,
+      excludedReason: null,
+      divergent,
+      divergencePct,
+    });
+  }
+
+  // Quarters Yahoo knows about but that have no earnings_history row at
+  // all — recorded for visibility only; no implied move exists for
+  // them from any source, so they can never contribute a ratio.
+  for (const m of historicalMoves) {
+    if (m.date === excludeEarningsDate || seenDates.has(m.date)) continue;
+    quarters.push({
+      earningsDate: m.date,
+      impliedMovePct: null,
+      dbActualMovePct: null,
+      yahooActualMovePct: m.actualMovePct,
+      actualUsed: null,
+      actualSource: null,
+      ratio: null,
+      excludedReason: "quarter absent from earnings_history — no implied move available",
+      divergent: false,
+      divergencePct: null,
+    });
+  }
+
+  quarters.sort((a, b) => (a.earningsDate < b.earningsDate ? 1 : a.earningsDate > b.earningsDate ? -1 : 0));
+
+  const valid = quarters.map((q) => q.ratio).filter((r): r is number => r !== null);
+  const meanRatio = valid.length > 0 ? valid.reduce((sum, r) => sum + r, 0) / valid.length : null;
+
+  return { meanRatio, n: valid.length, quarters };
 }
 
 function scoreConsistency(movePcts: number[]): number {
@@ -826,12 +1050,48 @@ function scoreConsistency(movePcts: number[]): number {
   return 0;
 }
 
-function scoreTermStructure(weeklyIv: number | null, monthlyIv: number | null): number {
+export type TermStructureBands = {
+  // Ratio thresholds, highest bucket first — see DEFAULT_TERM_STRUCTURE_BANDS.
+  edges: [number, number, number];
+  points: [number, number, number];
+};
+
+// Re-banded twice (PASS_2A/PASS_2B audits). Original edges (>1.5/>1.3/
+// >1.1) saturated 144/152 (94.7%) of the live population at the full
+// 5/5 — zero discriminating information. A first re-band (edges
+// [3.0,2.2,1.7], fit to only 5 tickers) fixed discrimination but also
+// collapsed the LEVEL: full-population mean contribution fell from
+// ~4.8/5 to 2.12/5, silently tightening the fixed A/B/C grade bands
+// for every candidate (that level shift, not the ranking change, was
+// the dominant driver of an 80/116-candidate downgrade). It also
+// floored legitimate inversions (CDNS 1.61, GLW 1.52) at a hard zero,
+// a false negative — 1.7 truncated the bottom third of the observed
+// ~1.5-3.6 range instead of discriminating across it.
+//
+// These edges were calibrated against the full 152-candidate live
+// weekly/monthly IV ratio population (not just the 5 audit tickers):
+// mean contribution ~3.37/5, distribution roughly 5/45/44/58 across
+// 0/2/3/5 points, and the floor sits at 1.4 specifically so nothing
+// above 1.4 — including CDNS/GLW — ever scores zero. Configurable, not
+// re-hardcoded, so the next audit can retune without touching call
+// sites.
+export const DEFAULT_TERM_STRUCTURE_BANDS: TermStructureBands = {
+  edges: [2.4, 1.9, 1.4],
+  points: [5, 3, 2],
+};
+
+function scoreTermStructure(
+  weeklyIv: number | null,
+  monthlyIv: number | null,
+  bands: TermStructureBands = DEFAULT_TERM_STRUCTURE_BANDS,
+): number {
   if (!weeklyIv || !monthlyIv || monthlyIv <= 0) return 0;
   const ratio = weeklyIv / monthlyIv;
-  if (ratio > 1.5) return 5;
-  if (ratio > 1.3) return 3;
-  if (ratio > 1.1) return 1;
+  const [e0, e1, e2] = bands.edges;
+  const [p0, p1, p2] = bands.points;
+  if (ratio > e0) return p0;
+  if (ratio > e1) return p1;
+  if (ratio > e2) return p2;
   return 0;
 }
 
@@ -843,6 +1103,115 @@ function scoreIvEdge(weeklyIv: number | null, realizedVol: number | null): numbe
   if (ratio >= 1.2 && ratio < 1.3) return 2;
   if (ratio > 1.9) return 1;
   return 0;
+}
+
+// ---------- Pure crush-composite scoring (no I/O) ----------
+//
+// Factored out of runStageThree so the exact production scoring logic
+// is independently callable — the validation/re-grade CLI
+// (scripts/validate-crush-grade-fix.ts) calls this directly against
+// persisted inputs rather than re-implementing the composite math a
+// second time (which would drift from the real pipeline silently).
+export type CrushCompositeInputs = {
+  historicalMoves: EarningsMove[];
+  crushHistory: CrushHistoryEvent[];
+  // The candidate's own earnings date — excluded from crushHistory so
+  // a same-day/not-yet-settled T0/T1 row never enters the ratio.
+  earningsDate: string;
+  dte: number;
+  weeklyIv: number | null;
+  monthlyIv: number | null;
+  realizedVol: number | null;
+  surpriseScore: number;
+  surpriseQuartersExamined: number;
+  termStructureBands?: TermStructureBands;
+  divergenceThreshold?: number;
+  // Population mean of move_ratio across ALL valid paired quarters in
+  // earnings_history (see getPopulationMeanMoveRatio in
+  // lib/earnings-history-table.ts) — required, not defaulted, so a
+  // caller can never silently grade against a stale/hardcoded value.
+  populationMeanRatio: number;
+  shrinkageK?: number;
+};
+
+export type CrushCompositeResult = {
+  score: number;
+  maxScore: number;
+  pass: boolean;
+  crushGrade: "A" | "B" | "C" | "F";
+  threshold: number;
+  historicalMoveScore: number;
+  consistencyScore: number;
+  termStructureScore: number;
+  ivEdgeScore: number;
+  surpriseScore: number;
+  scoreComponentsComputed: {
+    historicalMove: boolean;
+    consistency: boolean;
+    termStructure: boolean;
+    ivEdge: boolean;
+    surprise: boolean;
+  };
+  quarterlyRatio: QuarterlyMoveRatioResult;
+  // The shrunk estimate historicalMoveScore is actually computed from
+  // — see applyShrinkage. null iff quarterlyRatio.n===0 (component
+  // excluded, matches quarterlyRatio.meanRatio being null too).
+  shrunkRatio: number | null;
+  medianHistoricalMovePct: number | null;
+};
+
+export function computeCrushComposite(inputs: CrushCompositeInputs): CrushCompositeResult {
+  const movePcts = inputs.historicalMoves.map((m) => m.actualMovePct);
+  const medianMove = movePcts.length > 0 ? median(movePcts) : null;
+  const quarterlyRatio = buildQuarterlyMoveRatio(
+    inputs.crushHistory,
+    inputs.historicalMoves,
+    inputs.earningsDate,
+    inputs.divergenceThreshold,
+  );
+  const shrunkRatio = applyShrinkage(quarterlyRatio.meanRatio, quarterlyRatio.n, inputs.populationMeanRatio, inputs.shrinkageK);
+
+  const scoreComponentsComputed = {
+    historicalMove: quarterlyRatio.n > 0,
+    consistency: movePcts.length >= 3,
+    termStructure: inputs.weeklyIv !== null && inputs.monthlyIv !== null && inputs.monthlyIv > 0,
+    ivEdge: inputs.weeklyIv !== null && inputs.realizedVol !== null && inputs.realizedVol > 0,
+    surprise: inputs.surpriseQuartersExamined >= 1,
+  };
+
+  const historicalMoveScore = historicalMoveScoreFromRatio(shrunkRatio);
+  const consistencyScore = scoreConsistency(movePcts);
+  const termStructureScore = scoreTermStructure(inputs.weeklyIv, inputs.monthlyIv, inputs.termStructureBands);
+  const ivEdgeScore = scoreIvEdge(inputs.weeklyIv, inputs.realizedVol);
+  const surpriseScore = inputs.surpriseScore;
+
+  const componentPointsMax: Array<[boolean, number, number]> = [
+    [scoreComponentsComputed.historicalMove, historicalMoveScore, 8],
+    [scoreComponentsComputed.consistency, consistencyScore, 4],
+    [scoreComponentsComputed.termStructure, termStructureScore, 5],
+    [scoreComponentsComputed.ivEdge, ivEdgeScore, 4],
+    [scoreComponentsComputed.surprise, surpriseScore, 4],
+  ];
+  const score = componentPointsMax.reduce((sum, [isComputed, points]) => sum + (isComputed ? points : 0), 0);
+  const maxScore = componentPointsMax.reduce((sum, [isComputed, , max]) => sum + (isComputed ? max : 0), 0);
+  const threshold = maxScore > 0 ? (crushThresholdForDte(inputs.dte) / 25) * maxScore : 0;
+
+  return {
+    score,
+    maxScore,
+    pass: maxScore > 0 && score >= threshold,
+    crushGrade: gradeFromCrushScore(score, maxScore),
+    threshold,
+    historicalMoveScore,
+    consistencyScore,
+    termStructureScore,
+    ivEdgeScore,
+    surpriseScore,
+    scoreComponentsComputed,
+    quarterlyRatio,
+    shrunkRatio,
+    medianHistoricalMovePct: medianMove,
+  };
 }
 
 function pickAtmContract(chain: SchwabOptionsChain, expiryPrefix: string, spot: number): SchwabOptionContract | null {
@@ -1078,6 +1447,17 @@ export async function runStageThree(
   chain: SchwabOptionsChain,
   monthlyChain: SchwabOptionsChain | null,
   historicalMoves: EarningsMove[],
+  // Per-quarter DB history (getCrushHistory) — now fetched by the
+  // caller BEFORE this function runs (moved up from its old post-hoc
+  // spot in runStagesThreeFour) so the per-quarter ratio construction
+  // has real implied-move-at-the-time data instead of the old
+  // medianMove/today's-emPct approximation.
+  crushHistory: CrushHistoryEvent[],
+  // Shrinkage prior for historicalMoveRatio (PASS_2E) — see
+  // getPopulationMeanMoveRatio in lib/earnings-history-table.ts.
+  // Fetched once per batch by the caller (cached ~30min), not re-queried
+  // per candidate.
+  populationMeanRatio: number,
   opts: { forceFresh?: boolean } = {},
 ): Promise<StageThreeResult> {
   const sym = candidate.symbol;
@@ -1166,9 +1546,8 @@ export async function runStageThree(
       `ivFormulaEmPct=${ivFormulaEmPct ?? "null"} (weeklyIv * sqrt(${candidate.daysToExpiry}/365))`,
   );
   const movePcts = historicalMoves.map((m) => m.actualMovePct);
-  const medianMove = movePcts.length > 0 ? median(movePcts) : null;
   console.log(
-    `[stage3:${sym}] historicalMoves count=${historicalMoves.length} medianMove=${medianMove ?? "null"} emPct=${emPct ?? "null"}`,
+    `[stage3:${sym}] historicalMoves count=${historicalMoves.length} emPct=${emPct ?? "null"}`,
   );
 
   // 30-day realized vol proxy. Daily bars settle once at EOD, so this
@@ -1195,68 +1574,61 @@ export async function runStageThree(
 
   const surprise = await getEarningsSurpriseHistory(candidate.symbol, { forceFresh: opts.forceFresh });
 
-  const historicalMoveScore = scoreHistoricalMove(medianMove, emPct);
-  const consistencyScore = scoreConsistency(movePcts);
-  const termStructureScore = scoreTermStructure(weeklyIv, monthlyIv);
-  const ivEdgeScore = scoreIvEdge(weeklyIv, realizedVol);
-  const surpriseScore = surprise.surpriseScore;
-
-  const score = historicalMoveScore + consistencyScore + termStructureScore + ivEdgeScore + surpriseScore;
-  const threshold = crushThresholdForDte(candidate.daysToExpiry);
+  const composite = computeCrushComposite({
+    historicalMoves,
+    crushHistory,
+    earningsDate: candidate.earningsDate,
+    dte: candidate.daysToExpiry,
+    weeklyIv,
+    monthlyIv,
+    realizedVol,
+    surpriseScore: surprise.surpriseScore,
+    surpriseQuartersExamined: surprise.quartersExamined,
+    populationMeanRatio,
+  });
+  const {
+    score,
+    maxScore,
+    threshold,
+    crushGrade,
+    historicalMoveScore,
+    consistencyScore,
+    termStructureScore,
+    ivEdgeScore,
+    surpriseScore,
+    scoreComponentsComputed: computed,
+    quarterlyRatio,
+    shrunkRatio,
+    medianHistoricalMovePct: medianMove,
+  } = composite;
 
   console.log(
-    `[stage3:${sym}] SCORES hist=${historicalMoveScore}/8 cons=${consistencyScore}/4 ` +
-      `term=${termStructureScore}/5 ivEdge=${ivEdgeScore}/4 surprise=${surpriseScore}/4 ` +
-      `total=${score}/25 threshold=${threshold} pass=${score >= threshold} ` +
-      `grade=${gradeFromCrushScore(score)}`,
+    `[stage3:${sym}] SCORES hist=${historicalMoveScore}/${computed.historicalMove ? 8 : "excl"} ` +
+      `cons=${consistencyScore}/${computed.consistency ? 4 : "excl"} ` +
+      `term=${termStructureScore}/${computed.termStructure ? 5 : "excl"} ` +
+      `ivEdge=${ivEdgeScore}/${computed.ivEdge ? 4 : "excl"} ` +
+      `surprise=${surpriseScore}/${computed.surprise ? 4 : "excl"} ` +
+      `total=${score}/${maxScore} threshold=${threshold.toFixed(2)} pass=${composite.pass} ` +
+      `grade=${crushGrade} historicalMoveRatio=${quarterlyRatio.meanRatio?.toFixed(3) ?? "null"} (n=${quarterlyRatio.n})`,
   );
   void monthlyExpiryKey;
 
   // ---- DEBUG: SPOT-only validation dump (CRUSH inputs/intermediates). ----
-  // NOTE: per-event implied move is NOT stored in EarningsMove — only `date`,
-  // `actualMovePct`, `direction`. Ratio below uses the CURRENT weekly
-  // IV-implied move (emPct) as denominator for every historical row, which
-  // is the same denominator the median-vs-EM ratio uses in scoreHistoricalMove.
   if (sym === "SPOT") {
-    const events = historicalMoves.map((m) => ({
-      date: m.date,
-      actualMovePct: m.actualMovePct,
-      direction: m.direction,
-      impliedMovePct_current: emPct,
-      ratio_actualOverImplied: emPct && emPct > 0 ? m.actualMovePct / emPct : null,
-    }));
-    const crushRatio =
-      medianMove !== null && emPct !== null && emPct > 0
-        ? medianMove / emPct
-        : null;
-    const ratioGrade =
-      crushRatio === null
-        ? "—"
-        : crushRatio < 0.7
-          ? "A"
-          : crushRatio < 0.85
-            ? "B"
-            : crushRatio < 1.0
-              ? "C"
-              : crushRatio < 1.2
-                ? "D"
-                : "F";
     console.log(
       "[DEBUG:SPOT crush] " +
         JSON.stringify(
           {
             historicalEventCount: historicalMoves.length,
-            events,
-            // Raw historical move array per spec — easy to eyeball.
             historicalMoves: movePcts,
             medianHistoricalMove: medianMove,
             currentImpliedMove: emPct,
-            crushRatio,
-            crushRatioGrade: ratioGrade,
+            quarterlyRatio,
             weeklyIv,
             monthlyIv,
             realizedVol30d: realizedVol,
             dte: candidate.daysToExpiry,
+            scoreComponentsComputed: computed,
             scores: {
               historicalMoveScore,
               consistencyScore,
@@ -1264,15 +1636,15 @@ export async function runStageThree(
               ivEdgeScore,
               surpriseScore,
               total: score,
-              maxScore: 25,
+              maxScore,
               threshold,
-              pass: score >= threshold,
-              grade: gradeFromCrushScore(score),
+              pass: composite.pass,
+              grade: crushGrade,
             },
-            gradeThresholds: "A>=18, B>=14, C>=10, else F",
+            gradeThresholds: "A>=72%, B>=56%, C>=40% of maxScore, else F",
             historicalMoveScoreRule:
-              "ratio = medianMove/emPct: <0.7 => 8pts, <0.85 => 5pts, <1.0 => 2pts, <1.2 => 1pt, else 0",
-            note: "Per-event impliedMove is not stored. crushRatio uses today's weekly IV-implied move for every event.",
+              "ratio = mean of each quarter's own actual/implied: <0.7 => 8pts, <0.85 => 5pts, <1.0 => 2pts, <1.2 => 1pt, else 0",
+            note: "medianHistoricalMove/currentImpliedMove are diagnostic only — historicalMoveScore now comes from quarterlyRatio.meanRatio (per-quarter ratios), not this pair.",
           },
           null,
           2,
@@ -1280,17 +1652,15 @@ export async function runStageThree(
     );
   }
 
-  // Fix C's crushRatioCap is applied later, in runStagesThreeFour, once
-  // getCrushHistory's per-quarter data (with per-event implied_move_source)
-  // is available — this function only has historicalMoves (Yahoo realized
-  // moves) and today's current emPct, which is exactly the wrong pair to
-  // build the ratio from (see the comment on computeCrushRatioCap). These
-  // detail fields are placeholders, overwritten post-hoc.
+  // Verified (schwab-only) modifier is applied post-hoc in
+  // runStagesThreeFour once crushHistory's implied_move_source is
+  // filtered there — these detail fields are placeholders, overwritten
+  // post-hoc.
   return {
     score,
-    maxScore: 25,
-    pass: score >= threshold,
-    crushGrade: gradeFromCrushScore(score),
+    maxScore,
+    pass: composite.pass,
+    crushGrade,
     threshold,
     insufficientData: historicalMoves.length < 3,
     details: {
@@ -1299,13 +1669,20 @@ export async function runStageThree(
       termStructureScore,
       ivEdgeScore,
       surpriseScore,
+      scoreComponentsComputed: computed,
       medianHistoricalMovePct: medianMove,
+      historicalMoveRatio: quarterlyRatio.meanRatio,
+      historicalMoveRatioN: quarterlyRatio.n,
+      historicalMoveRatioShrunk: shrunkRatio,
+      populationMeanRatio,
+      shrinkageK: DEFAULT_SHRINKAGE_K,
+      historicalMoveRatioQuarters: quarterlyRatio.quarters,
       expectedMovePct: emPct,
       crushRatio: null,
       crushRatioSeverity: null,
       crushRatioCapSampleWeight: 0,
       crushRatioVerifiedN: 0,
-      crushRatioCap: null,
+      crushVerifiedModifierDelta: 0,
       crushRatioCapApplied: false,
       impliedMoveMethod,
       impliedMoveDegradedReason,
@@ -2131,7 +2508,25 @@ export async function runStagesThreeFour(
     }
   }
 
-  const historicalMoves = await getHistoricalEarningsMovements(candidate.symbol);
+  // crushHistory moved up from its old post-hoc fetch (below, alongside
+  // optionsFlow) so runStageThree can build the per-quarter move ratio
+  // directly instead of the old medianMove/today's-emPct approximation
+  // — see buildQuarterlyMoveRatio.
+  //
+  // populationMeanRatio (PASS_2E shrinkage prior) is SKIPPED at k=0
+  // (PASS_2F: shrinkage disabled) — applyShrinkage(mean, n, pop, 0)
+  // always returns mean unchanged, so the value literally cannot affect
+  // the score. getPopulationMeanMoveRatio does a paginated full-table
+  // scan (cached ~30min, but still real DB round-trips on a cache
+  // miss); no reason to pay that cost in the hot path when shrinkage is
+  // off. This check assumes no caller overrides shrinkageK away from
+  // DEFAULT_SHRINKAGE_K — if that ever changes, this needs to track it.
+  const shrinkageEnabled = DEFAULT_SHRINKAGE_K !== 0;
+  const [historicalMoves, crushHistory, population] = await Promise.all([
+    getHistoricalEarningsMovements(candidate.symbol),
+    getCrushHistory(candidate.symbol, 8),
+    shrinkageEnabled ? getPopulationMeanMoveRatio() : Promise.resolve({ mean: 1, n: 0 }),
+  ]);
 
   // Monthly IV needs a date RANGE, not a single day — 3rd-Friday monthly
   // expiries only rarely coincide with any given today+N.
@@ -2147,7 +2542,7 @@ export async function runStagesThreeFour(
       `result=${monthlyChain ? "ok" : "null"}`,
   );
 
-  const stageThree = await runStageThree(candidate, chain, monthlyChain, historicalMoves, {
+  const stageThree = await runStageThree(candidate, chain, monthlyChain, historicalMoves, crushHistory, population.mean, {
     forceFresh: opts?.forceFresh,
   });
 
@@ -2216,12 +2611,12 @@ export async function runStagesThreeFour(
     );
   }
 
-  // Crush history (Supabase) + options flow (Schwab full chain) + Fix B's
-  // loss-multiplier ladder run concurrently. All three are stamped on
-  // stageThree.details so the API response surfaces them without
+  // Options flow (Schwab full chain) + Fix B's loss-multiplier ladder
+  // run concurrently. crushHistory was already fetched above (needed
+  // earlier now, for runStageThree's per-quarter ratio). Both stamped
+  // on stageThree.details so the API response surfaces them without
   // changing the top-level result shape.
-  const [crushHistory, optionsFlow, lossMultiplierResult] = await Promise.all([
-    getCrushHistory(candidate.symbol, 8),
+  const [optionsFlow, lossMultiplierResult] = await Promise.all([
     stageThree.details.expectedMovePct !== null
       ? computeOptionsFlow({
           symbol: candidate.symbol,
@@ -2247,18 +2642,19 @@ export async function runStagesThreeFour(
   stageThree.details.crushHistory = crushHistory;
   stageThree.details.optionsFlow = optionsFlow;
 
-  // Fix C: apply the crush-ratio cap now that crushHistory (with each
-  // quarter's implied_move_source) is available. Schwab-only filter per
-  // the PASS_2A source-quality audit — see computeCrushRatioCap's
-  // docblock. Applied AFTER whichever grade is currently on stageThree
-  // (composite score or the encyclopedia-fallback substitution above),
-  // so it's a backstop regardless of which mechanism produced the letter.
-  // Excludes h.earningsDate === candidate.earningsDate: the T0/T1 crush
-  // capture cron writes a schwab_t0 row for the CURRENT cycle's own
-  // earnings before it's happened yet (seeding the pre-earnings implied
-  // move) — found live on NOW's own 2026-07-22 row, actual_move_pct
-  // 0.0003 sampled hours apart same-day, nowhere near a real post-
-  // earnings reaction. That's the live candidate itself, not history.
+  // Verified modifier: apply bidirectional, evidence-scaled adjustment
+  // now that crushHistory (with each quarter's implied_move_source) is
+  // available. Schwab-only filter per the PASS_2A source-quality audit
+  // — see computeVerifiedModifier's docblock. Applied AFTER whichever
+  // grade is currently on stageThree (composite score or the
+  // encyclopedia-fallback substitution above), so it's a backstop
+  // regardless of which mechanism produced the letter. Excludes
+  // h.earningsDate === candidate.earningsDate: the T0/T1 crush capture
+  // cron writes a schwab_t0 row for the CURRENT cycle's own earnings
+  // before it's happened yet (seeding the pre-earnings implied move) —
+  // found live on NOW's own 2026-07-22 row, actual_move_pct 0.0003
+  // sampled hours apart same-day, nowhere near a real post-earnings
+  // reaction. That's the live candidate itself, not history.
   const schwabRatios = crushHistory
     .filter(
       (h) =>
@@ -2267,20 +2663,18 @@ export async function runStagesThreeFour(
         h.earningsDate !== candidate.earningsDate,
     )
     .map((h) => h.ratio as number);
-  const ratioCap = computeCrushRatioCap(schwabRatios);
-  const preCapGrade = stageThree.crushGrade;
-  stageThree.crushGrade = capGrade(preCapGrade, ratioCap.cap);
-  stageThree.details.crushRatio = ratioCap.ratio;
-  stageThree.details.crushRatioSeverity = ratioCap.severity;
-  stageThree.details.crushRatioCapSampleWeight = ratioCap.sampleWeight;
-  stageThree.details.crushRatioVerifiedN = ratioCap.verifiedN;
-  stageThree.details.crushRatioCap = ratioCap.cap;
-  stageThree.details.crushRatioCapApplied = stageThree.crushGrade !== preCapGrade;
+  const modifier = computeVerifiedModifier(schwabRatios);
+  const preModifierGrade = stageThree.crushGrade;
+  stageThree.crushGrade = applyGradeModifier(preModifierGrade, modifier.delta);
+  stageThree.details.crushRatio = modifier.ratio;
+  stageThree.details.crushRatioSeverity = modifier.verifiedN > 0 ? modifier.band : null;
+  stageThree.details.crushRatioCapSampleWeight = modifier.weight;
+  stageThree.details.crushRatioVerifiedN = modifier.verifiedN;
+  stageThree.details.crushVerifiedModifierDelta = modifier.delta;
+  stageThree.details.crushRatioCapApplied = stageThree.crushGrade !== preModifierGrade;
   console.log(
-    `[crush-ratio-cap] ${candidate.symbol} schwabVerifiedN=${ratioCap.verifiedN} ` +
-      `ratio=${ratioCap.ratio?.toFixed(3) ?? "null (no verified quarters)"} severity=${ratioCap.severity ?? "n/a"} ` +
-      `weight=${ratioCap.sampleWeight} cap=${ratioCap.cap ?? "none"} preCapGrade=${preCapGrade} ` +
-      `postCapGrade=${stageThree.crushGrade}`,
+    `[crush-verified-modifier] ${candidate.symbol} ${modifier.reason} ` +
+      `preModifierGrade=${preModifierGrade} postModifierGrade=${stageThree.crushGrade}`,
   );
 
   if (lossMultiplierResult) {
@@ -3080,8 +3474,40 @@ export function calculateThreeLayerGrade(
     );
   }
   if (crushGrade === "F" && !stageThreeResult.insufficientData) {
+    // Branches on which sub-score actually drove the grade below
+    // threshold, and states the numeric ratio, instead of asserting a
+    // fixed "moves exceeded expectations" narrative regardless of
+    // mechanism — historicalMoveScore rewards LOW ratios, so an F can
+    // just as easily come from weak consistency/term-structure/ivEdge/
+    // surprise scores while the move ratio itself looks fine.
+    const d = stageThreeResult.details;
+    const componentFractions: Array<{ name: string; frac: number }> = [
+      d.scoreComponentsComputed.historicalMove
+        ? [{ name: "historical move ratio", frac: d.historicalMoveScore / 8 }]
+        : [],
+      d.scoreComponentsComputed.consistency
+        ? [{ name: "move consistency", frac: d.consistencyScore / 4 }]
+        : [],
+      d.scoreComponentsComputed.termStructure
+        ? [{ name: "IV term structure", frac: d.termStructureScore / 5 }]
+        : [],
+      d.scoreComponentsComputed.ivEdge ? [{ name: "IV edge", frac: d.ivEdgeScore / 4 }] : [],
+      d.scoreComponentsComputed.surprise
+        ? [{ name: "earnings-surprise history", frac: d.surpriseScore / 4 }]
+        : [],
+    ].flat();
+    const weakest =
+      componentFractions.length > 0
+        ? componentFractions.reduce((a, b) => (b.frac < a.frac ? b : a))
+        : null;
+    const ratioText =
+      d.historicalMoveRatio !== null
+        ? `${d.historicalMoveRatio.toFixed(2)}x realized/implied over ${d.historicalMoveRatioN} verified quarter(s)`
+        : "no per-quarter realized/implied ratio available";
     cautions.push(
-      `Crush F — historical moves have consistently exceeded expectations, implied-vol crush less reliable.`,
+      `Crush F — composite score ${stageThreeResult.score}/${stageThreeResult.maxScore} below threshold` +
+        (weakest ? `, driven mainly by ${weakest.name} (${(weakest.frac * 100).toFixed(0)}% of its max)` : "") +
+        `. Historical move ratio: ${ratioText}.`,
     );
   }
   if (cautions.length === 0) {
