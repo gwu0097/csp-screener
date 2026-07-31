@@ -35,6 +35,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { BROKER_ORDER, BROKER_LABEL, type BrokerKey } from "@/lib/brokers";
 
 export type DateRange = { from: string; to: string };
 
@@ -50,7 +51,10 @@ export type PresetKey =
   | "ytd"
   | "all";
 
-export type BrokerFilter = "all" | "schwab" | "schwab2" | "robinhood";
+// Derived from lib/brokers.ts's BROKER_ORDER so new accounts (e.g.
+// covered_calls) appear here automatically instead of needing a
+// second, easy-to-forget edit.
+export type BrokerFilter = "all" | BrokerKey;
 
 export type Granularity = "day" | "week" | "month";
 
@@ -193,9 +197,7 @@ export const PRESET_OPTIONS: Array<{ value: PresetKey; label: string }> = [
 
 export const BROKER_OPTIONS: Array<{ value: BrokerFilter; label: string }> = [
   { value: "all", label: "All" },
-  { value: "schwab", label: "Schwab" },
-  { value: "schwab2", label: "Schwab 2" },
-  { value: "robinhood", label: "Robinhood" },
+  ...BROKER_ORDER.map((key) => ({ value: key, label: BROKER_LABEL[key] })),
 ];
 
 // -------- Date helpers --------

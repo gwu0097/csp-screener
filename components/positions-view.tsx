@@ -19,6 +19,7 @@ import {
 } from "@/components/expire-confirmation-modal";
 import { UndoImportPopover } from "@/components/undo-import-popover";
 import type { ConfirmItem } from "@/components/expire-confirmation-modal";
+import { BROKER_ORDER, BROKER_LABEL } from "@/lib/brokers";
 import { SchwabTokenBanner } from "@/components/schwab-token-banner";
 import {
   SellSharesModal,
@@ -425,14 +426,8 @@ function fmtTimeShort(iso: string): string {
 // from (see the import destination-account selector). It behaves
 // exactly like a real account bucket: own section, own rollup,
 // included in All.
-const BROKER_ORDER = ["schwab", "schwab2", "robinhood", "covered_calls"] as const;
-const BROKER_LABEL: Record<string, string> = {
-  schwab: "Schwab",
-  schwab2: "Schwab 2",
-  robinhood: "Robinhood",
-  covered_calls: "Covered Calls",
-  other: "Other",
-};
+// Source of truth lives in lib/brokers.ts — imported at the top of
+// this file so new accounts show up everywhere automatically.
 
 // Per-account accent palette — drives both the panel border and the
 // active-tab tint. Keep these subtle; the data is the loud part.

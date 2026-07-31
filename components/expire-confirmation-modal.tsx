@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { fmtDollarsSigned } from "@/lib/format";
+import { BROKER_ORDER, BROKER_LABEL } from "@/lib/brokers";
 
 export type PendingConfirmationRow = {
   positionId: string;
@@ -47,15 +48,6 @@ export type ConfirmItem = {
   // for this id. Default for assigned rows = true.
   createStock?: boolean;
 };
-
-const BROKER_LABEL: Record<string, string> = {
-  schwab: "SCHWAB",
-  schwab2: "SCHWAB 2",
-  robinhood: "ROBINHOOD",
-  covered_calls: "COVERED CALLS",
-};
-
-const BROKER_ORDER = ["schwab", "schwab2", "robinhood", "covered_calls"] as const;
 
 function shortExpiry(iso: string): string {
   const d = new Date(iso + "T00:00:00Z");
