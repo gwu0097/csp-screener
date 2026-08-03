@@ -251,8 +251,8 @@ function CompactStat({
 }
 
 // Per-section open/closed state, persisted across reloads — same
-// localStorage pattern as the tweet char limit (screener-view.tsx's
-// LS_TWEET_CHAR_LIMIT): read once at mount via a lazy useState
+// localStorage pattern used elsewhere for sticky UI preferences:
+// read once at mount via a lazy useState
 // initializer, write through on every toggle. Keyed per section so
 // each one remembers its own state independently. A first visit (no
 // stored value yet) falls back to `defaultOpen`.

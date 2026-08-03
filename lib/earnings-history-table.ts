@@ -13,6 +13,10 @@ export type CrushHistoryEvent = {
   ratio: number | null;
   grade: "A" | "B" | "C" | "D" | "F" | null;
   impliedMoveSource: string | null;
+  // Whether earningsDate itself is trusted — see lib/encyclopedia.ts's
+  // date_confidence write path. Not read by any scoring; surfaced for
+  // the Analysis Dump export's per-row provenance.
+  dateConfidence: "confirmed" | "low" | null;
 };
 
 // Quarter label from earnings date. Companies typically report a
@@ -98,7 +102,7 @@ export async function getCrushHistory(
   const res = await sb
     .from("earnings_history")
     .select(
-      "earnings_date,implied_move_pct,actual_move_pct,move_ratio,implied_move_source",
+      "earnings_date,implied_move_pct,actual_move_pct,move_ratio,implied_move_source,date_confidence",
     )
     .eq("symbol", symbol.toUpperCase())
     .order("earnings_date", { ascending: false })
@@ -115,6 +119,7 @@ export async function getCrushHistory(
     actual_move_pct: number | null;
     move_ratio: number | null;
     implied_move_source: string | null;
+    date_confidence: "confirmed" | "low" | null;
   };
   const rows = (res.data ?? []) as Row[];
   return rows.map((r) => {
@@ -133,6 +138,7 @@ export async function getCrushHistory(
       ratio,
       grade: gradeFromRatio(ratio),
       impliedMoveSource: r.implied_move_source,
+      dateConfidence: r.date_confidence,
     };
   });
 }

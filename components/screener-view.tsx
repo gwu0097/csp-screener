@@ -1,12 +1,14 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   Play,
   AlertTriangle,
+  Check,
   ChevronDown,
   ChevronRight,
+  Copy,
   History,
   Info,
   Loader2,
@@ -37,7 +39,6 @@ import { cn } from "@/lib/utils";
 import type { ScreenerResult, StageFourResult, ReferenceStrikeCheck } from "@/lib/screener";
 import type { PerplexityNewsResult } from "@/lib/perplexity";
 import type { MarketContext } from "@/lib/market";
-import type { CrushContext, OutlierQuarter } from "@/lib/crush-context";
 import { CrushHistoryTable } from "@/components/crush-history-table";
 import { OptionsFlowSection } from "@/components/options-flow-section";
 import { PriceChart } from "@/components/price-chart";
@@ -229,7 +230,7 @@ type StrikeOverride = {
 // The 2xEM strike is the only recommendation this app makes — no
 // ladder walk to a different rung. Factored out so the Options Chain
 // tab centers its ±5-strike band on the same strike every other
-// surface (Strike column default, TweetTab default, CustomStrikeAnalyzer)
+// surface (Strike column default, Analysis Dump default, CustomStrikeAnalyzer)
 // already anchors on.
 function recommendedStrikeFor(r: ScreenerResult): number | null {
   return r.stageFour?.suggestedStrike ?? null;
@@ -384,93 +385,6 @@ function resetBatchSizes() {
     }
   } catch {
     /* ignore */
-  }
-}
-
-// Tweet tab's char limit is a sticky user PREFERENCE, not a per-trade
-// setting — it previously lived in a per-row map (tweetCharLimits),
-// which reset to the default the moment you expanded a different
-// symbol and never survived a reload at all. One global value instead,
-// same localStorage pattern as the adaptive batch sizes above: read
-// once at mount via a lazy useState initializer, write through on
-// every change. No clamping/minimum here either — freeform by design,
-// same as the server side.
-const LS_TWEET_CHAR_LIMIT = "screener_tweet_char_limit";
-const DEFAULT_TWEET_CHAR_LIMIT = 280;
-function getTweetCharLimit(): number {
-  if (typeof window === "undefined") return DEFAULT_TWEET_CHAR_LIMIT;
-  try {
-    const raw = localStorage.getItem(LS_TWEET_CHAR_LIMIT);
-    if (raw === null) return DEFAULT_TWEET_CHAR_LIMIT;
-    const n = Number(raw);
-    return Number.isFinite(n) ? n : DEFAULT_TWEET_CHAR_LIMIT;
-  } catch {
-    return DEFAULT_TWEET_CHAR_LIMIT;
-  }
-}
-function setTweetCharLimit(n: number) {
-  try {
-    if (typeof window !== "undefined") {
-      localStorage.setItem(LS_TWEET_CHAR_LIMIT, String(n));
-    }
-  } catch {
-    /* quota / privacy */
-  }
-}
-
-// Generated drafts used to live only in TweetTab's own useState, gone
-// the moment the row collapsed (ExpandedDetail unmounts) — forcing a
-// fresh Perplexity call (different text, losing any edits) just to
-// look at a draft again. Persisted per symbol now, same localStorage
-// pattern as the char limit: read once at mount, write through on
-// every generate AND every edit, so a tweaked draft is what comes
-// back, not the original generation. Keyed by symbol alone (not row
-// id) — sandbox and the main table intentionally share one draft per
-// ticker, same as the char limit already does.
-type StoredTweetDraft = {
-  strike: number;
-  convictionNote: string;
-  charLimit: number;
-  posts: string[];
-  editedPosts: string[];
-};
-
-function tweetDraftKey(symbol: string): string {
-  return `screener_tweet_draft_${symbol.toUpperCase()}`;
-}
-
-function isStoredTweetDraft(v: unknown): v is StoredTweetDraft {
-  if (!v || typeof v !== "object") return false;
-  const o = v as Record<string, unknown>;
-  return (
-    typeof o.strike === "number" &&
-    typeof o.convictionNote === "string" &&
-    typeof o.charLimit === "number" &&
-    Array.isArray(o.posts) &&
-    Array.isArray(o.editedPosts) &&
-    o.posts.length === o.editedPosts.length
-  );
-}
-
-function getStoredTweetDraft(symbol: string): StoredTweetDraft | null {
-  if (typeof window === "undefined") return null;
-  try {
-    const raw = localStorage.getItem(tweetDraftKey(symbol));
-    if (!raw) return null;
-    const parsed: unknown = JSON.parse(raw);
-    return isStoredTweetDraft(parsed) ? parsed : null;
-  } catch {
-    return null;
-  }
-}
-
-function setStoredTweetDraft(symbol: string, draft: StoredTweetDraft) {
-  try {
-    if (typeof window !== "undefined") {
-      localStorage.setItem(tweetDraftKey(symbol), JSON.stringify(draft));
-    }
-  } catch {
-    /* quota / privacy */
   }
 }
 
@@ -697,15 +611,6 @@ export function ScreenerView({ connected }: Props) {
   // adds/removes rows, never replaces an existing row's stageFour, so
   // there's nothing stale to clear there.
   const [strikeOverrides, setStrikeOverrides] = useState<Record<string, StrikeOverride>>({});
-  // Conviction note for the Tweet tab, keyed the same way as
-  // strikeOverrides — lives here (not local to ExpandedDetail) so it
-  // survives collapse/reopen and regeneration, since ExpandedDetail
-  // unmounts on collapse and a local useState would reset on every
-  // remount. Char limit used to live in an identical per-row map here
-  // too, but that's the wrong scope for a sticky preference — moved to
-  // a single localStorage-backed value (getTweetCharLimit/
-  // setTweetCharLimit above), owned entirely inside TweetTab now.
-  const [convictionNotes, setConvictionNotes] = useState<Record<string, string>>({});
   // Transient toast for Track confirmations. One line above the table.
   const [trackToast, setTrackToast] = useState<string | null>(null);
   // Stream C (chain verification) progress strip — populated while
@@ -2829,10 +2734,7 @@ export function ScreenerView({ connected }: Props) {
                                   return next;
                                 })
                               }
-                              convictionNote={convictionNotes[id] ?? ""}
-                              onConvictionNoteChange={(note) =>
-                                setConvictionNotes((prev) => ({ ...prev, [id]: note }))
-                              }
+                              screenedAt={screenedAt}
                             />
                           </TableCell>
                         </TableRow>
@@ -3083,41 +2985,6 @@ function gradeFromYieldClient(yieldPct: number): "A" | "B" | "C" | "F" {
   return "F";
 }
 
-type DirectionalMoveCoverage = {
-  worstDownsidePct: number | null;
-  downCount: number;
-  upCount: number;
-  survivesWorstDownside: boolean | null;
-};
-
-// Mirrors lib/earnings-history-table.ts's directionalMoveCoverage — not
-// imported: that module pulls the server-only supabase client into
-// this client bundle (same reason crush-history-table.tsx duplicates
-// quarterLabel instead of importing it). A CSP seller only loses on a
-// DOWN move past the strike, so this is deliberately a different,
-// simpler statistic than the calibrated EV loss-multiplier ladder —
-// see the canonical copy's comment for why the two must stay separate.
-function directionalMoveCoverageClient(
-  history: Array<{ actualMovePct: number | null }>,
-  strikeDistancePct: number,
-): DirectionalMoveCoverage {
-  const withMoves = history.filter(
-    (h): h is { actualMovePct: number } => h.actualMovePct !== null,
-  );
-  const downs = withMoves.filter((h) => h.actualMovePct < 0);
-  const upCount = withMoves.length - downs.length;
-  if (downs.length === 0) {
-    return { worstDownsidePct: null, downCount: 0, upCount, survivesWorstDownside: null };
-  }
-  const worstDownsidePct = Math.min(...downs.map((h) => h.actualMovePct));
-  return {
-    worstDownsidePct,
-    downCount: downs.length,
-    upCount,
-    survivesWorstDownside: strikeDistancePct >= Math.abs(worstDownsidePct),
-  };
-}
-
 type CustomStrikeAnalysis = {
   strike: number;
   distancePct: number;
@@ -3296,8 +3163,7 @@ function ExpandedDetail({
   strikeOverride,
   onSelectStrike,
   onResetStrike,
-  convictionNote,
-  onConvictionNoteChange,
+  screenedAt,
 }: {
   r: ScreenerResult;
   analyzing: boolean;
@@ -3305,8 +3171,10 @@ function ExpandedDetail({
   strikeOverride: StrikeOverride | null;
   onSelectStrike: (o: StrikeOverride) => void;
   onResetStrike: () => void;
-  convictionNote: string;
-  onConvictionNoteChange: (note: string) => void;
+  // When this candidate's price was captured — the whole screen run's
+  // batch timestamp, since price isn't stamped per-row. Null in the
+  // sandbox tester until its own single-ticker fetch completes.
+  screenedAt: Date | null;
 }) {
   // Live campaign data — hooks must run unconditionally, so this sits
   // above the pre-analysis early return. The Layer 2 card's "your
@@ -3464,7 +3332,7 @@ function ExpandedDetail({
             <TabsTrigger value="flow">🌊 Flow</TabsTrigger>
             <TabsTrigger value="history">📅 History</TabsTrigger>
             <TabsTrigger value="chain">⛓️ Options Chain</TabsTrigger>
-            <TabsTrigger value="tweet">✍️ Tweet</TabsTrigger>
+            <TabsTrigger value="dump">📄 Analysis Dump</TabsTrigger>
           </TabsList>
           {onAnalyze && (
             <button
@@ -3870,29 +3738,18 @@ function ExpandedDetail({
         </TabsContent>
 
         <TabsContent
-          value="tweet"
+          value="dump"
           forceMount
           className="space-y-3 data-[state=inactive]:hidden"
         >
-          <TweetTab
+          <AnalysisDumpTab
             r={r}
             strikeOverride={strikeOverride}
             onSelectStrike={onSelectStrike}
             onResetStrike={onResetStrike}
-            convictionNote={convictionNote}
-            onConvictionNoteChange={onConvictionNoteChange}
-            crushGrade={tl.industryFactors.crushGrade}
-            hasOverhang={tl.regimeFactors.hasActiveOverhang}
-            vix={tl.regimeFactors.vix}
-            penalty={tl.regimeFactors.gradePenalty}
-            personalModifier={personalModifier}
-            currentFinalGrade={displayFinalGrade(tl)}
-            regimeFactors={{
-              newsSentiment: tl.regimeFactors.newsSentiment,
-              overhangDescription: tl.regimeFactors.overhangDescription,
-            }}
-            ivEdge={tl.industryFactors.ivEdge}
-            termStructure={tl.industryFactors.termStructure}
+            screenedAt={screenedAt}
+            chainCampaigns={chainCampaigns}
+            chainCampaignsFailed={chainCampaignsFailed}
           />
         </TabsContent>
       </Tabs>
@@ -3909,10 +3766,12 @@ type ChainStrikeRow = {
   premiumFill: number;
   fillInvalid: boolean;
   delta: number;
+  oi: number;
+  volume: number;
 };
 
 // Shared by every strike-selection surface (EditableStrikeCell's typed
-// entry, OptionsChainTab's click, TweetTab's strike field) so the
+// entry, OptionsChainTab's click, Analysis Dump's strike field) so the
 // override object — and the spread% formula in particular — is
 // computed exactly once, not re-derived slightly differently in three
 // places.
@@ -4239,798 +4098,438 @@ function OptionsChainTab({
   );
 }
 
-type TweetFact = { id: string; text: string };
-type TweetRisk = TweetFact & { isDissent: boolean; keyMetric?: string };
-// kind="strength": score is a 0-1+ strength measure — every candidate
-// that clears the bar is used (no top-N selection anymore; a single
-// draft uses the whole qualifying pool). kind="risk": score is a
-// severity measure used to pick the top couple most material
-// concerns. A candidate with neither strong support nor real severity
-// is simply dropped — that's the fix for weak evidence ("3 of 5
-// quarters") showing up as if it were support. isDissent is set only
-// on the genuine Trade-Decision-Context "not safe to trade" case, not
-// its milder medium-risk sibling (both share id "tdc").
-type FactCandidate = {
-  kind: "strength" | "risk";
-  score: number;
-  id: string;
-  text: string;
-  keyMetric?: string;
-  isDissent?: boolean;
-};
-
-// Auto-grows a textarea to fit its content — no scrollbar, no fixed
-// row-count guess.
-//
-// This tab renders inside a Radix TabsContent mounted with
-// forceMount + `data-[state=inactive]:hidden` (see the "tweet"
-// TabsContent below) — Tailwind's `hidden` is display:none, applied
-// the instant data-state="inactive", which it is by default on any
-// row (re)open since <Tabs defaultValue="overview"> makes Overview
-// the active tab. An element with a display:none ANCESTOR has no
-// generated box at all, so scrollHeight reads 0 for it — confirmed
-// directly against this file's Tabs usage, not assumed. A
-// useLayoutEffect keyed on `value` fires correctly at that exact
-// mount (a genuine new mount, not a stale ref), but measures nothing
-// there is to measure, locks in a near-zero inline height, and
-// nothing re-fires it later when the user actually clicks over to
-// the Tweet tab, since `value` never changes just because visibility
-// did. That's why a fresh Generate (already on the visible Tweet tab
-// when clicked) works and a restored draft (mounted hidden behind
-// Overview) doesn't.
-//
-// Two distinct triggers legitimately invalidate the height, so two
-// hooks call the same resize function — this isn't a second
-// workaround for the SAME bug the way the old remount-key approach
-// was:
-//   - content changed while visible (typing, Regenerate, fresh
-//     generate's first paint) -> useLayoutEffect on `value`.
-//   - the element's own rendered box changed for a reason that has
-//     nothing to do with `value` (a hidden ancestor became visible,
-//     e.g. switching to the Tweet tab) -> ResizeObserver on the node
-//     itself, which fires on exactly that transition regardless of
-//     why it happened (Tabs today, any other conditionally-hidden
-//     wrapper in the future).
-function AutoGrowTextarea({
-  value,
-  onChange,
-  className,
-}: {
-  value: string;
-  onChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => void;
-  className?: string;
-}) {
-  const ref = useRef<HTMLTextAreaElement>(null);
-
-  function resize() {
-    const el = ref.current;
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${el.scrollHeight}px`;
-  }
-
-  useLayoutEffect(resize, [value]);
-
+// Company name isn't part of ScreenerResult (the screener never needed
+// it) — pulled lazily from the research profile route on tab mount.
+// Cheap single-row Supabase read (+ a cached/live price fallback we
+// discard); no LLM call, no chain re-fetch. Best-effort: a failed or
+// slow lookup just leaves the header blank rather than blocking the
+// rest of the dump, which is fully available from `r` alone.
+function useCompanyName(symbol: string): string | null {
+  const [name, setName] = useState<string | null>(null);
   useEffect(() => {
-    const el = ref.current;
-    if (!el || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(resize);
-    observer.observe(el);
-    return () => observer.disconnect();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- resize reads only the DOM node itself, not any prop/state that needs re-observing
-  }, []);
-
-  return <textarea ref={ref} value={value} onChange={onChange} rows={3} className={className} />;
+    let cancelled = false;
+    setName(null);
+    (async () => {
+      try {
+        const res = await fetch(`/api/research/${encodeURIComponent(symbol)}`, {
+          cache: "no-store",
+        });
+        const json = (await res.json()) as { companyName?: string | null };
+        if (!cancelled && res.ok && json.companyName) setName(json.companyName);
+      } catch {
+        /* best-effort — header just omits the name */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [symbol]);
+  return name;
 }
 
-// No caching by design — regenerating is one call and sidesteps
-// stale-vs-strike invalidation questions entirely (there's no cached
-// draft to compare a changed strike against). Strike is genuinely
-// two-way bound to strikeOverrides — the same state EditableStrikeCell
-// and OptionsChainTab write through, not a local copy — so picking a
-// strike here moves the selection everywhere else and vice versa.
-//
-// Every candidate fact is SCORED before it reaches the model: only
-// facts that clear a real strength bar are offered as support, weak/
-// inconclusive ones are dropped rather than reported as if they were
-// evidence, and the single most material concern is surfaced honestly
-// as risk rather than hidden. Live figures (POP, options flow, delta,
-// EM positioning) are allowed in the output — only position size,
-// contract count, premium, and dollar amounts are structurally never
-// sent to the model at all.
-function TweetTab({
+// Nearest listed strike to `target` — same snapping EditableStrikeCell/
+// TweetTab's old commitStrike used, so typing a strike that isn't
+// exactly on the chain grid still lands on a real, quotable contract.
+function nearestChainRow(
+  rows: ChainStrikeRow[],
+  target: number | null,
+): ChainStrikeRow | null {
+  if (target === null || !Number.isFinite(target) || rows.length === 0) return null;
+  let best = rows[0];
+  let bestDiff = Math.abs(best.strike - target);
+  for (const row of rows) {
+    const diff = Math.abs(row.strike - target);
+    if (diff < bestDiff) {
+      best = row;
+      bestDiff = diff;
+    }
+  }
+  return best;
+}
+
+function dumpNum(n: number | null | undefined, digits = 2): string {
+  return n === null || n === undefined || !Number.isFinite(n) ? "—" : n.toFixed(digits);
+}
+function dumpPct(n: number | null | undefined, digits = 1): string {
+  return n === null || n === undefined || !Number.isFinite(n) ? "—" : `${(n * 100).toFixed(digits)}%`;
+}
+function dumpInt(n: number | null | undefined): string {
+  return n === null || n === undefined || !Number.isFinite(n) ? "—" : String(Math.round(n));
+}
+
+// Mirrors lib/screener.ts's computeCspExpectedValue exactly (same
+// formula, same commission default) so EV can be recomputed here at
+// whatever strike the user typed — the server-side version is
+// deliberately scoped to the fixed 2xEM reference strike only. Same
+// established pattern as gradeFromRulesClient/gradeFromYieldClient
+// above: a client-side mirror, not an import, so this export surface
+// can never accidentally pull lib/screener.ts's server-only deps into
+// the client bundle.
+const COMMISSION_PER_CONTRACT_CLIENT = 0.65; // mirrors DEFAULT_COMMISSION_PER_CONTRACT
+function evPerContractClient(params: {
+  pop: number;
+  premium: number;
+  emPct: number;
+  lossMultiplier: number;
+  currentPrice: number;
+}): number {
+  const assignmentLoss =
+    params.currentPrice > 0 && params.emPct > 0
+      ? params.emPct * params.lossMultiplier * params.currentPrice * 100
+      : 0;
+  const gross = params.pop * params.premium * 100 - (1 - params.pop) * assignmentLoss;
+  return gross - COMMISSION_PER_CONTRACT_CLIENT * 2;
+}
+
+// Analysis Dump — replaces the old Tweet tab (see git history). The
+// app exports ONLY what an external analyst can't retrieve themselves
+// (historical EM, chain, computed sub-scores, live spot) — no news,
+// no analyst targets, no fundamentals, no generated prose. Raw AND
+// derived numbers are both included on purpose: showing the inputs
+// alongside a computed figure is what lets arithmetic errors be
+// caught externally, which is the whole reason this tab exists (see
+// commit message for the strike-distance and crush-caption bugs that
+// motivated it).
+function AnalysisDumpTab({
   r,
   strikeOverride,
   onSelectStrike,
   onResetStrike,
-  convictionNote,
-  onConvictionNoteChange,
-  crushGrade,
-  hasOverhang,
-  vix,
-  penalty,
-  personalModifier,
-  currentFinalGrade,
-  regimeFactors,
-  ivEdge,
-  termStructure,
+  screenedAt,
+  chainCampaigns,
+  chainCampaignsFailed,
 }: {
   r: ScreenerResult;
   strikeOverride: StrikeOverride | null;
   onSelectStrike: (o: StrikeOverride) => void;
   onResetStrike: () => void;
-  convictionNote: string;
-  onConvictionNoteChange: (note: string) => void;
-  crushGrade: "A" | "B" | "C" | "F";
-  hasOverhang: boolean;
-  vix: number | null;
-  penalty: number;
-  personalModifier: "boost" | "drop" | null;
-  currentFinalGrade: string;
-  regimeFactors: { newsSentiment: "positive" | "negative" | "neutral"; overhangDescription: string | null };
-  ivEdge: number;
-  termStructure: number;
+  screenedAt: Date | null;
+  chainCampaigns: ChainCampaign[] | null;
+  chainCampaignsFailed: boolean;
 }) {
-  // Global sticky preference (localStorage), not per-row — read once
-  // at mount, written through on every change. See
-  // getTweetCharLimit/setTweetCharLimit above.
-  const [charLimit, setCharLimitState] = useState(() => getTweetCharLimit());
-  function setCharLimit(n: number) {
-    setCharLimitState(n);
-    setTweetCharLimit(n);
-  }
-  const [generating, setGenerating] = useState(false);
-  const [genError, setGenError] = useState<string | null>(null);
-  // Hydrated from localStorage at mount (per symbol) so a generated
-  // draft survives row collapse, a symbol switch, and a page reload —
-  // only Regenerate ever replaces it. null = never generated.
-  const [posts, setPosts] = useState<string[] | null>(
-    () => getStoredTweetDraft(r.symbol)?.posts ?? null,
-  );
-  // Editable copy, keyed by [post] — generation seeds this; the user
-  // can then tweak text freely without a re-render clobbering their
-  // edits. Also hydrated from storage — an edited draft is the one
-  // that comes back, not the original generation.
-  const [editedPosts, setEditedPosts] = useState<string[]>(
-    () => getStoredTweetDraft(r.symbol)?.editedPosts ?? [],
-  );
-  // Strike/note/limit the CURRENT stored draft was generated for —
-  // compared against the live values below to show a "generated for a
-  // different strike" note instead of silently discarding or
-  // auto-regenerating on a mismatch.
-  const [draftContext, setDraftContext] = useState<
-    { strike: number; convictionNote: string; charLimit: number } | null
-  >(() => {
-    const stored = getStoredTweetDraft(r.symbol);
-    return stored ? { strike: stored.strike, convictionNote: stored.convictionNote, charLimit: stored.charLimit } : null;
-  });
-  const [copiedKey, setCopiedKey] = useState<string | null>(null);
-
-  const availableStrikes = r.stageFour?.availableStrikes ?? [];
-  const effectiveStrike = strikeOverride?.strike ?? r.stageFour?.suggestedStrike ?? null;
+  const companyName = useCompanyName(r.symbol);
+  const stageFourStrikes = r.stageFour?.availableStrikes;
+  const availableStrikes = useMemo(() => stageFourStrikes ?? [], [stageFourStrikes]);
+  const recommended = recommendedStrikeFor(r);
+  const effectiveStrike = strikeOverride?.strike ?? recommended;
   const effectiveDelta = strikeOverride?.delta ?? r.stageFour?.delta ?? null;
+  const effectivePremium = strikeOverride?.premium ?? r.stageFour?.premium ?? null;
   const effectivePop = effectiveDelta !== null ? 1 - Math.abs(effectiveDelta) : null;
+  const selectedRow = nearestChainRow(availableStrikes, effectiveStrike);
 
-  // Grade at whatever strike is currently selected — same pipeline as
-  // OptionsChainTab's preview / CustomStrikeAnalyzer's "Try:" box, so
-  // the grade the draft cites always matches the Strike field above it.
-  const effectiveGrade: string =
-    strikeOverride !== null && strikeOverride.strike > 0
-      ? (() => {
-          const pop = 1 - Math.abs(strikeOverride.delta);
-          const yieldPct = (strikeOverride.premium / strikeOverride.strike) * 100;
-          const { grade, unrated } = gradeFromRulesClient({
-            pop,
-            crushGrade,
-            opportunityGrade: gradeFromYieldClient(yieldPct),
-            hasOverhang,
-            vix,
-            penalty,
-            personalModifier,
-          });
-          return unrated ? "Unrated" : grade;
-        })()
-      : currentFinalGrade;
-  const gradeIsPreview = strikeOverride !== null;
+  const [strikeInput, setStrikeInput] = useState(() =>
+    effectiveStrike !== null ? String(effectiveStrike) : "",
+  );
+  useEffect(() => {
+    setStrikeInput(effectiveStrike !== null ? String(effectiveStrike) : "");
+  }, [effectiveStrike]);
+  const [spreadFlagPct, setSpreadFlagPct] = useState(50);
+  const [copied, setCopied] = useState(false);
 
-  function commitStrike(target: number) {
-    if (!Number.isFinite(target) || target <= 0 || availableStrikes.length === 0) return;
-    const nearest = availableStrikes.reduce((best, s) =>
-      Math.abs(s.strike - target) < Math.abs(best.strike - target) ? s : best,
+  function commitStrike() {
+    const target = Number(strikeInput);
+    const row = nearestChainRow(availableStrikes, target);
+    if (row) onSelectStrike(overrideFromStrike(row));
+  }
+
+  const d = r.stageThree?.details;
+  const tl = r.threeLayer;
+
+  const dump = useMemo(() => {
+    const lines: string[] = [];
+    const push = (s = "") => lines.push(s);
+    const section = (title: string) => {
+      push();
+      push(`=== ${title} ===`);
+    };
+
+    // ---------- HEADER ----------
+    section("HEADER");
+    push(`Ticker: ${r.symbol}`);
+    push(`Company: ${companyName ?? "—"}`);
+    push(
+      `Spot: $${dumpNum(r.price)} (captured: ${screenedAt ? screenedAt.toISOString() : "unknown — no screen timestamp available"})`,
     );
-    onSelectStrike(overrideFromStrike(nearest));
-  }
-
-  // ---- Evidence candidates — every one scored, weak ones dropped ----
-
-  function popCandidate(): FactCandidate | null {
-    if (effectivePop === null) return null;
-    const pct = Math.round(effectivePop * 100);
-    const deltaTxt = effectiveDelta !== null ? ` (delta ${effectiveDelta.toFixed(2)})` : "";
-    if (effectivePop >= 0.9) {
-      return { kind: "strength", score: effectivePop, id: "pop", text: `a ${pct}% probability of profit at this strike${deltaTxt}` };
-    }
-    if (effectivePop < 0.75) {
-      return { kind: "risk", score: 0.75 - effectivePop, id: "pop", text: `only a ${pct}% probability of profit at this strike${deltaTxt}` };
-    }
-    return null;
-  }
-
-  // Pattern, not figures: a count across recent reported quarters, not
-  // a ratio or percentage. Only reported events (actualMovePct !== null)
-  // count — the pinned upcoming/TODAY row never has one.
-  //
-  // Strength still requires a genuinely strong record (>=0.8) — that
-  // bar hasn't moved. But anything BELOW 0.8 is risk-eligible now, not
-  // just <=0.4. The earlier "never present 3-of-5 as support" fix was
-  // right; dropping it entirely instead of routing it to risk was an
-  // over-application — a mediocre record ("exceeded its expected move
-  // in 2 of the last 5 reported quarters") is real, citable risk
-  // material, not nothing.
-  function crushCandidate(): FactCandidate | null {
-    const history = (r.stageThree?.details?.crushHistory ?? []).filter(
-      (h) => h.actualMovePct !== null && h.ratio !== null,
+    push(`Earnings: ${r.earningsDate} (${r.earningsTiming === "BMO" ? "before market open" : "after market close"})`);
+    push(`DTE: ${r.daysToExpiry} (expiry ${r.expiry}, ${r.expirySource})`);
+    push(
+      `Implied move (EM): ${dumpPct(d?.expectedMovePct ?? null)} [source: ${d?.impliedMoveMethod ?? "unknown"}${d?.impliedMoveDegradedReason ? ` — ${d.impliedMoveDegradedReason}` : ""}]`,
     );
-    if (history.length < 3) return null;
-    const recent = history.slice(0, 5);
-    const inside = recent.filter((h) => (h.ratio ?? 0) <= 1).length;
-    const insideRatio = inside / recent.length;
-    if (insideRatio >= 0.8) {
-      return {
-        kind: "strength",
-        score: insideRatio,
-        id: "crush_pattern",
-        text: `stayed inside its expected move in ${inside} of the last ${recent.length} reported quarters`,
-      };
-    }
-    const outside = recent.length - inside;
-    return {
-      kind: "risk",
-      score: 1 - insideRatio,
-      id: "crush_pattern",
-      text: `exceeded its expected move in ${outside} of the last ${recent.length} reported quarters`,
-    };
-  }
+    push(`VIX: ${dumpNum(tl?.regimeFactors.vix ?? null, 1)} (${tl?.regimeFactors.vixRegime ?? "—"})`);
 
-  // Qualitative bucket, never a number — the strike's cushion (or lack
-  // of one) relative to the market's own priced move.
-  function emCandidate(): FactCandidate | null {
-    const emPct = r.stageThree?.details?.expectedMovePct ?? null;
-    if (emPct === null || emPct <= 0 || effectiveStrike === null || r.price <= 0) return null;
-    const pctDrop = (r.price - effectiveStrike) / r.price;
-    if (pctDrop <= 0) return null;
-    const multiple = pctDrop / emPct;
-    const distTxt = `${(pctDrop * 100).toFixed(0)}% below spot, about ${multiple.toFixed(1)}x the market's expected move for this report`;
-    if (multiple >= 1.3) {
-      return {
-        kind: "strength",
-        score: Math.min(multiple, 3) / 3,
-        id: "em_position",
-        text: `sits roughly ${distTxt}`,
-      };
+    // ---------- SELECTED STRIKE ----------
+    section("SELECTED STRIKE");
+    push(`Strike: $${dumpNum(effectiveStrike)}  Expiry: ${r.expiry}`);
+    if (recommended !== null && effectiveStrike !== null && Math.abs(effectiveStrike - recommended) > 0.005) {
+      push(`FLAG: selected strike differs from recommended strike ($${dumpNum(recommended)}).`);
+    } else {
+      push(`Matches recommended strike.`);
     }
-    if (multiple < 0.9) {
-      return {
-        kind: "risk",
-        score: 0.9 - multiple,
-        id: "em_position",
-        text: `sits roughly ${distTxt} — a thinner cushion than the market is pricing`,
-      };
-    }
-    return null;
-  }
-
-  // A CSP seller only loses on a DOWN move past the strike — an upside
-  // rally is irrelevant. Uses the FULL crushHistory (not the recent-5
-  // window crushCandidate uses), since "has this strike level ever
-  // been breached" gets more meaningful, not less, with more history.
-  // Deliberately separate from crushGrade/computeLossMultiplierLadder
-  // — see directionalMoveCoverageClient's own comment.
-  function directionalCandidate(): FactCandidate | null {
-    if (effectiveStrike === null || r.price <= 0) return null;
-    const history = r.stageThree?.details?.crushHistory ?? [];
-    const withMoves = history.filter((h) => h.actualMovePct !== null);
-    if (withMoves.length < 3) return null;
-    const pctDrop = (r.price - effectiveStrike) / r.price;
-    if (pctDrop <= 0) return null;
-    const coverage = directionalMoveCoverageClient(history, pctDrop);
-    const distTxt = `${(pctDrop * 100).toFixed(0)}% below spot`;
-    if (coverage.worstDownsidePct === null) {
-      // No down-move in the sample at all — real information, but NOT
-      // "survived every downside move" (that would be a hollow claim
-      // on a zero-sample). Framed as an absence, not a guarantee.
-      return {
-        kind: "strength",
-        score: 0.3,
-        id: "directional",
-        text: `has shown no downside move at all in its last ${coverage.upCount} reported quarters — no historical downside precedent to weigh this strike against`,
-      };
-    }
-    const worstTxt = `${Math.abs(coverage.worstDownsidePct * 100).toFixed(1)}%`;
-    if (coverage.survivesWorstDownside) {
-      return {
-        kind: "strength",
-        score: 0.7,
-        id: "directional",
-        text: `the worst downside move in its recent reported history was ${worstTxt}, and at ${distTxt} this strike would have survived every one of them`,
-      };
-    }
-    return {
-      kind: "risk",
-      score: 0.6,
-      id: "directional",
-      text: `the worst downside move in its recent reported history was ${worstTxt}, farther than this strike's ${distTxt} cushion — it would have been breached`,
-    };
-  }
-
-  function ivEdgeCandidate(): FactCandidate | null {
-    if (ivEdge <= 0) return null;
-    if (ivEdge >= 1.3) {
-      return {
-        kind: "strength",
-        score: Math.min(ivEdge, 2) / 2,
-        id: "iv_edge",
-        text: `implied vol is running well above realized (IV edge ${ivEdge.toFixed(2)})`,
-      };
-    }
-    if (ivEdge < 1.0) {
-      return {
-        kind: "risk",
-        score: Math.min(1 - ivEdge, 1),
-        id: "iv_edge",
-        text: `implied vol isn't running much above realized (IV edge ${ivEdge.toFixed(2)}) — less of a premium cushion than usual`,
-      };
-    }
-    return null;
-  }
-
-  function termStructureCandidate(): FactCandidate | null {
-    if (termStructure >= 3) {
-      return {
-        kind: "strength",
-        score: termStructure / 5,
-        id: "term_structure",
-        text: "the term structure is inverted heading into earnings, with front-month IV priced richer than back-month",
-      };
-    }
-    return null;
-  }
-
-  function vixCandidate(): FactCandidate | null {
-    if (vix === null) return null;
-    if (vix < 20) {
-      return { kind: "strength", score: 0.3, id: "vix", text: `VIX is calm at ${vix.toFixed(1)}` };
-    }
-    if (vix > 25) {
-      return {
-        kind: "risk",
-        score: Math.min((vix - 25) / 15, 1),
-        id: "vix",
-        text: `VIX is elevated at ${vix.toFixed(1)}`,
-      };
-    }
-    return null;
-  }
-
-  // Live options flow — put/call volume and OI ratios are already on
-  // the client (stageThree.details.optionsFlow), no extra fetch.
-  function flowCandidate(): FactCandidate | null {
-    const flow = r.stageThree?.details?.optionsFlow;
-    if (!flow || flow.flowBias === "neutral") return null;
-    const ratioTxt = `put/call volume ratio of ${flow.putCallRatio.toFixed(2)}, put/call open interest ratio of ${flow.putCallOI.toFixed(2)}`;
-    if (flow.flowBias === "bullish") {
-      return { kind: "strength", score: 0.6, id: "flow", text: `options flow is reading bullish — ${ratioTxt}` };
-    }
-    return { kind: "risk", score: 0.5, id: "flow", text: `options flow is reading bearish — ${ratioTxt}, more downside positioning than usual` };
-  }
-
-  // News/sentiment. An active overhang is the strongest possible risk
-  // signal short of a Trade-Decision-Context dissent (it's already
-  // what forces regimeGrade to F elsewhere in the app) — surfaced with
-  // its own description rather than just the sentiment label.
-  function newsCandidate(): FactCandidate | null {
-    if (hasOverhang) {
-      return {
-        kind: "risk",
-        score: 0.95,
-        id: "news",
-        text: regimeFactors.overhangDescription ?? "recent news flagged an active overhang on this name",
-      };
-    }
-    if (regimeFactors.newsSentiment === "positive") {
-      return { kind: "strength", score: 0.4, id: "news", text: "recent news coverage reads positive, with no active overhang" };
-    }
-    if (regimeFactors.newsSentiment === "negative") {
-      return { kind: "risk", score: 0.45, id: "news", text: "recent news coverage reads negative" };
-    }
-    return null;
-  }
-
-  // Deep-OTM put cluster — real, ticker-specific tail-hedging signal
-  // already computed for the Flow tab (stageThree.details.optionsFlow,
-  // no extra fetch). Only surfaced when the underlying lib judged it
-  // elevated (>25% of put volume in the 1x-2.5x EM band below spot) —
-  // a normal distribution isn't risk material either way.
-  function deepOtmCandidate(): FactCandidate | null {
-    const cluster = r.stageThree?.details?.optionsFlow?.deepOtmPutCluster;
-    if (!cluster || cluster.pctOfTotalPutVolume <= 25) return null;
-    return {
-      kind: "risk",
-      score: Math.min(cluster.pctOfTotalPutVolume, 60) / 60,
-      id: "deep_otm_cluster",
-      text: `${cluster.pctOfTotalPutVolume.toFixed(0)}% of put volume sits between $${cluster.lowerStrike.toFixed(0)} and $${cluster.upperStrike.toFixed(0)} — elevated tail-risk hedging`,
-    };
-  }
-
-  // Unusual-activity rows the Flow tab already classifies as tail
-  // hedges — same data, no new fetch.
-  function tailHedgeCandidate(): FactCandidate | null {
-    const flow = r.stageThree?.details?.optionsFlow;
-    if (!flow) return null;
-    const hedges = flow.unusualStrikes.filter((s) => s.type === "put" && s.note === "tail hedge");
-    if (hedges.length === 0) return null;
-    const strikesTxt = hedges.slice(0, 3).map((h) => `$${h.strike}`).join(", ");
-    return {
-      kind: "risk",
-      score: Math.min(hedges.length, 3) / 3,
-      id: "tail_hedges",
-      text: `unusual options activity flagged ${hedges.length} put strike${hedges.length > 1 ? "s" : ""} (${strikesTxt}) as tail hedges`,
-    };
-  }
-
-  // The Layer-1 move-vs-implied calibration grade — a different lens
-  // than crushCandidate's simple recent-quarters count (this one is
-  // shrinkage/pooled-based). Only surfaced when genuinely unfavorable;
-  // A/B don't get a separate strength slot here since crushCandidate
-  // already covers the specific pattern when it's strong.
-  function crushGradeCandidate(): FactCandidate | null {
-    if (crushGrade === "F") {
-      return {
-        kind: "risk",
-        score: 0.7,
-        id: "crush_grade",
-        text: "this ticker's post-earnings move-vs-implied calibration grades out poorly — IV pricing here has been unreliable",
-      };
-    }
-    if (crushGrade === "C") {
-      return {
-        kind: "risk",
-        score: 0.35,
-        id: "crush_grade",
-        text: "this ticker's post-earnings move-vs-implied calibration grades out middling",
-      };
-    }
-    return null;
-  }
-
-  const [tdc, setTdc] = useState<CrushContext | null>(null);
-  const [tdcChecked, setTdcChecked] = useState(false);
-
-  function tdcCandidate(): FactCandidate | null {
-    if (!tdc) return null;
-    if (tdc.safe_to_trade === false || tdc.overall_risk === "high") {
-      return { kind: "risk", score: 0.99, id: "tdc", text: tdc.verdict, keyMetric: tdc.key_metric_to_watch, isDissent: true };
-    }
-    if (tdc.overall_risk === "medium") {
-      return { kind: "risk", score: 0.65, id: "tdc", text: tdc.verdict, keyMetric: tdc.key_metric_to_watch };
-    }
-    if (tdc.safe_to_trade === true && tdc.overall_risk === "low") {
-      return {
-        kind: "strength",
-        score: tdc.confidence === "high" ? 0.5 : 0.3,
-        id: "tdc_clean",
-        text: "a dedicated review of this ticker's prior outlier quarters found current conditions don't resemble them",
-      };
-    }
-    return null;
-  }
-
-  async function fetchTdcIfNeeded(): Promise<CrushContext | null> {
-    if (tdcChecked) return tdc;
-    const outliers = (r.stageThree?.details?.crushHistory ?? []).filter(
-      (h) => (h.grade === "F" || h.grade === "D") && h.actualMovePct !== null && h.impliedMovePct !== null && h.ratio !== null,
+    push(
+      `Raw: bid=${dumpNum(selectedRow?.bid ?? null)} ask=${dumpNum(selectedRow?.ask ?? null)} last=${dumpNum(selectedRow?.last ?? null)} mid=${dumpNum(selectedRow?.mark ?? null)} OI=${dumpInt(selectedRow?.oi ?? null)} volume=${dumpInt(selectedRow?.volume ?? null)} delta=${dumpNum(selectedRow?.delta ?? effectiveDelta, 3)}`,
     );
-    if (outliers.length === 0) {
-      setTdcChecked(true);
-      return null;
+    if (selectedRow?.fillInvalid) {
+      push(`FLAG: mid was untrustworthy (crossed/missing ask) — fill priced off bid instead.`);
     }
-    const outlierQuarters: OutlierQuarter[] = outliers.map((h) => ({
-      date: h.earningsDate,
-      qtrLabel: h.qtrLabel,
-      actualMove: h.actualMovePct as number,
-      direction: (h.actualMovePct as number) >= 0 ? "up" : "down",
-      ratio: h.ratio as number,
-      impliedMove: h.impliedMovePct as number,
-    }));
-    try {
-      const res = await fetch("/api/screener/crush-context", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          symbol: r.symbol,
-          companyName: "",
-          currentEM: r.stageThree?.details?.expectedMovePct ?? 0,
-          earningsDate: r.earningsDate,
-          outlierQuarters,
-        }),
-        cache: "no-store",
-      });
-      const json = await res.json().catch(() => ({}) as Record<string, unknown>);
-      const fetched = res.ok && "context" in json ? (json.context as CrushContext) : null;
-      setTdc(fetched);
-      setTdcChecked(true);
-      return fetched;
-    } catch {
-      setTdcChecked(true);
-      return null;
-    }
-  }
+    const pctBelowSpot =
+      effectiveStrike !== null && r.price > 0 ? ((r.price - effectiveStrike) / r.price) * 100 : null;
+    const emPctValue = d?.expectedMovePct ?? null;
+    const xEm = pctBelowSpot !== null && emPctValue !== null && emPctValue > 0 ? pctBelowSpot / (emPctValue * 100) : null;
+    push(
+      `% below spot: ${dumpNum(pctBelowSpot, 1)}% = (${dumpNum(r.price)}-${dumpNum(effectiveStrike)})/${dumpNum(r.price)}`,
+    );
+    push(
+      `x EM: ${dumpNum(xEm, 2)}x = ${dumpNum(pctBelowSpot, 1)}/${dumpNum(emPctValue !== null ? emPctValue * 100 : null, 1)}`,
+    );
+    const breakeven = effectiveStrike !== null && effectivePremium !== null ? effectiveStrike - effectivePremium : null;
+    push(`Breakeven: $${dumpNum(breakeven)} = ${dumpNum(effectiveStrike)} - ${dumpNum(effectivePremium, 3)} (strike - premium)`);
+    const yieldPct = csPYieldPct(effectivePremium, effectiveStrike);
+    push(`Yield: ${dumpNum(yieldPct, 2)}% = ${dumpNum(effectivePremium, 3)}/${dumpNum(effectiveStrike)}`);
+    push(`POP: ${dumpNum(effectivePop !== null ? effectivePop * 100 : null, 1)}% = 1 - |${dumpNum(effectiveDelta, 3)}|`);
+    const evPerContract =
+      effectivePop !== null && effectivePremium !== null && emPctValue !== null && tl
+        ? evPerContractClient({
+            pop: effectivePop,
+            premium: effectivePremium,
+            emPct: emPctValue,
+            lossMultiplier: tl.industryFactors.lossMultiplier,
+            currentPrice: r.price,
+          })
+        : null;
+    push(
+      `EV per contract: $${dumpNum(evPerContract, 2)} [pop=${dumpNum(effectivePop, 3)} premium=${dumpNum(effectivePremium, 3)} lossMultiplier=${dumpNum(tl?.industryFactors.lossMultiplier ?? null, 2)}x commission=$${COMMISSION_PER_CONTRACT_CLIENT.toFixed(2)}/leg]`,
+    );
 
-  async function generate() {
-    if (effectiveStrike === null) {
-      setGenError("No strike selected yet.");
-      return;
-    }
-    setGenerating(true);
-    setGenError(null);
-    try {
-      // Trade Decision Context first — it's the highest-priority risk
-      // signal when present (item 5), so the rest of the selection
-      // needs to know about it before ranking candidates.
-      await fetchTdcIfNeeded();
-
-      const candidates = [
-        popCandidate(),
-        crushCandidate(),
-        emCandidate(),
-        flowCandidate(),
-        newsCandidate(),
-        tdcCandidate(),
-        deepOtmCandidate(),
-        tailHedgeCandidate(),
-        crushGradeCandidate(),
-        directionalCandidate(),
-        ivEdgeCandidate(),
-        termStructureCandidate(),
-        vixCandidate(),
-      ].filter((c): c is FactCandidate => c !== null);
-
-      // No top-N selection anymore — a single draft uses every
-      // strength that clears the bar, not a sample of them. The old
-      // per-variant split routinely stranded genuinely good, distinct
-      // points (term structure only in one variant, the directional
-      // survival argument only in another) with no single draft ever
-      // containing all of them. One list, fully sorted so the
-      // strongest points still lead.
-      //
-      // The cap here is a sanity ceiling, not a selection mechanism —
-      // scaled with charLimit so a 1000+-char draft can genuinely
-      // carry everything (there are only ~10 possible strength
-      // sources total, so "uncapped" and "generous cap" are nearly
-      // the same thing at high limits).
-      const strengthCap = !Number.isFinite(charLimit) || charLimit >= 1000 ? 10 : charLimit >= 500 ? 6 : 4;
-      const strengths: TweetFact[] = candidates
-        .filter((c) => c.kind === "strength")
-        .sort((a, b) => b.score - a.score)
-        .slice(0, strengthCap)
-        .map((c) => ({ id: c.id, text: c.text }));
-
-      // Top TWO most material concerns, if any — so compound risk
-      // (e.g. a mediocre crush record AND the deep-OTM put cluster)
-      // can appear together, the way a hand-written draft would.
-      // Still no generic fallback: when nothing clears a real risk
-      // bar, `risks` stays empty and the draft has no risk section at
-      // all, per the rule that an empty slot beats a placeholder.
-      const riskCandidates = candidates.filter((c) => c.kind === "risk").sort((a, b) => b.score - a.score);
-      const risks: TweetRisk[] = riskCandidates.slice(0, 2).map((c) => ({
-        id: c.id,
-        text: c.text,
-        isDissent: c.isDissent === true,
-        keyMetric: c.keyMetric,
-      }));
-
-      const res = await fetch("/api/screener/tweet-draft", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          symbol: r.symbol,
-          strike: effectiveStrike,
-          expiry: r.expiry,
-          dte: r.daysToExpiry,
-          grade: effectiveGrade,
-          gradeIsPreview,
-          strengths,
-          risks,
-          convictionNote,
-          charLimit,
-        }),
-        cache: "no-store",
-      });
-      const json = await res.json().catch(() => ({}) as Record<string, unknown>);
-      if (!res.ok) {
-        setGenError(typeof json.error === "string" ? json.error : `HTTP ${res.status}`);
-        return;
+    // ---------- OPTIONS CHAIN ----------
+    section("OPTIONS CHAIN (puts only, ±5 strikes around SELECTED strike)");
+    if (availableStrikes.length === 0) {
+      push("No chain data available.");
+    } else {
+      let centerIdx = 0;
+      if (effectiveStrike !== null) {
+        let bestDiff = Math.abs(availableStrikes[0].strike - effectiveStrike);
+        for (let i = 1; i < availableStrikes.length; i += 1) {
+          const diff = Math.abs(availableStrikes[i].strike - effectiveStrike);
+          if (diff < bestDiff) {
+            bestDiff = diff;
+            centerIdx = i;
+          }
+        }
       }
-      const body = json as { posts: string[] };
-      setPosts(body.posts);
-      setEditedPosts([...body.posts]);
-      const context = { strike: effectiveStrike, convictionNote, charLimit };
-      setDraftContext(context);
-      setStoredTweetDraft(r.symbol, {
-        ...context,
-        posts: body.posts,
-        editedPosts: [...body.posts],
-      });
-    } catch (e) {
-      setGenError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setGenerating(false);
+      const start = Math.max(0, centerIdx - 5);
+      const end = Math.min(availableStrikes.length, centerIdx + 6);
+      const band = availableStrikes.slice(start, end);
+      push(`Wide-spread flag threshold: ${spreadFlagPct}% of mid (configurable in the UI above).`);
+      push("strike | bid | ask | last | OI | volume | delta | flags");
+      for (const row of band) {
+        const spreadPct = row.mark > 0 ? ((row.ask - row.bid) / row.mark) * 100 : 0;
+        const flags: string[] = [];
+        const isRec = recommended !== null && Math.abs(row.strike - recommended) < 0.005;
+        const isSel = effectiveStrike !== null && Math.abs(row.strike - effectiveStrike) < 0.005;
+        if (isRec) flags.push("RECOMMENDED");
+        if (isSel) flags.push("SELECTED");
+        if (row.bid > 0 && spreadPct > spreadFlagPct) {
+          flags.push(`WIDE SPREAD (${spreadPct.toFixed(0)}% of mid — likely not a real fillable market)`);
+        }
+        if (row.fillInvalid) flags.push("INVALID MID");
+        push(
+          `$${dumpNum(row.strike)} | ${dumpNum(row.bid)} | ${dumpNum(row.ask)} | ${dumpNum(row.last)} | ${dumpInt(row.oi)} | ${dumpInt(row.volume)} | ${dumpNum(row.delta, 3)}${flags.length ? " | " + flags.join(", ") : ""}`,
+        );
+      }
+    }
+
+    // ---------- EARNINGS HISTORY ----------
+    section("EARNINGS HISTORY (full table)");
+    const history = d?.crushHistory ?? [];
+    if (history.length === 0) {
+      push("No stored earnings history for this ticker.");
+    } else {
+      push("date | qtr | implied% | actual% (signed) | ratio | grade | source | date_confidence");
+      for (const h of history) {
+        push(
+          `${h.earningsDate} | ${h.qtrLabel} | ${h.impliedMovePct === null ? "MISSING" : dumpPct(h.impliedMovePct)} | ${h.actualMovePct === null ? "MISSING" : dumpPct(h.actualMovePct)} | ${h.ratio === null ? "MISSING" : dumpNum(h.ratio, 3)} | ${h.grade ?? "MISSING"} | ${h.impliedMoveSource ?? "unknown"} | ${h.dateConfidence ?? "unknown"}`,
+        );
+      }
+    }
+    const validPairs = history.filter((h) => h.impliedMovePct !== null && h.actualMovePct !== null).length;
+    push(`n = ${validPairs} quarters with a valid implied+actual pair (of ${history.length} stored).`);
+
+    // ---------- GRADE BREAKDOWN ----------
+    section("GRADE BREAKDOWN");
+    push(`Crush grade: ${r.stageThree?.crushGrade ?? "—"} (score ${dumpNum(r.stageThree?.score ?? null, 1)}/${dumpNum(r.stageThree?.maxScore ?? null, 1)}, threshold ${dumpNum(r.stageThree?.threshold ?? null, 1)}, pass=${r.stageThree?.pass ?? "—"})`);
+    push(`Final grade: ${tl?.finalGrade ?? "—"}${tl?.unrated ? " (shown as Unrated — Opportunity F blocked what would've been higher)" : ""}`);
+    push(`Rule: ${tl?.ruleText ?? "no rule evaluated"}`);
+    if (tl?.overrideNotes.length) {
+      for (const note of tl.overrideNotes) push(`Override: ${note}`);
+    }
+    push("Sub-scores (value/max, EXCL = excluded for missing data, not scored as 0):");
+    const sc = d?.scoreComponentsComputed;
+    push(`  historicalMove: ${sc?.historicalMove ? `${dumpNum(d?.historicalMoveScore ?? null, 1)}/8` : "EXCL"}`);
+    push(`  consistency: ${sc?.consistency ? `${dumpNum(d?.consistencyScore ?? null, 1)}/4` : "EXCL"}`);
+    push(`  termStructure: ${sc?.termStructure ? `${dumpNum(d?.termStructureScore ?? null, 1)}/5` : "EXCL"}`);
+    push(`  ivEdge: ${sc?.ivEdge ? `${dumpNum(d?.ivEdgeScore ?? null, 1)}/4` : "EXCL"}`);
+    push(`  surprise: ${sc?.surprise ? `${dumpNum(d?.surpriseScore ?? null, 1)}/4` : "EXCL"}`);
+    push(`Effective max: ${dumpNum(r.stageThree?.maxScore ?? null, 1)} (25 minus any EXCL component's max)`);
+    push(
+      `historicalMoveRatio (raw): ${dumpNum(d?.historicalMoveRatio ?? null, 3)} (n=${d?.historicalMoveRatioN ?? 0})`,
+    );
+    push(
+      `historicalMoveRatio (shrunk toward population mean): ${dumpNum(d?.historicalMoveRatioShrunk ?? null, 3)} [populationMeanRatio=${dumpNum(d?.populationMeanRatio ?? null, 3)} shrinkageK=${dumpNum(d?.shrinkageK ?? null, 1)}]`,
+    );
+    push(
+      `verifiedModifier: delta=${d?.crushVerifiedModifierDelta ?? 0} (${d?.crushRatioSeverity ?? "no verified evidence"}) [verified ratio=${dumpNum(d?.crushRatio ?? null, 3)} verified-n=${d?.crushRatioVerifiedN ?? 0} applied=${d?.crushRatioCapApplied ?? false}]`,
+    );
+    push(
+      `Loss-multiplier calibration (E[loss|breach] as a multiple of EM): ${dumpNum(d?.lossMultiplier ?? null, 2)}x [source=${d?.lossMultiplierSource ?? "pool"} tickerN=${d?.lossMultiplierTickerN ?? 0} sectorN=${d?.lossMultiplierSectorN ?? 0} poolN=${d?.lossMultiplierPoolN ?? 0}]`,
+    );
+
+    // ---------- VOL INPUTS ----------
+    section("VOL INPUTS");
+    const weeklyIv = d?.weeklyIv ?? null;
+    const monthlyIv = d?.monthlyIv ?? null;
+    const realizedVol = d?.realizedVol30d ?? null;
+    const termRatio = weeklyIv !== null && monthlyIv !== null && monthlyIv > 0 ? weeklyIv / monthlyIv : null;
+    const ivEdgeRatio = weeklyIv !== null && realizedVol !== null && realizedVol > 0 ? weeklyIv / realizedVol : null;
+    push(`weeklyIV: ${dumpPct(weeklyIv)}   monthlyIV: ${dumpPct(monthlyIv)}   realizedVol30d: ${dumpPct(realizedVol)}`);
+    push(
+      `Term structure — raw ratio (weekly/monthly): ${dumpNum(termRatio, 3)}${d?.termStructureExcluded ? " (degenerate — monthly window collapsed onto the candidate's own expiry)" : ""}, awarded points: ${sc?.termStructure ? `${dumpNum(d?.termStructureScore ?? null, 1)}/5` : "EXCL"}`,
+    );
+    push(
+      `IV edge — raw ratio (weekly/realizedVol, unbounded): ${dumpNum(ivEdgeRatio, 3)}, awarded points: ${sc?.ivEdge ? `${dumpNum(d?.ivEdgeScore ?? null, 1)}/4` : "EXCL"} [cross-check industryFactors.ivEdge=${dumpNum(tl?.industryFactors.ivEdge ?? null, 3)}]`,
+    );
+
+    // ---------- FLOW ----------
+    section("FLOW");
+    const flow = d?.optionsFlow ?? null;
+    if (!flow) {
+      push("No options flow data — chain fetch didn't return flow for this candidate.");
+    } else {
+      push(
+        `P/C volume ratio: ${dumpNum(flow.putCallRatio, 3)} (put vol ${dumpInt(flow.putVolume)}, call vol ${dumpInt(flow.callVolume)}) — bias: ${flow.flowBias}`,
+      );
+      push(`P/C OI ratio: ${dumpNum(flow.putCallOI, 3)} (put OI ${dumpInt(flow.putOI)}, call OI ${dumpInt(flow.callOI)})`);
+      if (flow.unusualStrikes.length === 0) {
+        push("Unusual activity: none flagged (vol/OI > 3x with OI >= 30).");
+      } else {
+        push("Unusual activity — strike | type | volume | OI | vol/OI | tag:");
+        for (const u of flow.unusualStrikes) {
+          push(`  $${dumpNum(u.strike)} | ${u.type} | ${dumpInt(u.volume)} | ${dumpInt(u.oi)} | ${dumpNum(u.volOiRatio, 2)}x | ${u.note}`);
+        }
+      }
+      push(
+        `Deep OTM put cluster ($${dumpNum(flow.deepOtmPutCluster.lowerStrike)}–$${dumpNum(flow.deepOtmPutCluster.upperStrike)}, 1x-2.5x EM below spot): ${dumpInt(flow.deepOtmPutCluster.totalVolume)} vol / ${dumpInt(flow.deepOtmPutCluster.totalOI)} OI (${dumpNum(flow.deepOtmPutCluster.pctOfTotalPutVolume, 1)}% of put volume) — ${flow.deepOtmPutCluster.interpretation}`,
+      );
+    }
+    const selVolOiRatio =
+      selectedRow && selectedRow.oi > 0 ? selectedRow.volume / selectedRow.oi : null;
+    push(
+      `Volume/OI at selected strike ($${dumpNum(effectiveStrike)}): volume=${dumpInt(selectedRow?.volume ?? null)} OI=${dumpInt(selectedRow?.oi ?? null)} ratio=${dumpNum(selVolOiRatio, 2)}x`,
+    );
+
+    // ---------- POSITION CONTEXT ----------
+    section("POSITION CONTEXT");
+    if (chainCampaignsFailed) {
+      push("Campaign history fetch failed — unknown.");
+    } else if (chainCampaigns === null) {
+      push("Campaign history loading — unknown.");
+    } else {
+      const open = chainCampaigns.filter((c) => c.still_open);
+      if (open.length === 0) {
+        push("Existing position: none open on this ticker.");
+      } else {
+        push(`Existing position: ${open.length} open campaign(s) on this ticker.`);
+        for (const c of open) {
+          push(
+            `  opened ${fmtCampaignDate(c.start)} | ${tradeTypeBadge(c.trade_type).label} | ${c.contracts} contracts | peak capital $${dumpNum(c.peak_capital, 0)}`,
+          );
+        }
+      }
+      if (chainCampaigns.length === 0) {
+        push("Prior campaign history: none on this ticker.");
+      } else {
+        push(`Prior campaign history (${chainCampaigns.length} campaign(s)):`);
+        for (const c of chainCampaigns) {
+          push(
+            `  ${fmtCampaignDate(c.start)}–${fmtCampaignDate(c.end)} | ${tradeTypeBadge(c.trade_type).label} | ${c.contracts} contracts | P&L $${dumpNum(c.pnl, 0)} | ROC ${c.roc !== null ? `${c.roc.toFixed(2)}%` : "—"}${c.still_open ? " | still open" : ""}`,
+          );
+        }
+      }
+    }
+
+    return lines.join("\n").trim();
+  }, [r, tl, d, companyName, screenedAt, effectiveStrike, effectiveDelta, effectivePremium, effectivePop, selectedRow, recommended, availableStrikes, spreadFlagPct, chainCampaigns, chainCampaignsFailed]);
+
+  async function copyDump() {
+    try {
+      await navigator.clipboard.writeText(dump);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard unavailable — user can still select-all manually */
     }
   }
-
-  function copyPost(postIdx: number, text: string) {
-    navigator.clipboard.writeText(text).catch(() => {});
-    const key = `${postIdx}`;
-    setCopiedKey(key);
-    setTimeout(() => setCopiedKey((k) => (k === key ? null : k)), 1500);
-  }
-
-  // Stored drafts stay put on a strike/note/limit change — never
-  // silently discarded, never auto-regenerated (that would burn a
-  // call and produce different text unasked). Just flagged so it's
-  // obvious the draft below doesn't match the current inputs.
-  const draftMismatches: string[] =
-    posts && draftContext
-      ? [
-          effectiveStrike !== null && draftContext.strike !== effectiveStrike
-            ? `strike $${draftContext.strike}`
-            : null,
-          draftContext.convictionNote !== convictionNote ? "a different conviction note" : null,
-          draftContext.charLimit !== charLimit ? `a ${draftContext.charLimit}-char limit` : null,
-        ].filter((m): m is string => m !== null)
-      : [];
 
   return (
-    <div className="space-y-4">
-      <div className="grid gap-3 rounded-md border border-border bg-background/40 p-3 text-sm md:grid-cols-2">
-        <label className="flex items-center gap-2">
-          <span className="w-24 shrink-0 text-muted-foreground">Strike</span>
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-2 rounded border border-border bg-background/40 px-2 py-1.5 text-sm">
+        <label className="flex items-center gap-1.5">
+          <span className="text-muted-foreground">Strike</span>
           <input
             type="number"
-            step="0.5"
-            defaultValue={effectiveStrike ?? ""}
-            key={effectiveStrike ?? "none"}
-            onBlur={(e) => {
-              const v = Number(e.target.value);
-              if (Number.isFinite(v)) commitStrike(v);
-            }}
+            step="any"
+            value={strikeInput}
+            onChange={(e) => setStrikeInput(e.target.value)}
+            onBlur={commitStrike}
             onKeyDown={(e) => {
-              if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+              if (e.key === "Enter") commitStrike();
             }}
             className="w-24 rounded border border-border bg-background px-2 py-1 font-mono"
           />
-          {strikeOverride !== null && (
-            <button
-              type="button"
-              onClick={onResetStrike}
-              className="rounded border border-border px-1.5 py-0.5 text-[10px] uppercase text-muted-foreground hover:bg-foreground/10 hover:text-foreground"
-              title="Reset to suggested 2x EM strike"
-            >
-              ↺ reset
-            </button>
-          )}
         </label>
-        <label className="flex items-center gap-2">
-          <span className="w-24 shrink-0 text-muted-foreground">Char limit</span>
+        <span className="text-muted-foreground">
+          Recommended: <span className="font-mono">${fmtNum(recommended)}</span>
+        </span>
+        {strikeOverride !== null && (
+          <button
+            type="button"
+            onClick={() => {
+              onResetStrike();
+              setStrikeInput(recommended !== null ? String(recommended) : "");
+            }}
+            className="text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+          >
+            reset to recommended
+          </button>
+        )}
+        <label className="ml-2 flex items-center gap-1.5">
+          <span className="text-muted-foreground">Wide-spread flag</span>
           <input
             type="number"
-            step="1"
-            value={charLimit}
-            onChange={(e) => {
-              const n = Number(e.target.value);
-              if (Number.isFinite(n)) setCharLimit(n);
-            }}
-            className="w-24 rounded border border-border bg-background px-2 py-1 font-mono"
+            min={1}
+            step="any"
+            value={spreadFlagPct}
+            onChange={(e) => setSpreadFlagPct(Number(e.target.value) || 0)}
+            className="w-14 rounded border border-border bg-background px-2 py-1 font-mono"
           />
-          <span className="text-xs text-muted-foreground">freeform · sticky across rows &amp; reloads</span>
+          <span className="text-muted-foreground">% of mid</span>
         </label>
-        <label className="flex flex-col gap-1 md:col-span-2">
-          <span className="text-muted-foreground">Conviction note (persists on this row)</span>
-          <input
-            type="text"
-            value={convictionNote}
-            onChange={(e) => onConvictionNoteChange(e.target.value)}
-            placeholder='e.g. "B grade but sizing down" or "cleanest setup this week"'
-            className="rounded border border-border bg-background px-2 py-1"
-          />
-        </label>
-        <div className="text-xs text-muted-foreground md:col-span-2">
-          Grading this as{" "}
-          <span className="font-mono text-foreground">{effectiveGrade}</span>
-          {gradeIsPreview ? " (preview, at the selected strike)" : ""} — live figures like probability
-          of profit and options flow may appear; position size, contract count, premium, and dollar
-          amounts never will.
-        </div>
-      </div>
-
-      <div className="flex items-center gap-2">
-        <Button size="sm" onClick={() => void generate()} disabled={generating || effectiveStrike === null}>
-          {generating ? (
+        <Button size="sm" className="ml-auto" onClick={() => void copyDump()}>
+          {copied ? (
             <>
-              <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
-              Generating…
+              <Check className="mr-1 h-3.5 w-3.5" />
+              Copied
             </>
-          ) : posts ? (
-            "Regenerate"
           ) : (
-            "Generate"
+            <>
+              <Copy className="mr-1 h-3.5 w-3.5" />
+              Copy dump
+            </>
           )}
         </Button>
-        {genError && <span className="text-sm text-red-400">{genError}</span>}
       </div>
-
-      {draftMismatches.length > 0 && (
-        <div className="rounded border border-amber-500/30 bg-amber-500/5 px-2 py-1.5 text-xs text-amber-200">
-          Generated for {draftMismatches.join(", ")} — inputs have changed since. Regenerate to
-          update.
-        </div>
-      )}
-
-      {posts &&
-        (() => {
-          const displayPosts = editedPosts.length === posts.length ? editedPosts : posts;
-          return (
-            <div className="space-y-2 rounded-md border border-border bg-background/40 p-3">
-              {displayPosts.map((post, pi) => {
-                const key = `${pi}`;
-                return (
-                  <div key={pi} className="space-y-1">
-                    {displayPosts.length > 1 && (
-                      <div className="text-[10px] text-muted-foreground">
-                        Post {pi + 1} of {displayPosts.length}
-                      </div>
-                    )}
-                    <AutoGrowTextarea
-                      value={post}
-                      onChange={(e) => {
-                        const text = e.target.value;
-                        setEditedPosts((prev) => {
-                          const next = prev.length === posts.length ? [...prev] : [...posts];
-                          next[pi] = text;
-                          // Persist the edit, not just the original
-                          // generation — this is the version that
-                          // should come back after collapse/reload.
-                          if (draftContext) {
-                            setStoredTweetDraft(r.symbol, { ...draftContext, posts, editedPosts: next });
-                          }
-                          return next;
-                        });
-                      }}
-                      className="w-full resize-none overflow-hidden rounded border border-border bg-background p-2 text-sm"
-                    />
-                    <div className="flex items-center justify-between">
-                      <span
-                        className={cn(
-                          "font-mono text-xs",
-                          post.length > charLimit ? "text-red-400" : "text-muted-foreground",
-                        )}
-                      >
-                        {post.length} / {charLimit}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => copyPost(pi, post)}
-                        className="rounded border border-border px-2 py-0.5 text-xs text-muted-foreground hover:bg-foreground/10 hover:text-foreground"
-                      >
-                        {copiedKey === key ? "Copied" : "Copy"}
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          );
-        })()}
+      <pre className="max-h-[600px] overflow-auto whitespace-pre-wrap rounded border border-border bg-background/40 p-3 font-mono text-xs leading-relaxed">
+        {dump}
+      </pre>
     </div>
   );
 }
@@ -5793,14 +5292,14 @@ function SandboxTester({ connected }: { connected: boolean }) {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<ScreenerResult | null>(null);
   const [note, setNote] = useState<string | null>(null);
-  // Sandbox result isn't part of the main table's strikeOverrides /
-  // convictionNotes maps (it's not a saved candidate row) — same
-  // mechanisms, scoped locally instead. Reset with each new sandbox
-  // run below.
+  // Sandbox result isn't part of the main table's strikeOverrides map
+  // (it's not a saved candidate row) — same mechanism, scoped locally
+  // instead. Reset with each new sandbox run below.
   const [sandboxStrikeOverride, setSandboxStrikeOverride] = useState<StrikeOverride | null>(null);
-  const [sandboxConvictionNote, setSandboxConvictionNote] = useState("");
-  // Char limit is no longer sandbox-local — TweetTab reads/writes the
-  // same global localStorage preference everywhere, sandbox included.
+  // When this sandbox fetch's price was captured — the Analysis Dump
+  // tab's header needs a capture timestamp, and sandbox has no batch
+  // screenedAt to fall back on since it's a live single-ticker pull.
+  const [fetchedAt, setFetchedAt] = useState<Date | null>(null);
 
   async function analyze() {
     const sym = symbol.trim().toUpperCase();
@@ -5812,7 +5311,7 @@ function SandboxTester({ connected }: { connected: boolean }) {
     setNote(null);
     setResult(null);
     setSandboxStrikeOverride(null);
-    setSandboxConvictionNote("");
+    setFetchedAt(null);
     const candidate = makeSandboxCandidate(sym);
     if (!connected) {
       setResult(candidate);
@@ -5831,6 +5330,7 @@ function SandboxTester({ connected }: { connected: boolean }) {
       const json = (await res.json()) as { result?: ScreenerResult; error?: string };
       if (!res.ok || !json.result) throw new Error(json.error ?? `HTTP ${res.status}`);
       setResult(json.result);
+      setFetchedAt(new Date());
       if (!json.result.stageThree || !json.result.stageFour) {
         setNote(
           "Options chain unavailable for this expiry (market closed or no listed options) — grades and strike suggestions can't be computed. Showing everything else.",
@@ -5923,8 +5423,7 @@ function SandboxTester({ connected }: { connected: boolean }) {
                 strikeOverride={sandboxStrikeOverride}
                 onSelectStrike={setSandboxStrikeOverride}
                 onResetStrike={() => setSandboxStrikeOverride(null)}
-                convictionNote={sandboxConvictionNote}
-                onConvictionNoteChange={setSandboxConvictionNote}
+                screenedAt={fetchedAt}
               />
             </div>
           ) : (

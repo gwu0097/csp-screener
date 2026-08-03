@@ -276,6 +276,13 @@ export type StageFourResult = {
     // use a possibly-stale bid.
     fillInvalid: boolean;
     delta: number;
+    // Open interest / today's volume for this strike — same Schwab
+    // contract response runStageFour already fetches for bid/ask/mark,
+    // just extracted; not a new round-trip. Powers the Analysis Dump
+    // export's Options Chain section (no OI/volume column exists in
+    // the on-screen chain table, but the data was always present).
+    oi: number;
+    volume: number;
   }>;
 };
 
@@ -443,6 +450,16 @@ export type ThreeLayerGrade = {
   // recommendation, full stop — this field is diagnostic only (is it
   // liquid, at what price) and never recommends a different strike.
   referenceStrikeCheck: ReferenceStrikeCheck;
+  // Which finalGrade rule cascade branch matched (or "F" via the
+  // no-rule-matched fallthrough) plus its human-readable explanation —
+  // surfaced verbatim from the same local values the cascade already
+  // computes, for the Analysis Dump export's grade-breakdown section.
+  // Not a new calculation, just exposing what was already decided.
+  matchedRule: "A" | "B" | "C" | "F";
+  ruleText: string;
+  // Overhang/VIX/personal-history overrides that fired after the rule
+  // cascade, in order — empty when none applied.
+  overrideNotes: string[];
 };
 
 // Client-facing categorization, computed here where the thresholds live —
@@ -2144,6 +2161,8 @@ export async function runStageFour(
           premiumFill: Math.round(strikeFill * 100) / 100,
           fillInvalid: strikeFillInvalid,
           delta: Math.round(c.delta * 1000) / 1000,
+          oi: Number.isFinite(c.openInterest) ? (c.openInterest as number) : 0,
+          volume: Number.isFinite(c.totalVolume) ? (c.totalVolume as number) : 0,
         });
       }
     }
@@ -3709,5 +3728,8 @@ export function calculateThreeLayerGrade(
     expirySource,
     setupGrade,
     referenceStrikeCheck,
+    matchedRule,
+    ruleText: ruleExplain[matchedRule],
+    overrideNotes: overrideBits,
   };
 }

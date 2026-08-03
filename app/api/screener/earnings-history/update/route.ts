@@ -93,6 +93,9 @@ export async function POST(req: NextRequest) {
     ratio,
     grade,
     impliedMoveSource: "manual",
+    // This upsert doesn't touch date_confidence — whatever the row
+    // already has (or doesn't) is unknown here without a re-read.
+    dateConfidence: null,
   };
   return NextResponse.json({ event });
 }

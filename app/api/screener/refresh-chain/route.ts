@@ -73,12 +73,13 @@ export async function POST(req: NextRequest) {
   }
 
   // Mirrors StageFourResult["availableStrikes"]'s shape (strike/bid/
-  // ask/mark/last/premiumFill/fillInvalid/delta) so the client's
-  // click-to-select handler can treat a freshly-refreshed chain and
-  // the original analysis-time chain identically — same fields, same
-  // fill-basis math, no source-specific branching. delta is already
-  // on every Schwab contract (no extra fetch), so a strike clicked
-  // from a refreshed chain still yields a real per-strike Delta/POP.
+  // ask/mark/last/premiumFill/fillInvalid/delta/oi/volume) so the
+  // client's click-to-select handler can treat a freshly-refreshed
+  // chain and the original analysis-time chain identically — same
+  // fields, same fill-basis math, no source-specific branching. delta/
+  // openInterest/totalVolume are already on every Schwab contract (no
+  // extra fetch), so a strike clicked from a refreshed chain still
+  // yields a real per-strike Delta/POP/OI/volume.
   const strikes = contracts
     .map((c) => {
       const bid = Number.isFinite(c.bid) ? c.bid : 0;
@@ -97,6 +98,8 @@ export async function POST(req: NextRequest) {
         premiumFill: Math.round(fill * 100) / 100,
         fillInvalid: midInvalid,
         delta: Number.isFinite(c.delta) ? Math.round(c.delta * 1000) / 1000 : 0,
+        oi: Number.isFinite(c.openInterest) ? (c.openInterest as number) : 0,
+        volume: Number.isFinite(c.totalVolume) ? (c.totalVolume as number) : 0,
       };
     })
     .sort((a, b) => a.strike - b.strike);

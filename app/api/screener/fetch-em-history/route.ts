@@ -171,7 +171,7 @@ export async function POST(req: NextRequest) {
   const refreshed = await sb
     .from("earnings_history")
     .select(
-      "earnings_date,implied_move_pct,actual_move_pct,move_ratio,implied_move_source",
+      "earnings_date,implied_move_pct,actual_move_pct,move_ratio,implied_move_source,date_confidence",
     )
     .eq("symbol", symbol)
     .order("earnings_date", { ascending: false })
@@ -182,6 +182,7 @@ export async function POST(req: NextRequest) {
     actual_move_pct: number | null;
     move_ratio: number | null;
     implied_move_source: string | null;
+    date_confidence: "confirmed" | "low" | null;
   }>).map((row) => {
     const ratio =
       row.move_ratio ??
@@ -198,6 +199,7 @@ export async function POST(req: NextRequest) {
       ratio,
       grade: gradeFromRatio(ratio),
       impliedMoveSource: row.implied_move_source,
+      dateConfidence: row.date_confidence,
     };
   });
 
