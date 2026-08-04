@@ -29,6 +29,8 @@ import {
 } from "@/components/buy-zone-view";
 import type { EarningsWatchRow } from "@/components/earnings-watch-view";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { SchwabStatusBanner } from "@/components/schwab-status-banner";
+import { CaptureHealthPanel } from "@/components/capture-health-panel";
 
 // Markdown body for the AI morning brief — mirrors the styling used for
 // filing analyses (components/filing-analysis.tsx) without a typography plugin.
@@ -141,6 +143,32 @@ function prettyToday(): string {
     day: "numeric",
     year: "numeric",
   }).format(new Date());
+}
+function isWeekendIso(ymd: string): boolean {
+  const [y, m, d] = ymd.split("-").map(Number);
+  const day = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+  return day === 0 || day === 6;
+}
+// The next trading session after `fromIso` — Monday after a Friday,
+// not literally "tomorrow". Market holidays aren't accounted for
+// (same scope as this codebase's other isWeekend-only helpers, e.g.
+// schwab-status-banner.tsx) — only the weekend case matters for the
+// earnings panel's "before the next open" deadline.
+function nextTradingSessionIso(fromIso: string): string {
+  let cursor = addDayStr(fromIso);
+  while (isWeekendIso(cursor)) cursor = addDayStr(cursor);
+  return cursor;
+}
+function weekdayNameFromIso(ymd: string): string {
+  const [y, m, d] = ymd.split("-").map(Number);
+  return new Intl.DateTimeFormat("en-US", { timeZone: "UTC", weekday: "long" }).format(
+    new Date(Date.UTC(y, m - 1, d)),
+  );
+}
+// "Tomorrow" when the next session really is the next calendar day;
+// otherwise the weekday name (e.g. a Friday's next session is Monday).
+function nextSessionLabel(todayIso: string, sessionIso: string): string {
+  return sessionIso === addDayStr(todayIso) ? "Tomorrow" : weekdayNameFromIso(sessionIso);
 }
 
 // ---------- Formatters ----------
@@ -363,7 +391,7 @@ export function DashboardView() {
   const buyZoneResearch = useBuyZoneResearch();
   const [earningsWeek, setEarningsWeek] = useState<Slot<EarningsWatchResp>>(LOADING);
   // null = no manual choice yet, use the computed default below (which
-  // depends on earningsToday.length — not knowable at mount before
+  // depends on earningsUrgent.length — not knowable at mount before
   // earningsWeek has loaded, so this can't be a lazy useState initializer).
   const [manualShowAllEarnings, setManualShowAllEarnings] = useState<boolean | null>(null);
   const router = useRouter();
@@ -679,13 +707,24 @@ export function DashboardView() {
   // AMC hasn't (it prints tonight after close) — these need to look
   // different, not identical "reports today" rows.
   const todayIsoStr = easternToday();
-  const earningsToday = earningsWeekHeld.filter((r) => r.earningsDate === todayIsoStr);
-  const earningsLater = earningsWeekHeld.filter((r) => r.earningsDate !== todayIsoStr);
-  // Default: collapsed if today already has rows to show (later names
-  // sit behind the toggle); expanded automatically if today has
-  // nothing, so the panel never looks empty with everything hidden.
-  const showAllEarnings = manualShowAllEarnings ?? earningsToday.length === 0;
-  const earningsRowsToShow = showAllEarnings ? [...earningsToday, ...earningsLater] : earningsToday;
+  // The expanded section groups by DEADLINE ("reports before the next
+  // market open"), not by calendar date. A BMO print tomorrow morning
+  // requires acting before TODAY's close, same as tonight's AMC prints
+  // — so both belong here, even though they're on different calendar
+  // dates. "Next session" skips weekends (Friday's next session is
+  // Monday), not literally tomorrow — see nextTradingSessionIso.
+  const nextSessionIsoStr = nextTradingSessionIso(todayIsoStr);
+  const isUrgentEarningsRow = (r: EarningsWatchRow) =>
+    r.earningsDate === todayIsoStr ||
+    (r.earningsDate === nextSessionIsoStr && r.earningsTiming === "BMO");
+  const earningsUrgent = earningsWeekHeld.filter(isUrgentEarningsRow);
+  const earningsLater = earningsWeekHeld.filter((r) => !isUrgentEarningsRow(r));
+  // Default: collapsed if the urgent set already has rows to show
+  // (later names sit behind the toggle); expanded automatically if
+  // there's nothing urgent, so the panel never looks empty with
+  // everything hidden.
+  const showAllEarnings = manualShowAllEarnings ?? earningsUrgent.length === 0;
+  const earningsRowsToShow = showAllEarnings ? [...earningsUrgent, ...earningsLater] : earningsUrgent;
 
   // ---------- Market tiles ----------
   const m = market.data;
@@ -696,6 +735,8 @@ export function DashboardView() {
 
   return (
     <div className="space-y-4">
+      <SchwabStatusBanner />
+      <CaptureHealthPanel />
       {/* ---------- Header ---------- */}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
@@ -939,11 +980,13 @@ export function DashboardView() {
       </Panel>
 
       {/* ---------- Earnings this week (always visible, non-collapsible) ----------
-          One panel, not two. Today's reporters always render inline;
-          the rest of the week sits behind an in-panel "show more"
-          toggle — never a second section, and never hidden entirely
-          when today has nothing to show (see earningsRowsToShow). */}
-      <Panel className={cn(earningsToday.length > 0 && "border-amber-500/40")}>
+          One panel, not two. Rows that need a decision before the next
+          market open — today's AMC reporters and the NEXT trading
+          session's BMO reporters (Monday's, on a Friday) — always
+          render inline; the rest of the week sits behind an in-panel
+          "show more" toggle — never a second section, and never hidden
+          entirely when nothing is urgent (see earningsRowsToShow). */}
+      <Panel className={cn(earningsUrgent.length > 0 && "border-amber-500/40")}>
         <SectionHeader
           icon={<AlarmClock className="h-4 w-4 text-amber-400" />}
           right={
@@ -955,7 +998,7 @@ export function DashboardView() {
             </Link>
           }
         >
-          <span className={earningsToday.length > 0 ? "text-amber-300" : undefined}>
+          <span className={earningsUrgent.length > 0 ? "text-amber-300" : undefined}>
             Earnings this week — held names
           </span>
         </SectionHeader>
@@ -963,7 +1006,7 @@ export function DashboardView() {
           <SkeletonLines n={2} />
         ) : earningsWeek.status === "error" ? (
           <p className="text-sm text-muted-foreground">—</p>
-        ) : earningsToday.length === 0 && earningsLater.length === 0 ? (
+        ) : earningsUrgent.length === 0 && earningsLater.length === 0 ? (
           <p className="text-sm text-muted-foreground">
             No Portfolio watchlist names report earnings this week.
           </p>
@@ -974,7 +1017,7 @@ export function DashboardView() {
                 <thead>
                   <tr className="text-left text-[11px] uppercase tracking-wider text-muted-foreground">
                     <th className="py-1.5 pr-3 font-medium">Symbol</th>
-                    <th className="py-1.5 pr-3 font-medium">{earningsToday.length > 0 ? "Status" : "Reports"}</th>
+                    <th className="py-1.5 pr-3 font-medium">{earningsUrgent.length > 0 ? "Status" : "Reports"}</th>
                     <th className="py-1.5 pr-3 font-medium">Allocation</th>
                     <th className="py-1.5 pr-3 font-medium">Options</th>
                     <th className="py-1.5 text-right font-medium">Call</th>
@@ -983,33 +1026,45 @@ export function DashboardView() {
                 <tbody>
                   {earningsRowsToShow.map((r) => {
                     const isToday = r.earningsDate === todayIsoStr;
+                    const isNextSessionBmo =
+                      r.earningsDate === nextSessionIsoStr && r.earningsTiming === "BMO";
                     // BMO prints before today's open — by the time this
                     // dashboard is viewed, that has already happened.
-                    // AMC prints tonight after close — still ahead.
+                    // AMC prints tonight after close — still ahead. A
+                    // next-session BMO also still ahead — same deadline
+                    // (today's close) as tonight's AMC, different date.
                     const reported = isToday && r.earningsTiming === "BMO";
                     const upcoming = isToday && r.earningsTiming === "AMC";
+                    const actNow = upcoming || isNextSessionBmo;
+                    const isUrgent = isToday || isNextSessionBmo;
                     return (
                       <tr
                         key={r.symbol}
                         onClick={() => router.push(`/analysis/earnings-watch?symbol=${r.symbol}`)}
                         className={cn(
                           "cursor-pointer border-t border-border/60 hover:bg-background/60",
-                          upcoming && "bg-amber-500/[0.06]",
+                          actNow && "bg-amber-500/[0.06]",
                           reported && "text-muted-foreground",
                         )}
                       >
                         <td className="py-1.5 pr-3 font-mono font-semibold">{r.symbol}</td>
                         <td className="py-1.5 pr-3">
-                          {isToday ? (
+                          {isUrgent ? (
                             <span
                               className={cn(
                                 "rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase",
-                                upcoming
+                                actNow
                                   ? "border-amber-500/40 bg-amber-500/15 text-amber-300"
                                   : "border-border bg-muted text-muted-foreground",
                               )}
                             >
-                              {reported ? "Reported · BMO" : upcoming ? "Tonight · AMC" : r.earningsTiming ?? "Today"}
+                              {reported
+                                ? "Reported · BMO"
+                                : upcoming
+                                  ? "Tonight · AMC"
+                                  : isNextSessionBmo
+                                    ? `${nextSessionLabel(todayIsoStr, nextSessionIsoStr)} · BMO`
+                                    : r.earningsTiming ?? "Today"}
                             </span>
                           ) : (
                             <span className="text-[11px] text-muted-foreground">
@@ -1039,7 +1094,7 @@ export function DashboardView() {
                 </tbody>
               </table>
             </div>
-            {earningsToday.length > 0 && earningsLater.length > 0 && (
+            {earningsUrgent.length > 0 && earningsLater.length > 0 && (
               <button
                 type="button"
                 onClick={() => setManualShowAllEarnings(!showAllEarnings)}
