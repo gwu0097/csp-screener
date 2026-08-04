@@ -1,0 +1,40 @@
+# Builds a clean `git worktree` of HEAD — not the working tree — and
+# runs the same `npm ci && npm run build` Vercel runs. This is the
+# only local check that's actually equivalent to what breaks in
+# production: a worktree only contains what's committed, so an import
+# (or a fetch("/api/...") target) that exists on disk but was never
+# `git add`ed fails here exactly like it fails on Vercel's clean
+# clone — the failure mode that broke two deploys in a row before
+# this hook existed. `next build`'s own local-vs-working-tree run
+# proves nothing; that's the whole reason this exists as a *worktree*
+# build, not a plain `npm run build`.
+#
+# Slow on purpose (a full npm ci + next build) — that thoroughness is
+# the point. Skip once, deliberately, with:
+#   git push --no-verify
+set -e
+
+WORKTREE_DIR=$(mktemp -d /tmp/pre-push-verify.XXXXXX)
+cleanup() {
+  git worktree remove "$WORKTREE_DIR" --force >/dev/null 2>&1 || true
+  rm -rf "$WORKTREE_DIR"
+}
+trap cleanup EXIT
+
+echo "[pre-push] Building a clean worktree of HEAD to verify what Vercel will see..."
+git worktree add "$WORKTREE_DIR" HEAD --quiet
+
+# Vercel has its own configured env vars; a local .env.local is the
+# closest local proxy so this build doesn't fail for missing secrets
+# that Vercel actually has. Skipped harmlessly if absent.
+if [ -f .env.local ]; then
+  cp .env.local "$WORKTREE_DIR/.env.local"
+fi
+
+(
+  cd "$WORKTREE_DIR"
+  npm ci --silent
+  npm run build
+)
+
+echo "[pre-push] Clean-worktree build passed."
