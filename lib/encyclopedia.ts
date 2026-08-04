@@ -576,22 +576,32 @@ export async function updateEncyclopedia(symbol: string): Promise<UpdateSummary>
   // real announcement date — see fetchYahooPriceAction).
   const existingRes = await sb
     .from("earnings_history")
-    .select("earnings_date,is_complete,actual_move_pct,implied_move_source")
+    .select("earnings_date,is_complete,actual_move_pct,implied_move_source,timing,timing_source")
     .eq("symbol", sym);
   const existing = new Map<
     string,
-    { is_complete: boolean; actual_move_pct: number | null; implied_move_source: string | null }
+    {
+      is_complete: boolean;
+      actual_move_pct: number | null;
+      implied_move_source: string | null;
+      timing: string | null;
+      timing_source: string | null;
+    }
   >();
   for (const r of (existingRes.data ?? []) as Array<{
     earnings_date: string;
     is_complete: boolean;
     actual_move_pct: number | null;
     implied_move_source: string | null;
+    timing: string | null;
+    timing_source: string | null;
   }>) {
     existing.set(r.earnings_date, {
       is_complete: r.is_complete,
       actual_move_pct: r.actual_move_pct,
       implied_move_source: r.implied_move_source,
+      timing: r.timing,
+      timing_source: r.timing_source,
     });
   }
 
@@ -605,6 +615,15 @@ export async function updateEncyclopedia(symbol: string): Promise<UpdateSummary>
     const earnings_date = calMatch?.announcementDate ?? r.period;
     const hour = calMatch?.hour ?? null;
     const already = existing.get(earnings_date);
+    // This upsert's timing source (the Yahoo reportedDate heuristic) is
+    // the weakest of the three: 'manual' is human-verified, 'finnhub_hour'
+    // comes from Finnhub's real calendar (the T0 capture path). An
+    // upsert here must never downgrade a stronger existing source —
+    // this loop re-runs on incomplete/implausible rows, and a row can
+    // have picked up finnhub_hour from T0 capture before Phase 1 gets
+    // back around to it.
+    const preserveExistingTiming =
+      already?.timing_source === "manual" || already?.timing_source === "finnhub_hour";
     // Hand-entered rows (from the earnings-history table's inline EM/
     // Actual editor) are never touched by the automated feed — that
     // feed is exactly what left the row blank in the first place, and
@@ -685,6 +704,16 @@ export async function updateEncyclopedia(symbol: string): Promise<UpdateSummary>
       actual_move_pct: price.actual_move_pct,
       implied_move_pct,
       move_ratio: breach.move_ratio,
+      // hour is exactly what fetchYahooPriceActionTimed above used to
+      // pick price_before/price_after — persisting it, not just using
+      // it in memory, is the actual fix here. Never overwrite a
+      // stronger existing source (see preserveExistingTiming above).
+      timing: preserveExistingTiming ? already!.timing : hour,
+      timing_source: preserveExistingTiming
+        ? already!.timing_source
+        : hour
+          ? "yahoo_timestamp_heuristic"
+          : null,
       iv_before: null,
       iv_after: null,
       iv_crushed: null,
@@ -952,20 +981,30 @@ export async function fetchYahooPriceActionTimed(
     }
     return best;
   };
-  const firstOnOrAfter = (target: string): number | null => {
-    for (const b of normalized) if (b.iso >= target) return b.close;
-    return null;
-  };
-
+  // Anchor to the nearest REAL trading day on/after announcementDate,
+  // then step by array position — not by addDaysIso(announcementDate,
+  // ±1) calendar-day math. That calendar-day version had a real bug:
+  // when announcementDate itself falls on a weekend/holiday (confirmed
+  // live: BRK-B 2025-08-02, a Saturday), lastOnOrBefore(D-1) and
+  // lastOnOrBefore(D) both resolve to the same prior trading day's
+  // bar — Friday's close — producing an artificial exact-zero move
+  // that has nothing to do with the real reaction. Mirrors the anchor
+  // logic in scripts/backfill-earnings-price-paths.ts, which never had
+  // this bug for the same reason.
+  const anchorIdx = normalized.findIndex((b) => b.iso >= announcementDate);
   let price_before: number | null;
   let price_after: number | null;
-  if (hour === "bmo") {
-    price_before = lastOnOrBefore(addDaysIso(announcementDate, -1));
-    price_after = lastOnOrBefore(announcementDate);
+  if (anchorIdx === -1) {
+    // No bar on or after announcementDate in the fetched window.
+    price_before = null;
+    price_after = null;
+  } else if (hour === "bmo") {
+    price_before = anchorIdx - 1 >= 0 ? normalized[anchorIdx - 1].close : null;
+    price_after = normalized[anchorIdx].close;
   } else {
     // AMC or unknown — treat as after-close.
-    price_before = lastOnOrBefore(announcementDate);
-    price_after = firstOnOrAfter(addDaysIso(announcementDate, 1));
+    price_before = normalized[anchorIdx].close;
+    price_after = anchorIdx + 1 < normalized.length ? normalized[anchorIdx + 1].close : null;
   }
   const price_at_expiry = lastOnOrBefore(expiryIso);
   const actual_move_pct =
@@ -1134,6 +1173,11 @@ export async function reingestHistoricalDates(
       // forces ensurePerplexityData to re-pull on the next maintenance
       // run, where it'll read the corrected actual_move_pct.
       const newerRow = existingAtAnnouncement;
+      // Same precedence as Phase 1: don't let this re-key's Yahoo-
+      // heuristic timing clobber a stronger source (manual, or
+      // finnhub_hour from the T0-inserted row we're merging into).
+      const preserveNewerTiming =
+        newerRow.timing_source === "manual" || newerRow.timing_source === "finnhub_hour";
       const updatePayload = {
         eps_estimate: newerRow.eps_estimate ?? merged.eps_estimate,
         eps_actual: newerRow.eps_actual ?? merged.eps_actual,
@@ -1156,6 +1200,10 @@ export async function reingestHistoricalDates(
           newerRow.implied_move_pct > 0
             ? Math.abs(price.actual_move_pct) / newerRow.implied_move_pct
             : newerRow.move_ratio,
+        // match.hour is exactly what fetchYahooPriceActionTimed above
+        // used to compute price.price_before/price_after.
+        timing: preserveNewerTiming ? newerRow.timing : match.hour,
+        timing_source: preserveNewerTiming ? newerRow.timing_source : "yahoo_timestamp_heuristic",
         data_source: "finnhub+calendar-rekey",
       };
       const u = await sb
@@ -1193,6 +1241,8 @@ export async function reingestHistoricalDates(
     // generated against the wrong earnings_date / actual_move_pct and
     // is now stale. ensurePerplexityData will re-pull on the next
     // maintenance run using the corrected values.
+    const preserveRowTiming =
+      row.timing_source === "manual" || row.timing_source === "finnhub_hour";
     const updatePayload = {
       earnings_date: announcementDate,
       eps_estimate: merged.eps_estimate,
@@ -1209,6 +1259,10 @@ export async function reingestHistoricalDates(
       analyst_sentiment: null,
       news_summary: null,
       perplexity_pulled_at: null,
+      // match.hour is exactly what fetchYahooPriceActionTimed above
+      // used to compute price.price_before/price_after.
+      timing: preserveRowTiming ? row.timing : match.hour,
+      timing_source: preserveRowTiming ? row.timing_source : "yahoo_timestamp_heuristic",
       data_source: "finnhub+calendar-rekey",
     };
     const u = await sb
@@ -1258,6 +1312,7 @@ type HistoryRow = {
   symbol: string;
   earnings_date: string;
   timing: "amc" | "bmo" | "unknown" | null;
+  timing_source: string | null;
   date_confidence: "confirmed" | "low" | null;
   price_before: number | null;
   price_after: number | null;
@@ -1317,6 +1372,8 @@ async function upsertHistoryStub(
         data_source: "encyclopedia-live",
         is_complete: false,
         timing,
+        // "unknown" isn't a real determination — nothing to attribute.
+        timing_source: timing === "unknown" ? null : "finnhub_hour",
       },
       { onConflict: "symbol,earnings_date" },
     );
@@ -1504,6 +1561,8 @@ export async function captureEarningsT0(
       // persistLiveImpliedMove, which has no calendar context) rather
       // than clobbering a known value with "unknown".
       timing: timing !== "unknown" ? timing : (row?.timing ?? "unknown"),
+      timing_source:
+        timing !== "unknown" ? "finnhub_hour" : (row?.timing_source ?? null),
       t0_captured_at: new Date().toISOString(),
     })
     .eq("symbol", sym)

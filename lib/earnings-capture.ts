@@ -26,7 +26,7 @@ import type { PositionRow } from "@/lib/positions";
 // far above a normal day's relevant-reporter count.
 const CAPTURE_BUDGET_MS = 50_000;
 
-function todayEasternIso(): string {
+export function todayEasternIso(): string {
   return new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/New_York",
     year: "numeric",
@@ -59,6 +59,73 @@ export function isT1SessionEligible(
   const timing = (row.timing ?? "unknown").toLowerCase();
   if (timing === "bmo") return row.earnings_date <= todayEt;
   return row.earnings_date < todayEt;
+}
+
+export type T0Candidate = { symbol: string; earnings_date: string; timing: "amc" | "bmo" | "unknown" };
+
+// Pure selection — no Schwab calls, safe to call from anywhere (including
+// a local read-only chain-detail capture) without burning API budget.
+// Extracted from runT0Capture so there's one definition, not two that
+// can drift; runT0Capture calls this directly.
+export async function selectT0Candidates(): Promise<T0Candidate[]> {
+  const todayEt = todayEasternIso();
+  const tomorrowEt = addDaysIso(todayEt, 1);
+  const byKey = new Map<string, T0Candidate>();
+
+  // Source 1: live earnings calendar ∩ app-known symbols. Carries real
+  // AMC/BMO timing straight from Finnhub.
+  const [{ relevant }, calendar] = await Promise.all([
+    buildMaintenanceSymbolSets(),
+    getTodayEarnings().catch(() => []),
+  ]);
+  for (const e of calendar) {
+    const sym = e.symbol.toUpperCase();
+    if (!relevant.has(sym)) continue;
+    const timing: "amc" | "bmo" | "unknown" = e.timing === "AMC" ? "amc" : e.timing === "BMO" ? "bmo" : "unknown";
+    byKey.set(`${sym}|${e.date}`, { symbol: sym, earnings_date: e.date, timing });
+  }
+
+  // Source 2: pre-ingested earnings_history rows for the window. No real
+  // timing available here — "unknown" is deliberately conservative.
+  const sb = createServerClient();
+  const pre = await sb
+    .from("earnings_history")
+    .select("symbol,earnings_date,iv_before")
+    .gte("earnings_date", todayEt)
+    .lte("earnings_date", tomorrowEt)
+    .is("iv_before", null);
+  for (const r of (pre.data ?? []) as Array<{ symbol: string; earnings_date: string }>) {
+    const sym = r.symbol.toUpperCase();
+    const key = `${sym}|${r.earnings_date}`;
+    if (byKey.has(key)) continue; // Source 1 already has real timing for this pair
+    byKey.set(key, { symbol: sym, earnings_date: r.earnings_date, timing: "unknown" });
+  }
+  return Array.from(byKey.values());
+}
+
+export type T1Candidate = {
+  symbol: string;
+  earnings_date: string;
+  iv_before: number | null;
+  implied_move_pct: number | null;
+  timing: string | null;
+};
+
+// Pure selection — no Schwab calls. Extracted from runT1Capture for the
+// same reason as selectT0Candidates.
+export async function selectT1Candidates(): Promise<T1Candidate[]> {
+  const todayEt = todayEasternIso();
+  const sb = createServerClient();
+  const raw = await sb
+    .from("earnings_history")
+    .select("symbol,earnings_date,iv_before,implied_move_pct,timing")
+    .gte("earnings_date", addDaysIso(todayEt, -4))
+    .lte("earnings_date", todayEt)
+    .is("iv_after", null);
+  if (raw.error) return [];
+  return ((raw.data ?? []) as T1Candidate[])
+    .filter((r) => r.iv_before !== null && r.implied_move_pct !== null)
+    .filter((r) => isT1SessionEligible(r, todayEt));
 }
 
 export type CaptureItem = {
@@ -188,7 +255,7 @@ export async function runT0Capture(opts?: {
     return { ...report, ok: false, skipReason: "schwab_disconnected" };
   }
 
-  let candidates: Array<{ symbol: string; earnings_date: string; timing: "amc" | "bmo" | "unknown" }>;
+  let candidates: T0Candidate[];
   if (opts?.only && opts.only.length > 0) {
     candidates = opts.only.map((c) => ({
       symbol: c.symbol.toUpperCase(),
@@ -196,44 +263,7 @@ export async function runT0Capture(opts?: {
       timing: c.timing ?? "unknown",
     }));
   } else {
-    const todayEt = todayEasternIso();
-    const tomorrowEt = addDaysIso(todayEt, 1);
-    const byKey = new Map<string, { symbol: string; earnings_date: string; timing: "amc" | "bmo" | "unknown" }>();
-
-    // Source 1: live earnings calendar ∩ app-known symbols. Carries
-    // real AMC/BMO timing straight from Finnhub — this is now
-    // persisted (captureEarningsT0 writes it), which is what lets
-    // runT1Capture gate on session instead of date.
-    const [{ relevant }, calendar] = await Promise.all([
-      buildMaintenanceSymbolSets(),
-      getTodayEarnings().catch(() => []),
-    ]);
-    for (const e of calendar) {
-      const sym = e.symbol.toUpperCase();
-      if (!relevant.has(sym)) continue;
-      const timing: "amc" | "bmo" | "unknown" = e.timing === "AMC" ? "amc" : e.timing === "BMO" ? "bmo" : "unknown";
-      byKey.set(`${sym}|${e.date}`, { symbol: sym, earnings_date: e.date, timing });
-    }
-
-    // Source 2: pre-ingested earnings_history rows for the window.
-    // These bypass the calendar fetch above, so there's no real timing
-    // to attach — "unknown" is deliberately conservative (treated as
-    // AMC by runT1Capture's session gate, i.e. it defers a session
-    // rather than risk a same-session AMC capture).
-    const sb = createServerClient();
-    const pre = await sb
-      .from("earnings_history")
-      .select("symbol,earnings_date,iv_before")
-      .gte("earnings_date", todayEt)
-      .lte("earnings_date", tomorrowEt)
-      .is("iv_before", null);
-    for (const r of (pre.data ?? []) as Array<{ symbol: string; earnings_date: string }>) {
-      const sym = r.symbol.toUpperCase();
-      const key = `${sym}|${r.earnings_date}`;
-      if (byKey.has(key)) continue; // Source 1 already has real timing for this pair
-      byKey.set(key, { symbol: sym, earnings_date: r.earnings_date, timing: "unknown" });
-    }
-    candidates = Array.from(byKey.values());
+    candidates = await selectT0Candidates();
   }
 
   report.candidates = candidates.length;
@@ -377,32 +407,7 @@ export async function runT1Capture(opts?: {
     return { ...report, ok: false, skipReason: "schwab_disconnected" };
   }
 
-  const todayEt = todayEasternIso();
-  const sb = createServerClient();
-  // The REST wrapper has no .not() — fetch the null-iv_after window and
-  // require iv_before in memory (same pattern as runEncyclopediaMaintenance).
-  // .lte("earnings_date", todayEt) here is a coarse SQL-level fetch
-  // window only — the real per-row eligibility (session-aware, not
-  // date-aware) is applied below in isSessionEligible.
-  const raw = await sb
-    .from("earnings_history")
-    .select("symbol,earnings_date,iv_before,implied_move_pct,timing")
-    .gte("earnings_date", addDaysIso(todayEt, -4))
-    .lte("earnings_date", todayEt)
-    .is("iv_after", null);
-  if (raw.error) {
-    console.warn(`[earnings-capture:T1] candidate query failed: ${raw.error.message}`);
-    return { ...report, ok: false, skipReason: `db_error:${raw.error.message}` };
-  }
-  const candidates = ((raw.data ?? []) as Array<{
-    symbol: string;
-    earnings_date: string;
-    iv_before: number | null;
-    implied_move_pct: number | null;
-    timing: string | null;
-  }>)
-    .filter((r) => r.iv_before !== null && r.implied_move_pct !== null)
-    .filter((r) => isT1SessionEligible(r, todayEt));
+  const candidates = await selectT1Candidates();
 
   report.candidates = candidates.length;
   const startedAt = Date.now();

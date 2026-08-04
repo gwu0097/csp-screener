@@ -1,12 +1,12 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
-import { getValidAccessToken } from "@/lib/schwab";
+import { getValidAccessToken, forceRefreshToken } from "@/lib/schwab";
 import { requireAdmin, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-// GET /api/schwab/token-status
+// GET /api/schwab/token-status[?verify=1]
 //
 // Surface the age of the Schwab refresh token so the UI can show a
 // proactive banner BEFORE the token expires (Schwab refresh tokens
@@ -15,16 +15,21 @@ export const revalidate = 0;
 // schwab_tokens row from lib/schwab.persistTokens; this just reads
 // it and computes derived status fields.
 //
-// When the access token is past expiry but refresh is still valid
-// we ALSO exercise getValidAccessToken so a Schwab-side refresh
-// failure (rotated refresh token, network blip, etc.) surfaces
-// here as "refresh_failed" instead of silently failing the next
-// chain fetch.
+// Without ?verify=1: only exercises a live refresh when the ACCESS
+// token itself is already past its 30-min TTL — cheap, but can go a
+// full week without ever proving the refresh token still works.
+//
+// With ?verify=1 (used by the dashboard banner, which must clear
+// ONLY on a verified successful refresh, never merely because the
+// OAuth redirect landed): unconditionally attempts a live refresh via
+// forceRefreshToken(), the same path the weekend health job uses, so
+// "connected" here means "Schwab accepted this token just now," not
+// "a locally-computed timestamp hasn't passed yet."
 //
 // status:
 //   "missing"          no row in schwab_tokens — never connected
 //   "expired"          refresh_token_expires_at <= now
-//   "refresh_failed"   access expired AND auto-refresh threw
+//   "refresh_failed"   live refresh attempted and failed
 //   "warning"          < 2 days remaining on refresh
 //   "soft_warn"        < 3 days remaining on refresh
 //   "ok"               > 3 days remaining
@@ -39,13 +44,49 @@ type StatusKind =
 
 const DAY_MS = 86_400_000;
 
-export async function GET(): Promise<NextResponse> {
+export async function GET(req: NextRequest): Promise<NextResponse> {
   // Admin-only, like every other Schwab route: the response carries
   // token lifecycle metadata and can trigger a live token refresh.
   try {
     await requireAdmin();
   } catch (e) {
     return authErrorResponse(e);
+  }
+  const verify = req.nextUrl.searchParams.get("verify") === "1";
+
+  if (verify) {
+    const result = await forceRefreshToken();
+    if (!result.ok) {
+      return NextResponse.json({
+        valid: false,
+        status: (result.error === "not_connected" ? "missing" : "refresh_failed") as StatusKind,
+        expiresAt: result.hadStoredExpiry,
+        expiresInDays: result.daysRemainingBeforeAttempt,
+        ageHours: null,
+        refreshAttempted: true,
+        refreshError: result.error,
+        liveVerified: false,
+        liveVerifiedAt: null,
+      });
+    }
+    const now = Date.now();
+    const expiry = new Date(result.newRefreshExpiresAt).getTime();
+    const expiresInDays = (expiry - now) / DAY_MS;
+    let status: StatusKind;
+    if (expiresInDays < 2) status = "warning";
+    else if (expiresInDays < 3) status = "soft_warn";
+    else status = "ok";
+    return NextResponse.json({
+      valid: true,
+      status,
+      expiresAt: result.newRefreshExpiresAt,
+      expiresInDays: Number(expiresInDays.toFixed(2)),
+      ageHours: 0,
+      refreshAttempted: true,
+      refreshError: null,
+      liveVerified: true,
+      liveVerifiedAt: new Date(now).toISOString(),
+    });
   }
   const sb = createServerClient();
   const r = await sb
@@ -126,5 +167,7 @@ export async function GET(): Promise<NextResponse> {
     accessExpired,
     refreshAttempted,
     refreshError,
+    liveVerified: false,
+    liveVerifiedAt: null,
   });
 }

@@ -47,6 +47,21 @@ export class SchwabAuthError extends Error {
   }
 }
 
+// Carries the HTTP status for general market-data GET failures (chain
+// fetches, quotes) — distinct from SchwabAuthError, which is scoped to
+// the OAuth token endpoint only. Callers that need to tell a transient
+// failure (429, 5xx) apart from a permanent one (400 on a bad/delisted
+// symbol) need this status; a plain Error only carries it inside the
+// message string, which is not something a retry loop should regex.
+export class SchwabApiError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "SchwabApiError";
+    this.status = status;
+  }
+}
+
 async function postTokenRequest(body: URLSearchParams): Promise<TokenResponse> {
   const grantType = body.get("grant_type");
   console.log("[schwab-token] POST", `${OAUTH_BASE}/token`, {
@@ -81,14 +96,41 @@ async function persistTokens(tokens: TokenResponse): Promise<void> {
   const supabase = createServerClient();
   const now = Date.now();
   const accessExpiresAt = new Date(now + (tokens.expires_in ?? ACCESS_TTL_SECONDS) * 1000);
-  const refreshExpiresAt = new Date(now + REFRESH_TTL_SECONDS * 1000);
 
   const { data: existing } = await supabase
     .from("schwab_tokens")
-    .select("id")
+    .select("id,refresh_token,refresh_token_expires_at")
     .order("updated_at", { ascending: false })
     .limit(1)
     .maybeSingle();
+  const existingRow = existing as
+    | { id: string; refresh_token: string; refresh_token_expires_at: string }
+    | null;
+
+  // Only reset the 7-day refresh window when there's real reason to
+  // believe it should move: either Schwab issued a new refresh_token
+  // value (unambiguous new issuance), or the previously stored expiry
+  // is already not-in-the-future (stale, or backdated to epoch 0 by
+  // invalidateSchwabToken()). In the latter case a successful refresh
+  // — using the very token we're about to (maybe) mark unchanged — is
+  // itself live proof the token works right now, so we heal the
+  // sentinel rather than leave isSchwabConnected() permanently
+  // reporting disconnected despite a working token. If we're wrong
+  // about how long it's actually good for, the next refresh attempt
+  // that gets invalid_grant/401 re-invalidates it anyway (existing
+  // getValidAccessToken() error path) — a bad guess here is cheap and
+  // self-correcting. Only when the refresh_token is UNCHANGED and the
+  // existing expiry is still genuinely in the future do we leave it
+  // alone, so a non-rotating token doesn't get its clock silently
+  // extended past whatever its real server-side wall is.
+  const refreshTokenChanged =
+    !existingRow || existingRow.refresh_token !== tokens.refresh_token;
+  const existingExpiryStillFuture =
+    !!existingRow && new Date(existingRow.refresh_token_expires_at).getTime() > now;
+  const refreshExpiresAt =
+    refreshTokenChanged || !existingExpiryStillFuture
+      ? new Date(now + REFRESH_TTL_SECONDS * 1000)
+      : new Date(existingRow.refresh_token_expires_at);
 
   const payload = {
     access_token: tokens.access_token,
@@ -98,8 +140,8 @@ async function persistTokens(tokens: TokenResponse): Promise<void> {
     updated_at: new Date().toISOString(),
   };
 
-  if (existing?.id) {
-    const { error } = await supabase.from("schwab_tokens").update(payload).eq("id", existing.id);
+  if (existingRow?.id) {
+    const { error } = await supabase.from("schwab_tokens").update(payload).eq("id", existingRow.id);
     if (error) throw new Error(`Failed to update Schwab tokens: ${error.message}`);
   } else {
     const { error } = await supabase.from("schwab_tokens").insert(payload);
@@ -194,6 +236,59 @@ export async function invalidateSchwabToken(): Promise<void> {
   }
 }
 
+export type ForceRefreshResult =
+  | { ok: true; refreshTokenChanged: boolean; newRefreshExpiresAt: string }
+  | {
+      ok: false;
+      error: string;
+      hadStoredExpiry: string | null;
+      daysRemainingBeforeAttempt: number | null;
+    };
+
+// Unconditionally attempts a LIVE refresh-token exchange, regardless of
+// whether the access token still looks fresh or what the stored
+// refresh_token_expires_at says. getValidAccessToken() only refreshes
+// when the ACCESS token (30-min TTL) is stale, so it can go a full
+// week without ever actually exercising the refresh token — meaning a
+// dead refresh token can sit undetected until the access token
+// finally expires mid-capture. This is the health-check path: it
+// proves the refresh token works right now, or proves it doesn't.
+export async function forceRefreshToken(): Promise<ForceRefreshResult> {
+  const row = await loadLatestTokenRow();
+  if (!row) {
+    return {
+      ok: false,
+      error: "not_connected",
+      hadStoredExpiry: null,
+      daysRemainingBeforeAttempt: null,
+    };
+  }
+  const hadStoredExpiry = row.refresh_token_expires_at;
+  const daysRemainingBeforeAttempt =
+    (new Date(hadStoredExpiry).getTime() - Date.now()) / 86_400_000;
+
+  try {
+    const fresh = await refreshAccessToken(row.refresh_token);
+    await persistTokens(fresh);
+    const updated = await loadLatestTokenRow();
+    return {
+      ok: true,
+      refreshTokenChanged: fresh.refresh_token !== row.refresh_token,
+      newRefreshExpiresAt: updated?.refresh_token_expires_at ?? hadStoredExpiry,
+    };
+  } catch (e) {
+    if (e instanceof SchwabAuthError && (e.status === 400 || e.status === 401)) {
+      await invalidateSchwabToken();
+    }
+    return {
+      ok: false,
+      error: e instanceof Error ? e.message : String(e),
+      hadStoredExpiry,
+      daysRemainingBeforeAttempt: Number(daysRemainingBeforeAttempt.toFixed(2)),
+    };
+  }
+}
+
 export async function disconnectSchwab(): Promise<void> {
   const supabase = createServerClient();
   await supabase.from("schwab_tokens").delete().neq("id", "00000000-0000-0000-0000-000000000000");
@@ -251,7 +346,7 @@ export async function schwabGet<T>(path: string, params?: Record<string, string 
       // immediately instead of waiting on the stale local timestamp.
       await invalidateSchwabToken();
     }
-    throw new Error(`Schwab GET ${url.pathname} failed: ${res.status} ${text}`);
+    throw new SchwabApiError(res.status, `Schwab GET ${url.pathname} failed: ${res.status} ${text}`);
   }
   return (await res.json()) as T;
 }
