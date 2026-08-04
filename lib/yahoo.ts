@@ -35,7 +35,7 @@ export type EarningsMove = {
   direction: "up" | "down" | "flat";
 };
 
-type MinimalQuote = { regularMarketPrice?: number; marketCap?: number };
+type MinimalQuote = { regularMarketPrice?: number; marketCap?: number; sharesOutstanding?: number };
 
 type HistoricalRow = {
   date: Date;
@@ -144,6 +144,7 @@ async function quoteMinimal(symbol: string): Promise<MinimalQuote | null> {
   return {
     regularMarketPrice: pickNumber(record, "regularMarketPrice") ?? undefined,
     marketCap: pickNumber(record, "marketCap") ?? undefined,
+    sharesOutstanding: pickNumber(record, "sharesOutstanding") ?? undefined,
   };
 }
 
@@ -436,10 +437,56 @@ export async function getPriceDebug(symbol: string): Promise<{
   return { price: null, fieldUsed: null, raw: record };
 }
 
+// How far Yahoo's own `marketCap` field may drift from its own
+// `regularMarketPrice × sharesOutstanding` (both on the same quote
+// payload — this is a self-consistency check, not a second API call)
+// before we stop trusting it. Confirmed live on SPCX (Space
+// Exploration Technologies, first traded 2026-06-12): Yahoo reported
+// marketCap=$1.574T against price×sharesOutstanding=$904.78B — a 74%
+// gap, most likely a stale pre-listing private valuation that never
+// reconciled against the real post-IPO share count. 30% is generous
+// enough to absorb normal staleness between the two fields (they're
+// not always snapshotted at the same instant) while still catching a
+// gap that large. A freshly-listed/thinly-covered symbol is exactly
+// where Yahoo's data is most likely to be internally inconsistent —
+// this check doesn't special-case "recently listed," it just refuses
+// to trust a marketCap that disagrees with the rest of the same quote.
+const MARKET_CAP_IMPLIED_TOLERANCE = 0.3;
+
+function marketCapIsPlausible(
+  symbol: string,
+  marketCap: number,
+  price: number | undefined,
+  sharesOutstanding: number | undefined,
+): boolean {
+  if (!price || price <= 0 || !sharesOutstanding || sharesOutstanding <= 0) {
+    // Nothing to cross-check against — don't block on missing data,
+    // only on data that actively disagrees with itself.
+    return true;
+  }
+  const implied = price * sharesOutstanding;
+  if (implied <= 0) return true;
+  const ratio = marketCap / implied;
+  const plausible =
+    ratio >= 1 - MARKET_CAP_IMPLIED_TOLERANCE && ratio <= 1 + MARKET_CAP_IMPLIED_TOLERANCE;
+  if (!plausible) {
+    console.warn(
+      `[yahoo] ${symbol}: marketCap=$${(marketCap / 1e9).toFixed(2)}B disagrees with ` +
+        `price×sharesOutstanding=$${(implied / 1e9).toFixed(2)}B (ratio=${ratio.toFixed(2)}) — ` +
+        `treating marketCap as unreliable`,
+    );
+  }
+  return plausible;
+}
+
 export async function getMarketCap(symbol: string): Promise<number | null> {
   try {
     const q = await quoteMinimal(symbol);
-    return q?.marketCap ?? null;
+    if (q?.marketCap === undefined) return null;
+    if (!marketCapIsPlausible(symbol, q.marketCap, q.regularMarketPrice, q.sharesOutstanding)) {
+      return null;
+    }
+    return q.marketCap;
   } catch (e) {
     logYahooFailure(`getMarketCap(${symbol})`, e);
     return null;

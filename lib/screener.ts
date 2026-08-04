@@ -334,13 +334,17 @@ export type ScreenerResult = {
   isWhitelisted: boolean;
   industryStatus: "pass" | "fail" | "unknown";
   spreadTooWide: boolean;
-  // True when the weekly-chain check at screen time couldn't reach
-  // Schwab (token expired, network blip, empty response). The row is
-  // passed through anyway — Stage 3/4 will retry the chain fetch and
-  // surface "Cannot evaluate" if it really can't be priced. Matters
-  // because the alternative — dropping every row when Schwab is down —
-  // produces a misleading "0 candidates" board.
+  // True when Screen Today's chain-verification step (Stream C,
+  // /api/screener/screen/verify-chains) couldn't confirm this
+  // candidate's weekly chain after retries — a genuine Schwab fetch
+  // failure, distinct from "verified absent" (no weekly options for
+  // this date, which drops the row instead of flagging it). Kept
+  // VISIBLE rather than silently dropped — the whole reason this
+  // field exists is that a fetch failure and a correct exclusion look
+  // identical from the outside unless something marks the difference
+  // (see chain_verification_log, and the AMD/DIS audit this fixed).
   chainUnverified?: boolean;
+  chainUnverifiedReason?: string;
   // Three-layer grade (industry standard + your trade history + current
   // news/vix regime). Populated by runStagesThreeFour when the analyze
   // route has news + personal context to feed in. Null when not computed
