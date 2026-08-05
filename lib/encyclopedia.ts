@@ -27,9 +27,25 @@ import {
   type SchwabOptionContract,
   type SchwabOptionsChain,
 } from "@/lib/schwab";
+import { isT1SessionEligible } from "@/lib/session-eligibility";
 import YahooFinance from "yahoo-finance2";
 
 const FINNHUB_RATE_DELAY_MS = 200;
+
+// Duplicated locally rather than imported from lib/earnings-capture.ts
+// (which imports FROM this file) — same established pattern as
+// app/api/capture-health/route.ts and lib/expire-positions.ts's own
+// local copies. Session-eligibility checks below need Eastern calendar
+// "today," not todayIso()'s UTC date — the two disagree for several
+// hours a day and a same-session AMC print gets missed exactly then.
+function todayEasternIso(): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
 
 export type StockEncyclopedia = {
   id: string;
@@ -674,13 +690,26 @@ export async function updateEncyclopedia(symbol: string): Promise<UpdateSummary>
     // writing it as trusted. Same principle for a defensive isQuarterEndDate
     // check in case a future calMatch source ever resolves to one directly.
     const dateUntrusted = !calMatch || isQuarterEndDate(earnings_date);
-    const price = dateUntrusted
+    // Session gate: this loop reads Finnhub's completed /stock/earnings
+    // history, which in practice shouldn't surface a same-day,
+    // not-yet-reported quarter — Finnhub doesn't publish actual EPS
+    // until after the print. But that's an assumption about a
+    // third-party API's behavior, not a guarantee this code checks for
+    // itself, and an unchecked assumption exactly like it is what let
+    // T1 write a same-session AMC phantom (fixed 2026-08-05 — see
+    // isT1SessionEligible). Checking costs nothing on the (overwhelming)
+    // majority of rows here, which are historical, and closes the
+    // loophole if Finnhub ever does surface an in-flight quarter.
+    const sessionIneligible =
+      !dateUntrusted && !isT1SessionEligible({ earnings_date, timing: hour }, todayEasternIso());
+    const skipWrite = dateUntrusted || sessionIneligible;
+    const price = skipWrite
       ? { price_before: null, price_after: null, actual_move_pct: null, price_at_expiry: null }
       : hour
         ? await fetchYahooPriceActionTimed(sym, earnings_date, hour)
         : await fetchYahooPriceAction(sym, earnings_date);
-    const implied_move_pct = dateUntrusted ? null : await fetchImpliedMove(sym, earnings_date);
-    const breach = dateUntrusted
+    const implied_move_pct = skipWrite ? null : await fetchImpliedMove(sym, earnings_date);
+    const breach = skipWrite
       ? { move_ratio: null, two_x_em_strike: null, breached_two_x_em: null, recovered_by_expiry: null }
       : calculateBreachAnalysis({
           price_before: price.price_before,
@@ -695,13 +724,19 @@ export async function updateEncyclopedia(symbol: string): Promise<UpdateSummary>
         `[encyclopedia] ${sym} ${earnings_date}: no calendar re-map (Yahoo calendar doesn't cover this quarter) — ` +
           `withholding move data, tagging date_confidence=low instead of writing against an unverified quarter-end date.`,
       );
+    } else if (sessionIneligible) {
+      console.warn(
+        `[encyclopedia] ${sym} ${earnings_date}: same-session capture blocked — the print hasn't happened yet ` +
+          `this session (timing=${hour ?? "unknown"}). Withholding move data; will retry once eligible.`,
+      );
     }
 
     // A row is "complete" when the core quantitative fields are present;
-    // narrative/IV fields are Phase-2 concerns. An untrusted-date row is
-    // never complete — its core fields are deliberately null.
+    // narrative/IV fields are Phase-2 concerns. An untrusted-date or
+    // session-ineligible row is never complete — its core fields are
+    // deliberately null.
     const is_complete =
-      !dateUntrusted &&
+      !skipWrite &&
       r.actual !== null &&
       r.estimate !== null &&
       price.price_before !== null &&
@@ -1598,11 +1633,20 @@ export async function captureEarningsT0(
 
 // ---------- T1: post-earnings capture ----------
 
-// Configurable floor for the too-early-capture guard below — a real
-// earnings reaction essentially never lands under 1% AND shows flat-
-// or-rising IV in the same read; a capture that does is far more
-// likely a pre-print snapshot than a genuinely quiet quarter.
-export const TOO_EARLY_ACTUAL_FLOOR = 0.01;
+// Configurable floor for the too-early-capture guard below. Originally
+// gated on iv_crush_magnitude<=0 AND |actual_move_pct|<1% — missed all
+// 5 same-session AMC phantoms on 2026-08-05 because their IV happened
+// to tick down slightly (0.10%-1.44%, ordinary intraday noise between
+// two reads minutes apart) rather than sitting flat or rising, so the
+// <=0 leg never tripped. A genuine post-print T1 crushes IV by a lot —
+// removing event risk from the option's remaining life is what a real
+// crush IS, independent of how big the realized move turns out to be
+// (real examples: UPS +34.8%, GLW +10.2%). iv_crush_magnitude alone,
+// against a floor comfortably below any real observed crush and
+// comfortably above same-session noise, is a strictly better signal
+// than pairing a magnitude check with a move-size check that a genuine
+// quiet quarter can also fail.
+export const TOO_EARLY_ACTUAL_FLOOR = 0.05;
 
 export type T1Result =
   | {
@@ -1691,19 +1735,27 @@ export async function captureEarningsT1(
   const iv_crush_magnitude = (iv_before - iv_after) / iv_before;
   const breached_two_x_em = price_after < two_x_em_strike;
 
-  // Recurrence guard (PASS_2C): a too-early capture (T1 running before
-  // the market has had a chance to react — same-session on an AMC name
-  // being the primary case, but this catches any timing miss) shows a
-  // near-zero realized move paired with flat-to-rising IV. Reject and
-  // log rather than write a phantom row — the eligibility gate in
-  // runT1Capture should already prevent this for AMC names, but this is
-  // a backstop, not a replacement for that fix. The row stays eligible
-  // (iv_after still null) and is retried on the next cron run.
-  if (iv_crush_magnitude <= 0 && Math.abs(actual_move_pct) < TOO_EARLY_ACTUAL_FLOOR) {
+  // Recurrence guard (PASS_2C, revised 2026-08-05): a too-early capture
+  // (T1 running before the market has had a chance to react —
+  // same-session on an AMC name being the primary case, but this
+  // catches any timing miss) shows IV that hasn't really crushed yet.
+  // Originally gated on iv_crush_magnitude<=0 AND a small realized
+  // move — missed all 5 same-session AMC phantoms on 2026-08-05
+  // because their IV ticked down slightly (0.10%-1.44%) rather than
+  // sitting flat or rising, so the <=0 leg never tripped even though
+  // none of them were real captures. iv_crush_magnitude alone against
+  // TOO_EARLY_ACTUAL_FLOOR (comfortably below every real crush this
+  // table has ever recorded) is the actual signal; reject and log
+  // rather than write a phantom row. The eligibility gates in
+  // runT1Capture / runEncyclopediaMaintenance / updateEncyclopedia
+  // should already prevent this, but this is a backstop, not a
+  // replacement for those fixes. The row stays eligible (iv_after
+  // still null) and is retried on the next cron run.
+  if (iv_crush_magnitude < TOO_EARLY_ACTUAL_FLOOR) {
     console.warn(
       `[encyclopedia:T1] ${sym} ${earningsDate}: rejected — looks like a too-early capture ` +
-        `(iv_crush_magnitude=${iv_crush_magnitude.toFixed(4)} <= 0, |actual_move_pct|=${Math.abs(actual_move_pct).toFixed(4)} ` +
-        `< floor ${TOO_EARLY_ACTUAL_FLOOR}). Not writing — will retry on the next eligible cron run.`,
+        `(iv_crush_magnitude=${iv_crush_magnitude.toFixed(4)} < floor ${TOO_EARLY_ACTUAL_FLOOR}). ` +
+        `Not writing — will retry on the next eligible cron run.`,
     );
     return { captured: false, skipped: true, reason: "too_early_capture" };
   }
@@ -2091,6 +2143,83 @@ export async function buildMaintenanceSymbolSets(): Promise<{
   return { active, relevant };
 }
 
+// ---------- T0/T1 candidate selection ----------
+//
+// Moved here from lib/earnings-capture.ts (2026-08-05) so
+// runEncyclopediaMaintenance's T0/T1 passes below can call the SAME
+// selection logic runT0Capture/runT1Capture use, instead of each
+// maintaining an independent, hand-rolled duplicate. The T1 duplicate
+// never got the isT1SessionEligible gate added elsewhere, which is
+// exactly what let same-session AMC captures through; the T0 duplicate
+// separately dropped Finnhub's real timing on the floor, leaving rows
+// (BMO included) tagged timing="unknown". lib/earnings-capture.ts
+// re-exports both for its own use and for existing importers.
+export type T0Candidate = { symbol: string; earnings_date: string; timing: "amc" | "bmo" | "unknown" };
+
+// Pure selection — no Schwab calls, safe to call from anywhere (including
+// a local read-only chain-detail capture) without burning API budget.
+export async function selectT0Candidates(): Promise<T0Candidate[]> {
+  const todayEt = todayEasternIso();
+  const tomorrowEt = addDaysIso(todayEt, 1);
+  const byKey = new Map<string, T0Candidate>();
+
+  // Source 1: live earnings calendar ∩ app-known symbols. Carries real
+  // AMC/BMO timing straight from Finnhub.
+  const [{ relevant }, calendar] = await Promise.all([
+    buildMaintenanceSymbolSets(),
+    getTodayEarnings().catch(() => []),
+  ]);
+  for (const e of calendar) {
+    const sym = e.symbol.toUpperCase();
+    if (!relevant.has(sym)) continue;
+    const timing: "amc" | "bmo" | "unknown" = e.timing === "AMC" ? "amc" : e.timing === "BMO" ? "bmo" : "unknown";
+    byKey.set(`${sym}|${e.date}`, { symbol: sym, earnings_date: e.date, timing });
+  }
+
+  // Source 2: pre-ingested earnings_history rows for the window. No real
+  // timing available here — "unknown" is deliberately conservative.
+  const sb = createServerClient();
+  const pre = await sb
+    .from("earnings_history")
+    .select("symbol,earnings_date,iv_before")
+    .gte("earnings_date", todayEt)
+    .lte("earnings_date", tomorrowEt)
+    .is("iv_before", null);
+  for (const r of (pre.data ?? []) as Array<{ symbol: string; earnings_date: string }>) {
+    const sym = r.symbol.toUpperCase();
+    const key = `${sym}|${r.earnings_date}`;
+    if (byKey.has(key)) continue; // Source 1 already has real timing for this pair
+    byKey.set(key, { symbol: sym, earnings_date: r.earnings_date, timing: "unknown" });
+  }
+  return Array.from(byKey.values());
+}
+
+export type T1Candidate = {
+  symbol: string;
+  earnings_date: string;
+  iv_before: number | null;
+  implied_move_pct: number | null;
+  timing: string | null;
+};
+
+// Pure selection — no Schwab calls. Does NOT filter by relevant/active
+// symbols — callers that need that scope (runEncyclopediaMaintenance)
+// filter the result themselves.
+export async function selectT1Candidates(): Promise<T1Candidate[]> {
+  const todayEt = todayEasternIso();
+  const sb = createServerClient();
+  const raw = await sb
+    .from("earnings_history")
+    .select("symbol,earnings_date,iv_before,implied_move_pct,timing")
+    .gte("earnings_date", addDaysIso(todayEt, -4))
+    .lte("earnings_date", todayEt)
+    .is("iv_after", null);
+  if (raw.error) return [];
+  return ((raw.data ?? []) as T1Candidate[])
+    .filter((r) => r.iv_before !== null && r.implied_move_pct !== null)
+    .filter((r) => isT1SessionEligible(r, todayEt));
+}
+
 const PERPLEXITY_GAP_MS = 1000;
 const ENCYCLOPEDIA_STALENESS_DAYS = 7;
 // Quarter-end rows older than this can never be re-keyed (Yahoo only
@@ -2191,24 +2320,28 @@ export async function runEncyclopediaMaintenance(): Promise<MaintenanceReport> {
 
   // 2. T0 pass — fires for today-AMC / tomorrow-BMO announcements in
   // relevant symbols. captureEarningsT0 inserts the stub row if needed.
-  let todayAnnouncements: Array<{ symbol: string; date: string }> = [];
+  // Calls selectT0Candidates() directly — the same selection
+  // runT0Capture uses — instead of a hand-rolled duplicate. That
+  // duplicate dropped getTodayEarnings()'s own timing field, leaving
+  // rows (BMO included) tagged timing="unknown" and vulnerable to the
+  // T1 same-session-AMC bug below once isT1SessionEligible reads it
+  // back (fixed 2026-08-05).
+  let t0Candidates: T0Candidate[] = [];
   try {
-    const list = await getTodayEarnings();
-    todayAnnouncements = list.map((e) => ({ symbol: e.symbol.toUpperCase(), date: e.date }));
+    t0Candidates = (await selectT0Candidates()).filter((c) => relevant.has(c.symbol));
   } catch (e) {
     report.errors.push({
       symbol: "",
       earnings_date: null,
-      stage: "getTodayEarnings",
+      stage: "selectT0Candidates",
       reason: e instanceof Error ? e.message : String(e),
     });
   }
-  for (const a of todayAnnouncements) {
-    if (!relevant.has(a.symbol)) continue;
+  for (const a of t0Candidates) {
     if (overBudget("t0-capture")) break;
     try {
-      const r = await captureEarningsT0(a.symbol, a.date);
-      if (r.captured) report.t0Captured.push({ symbol: a.symbol, earnings_date: a.date });
+      const r = await captureEarningsT0(a.symbol, a.earnings_date, { timing: a.timing });
+      if (r.captured) report.t0Captured.push({ symbol: a.symbol, earnings_date: a.earnings_date });
       else if (
         r.reason &&
         !["already_captured", "schwab_disconnected", "no_options_data", "no_iv_data", "chain_fetch_failed"].includes(
@@ -2219,7 +2352,7 @@ export async function runEncyclopediaMaintenance(): Promise<MaintenanceReport> {
         // real anomalies (db errors, etc.) get logged as errors.
         report.errors.push({
           symbol: a.symbol,
-          earnings_date: a.date,
+          earnings_date: a.earnings_date,
           stage: "T0",
           reason: r.reason,
         });
@@ -2227,7 +2360,7 @@ export async function runEncyclopediaMaintenance(): Promise<MaintenanceReport> {
     } catch (e) {
       report.errors.push({
         symbol: a.symbol,
-        earnings_date: a.date,
+        earnings_date: a.earnings_date,
         stage: "T0",
         reason: e instanceof Error ? e.message : String(e),
       });
@@ -2235,26 +2368,21 @@ export async function runEncyclopediaMaintenance(): Promise<MaintenanceReport> {
   }
 
   // 3. T1 pass — rows where T0 ran in the last 3 days but T1 hasn't.
-  // REST wrapper has no .not() helper, so we fetch the date window +
-  // null-iv_after filter and reject missing-implied_move_pct in memory.
-  const threeDaysAgo = addDaysIso(todayStr, -3);
-  const t1Raw = await sb
-    .from("earnings_history")
-    .select("symbol,earnings_date,implied_move_pct")
-    .in("symbol", Array.from(relevant))
-    .gte("earnings_date", threeDaysAgo)
-    .lte("earnings_date", todayStr)
-    .is("iv_after", null);
-  const t1Candidates = ((t1Raw.data ?? []) as Array<{
-    symbol: string;
-    earnings_date: string;
-    implied_move_pct: number | null;
-  }>).filter((r) => r.implied_move_pct !== null);
+  // Calls selectT1Candidates() directly — the single, gated
+  // implementation runT1Capture uses (isT1SessionEligible applied
+  // inside it) — instead of a hand-rolled duplicate query. That
+  // duplicate never had the session gate, which is exactly what let
+  // same-session AMC captures through on 2026-08-05 despite the gate
+  // existing elsewhere. selectT1Candidates() doesn't scope by
+  // relevant/active symbols by design (the cron path doesn't need
+  // that scope); filtered here to preserve this sweep's existing
+  // "only symbols this app already knows about" intent.
+  const t1Candidates = (await selectT1Candidates()).filter((c) => relevant.has(c.symbol));
   for (const c of t1Candidates) {
     if (overBudget("t1-capture")) break;
     try {
       const r = await captureEarningsT1(c.symbol, c.earnings_date);
-      if (r.captured) report.t1Captured.push(c);
+      if (r.captured) report.t1Captured.push({ symbol: c.symbol, earnings_date: c.earnings_date });
       else if (
         r.reason &&
         !["already_captured", "schwab_disconnected", "no_options_data", "no_iv_data", "chain_fetch_failed"].includes(

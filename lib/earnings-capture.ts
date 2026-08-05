@@ -14,12 +14,27 @@ import { isSchwabConnected } from "@/lib/schwab";
 import {
   captureEarningsT0,
   captureEarningsT1,
-  buildMaintenanceSymbolSets,
   recalculateStats,
+  selectT0Candidates,
+  selectT1Candidates,
+  type T0Candidate,
+  type T1Candidate,
 } from "@/lib/encyclopedia";
-import { getTodayEarnings } from "@/lib/earnings";
 import { analyzePositionPostEarnings } from "@/lib/post-earnings";
 import type { PositionRow } from "@/lib/positions";
+import { isT1SessionEligible } from "@/lib/session-eligibility";
+
+// Re-exported for existing importers. isT1SessionEligible's canonical
+// definition lives in lib/session-eligibility.ts so lib/encyclopedia.ts
+// can use the identical check without a circular import (encyclopedia.ts
+// is already imported by this file). selectT0Candidates/selectT1Candidates
+// moved to lib/encyclopedia.ts 2026-08-05 so runEncyclopediaMaintenance's
+// T0/T1 passes can call the SAME selection logic this file's
+// runT0Capture/runT1Capture use, instead of maintaining an independent,
+// driftable duplicate — which is exactly what let a same-session AMC
+// capture through.
+export { isT1SessionEligible, selectT0Candidates, selectT1Candidates };
+export type { T0Candidate, T1Candidate };
 
 // Leave headroom inside Vercel Hobby's 60s ceiling for the response to
 // flush. Chain fetches are 1-3s each, so this covers ~15-25 symbols —
@@ -33,99 +48,6 @@ export function todayEasternIso(): string {
     month: "2-digit",
     day: "2-digit",
   }).format(new Date());
-}
-
-function addDaysIso(iso: string, days: number): string {
-  const d = new Date(iso + "T00:00:00Z");
-  d.setUTCDate(d.getUTCDate() + days);
-  return d.toISOString().slice(0, 10);
-}
-
-// Session gate, not date gate — the actual fix for T1's same-session-
-// AMC contamination bug. BMO: the print already happened before
-// today's open, so same-day (earnings_date === todayEt) capture is
-// correct — unchanged from before. AMC (or unknown timing, treated
-// conservatively as AMC): the print hasn't happened yet as of this
-// morning if earnings_date === todayEt, so the earliest eligible
-// capture is the NEXT session (earnings_date < todayEt). Deliberately
-// NOT a blanket "exclude earnings_date === today" filter — that would
-// also break same-day BMO capture, which must keep working. Exported
-// standalone (not inlined in runT1Capture) so it's directly testable
-// against known cases without needing a live Schwab connection or DB.
-export function isT1SessionEligible(
-  row: { earnings_date: string; timing: string | null },
-  todayEt: string,
-): boolean {
-  const timing = (row.timing ?? "unknown").toLowerCase();
-  if (timing === "bmo") return row.earnings_date <= todayEt;
-  return row.earnings_date < todayEt;
-}
-
-export type T0Candidate = { symbol: string; earnings_date: string; timing: "amc" | "bmo" | "unknown" };
-
-// Pure selection — no Schwab calls, safe to call from anywhere (including
-// a local read-only chain-detail capture) without burning API budget.
-// Extracted from runT0Capture so there's one definition, not two that
-// can drift; runT0Capture calls this directly.
-export async function selectT0Candidates(): Promise<T0Candidate[]> {
-  const todayEt = todayEasternIso();
-  const tomorrowEt = addDaysIso(todayEt, 1);
-  const byKey = new Map<string, T0Candidate>();
-
-  // Source 1: live earnings calendar ∩ app-known symbols. Carries real
-  // AMC/BMO timing straight from Finnhub.
-  const [{ relevant }, calendar] = await Promise.all([
-    buildMaintenanceSymbolSets(),
-    getTodayEarnings().catch(() => []),
-  ]);
-  for (const e of calendar) {
-    const sym = e.symbol.toUpperCase();
-    if (!relevant.has(sym)) continue;
-    const timing: "amc" | "bmo" | "unknown" = e.timing === "AMC" ? "amc" : e.timing === "BMO" ? "bmo" : "unknown";
-    byKey.set(`${sym}|${e.date}`, { symbol: sym, earnings_date: e.date, timing });
-  }
-
-  // Source 2: pre-ingested earnings_history rows for the window. No real
-  // timing available here — "unknown" is deliberately conservative.
-  const sb = createServerClient();
-  const pre = await sb
-    .from("earnings_history")
-    .select("symbol,earnings_date,iv_before")
-    .gte("earnings_date", todayEt)
-    .lte("earnings_date", tomorrowEt)
-    .is("iv_before", null);
-  for (const r of (pre.data ?? []) as Array<{ symbol: string; earnings_date: string }>) {
-    const sym = r.symbol.toUpperCase();
-    const key = `${sym}|${r.earnings_date}`;
-    if (byKey.has(key)) continue; // Source 1 already has real timing for this pair
-    byKey.set(key, { symbol: sym, earnings_date: r.earnings_date, timing: "unknown" });
-  }
-  return Array.from(byKey.values());
-}
-
-export type T1Candidate = {
-  symbol: string;
-  earnings_date: string;
-  iv_before: number | null;
-  implied_move_pct: number | null;
-  timing: string | null;
-};
-
-// Pure selection — no Schwab calls. Extracted from runT1Capture for the
-// same reason as selectT0Candidates.
-export async function selectT1Candidates(): Promise<T1Candidate[]> {
-  const todayEt = todayEasternIso();
-  const sb = createServerClient();
-  const raw = await sb
-    .from("earnings_history")
-    .select("symbol,earnings_date,iv_before,implied_move_pct,timing")
-    .gte("earnings_date", addDaysIso(todayEt, -4))
-    .lte("earnings_date", todayEt)
-    .is("iv_after", null);
-  if (raw.error) return [];
-  return ((raw.data ?? []) as T1Candidate[])
-    .filter((r) => r.iv_before !== null && r.implied_move_pct !== null)
-    .filter((r) => isT1SessionEligible(r, todayEt));
 }
 
 export type CaptureItem = {
