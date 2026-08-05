@@ -160,6 +160,18 @@ function fmtRatio(n: number | null): string {
   return n.toFixed(2);
 }
 
+// Short, unambiguous date next to the calendar-quarter label — for
+// matching a ThinkorSwim row (which shows the real earnings date, not
+// a calendar quarter) without needing to know the company's fiscal
+// year offset. "Apr 27 '26", not the ISO string — ToS-recognizable at
+// a glance.
+function fmtEarningsDateShort(dateIso: string): string {
+  const [y, m, d] = dateIso.split("-").map(Number);
+  if (!y || !m || !d) return "";
+  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  return `${MONTHS[m - 1]} ${d} '${String(y).slice(2)}`;
+}
+
 // EM values come from sources of very different reliability -- schwab/
 // schwab_t0 are the real straddle formula, manual is hand-entered,
 // perplexity is an LLM recalling a number (confirmed wrong at least
@@ -668,6 +680,9 @@ export function CrushHistoryTable({
             <tr className="border-t border-border bg-amber-500/[0.04]">
               <td className="px-2 py-1 font-mono font-semibold">
                 {pinnedQtr}
+                <span className="ml-1.5 font-normal text-muted-foreground">
+                  {fmtEarningsDateShort(pinnedDate)}
+                </span>
                 <span className="ml-1.5 rounded bg-amber-500/15 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-amber-200">
                   {timing.badge}
                 </span>
@@ -713,6 +728,9 @@ export function CrushHistoryTable({
                 >
                   <td className="px-2 py-1 font-mono">
                     {e.qtrLabel}
+                    <span className="ml-1.5 text-muted-foreground">
+                      {fmtEarningsDateShort(e.earningsDate)}
+                    </span>
                     {isManual && (
                       <TooltipProvider delayDuration={200}>
                         <Tooltip>
