@@ -170,6 +170,49 @@ function weekdayNameFromIso(ymd: string): string {
 function nextSessionLabel(todayIso: string, sessionIso: string): string {
   return sessionIso === addDayStr(todayIso) ? "Tomorrow" : weekdayNameFromIso(sessionIso);
 }
+// True at or after 4:00pm ET — mirrors lib/expire-positions.ts's
+// isAfterMarketCloseET (not imported: that module pulls the
+// server-only supabase client into this client bundle, same reason
+// this file's other date helpers are local mirrors rather than
+// imports).
+function isAfterMarketCloseET(d: Date = new Date()): boolean {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    hour: "numeric",
+    minute: "numeric",
+    hour12: false,
+  })
+    .format(d)
+    .split(":")
+    .map((s) => Number(s.trim()));
+  const hour = parts[0];
+  const minute = parts[1] ?? 0;
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return false;
+  if (hour > 16) return true;
+  if (hour === 16 && minute >= 0) return true;
+  return false;
+}
+// The session a name must report AGAINST to still be actionable right
+// now: today, unless today's close has already passed (or today isn't
+// a trading day at all), in which case the window has already rolled
+// to the next trading session. Everything downstream anchors on this
+// instead of literal "today" — that's what makes a BMO name die at
+// the PREVIOUS session's close rather than lingering, muted, until it
+// actually reports (see the panel's header comment for the concrete
+// SHOP example this fixes).
+function currentActionableSession(): string {
+  const today = easternToday();
+  if (isWeekendIso(today) || isAfterMarketCloseET()) {
+    return nextTradingSessionIso(today);
+  }
+  return today;
+}
+// The AMC-side twin of nextSessionLabel: "Tonight" when the session
+// in question IS today, otherwise the same relative-day naming
+// (Tomorrow / weekday name) nextSessionLabel already uses.
+function amcSessionLabel(todayIso: string, sessionIso: string): string {
+  return sessionIso === todayIso ? "Tonight" : nextSessionLabel(todayIso, sessionIso);
+}
 
 // ---------- Formatters ----------
 function fmtMoney(n: number | null): string {
@@ -702,23 +745,40 @@ export function DashboardView() {
       if (dateCmp !== 0) return dateCmp;
       return sessionRank(a.earningsTiming) - sessionRank(b.earningsTiming);
     });
-  // Today's BMO has already happened (it prints before today's open,
-  // so by the time this dashboard is viewed it's in the past); today's
-  // AMC hasn't (it prints tonight after close) — these need to look
-  // different, not identical "reports today" rows.
-  const todayIsoStr = easternToday();
   // The expanded section groups by DEADLINE ("reports before the next
-  // market open"), not by calendar date. A BMO print tomorrow morning
-  // requires acting before TODAY's close, same as tonight's AMC prints
-  // — so both belong here, even though they're on different calendar
-  // dates. "Next session" skips weekends (Friday's next session is
-  // Monday), not literally tomorrow — see nextTradingSessionIso.
-  const nextSessionIsoStr = nextTradingSessionIso(todayIsoStr);
+  // market open"), not by calendar date — and drops a name the moment
+  // its last chance to act has passed, not when it prints. AMC on the
+  // current actionable session is live until that session's close;
+  // BMO on the NEXT session is also live until that same close (you
+  // act today, ahead of tomorrow's open) — both die together the
+  // instant that close passes. Concretely: SHOP reporting BMO
+  // Wednesday morning was only ever actionable Tuesday, so it's dead
+  // (off the panel entirely) from Tuesday's close onward — Wednesday
+  // morning is too late, not the moment it becomes stale. There is no
+  // "reported, muted" state anymore — a BMO name's own report date is
+  // never inside its actionable window, so it can only ever be either
+  // upcoming (next-session BMO) or already dead.
+  const todayIsoStr = easternToday();
+  const actionSessionIsoStr = currentActionableSession();
+  const nextSessionIsoStr = nextTradingSessionIso(actionSessionIsoStr);
   const isUrgentEarningsRow = (r: EarningsWatchRow) =>
-    r.earningsDate === todayIsoStr ||
+    (r.earningsDate === actionSessionIsoStr && r.earningsTiming === "AMC") ||
     (r.earningsDate === nextSessionIsoStr && r.earningsTiming === "BMO");
+  // AMC dies once its own date is behind the current session; BMO
+  // dies once its date is on or behind the current session (its
+  // actionable window was the session BEFORE its date). Timings
+  // outside AMC/BMO (DMH/unknown) aren't covered by this deadline
+  // rule — unchanged, they just fall through to "later this week".
+  const isDeadEarningsRow = (r: EarningsWatchRow) => {
+    if (!r.earningsDate) return false;
+    if (r.earningsTiming === "AMC") return r.earningsDate < actionSessionIsoStr;
+    if (r.earningsTiming === "BMO") return r.earningsDate <= actionSessionIsoStr;
+    return false;
+  };
   const earningsUrgent = earningsWeekHeld.filter(isUrgentEarningsRow);
-  const earningsLater = earningsWeekHeld.filter((r) => !isUrgentEarningsRow(r));
+  const earningsLater = earningsWeekHeld.filter(
+    (r) => !isUrgentEarningsRow(r) && !isDeadEarningsRow(r),
+  );
   // Default: collapsed if the urgent set already has rows to show
   // (later names sit behind the toggle); expanded automatically if
   // there's nothing urgent, so the panel never looks empty with
@@ -980,12 +1040,15 @@ export function DashboardView() {
       </Panel>
 
       {/* ---------- Earnings this week (always visible, non-collapsible) ----------
-          One panel, not two. Rows that need a decision before the next
-          market open — today's AMC reporters and the NEXT trading
-          session's BMO reporters (Monday's, on a Friday) — always
-          render inline; the rest of the week sits behind an in-panel
-          "show more" toggle — never a second section, and never hidden
-          entirely when nothing is urgent (see earningsRowsToShow). */}
+          One panel, not two. Rows still actionable right now — AMC on
+          the current actionable session and BMO on the session after
+          it, both live until that session's close — always render
+          inline; anything whose window has already closed is dropped
+          from the panel entirely, not just muted (see
+          isDeadEarningsRow above). The rest of the week sits behind an
+          in-panel "show more" toggle — never a second section, and
+          never hidden entirely when nothing is urgent (see
+          earningsRowsToShow). */}
       <Panel className={cn(earningsUrgent.length > 0 && "border-amber-500/40")}>
         <SectionHeader
           icon={<AlarmClock className="h-4 w-4 text-amber-400" />}
@@ -1025,46 +1088,35 @@ export function DashboardView() {
                 </thead>
                 <tbody>
                   {earningsRowsToShow.map((r) => {
-                    const isToday = r.earningsDate === todayIsoStr;
+                    // AMC on the action session and BMO on the next
+                    // session are the only two ways into earningsUrgent
+                    // now (see isUrgentEarningsRow above) — both are
+                    // equally "act now", not one live/one reported. The
+                    // muted "already reported" state is gone: a BMO
+                    // name's own report date is never inside its
+                    // actionable window, so it either shows here as
+                    // upcoming or it's already been dropped entirely.
+                    const isAmcOnSession =
+                      r.earningsDate === actionSessionIsoStr && r.earningsTiming === "AMC";
                     const isNextSessionBmo =
                       r.earningsDate === nextSessionIsoStr && r.earningsTiming === "BMO";
-                    // BMO prints before today's open — by the time this
-                    // dashboard is viewed, that has already happened.
-                    // AMC prints tonight after close — still ahead. A
-                    // next-session BMO also still ahead — same deadline
-                    // (today's close) as tonight's AMC, different date.
-                    const reported = isToday && r.earningsTiming === "BMO";
-                    const upcoming = isToday && r.earningsTiming === "AMC";
-                    const actNow = upcoming || isNextSessionBmo;
-                    const isUrgent = isToday || isNextSessionBmo;
+                    const isUrgent = isAmcOnSession || isNextSessionBmo;
                     return (
                       <tr
                         key={r.symbol}
                         onClick={() => router.push(`/analysis/earnings-watch?symbol=${r.symbol}`)}
                         className={cn(
                           "cursor-pointer border-t border-border/60 hover:bg-background/60",
-                          actNow && "bg-amber-500/[0.06]",
-                          reported && "text-muted-foreground",
+                          isUrgent && "bg-amber-500/[0.06]",
                         )}
                       >
                         <td className="py-1.5 pr-3 font-mono font-semibold">{r.symbol}</td>
                         <td className="py-1.5 pr-3">
                           {isUrgent ? (
-                            <span
-                              className={cn(
-                                "rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase",
-                                actNow
-                                  ? "border-amber-500/40 bg-amber-500/15 text-amber-300"
-                                  : "border-border bg-muted text-muted-foreground",
-                              )}
-                            >
-                              {reported
-                                ? "Reported · BMO"
-                                : upcoming
-                                  ? "Tonight · AMC"
-                                  : isNextSessionBmo
-                                    ? `${nextSessionLabel(todayIsoStr, nextSessionIsoStr)} · BMO`
-                                    : r.earningsTiming ?? "Today"}
+                            <span className="rounded border border-amber-500/40 bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-amber-300">
+                              {isAmcOnSession
+                                ? `${amcSessionLabel(todayIsoStr, actionSessionIsoStr)} · AMC`
+                                : `${nextSessionLabel(todayIsoStr, nextSessionIsoStr)} · BMO`}
                             </span>
                           ) : (
                             <span className="text-[11px] text-muted-foreground">
