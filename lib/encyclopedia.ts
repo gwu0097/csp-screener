@@ -282,25 +282,47 @@ export async function fetchYahooPriceAction(
     inWindow(addDaysIso(earnIso, -7), addDaysIso(earnIso, 42)),
   );
 
-  // Prefer the report-window gap because that's the principled choice
-  // — US earnings land 14–42 days after the fiscal quarter end. Only
-  // override with the near-window gap when it's SIGNIFICANTLY bigger
-  // (≥ 1.5× reportGap), which is the signature of "earnings_date is
-  // already the actual announcement date" rather than a quarter end.
+  // The report-window search is only valid for case (b) above — a
+  // fiscal quarter-end marker, where the real reaction could land
+  // anywhere in the typical 2–6-week reporting lag. isQuarterEndDate
+  // is the same, already-established signal the rest of this file
+  // uses to distinguish "untrusted date" (dateUntrusted in
+  // updateEncyclopedia, the scoping filter in reingestHistoricalDates)
+  // from a confirmed real announcement date — so it can decide here
+  // too, instead of guessing from gap magnitudes.
+  //
+  // When earningsDate is NOT a quarter-end date, it's already case
+  // (a): a confirmed real announcement date. The reaction is here,
+  // full stop — searching weeks out for a bigger unrelated move is
+  // exactly the bug that corrupted 8 earnings_history rows (CDNS,
+  // GLW, DUOL, COP, MP, GTLB, DOCU, CRH; repaired 2026-08-05): a large
+  // unrelated price move weeks later beat a real but modest earnings
+  // reaction on gap magnitude alone and got written as if it were the
+  // earnings move. Guessing "which window is right" from relative
+  // move size doesn't work when the true reaction is genuinely small
+  // — exactly the case a magnitude-only heuristic gets most wrong.
   let chosen: ReturnType<typeof biggestGap> = null;
-  if (reportGap && Math.abs(reportGap.move) >= 0.005) {
-    chosen = reportGap;
-    if (
-      nearGap &&
-      Math.abs(nearGap.move) >= Math.abs(reportGap.move) * 1.5 &&
-      Math.abs(nearGap.move) >= 0.01
-    ) {
+  if (isQuarterEndDate(earningsDate)) {
+    if (reportGap && Math.abs(reportGap.move) >= 0.005) {
+      chosen = reportGap;
+      if (
+        nearGap &&
+        Math.abs(nearGap.move) >= Math.abs(reportGap.move) * 1.5 &&
+        Math.abs(nearGap.move) >= 0.01
+      ) {
+        chosen = nearGap;
+      }
+    } else if (nearGap && Math.abs(nearGap.move) >= 0.01) {
       chosen = nearGap;
+    } else {
+      chosen = wideGap;
     }
-  } else if (nearGap && Math.abs(nearGap.move) >= 0.01) {
-    chosen = nearGap;
   } else {
-    chosen = wideGap;
+    // Confirmed announcement date: near-window only. If there's no
+    // usable pair within ±2 days (a data gap), return nulls rather
+    // than guess from a window that spans weeks — an incomplete row
+    // is recoverable later; a wrong number silently isn't.
+    chosen = nearGap;
   }
 
   const bestPriorClose = chosen?.prior ?? null;
