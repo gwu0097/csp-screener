@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { AlertOctagon, CheckCircle2, Loader2 } from "lucide-react";
+import { AlertOctagon, AlertTriangle, CheckCircle2, Loader2 } from "lucide-react";
 
 // Reads /api/capture-health, which reads capture_health_daily — NOT
 // Parquet chain-data presence. A day with zero due symbols and a day
@@ -27,6 +27,17 @@ type CaptureHealthResp = {
   coverage7: { bdaysChecked: number; zeroRunDates: string[]; highFailureDates: string[] };
   coverage30: { bdaysChecked: number; zeroRunDates: string[]; highFailureDates: string[] };
   schwabStatus: { ok: boolean; expiresInDays?: number; error?: string } | null;
+  priceIntegrityFlags: Array<{
+    symbol: string;
+    earnings_date: string;
+    stored_price_before: number;
+    stored_price_after: number;
+    stored_actual_move_pct: number | null;
+    matched_before_date: string;
+    matched_after_date: string;
+    gap_from_earnings_days: number;
+    detected_at: string;
+  }>;
 };
 
 export function CaptureHealthPanel() {
@@ -151,6 +162,75 @@ export function CaptureHealthPanel() {
         </div>
         <div>outstanding today: {outstandingToday.length}</div>
       </div>
+    </div>
+  );
+}
+
+// Warn-only price-date-mismatch findings from the weekly scan
+// (scripts/detect-price-date-mismatch.ts). Never auto-repaired —
+// this panel is where a human sees them and decides whether to act.
+// Separate component so a clean capture run doesn't hide these, and a
+// price-integrity issue doesn't get mistaken for a capture-pipeline
+// problem (different failure mode, different severity color).
+export function PriceIntegrityFlagsPanel() {
+  const [resp, setResp] = useState<CaptureHealthResp | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/capture-health", { cache: "no-store" })
+      .then((r) => (r.ok ? (r.json() as Promise<CaptureHealthResp>) : null))
+      .then((j) => {
+        if (!cancelled) setResp(j);
+      })
+      .catch(() => {
+        if (!cancelled) setResp(null);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (loading || !resp || resp.priceIntegrityFlags.length === 0) return null;
+
+  return (
+    <div className="rounded-lg border-2 border-amber-500 bg-amber-500/10 p-4 shadow-[0_0_0_1px_rgba(245,158,11,0.3)]">
+      <div className="flex items-center gap-2">
+        <AlertTriangle className="h-5 w-5 shrink-0 text-amber-400" />
+        <span className="text-base font-bold text-amber-200">
+          Price integrity: {resp.priceIntegrityFlags.length} row(s) flagged
+        </span>
+      </div>
+      <p className="mt-1 text-xs text-amber-200/80">
+        Stored price_before/price_after exactly match real closes on dates well outside the
+        earnings window — the same signature as the report-window-gap bug fixed 2026-08-05. Warn
+        only: nothing here has been changed automatically.
+      </p>
+      <ul className="mt-3 space-y-2">
+        {resp.priceIntegrityFlags.map((f) => (
+          <li
+            key={`${f.symbol}|${f.earnings_date}`}
+            className="rounded border border-amber-500/30 bg-amber-500/5 p-2 text-xs text-amber-100"
+          >
+            <div className="font-mono font-semibold">
+              {f.symbol} · earnings_date {f.earnings_date}
+            </div>
+            <div className="mt-1 text-amber-200/90">
+              stored: before={f.stored_price_before} after={f.stored_price_after}{" "}
+              {f.stored_actual_move_pct !== null
+                ? `(${(f.stored_actual_move_pct * 100).toFixed(2)}%)`
+                : ""}
+            </div>
+            <div className="text-amber-200/90">
+              actually matches: {f.matched_before_date} → {f.matched_after_date} (
+              {f.gap_from_earnings_days}d from earnings_date)
+            </div>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

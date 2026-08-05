@@ -99,6 +99,28 @@ export async function GET(): Promise<NextResponse> {
 
   const outstandingToday = last && last.capture_date === todayEt ? last.outstanding : [];
 
+  // Warn-only findings from the weekly price-date-mismatch scan (see
+  // scripts/detect-price-date-mismatch.ts) — never auto-repaired, just
+  // surfaced here so they get seen.
+  const priceIntegrityRes = await sb
+    .from("price_integrity_flags")
+    .select(
+      "symbol,earnings_date,stored_price_before,stored_price_after,stored_actual_move_pct,matched_before_date,matched_after_date,gap_from_earnings_days,detected_at",
+    )
+    .is("resolved_at", null)
+    .order("detected_at", { ascending: false });
+  const priceIntegrityFlags = (priceIntegrityRes.data ?? []) as Array<{
+    symbol: string;
+    earnings_date: string;
+    stored_price_before: number;
+    stored_price_after: number;
+    stored_actual_move_pct: number | null;
+    matched_before_date: string;
+    matched_after_date: string;
+    gap_from_earnings_days: number;
+    detected_at: string;
+  }>;
+
   // Reuse the same live-refresh verify the reconnect banner uses, so
   // this panel's Schwab status matches what the banner would show —
   // one source of truth for "is Schwab actually connected right now."
@@ -134,5 +156,6 @@ export async function GET(): Promise<NextResponse> {
     coverage7: coverage(7),
     coverage30: coverage(30),
     schwabStatus,
+    priceIntegrityFlags,
   });
 }
