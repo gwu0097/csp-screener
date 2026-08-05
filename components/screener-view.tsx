@@ -45,8 +45,10 @@ import { PriceChart } from "@/components/price-chart";
 import { TickerIntelligenceStrip } from "@/components/ticker-intelligence-strip";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { ErrorBanner } from "@/components/error-banner";
+import { ResearchAnalysisPasteBack } from "@/components/research-analysis-paste";
 import { SchwabTokenBanner } from "@/components/schwab-token-banner";
 import { CSP_EARNINGS_SCREENER } from "@/lib/screener-config";
+import { ANALYSIS_TEMPLATE, ANALYSIS_TEMPLATE_VERSION } from "@/lib/analysis-dump-template";
 import {
   interpretError,
   interpretFetchError,
@@ -4159,6 +4161,38 @@ function dumpInt(n: number | null | undefined): string {
   return n === null || n === undefined || !Number.isFinite(n) ? "—" : String(Math.round(n));
 }
 
+// Shared by the dump's EARNINGS HISTORY section and the paste-back
+// save flow's snapshot (research_analyses.max_downside_ratio) — one
+// definition so the two can never disagree on which quarter "the
+// worst downside" means. ratio is magnitude-only (|actual|/implied)
+// everywhere in this codebase; "downside" means actualMovePct < 0,
+// not ratio < 0.
+type HistoryRatioRow = { qtrLabel: string; earningsDate: string; actualMovePct: number | null; ratio: number | null };
+function findMaxDownsideRatio(
+  history: HistoryRatioRow[],
+): { ratio: number; qtrLabel: string; earningsDate: string; actualMovePct: number } | null {
+  const downside = history.filter(
+    (h): h is HistoryRatioRow & { actualMovePct: number; ratio: number } =>
+      h.actualMovePct !== null && h.actualMovePct < 0 && h.ratio !== null,
+  );
+  if (downside.length === 0) return null;
+  const worst = downside.reduce((best, h) => (h.ratio > best.ratio ? h : best));
+  return { ratio: worst.ratio, qtrLabel: worst.qtrLabel, earningsDate: worst.earningsDate, actualMovePct: worst.actualMovePct };
+}
+
+// Same sharing rationale as findMaxDownsideRatio — feeds both the
+// dump's STRIKE VS WORST DOWN MOVE line and the paste-back snapshot.
+function findWorstDownMove(
+  history: HistoryRatioRow[],
+): { actualMovePct: number; qtrLabel: string; earningsDate: string } | null {
+  const down = history.filter(
+    (h): h is HistoryRatioRow & { actualMovePct: number } => h.actualMovePct !== null && h.actualMovePct < 0,
+  );
+  if (down.length === 0) return null;
+  const worst = down.reduce((w, h) => (h.actualMovePct < w.actualMovePct ? h : w));
+  return { actualMovePct: worst.actualMovePct, qtrLabel: worst.qtrLabel, earningsDate: worst.earningsDate };
+}
+
 // Mirrors lib/screener.ts's computeCspExpectedValue exactly (same
 // formula, same commission default) so EV can be recomputed here at
 // whatever strike the user typed — the server-side version is
@@ -4258,6 +4292,7 @@ function AnalysisDumpTab({
       `Implied move (EM): ${dumpPct(d?.expectedMovePct ?? null)} [source: ${d?.impliedMoveMethod ?? "unknown"}${d?.impliedMoveDegradedReason ? ` — ${d.impliedMoveDegradedReason}` : ""}]`,
     );
     push(`VIX: ${dumpNum(tl?.regimeFactors.vix ?? null, 1)} (${tl?.regimeFactors.vixRegime ?? "—"})`);
+    push(`Research analysis template version: ${ANALYSIS_TEMPLATE_VERSION}`);
 
     // ---------- SELECTED STRIKE ----------
     section("SELECTED STRIKE");
@@ -4355,6 +4390,44 @@ function AnalysisDumpTab({
     }
     const validPairs = history.filter((h) => h.impliedMovePct !== null && h.actualMovePct !== null).length;
     push(`n = ${validPairs} quarters with a valid implied+actual pair (of ${history.length} stored).`);
+
+    // Max DOWNSIDE ratio — the mean ratio can look benign while every
+    // blow-through above 1.0 is a downside move (e.g. APP: mean 0.708,
+    // worst downside 1.387).
+    const maxDownside = findMaxDownsideRatio(history);
+    if (maxDownside === null) {
+      push(`MAX DOWNSIDE RATIO: no negative-move quarter has a valid ratio.`);
+    } else {
+      push(
+        `MAX DOWNSIDE RATIO: ${dumpNum(maxDownside.ratio, 3)} (${maxDownside.qtrLabel}, ${maxDownside.earningsDate}, actual ${dumpPct(maxDownside.actualMovePct)})`,
+      );
+    }
+
+    // Strike-vs-worst-down-move cushion — against the REFERENCE strike
+    // (2x EM below spot, per the template's Part 3), not whatever
+    // strike is currently selected in the UI above, so this number
+    // matches what an external analyst reproduces from the template.
+    // Uses tl.referenceStrikeCheck.referenceStrike — the app's own
+    // canonical 2xEM strike (lib/screener.ts's evaluateReferenceStrike)
+    // — rather than re-deriving spot*(1-2*em) here, so this can never
+    // silently drift from the value the rest of the app already shows.
+    const referenceStrike = tl?.referenceStrikeCheck.referenceStrike ?? null;
+    const referenceStrikePctBelowSpot =
+      referenceStrike !== null && r.price > 0 ? ((r.price - referenceStrike) / r.price) * 100 : null;
+    const worstDown = findWorstDownMove(history);
+    if (referenceStrikePctBelowSpot === null) {
+      push(`STRIKE VS WORST DOWN MOVE: cannot compute — no reference strike available.`);
+    } else if (worstDown === null) {
+      push(`STRIKE VS WORST DOWN MOVE: no negative-move quarter in stored history.`);
+    } else {
+      const worstDownPct = Math.abs(worstDown.actualMovePct) * 100;
+      const requiredMultiple = worstDownPct > 0 ? referenceStrikePctBelowSpot / worstDownPct : null;
+      push(
+        `STRIKE VS WORST DOWN MOVE (reference strike $${dumpNum(referenceStrike)} = 2x EM below spot): strike is ${referenceStrikePctBelowSpot.toFixed(1)}% below spot; ` +
+          `worst down move ${dumpPct(worstDown.actualMovePct)} (${worstDown.qtrLabel}, ${worstDown.earningsDate}); ` +
+          `requires ${requiredMultiple !== null ? requiredMultiple.toFixed(2) : "—"}x = ${referenceStrikePctBelowSpot.toFixed(1)}/${worstDownPct.toFixed(1)}`,
+      );
+    }
 
     // ---------- GRADE BREAKDOWN ----------
     section("GRADE BREAKDOWN");
@@ -4458,8 +4531,30 @@ function AnalysisDumpTab({
       }
     }
 
+    // ---------- RESEARCH ANALYSIS REQUEST (static template, verbatim) ----------
+    push();
+    push(ANALYSIS_TEMPLATE);
+
     return lines.join("\n").trim();
   }, [r, tl, d, companyName, screenedAt, effectiveStrike, effectiveDelta, effectivePremium, effectivePop, selectedRow, recommended, availableStrikes, spreadFlagPct, chainCampaigns, chainCampaignsFailed]);
+
+  // Setup values snapshotted at analysis-save time (research_analyses
+  // is never joined to live data later — spot/EM/grade all drift
+  // after the fact). Reuses the exact same shared helpers as the dump
+  // text above so a saved snapshot can never disagree with what the
+  // dump the analysis was written against actually showed.
+  const analysisSnapshot = useMemo(() => {
+    const history = d?.crushHistory ?? [];
+    const maxDownside = findMaxDownsideRatio(history);
+    return {
+      referenceStrike: tl?.referenceStrikeCheck.referenceStrike ?? null,
+      spot: r.price,
+      emPct: d?.expectedMovePct ?? null,
+      numericGrade: tl?.finalGrade ?? null,
+      crushGrade: r.stageThree?.crushGrade ?? null,
+      maxDownsideRatio: maxDownside?.ratio ?? null,
+    };
+  }, [r, tl, d]);
 
   async function copyDump() {
     try {
@@ -4532,6 +4627,11 @@ function AnalysisDumpTab({
       <pre className="max-h-[600px] overflow-auto whitespace-pre-wrap rounded border border-border bg-background/40 p-3 font-mono text-xs leading-relaxed">
         {dump}
       </pre>
+      <ResearchAnalysisPasteBack
+        symbol={r.symbol}
+        earningsDate={r.earningsDate}
+        snapshot={analysisSnapshot}
+      />
     </div>
   );
 }

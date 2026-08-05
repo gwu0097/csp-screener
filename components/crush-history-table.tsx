@@ -5,14 +5,32 @@
 // by runStagesThreeFour. ★ marks events within ±2pp of today's IV-
 // implied move (today's EM is the only fair comparison set).
 
-import { useEffect, useState, type ReactNode } from "react";
-import { AlertTriangle, CheckCircle2, Loader2, XCircle } from "lucide-react";
+import { Fragment, useEffect, useState, type ReactNode } from "react";
+import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Loader2, XCircle } from "lucide-react";
 import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+
+// Advisory-only research analysis (research_analyses table) — pasted
+// back from an external LLM conversation seeded by the Analysis Dump
+// tab. Never feeds any calculation here; this is a read-only indicator
+// + expandable detail per quarter.
+type ResearchAnalysisRow = {
+  symbol: string;
+  earnings_date: string;
+  flags_fired: string[];
+  flags_unknown: string[];
+  candidate_flags: string[];
+  checklist_version: string | null;
+  template_version: string | null;
+  analysis_prose: string | null;
+  parse_status: "parsed" | "prose_only" | "partial";
+  reference_strike: number | null;
+  max_downside_ratio: number | null;
+};
 
 type CrushContext = {
   outlier_analyses: Array<{
@@ -356,6 +374,11 @@ export function CrushHistoryTable({
   // doesn't get lost/overwritten by the next Fetch EM History run.
   const [editErrors, setEditErrors] = useState<Record<string, string>>({});
 
+  // Advisory-only research analyses for this symbol, keyed by
+  // earnings_date. null = not yet loaded; {} = loaded, none exist.
+  const [researchAnalyses, setResearchAnalyses] = useState<Record<string, ResearchAnalysisRow> | null>(null);
+  const [expandedAnalysisDate, setExpandedAnalysisDate] = useState<string | null>(null);
+
   // On mount: read the latest events for this symbol from the DB so
   // a re-expand never shows stale stageThree.details.crushHistory
   // baked into the screener_results cache (which can be hours old).
@@ -374,6 +397,31 @@ export function CrushHistoryTable({
         }
       } catch {
         /* fall back to props.events */
+      }
+    }
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [todaySymbol]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        const res = await fetch(
+          `/api/screener/research-analysis?symbol=${encodeURIComponent(todaySymbol)}`,
+          { cache: "no-store" },
+        );
+        if (!res.ok) return;
+        const json = (await res.json()) as { analyses?: ResearchAnalysisRow[] };
+        if (!cancelled && Array.isArray(json.analyses)) {
+          const byDate: Record<string, ResearchAnalysisRow> = {};
+          for (const a of json.analyses) byDate[a.earnings_date] = a;
+          setResearchAnalyses(byDate);
+        }
+      } catch {
+        /* indicator just won't show — non-critical */
       }
     }
     void load();
@@ -721,9 +769,11 @@ export function CrushHistoryTable({
               const isF = e.grade === "F";
               const isManual = e.impliedMoveSource === "manual";
               const rowError = editErrors[e.earningsDate];
+              const analysis = researchAnalyses?.[e.earningsDate] ?? null;
+              const isExpanded = expandedAnalysisDate === e.earningsDate;
               return (
+                <Fragment key={e.earningsDate}>
                 <tr
-                  key={e.earningsDate}
                   className={`border-t border-border ${isSimilar ? "bg-emerald-500/[0.04]" : ""}`}
                 >
                   <td className="px-2 py-1 font-mono">
@@ -741,6 +791,30 @@ export function CrushHistoryTable({
                           </TooltipTrigger>
                           <TooltipContent className="max-w-xs text-sm">
                             Hand-entered — Fetch EM History will never overwrite this row. Click EM/Actual to re-edit.
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    )}
+                    {analysis && (
+                      <TooltipProvider delayDuration={200}>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <button
+                              type="button"
+                              onClick={() => setExpandedAnalysisDate(isExpanded ? null : e.earningsDate)}
+                              className="ml-1.5 inline-flex cursor-pointer items-center gap-0.5 rounded bg-violet-500/15 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-violet-300 hover:bg-violet-500/25"
+                            >
+                              {isExpanded ? (
+                                <ChevronDown className="h-2.5 w-2.5" />
+                              ) : (
+                                <ChevronRight className="h-2.5 w-2.5" />
+                              )}
+                              research
+                            </button>
+                          </TooltipTrigger>
+                          <TooltipContent className="max-w-xs text-sm">
+                            Advisory-only research analysis exists for this quarter — click to expand. Never feeds the
+                            numeric grade.
                           </TooltipContent>
                         </Tooltip>
                       </TooltipProvider>
@@ -841,6 +915,65 @@ export function CrushHistoryTable({
                     )}
                   </td>
                 </tr>
+                {isExpanded && analysis && (
+                  <tr key={`${e.earningsDate}-analysis`} className="border-t border-violet-500/20 bg-violet-500/[0.04]">
+                    <td colSpan={6} className="px-2 py-2 text-xs">
+                      <div className="space-y-1.5">
+                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-muted-foreground">
+                          <span>
+                            parse: <span className="font-mono">{analysis.parse_status}</span>
+                          </span>
+                          {analysis.checklist_version && (
+                            <span>
+                              checklist: <span className="font-mono">{analysis.checklist_version}</span>
+                            </span>
+                          )}
+                          {analysis.template_version && (
+                            <span>
+                              template: <span className="font-mono">{analysis.template_version}</span>
+                            </span>
+                          )}
+                          {analysis.reference_strike !== null && (
+                            <span>
+                              ref strike: <span className="font-mono">${analysis.reference_strike.toFixed(2)}</span>
+                            </span>
+                          )}
+                          {analysis.max_downside_ratio !== null && (
+                            <span>
+                              max downside ratio: <span className="font-mono">{analysis.max_downside_ratio.toFixed(3)}</span>
+                            </span>
+                          )}
+                        </div>
+                        {analysis.flags_fired.length > 0 && (
+                          <div>
+                            <span className="font-semibold text-violet-300">Fired: </span>
+                            {analysis.flags_fired.join(", ")}
+                          </div>
+                        )}
+                        {analysis.flags_unknown.length > 0 && (
+                          <div>
+                            <span className="font-semibold text-muted-foreground">Unknown: </span>
+                            {analysis.flags_unknown.join(", ")}
+                          </div>
+                        )}
+                        {analysis.candidate_flags.length > 0 && (
+                          <div>
+                            <span className="font-semibold text-amber-300">Candidate flags: </span>
+                            {analysis.candidate_flags.join(", ")}
+                          </div>
+                        )}
+                        {analysis.analysis_prose ? (
+                          <div className="whitespace-pre-wrap rounded border border-border bg-background/60 p-2 font-sans text-xs leading-relaxed">
+                            {analysis.analysis_prose}
+                          </div>
+                        ) : (
+                          <div className="text-muted-foreground">No prose stored for this analysis.</div>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                )}
+                </Fragment>
               );
             })}
           </tbody>
