@@ -1,5 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
+import {
+  buildDictionaryMap,
+  classifyObservations,
+  validateObservationResolutions,
+  type ObservationClassification,
+  type ObservationDictionaryEntry,
+  type ObservationKind,
+  type ObservationResolutions,
+  type ParsedCandidateObservation,
+} from "@/lib/observation-dictionary";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -82,6 +92,8 @@ type Body = {
   flagsNa?: unknown;
   flagsUnknown?: unknown;
   candidateFlags?: unknown;
+  candidateObservations?: unknown;
+  observationResolutions?: unknown;
   checklistVersion?: unknown;
   templateVersion?: unknown;
   analysisProse?: unknown;
@@ -113,6 +125,153 @@ function asNullableNumber(v: unknown, field: string): { ok: true; value: number 
 
 function asNullableString(v: unknown): string | null {
   return typeof v === "string" && v.length > 0 ? v : null;
+}
+
+const OBSERVATION_TERM_RE = /^[a-z][a-z0-9_]*$/;
+
+// undefined (field omitted) means "this is a legacy v1-v3 save, no
+// observation pipeline" — distinct from `[]` (a v4 save that genuinely
+// found zero observations this time, which still needs to sync away any
+// previously-recorded usages for this analysis).
+function asObservationList(
+  v: unknown,
+): { ok: true; value: ParsedCandidateObservation[] | undefined } | { ok: false; error: string } {
+  if (v === undefined) return { ok: true, value: undefined };
+  if (!Array.isArray(v)) return { ok: false, error: "candidateObservations must be an array" };
+  const out: ParsedCandidateObservation[] = [];
+  const seen = new Set<string>();
+  for (const item of v) {
+    if (typeof item !== "object" || item === null) {
+      return { ok: false, error: "candidateObservations entries must be objects" };
+    }
+    const rec = item as Record<string, unknown>;
+    const term = rec.term;
+    const definition = rec.definition;
+    if (typeof term !== "string" || !OBSERVATION_TERM_RE.test(term)) {
+      return { ok: false, error: `Invalid observation term: ${JSON.stringify(term)}` };
+    }
+    if (definition !== null && definition !== undefined && typeof definition !== "string") {
+      return { ok: false, error: `Invalid observation definition for term "${term}"` };
+    }
+    if (seen.has(term)) continue; // client should already dedupe; defensive only
+    seen.add(term);
+    out.push({ term, definition: typeof definition === "string" ? definition : null });
+  }
+  return { ok: true, value: out };
+}
+
+function asObservationResolutions(v: unknown): ObservationResolutions {
+  const empty: ObservationResolutions = { newTermKinds: {}, useNewDefinitionFor: [] };
+  if (typeof v !== "object" || v === null) return empty;
+  const rec = v as Record<string, unknown>;
+  const newTermKinds: Record<string, ObservationKind> = {};
+  if (typeof rec.newTermKinds === "object" && rec.newTermKinds !== null) {
+    for (const [term, kind] of Object.entries(rec.newTermKinds as Record<string, unknown>)) {
+      if (kind === "setup_observation" || kind === "app_defect") newTermKinds[term] = kind;
+    }
+  }
+  const useNewDefinitionFor = Array.isArray(rec.useNewDefinitionFor)
+    ? rec.useNewDefinitionFor.filter((x): x is string => typeof x === "string")
+    : [];
+  return { newTermKinds, useNewDefinitionFor };
+}
+
+// Inserts brand-new terms and, only where the caller explicitly chose to
+// overwrite (resolutions.useNewDefinitionFor), updates a redefined term's
+// stored definition. Reused terms (bare or matching) get no dictionary
+// write here — use_count/last_used_at are handled entirely by
+// syncObservationUsages below, recomputed from observation_usages rather
+// than incremented, so a re-save of the same analysis never drifts.
+async function upsertDictionaryTerms(
+  sb: ReturnType<typeof createServerClient>,
+  classifications: ObservationClassification[],
+  resolutions: ObservationResolutions,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const nowIso = new Date().toISOString();
+  for (const c of classifications) {
+    if (c.status === "new_with_definition") {
+      const kind = resolutions.newTermKinds[c.term];
+      const insRes = await sb.from("observation_dictionary").insert({
+        term: c.term,
+        definition: c.definition,
+        kind,
+        use_count: 0,
+        created_at: nowIso,
+        updated_at: nowIso,
+      });
+      if (insRes.error) return { ok: false, error: insRes.error.message };
+    } else if (c.status === "existing_redefined" && resolutions.useNewDefinitionFor.includes(c.term)) {
+      const updRes = await sb
+        .from("observation_dictionary")
+        .update({ definition: c.newDefinition, updated_at: nowIso })
+        .eq("term", c.term);
+      if (updRes.error) return { ok: false, error: updRes.error.message };
+    }
+  }
+  return { ok: true };
+}
+
+// Reconciles observation_usages for (symbol, earningsDate) against the
+// terms used in THIS save — a diff/sync, not an append, so re-saving the
+// same analysis (the paste/revise/save loop this UI is built around)
+// never double-counts. For every term whose usage set for this analysis
+// changed (added or removed), use_count/first_used_at/last_used_at are
+// recomputed from the full observation_usages table for that term, not
+// incremented — a blind +1/-1 would drift on any partial-failure retry.
+async function syncObservationUsages(
+  sb: ReturnType<typeof createServerClient>,
+  symbol: string,
+  earningsDate: string,
+  newTerms: string[],
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const existingRes = await sb
+    .from("observation_usages")
+    .select("term")
+    .eq("symbol", symbol)
+    .eq("earnings_date", earningsDate);
+  if (existingRes.error) return { ok: false, error: existingRes.error.message };
+  const existingTerms = new Set(((existingRes.data ?? []) as { term: string }[]).map((r) => r.term));
+  const newTermSet = new Set(newTerms);
+
+  const toDelete = Array.from(existingTerms).filter((t) => !newTermSet.has(t));
+  const toInsert = Array.from(newTermSet).filter((t) => !existingTerms.has(t));
+
+  for (const term of toDelete) {
+    const delRes = await sb
+      .from("observation_usages")
+      .delete()
+      .eq("term", term)
+      .eq("symbol", symbol)
+      .eq("earnings_date", earningsDate);
+    if (delRes.error) return { ok: false, error: delRes.error.message };
+  }
+
+  if (toInsert.length > 0) {
+    const insRes = await sb
+      .from("observation_usages")
+      .insert(toInsert.map((term) => ({ term, symbol, earnings_date: earningsDate })));
+    if (insRes.error) return { ok: false, error: insRes.error.message };
+  }
+
+  const affected = Array.from(new Set([...toDelete, ...toInsert]));
+  for (const term of affected) {
+    const usagesRes = await sb.from("observation_usages").select("created_at").eq("term", term);
+    if (usagesRes.error) return { ok: false, error: usagesRes.error.message };
+    const rows = (usagesRes.data ?? []) as { created_at: string }[];
+    const times = rows.map((r) => new Date(r.created_at).getTime()).filter((t) => !Number.isNaN(t));
+    const updRes = await sb
+      .from("observation_dictionary")
+      .update({
+        use_count: rows.length,
+        first_used_at: times.length > 0 ? new Date(Math.min(...times)).toISOString() : null,
+        last_used_at: times.length > 0 ? new Date(Math.max(...times)).toISOString() : null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("term", term);
+    if (updRes.error) return { ok: false, error: updRes.error.message };
+  }
+
+  return { ok: true };
 }
 
 // POST — saves (upserts) one analysis, keyed by (symbol, earnings_date).
@@ -155,6 +314,39 @@ export async function POST(req: NextRequest) {
   const candidateFlags = asStringArray(body.candidateFlags, "candidateFlags");
   if (!candidateFlags.ok) return NextResponse.json({ error: candidateFlags.error }, { status: 400 });
 
+  const candidateObservations = asObservationList(body.candidateObservations);
+  if (!candidateObservations.ok) {
+    return NextResponse.json({ error: candidateObservations.error }, { status: 400 });
+  }
+  const observationResolutions = asObservationResolutions(body.observationResolutions);
+
+  // candidateObservations present (even as []) marks a v4-shaped save —
+  // classify against the current dictionary and reject before writing
+  // anything if a term is new-without-a-definition or a new term has no
+  // chosen kind. Absent means a legacy v1-v3 save; candidate_flags below
+  // is then taken verbatim from the client as before.
+  let observationClassifications: ObservationClassification[] = [];
+  const sb = createServerClient();
+  if (candidateObservations.value !== undefined) {
+    const terms = Array.from(new Set(candidateObservations.value.map((o) => o.term)));
+    let dictionaryEntries: ObservationDictionaryEntry[] = [];
+    if (terms.length > 0) {
+      const dictRes = await sb.from("observation_dictionary").select("*").in("term", terms);
+      if (dictRes.error) {
+        return NextResponse.json({ error: dictRes.error.message }, { status: 500 });
+      }
+      dictionaryEntries = (dictRes.data ?? []) as ObservationDictionaryEntry[];
+    }
+    observationClassifications = classifyObservations(
+      candidateObservations.value,
+      buildDictionaryMap(dictionaryEntries),
+    );
+    const validation = validateObservationResolutions(observationClassifications, observationResolutions);
+    if (!validation.ok) {
+      return NextResponse.json({ error: validation.error }, { status: 400 });
+    }
+  }
+
   const referenceStrike = asNullableNumber(body.referenceStrike, "referenceStrike");
   if (!referenceStrike.ok) return NextResponse.json({ error: referenceStrike.error }, { status: 400 });
   const spotAtAnalysis = asNullableNumber(body.spotAtAnalysis, "spotAtAnalysis");
@@ -164,7 +356,16 @@ export async function POST(req: NextRequest) {
   const maxDownsideRatio = asNullableNumber(body.maxDownsideRatio, "maxDownsideRatio");
   if (!maxDownsideRatio.ok) return NextResponse.json({ error: maxDownsideRatio.error }, { status: 400 });
 
-  const sb = createServerClient();
+  // v4 saves derive candidate_flags from the observation term list
+  // server-side rather than trusting the client's flat array, so the
+  // History tab / modal / this route's own savedRecord panel — which all
+  // read candidate_flags directly and are out of scope for this phase —
+  // keep working unchanged for v4 records too.
+  const finalCandidateFlags =
+    candidateObservations.value !== undefined
+      ? Array.from(new Set(candidateObservations.value.map((o) => o.term)))
+      : candidateFlags.value;
+
   const up = await sb
     .from("research_analyses")
     .upsert(
@@ -174,7 +375,7 @@ export async function POST(req: NextRequest) {
         flags_fired: flagsFired.value,
         flags_na: flagsNa.value,
         flags_unknown: flagsUnknown.value,
-        candidate_flags: candidateFlags.value,
+        candidate_flags: finalCandidateFlags,
         checklist_version: asNullableString(body.checklistVersion),
         template_version: asNullableString(body.templateVersion),
         analysis_prose: asNullableString(body.analysisProse),
@@ -195,6 +396,30 @@ export async function POST(req: NextRequest) {
   if (up.error) {
     return NextResponse.json({ error: up.error.message }, { status: 500 });
   }
+
+  // Dictionary + usages writes happen only after the analysis row is
+  // safely saved, and are ordered new-terms-then-usages so a mid-failure
+  // retry is recoverable: observation_usages has a unique(term, symbol,
+  // earnings_date) constraint and syncObservationUsages recomputes
+  // use_count from source of truth rather than incrementing, so replaying
+  // this tail after a partial failure is idempotent, not double-counted.
+  if (candidateObservations.value !== undefined) {
+    const dictRes = await upsertDictionaryTerms(sb, observationClassifications, observationResolutions);
+    if (!dictRes.ok) {
+      return NextResponse.json(
+        { error: `Analysis saved, but the observation dictionary update failed: ${dictRes.error}` },
+        { status: 500 },
+      );
+    }
+    const usagesRes = await syncObservationUsages(sb, symbol, earningsDate, finalCandidateFlags);
+    if (!usagesRes.ok) {
+      return NextResponse.json(
+        { error: `Analysis saved, but observation usage tracking failed: ${usagesRes.error}` },
+        { status: 500 },
+      );
+    }
+  }
+
   // Returning the upserted row lets the paste-back UI rehydrate the
   // textarea from exactly what's now persisted, instead of clearing it
   // or re-fetching separately — this is an iterative paste/revise/save

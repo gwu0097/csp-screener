@@ -10,6 +10,14 @@ import {
   type ParsedResearchAnalysis,
 } from "@/lib/research-analysis-parser";
 import { ANALYSIS_TEMPLATE_VERSION } from "@/lib/analysis-dump-template";
+import {
+  buildDictionaryMap,
+  classifyObservations,
+  validateObservationResolutions,
+  type ObservationDictionaryEntry,
+  type ObservationKind,
+  type ObservationResolutions,
+} from "@/lib/observation-dictionary";
 
 // The full research_analyses row, as returned by GET/POST
 // /api/screener/research-analysis — the persisted source of truth this
@@ -100,6 +108,40 @@ export function ResearchAnalysisPasteBack({
   // preview" is clicked) would be worse than staying expanded.
   const [textareaExpanded, setTextareaExpanded] = useState(false);
 
+  // Observation dictionary — fetched once (it's global, not per-candidate)
+  // and used to classify a v4 paste's CANDIDATE_OBSERVATIONS against
+  // known terms before Save is enabled. newTermKinds/useNewDefinitionFor
+  // hold the user's resolutions for the two ambiguous cases the response
+  // format itself can't carry: a brand-new term needs a kind chosen here,
+  // and a redefined term needs the user to pick which definition wins.
+  const [dictionaryEntries, setDictionaryEntries] = useState<ObservationDictionaryEntry[] | null>(null);
+  const [dictionaryError, setDictionaryError] = useState<string | null>(null);
+  const [dictionaryLoading, setDictionaryLoading] = useState(true);
+  const [newTermKinds, setNewTermKinds] = useState<Record<string, ObservationKind>>({});
+  const [useNewDefinitionFor, setUseNewDefinitionFor] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    let cancelled = false;
+    setDictionaryLoading(true);
+    setDictionaryError(null);
+    (async () => {
+      try {
+        const res = await fetch("/api/screener/observation-dictionary", { cache: "no-store" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = (await res.json()) as { entries?: ObservationDictionaryEntry[] };
+        if (cancelled) return;
+        setDictionaryEntries(json.entries ?? []);
+      } catch (e) {
+        if (!cancelled) setDictionaryError(e instanceof Error ? e.message : String(e));
+      } finally {
+        if (!cancelled) setDictionaryLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // Hydrate from research_analyses whenever the candidate changes (tab
   // open, or switching to a different symbol/earnings date). Empty
   // placeholder is just the natural result of no match existing — no
@@ -151,6 +193,27 @@ export function ResearchAnalysisPasteBack({
     [parsed],
   );
 
+  const dictionaryMap = useMemo(() => buildDictionaryMap(dictionaryEntries ?? []), [dictionaryEntries]);
+  const observationClassifications = useMemo(
+    () => (parsed ? classifyObservations(parsed.candidateObservations, dictionaryMap) : []),
+    [parsed, dictionaryMap],
+  );
+  const observationResolutions: ObservationResolutions = useMemo(
+    () => ({ newTermKinds, useNewDefinitionFor: Array.from(useNewDefinitionFor) }),
+    [newTermKinds, useNewDefinitionFor],
+  );
+  const observationValidation = useMemo(
+    () => validateObservationResolutions(observationClassifications, observationResolutions),
+    [observationClassifications, observationResolutions],
+  );
+  // A v4 paste (observationsBlockFound) can't be safely classified until
+  // the dictionary has actually loaded — without it, a bare reused term
+  // is indistinguishable from a new undefined one. Block Save rather than
+  // guess; the server would reject anyway, but failing before the round
+  // trip is cheaper and the reason is clearer to the user.
+  const observationsBlockedOnDictionary =
+    parsed !== null && parsed.observationsBlockFound && (dictionaryLoading || dictionaryError !== null);
+
   // Unsaved-edit detection — the textarea vs. whatever's actually
   // persisted (empty string when nothing's saved yet). Intentionally
   // independent of the parsed-preview state so it stays accurate even
@@ -161,6 +224,8 @@ export function ResearchAnalysisPasteBack({
     setSaved(false);
     setSaveError(null);
     setConfirmedMismatch(false);
+    setNewTermKinds({});
+    setUseNewDefinitionFor(new Set());
     if (raw.trim().length === 0) {
       setParsed(null);
       return;
@@ -171,6 +236,7 @@ export function ResearchAnalysisPasteBack({
   async function handleSave() {
     if (!parsed) return;
     if (hasMismatch && !confirmedMismatch) return;
+    if (parsed.observationsBlockFound && (observationsBlockedOnDictionary || !observationValidation.ok)) return;
     setSaving(true);
     setSaveError(null);
     try {
@@ -184,6 +250,12 @@ export function ResearchAnalysisPasteBack({
           flagsNa: parsed.flagsNa,
           flagsUnknown: parsed.flagsUnknown,
           candidateFlags: parsed.candidateFlags,
+          ...(parsed.observationsBlockFound
+            ? {
+                candidateObservations: parsed.candidateObservations,
+                observationResolutions,
+              }
+            : {}),
           checklistVersion: parsed.checklistVersion,
           templateVersion: ANALYSIS_TEMPLATE_VERSION,
           analysisProse: parsed.prose,
@@ -374,10 +446,12 @@ export function ResearchAnalysisPasteBack({
               Flags unknown ({parsed.flagsUnknown.length}):{" "}
               {parsed.flagsUnknown.length === 0 ? "none" : parsed.flagsUnknown.join(", ")}
             </div>
-            <div>
-              Candidate flags ({parsed.candidateFlags.length}):{" "}
-              {parsed.candidateFlags.length === 0 ? "none" : parsed.candidateFlags.join(", ")}
-            </div>
+            {!parsed.observationsBlockFound && (
+              <div>
+                Candidate flags ({parsed.candidateFlags.length}):{" "}
+                {parsed.candidateFlags.length === 0 ? "none" : parsed.candidateFlags.join(", ")}
+              </div>
+            )}
             {unrecognizedFired.length > 0 && (
               <div className="text-amber-300">
                 {unrecognizedFired.length} flag(s) in FLAGS_FIRED are outside the current known vocabulary —
@@ -385,6 +459,126 @@ export function ResearchAnalysisPasteBack({
               </div>
             )}
           </div>
+
+          {parsed.observationsBlockFound && (
+            <div className="space-y-1.5 rounded border border-border bg-background/40 p-2">
+              <div className="font-medium text-foreground/80">
+                Candidate observations ({parsed.candidateObservations.length})
+              </div>
+
+              {dictionaryLoading && (
+                <div className="flex items-center gap-1.5 text-muted-foreground">
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                  Loading observation dictionary…
+                </div>
+              )}
+              {dictionaryError && (
+                <div className="flex items-start gap-1.5 rounded border border-rose-500/40 bg-rose-500/10 p-1.5 text-rose-200">
+                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  Observation dictionary unavailable ({dictionaryError}) — new vs. reused terms can&apos;t be
+                  verified. Save is disabled until this loads; reload the page to retry.
+                </div>
+              )}
+              {!dictionaryLoading && !dictionaryError && parsed.candidateObservations.length === 0 && (
+                <div className="text-muted-foreground">none</div>
+              )}
+
+              {!dictionaryLoading &&
+                !dictionaryError &&
+                observationClassifications.map((c) => (
+                  <div key={c.term} className="rounded border border-border/60 p-1.5">
+                    {c.status === "new_missing_definition" && (
+                      <div className="flex items-start gap-1.5 text-rose-300">
+                        <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                        <div>
+                          <span className="font-mono">{c.term}</span> is a new term with no definition.
+                          Definitions are required on first use — add one, or check the name if this was
+                          meant to reuse an existing term.
+                        </div>
+                      </div>
+                    )}
+
+                    {c.status === "new_with_definition" && (
+                      <div className="space-y-1">
+                        <div>
+                          <span className="font-mono text-emerald-300">{c.term}</span>{" "}
+                          <span className="text-muted-foreground">(new) — {c.definition}</span>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-3 pl-1 text-muted-foreground">
+                          <span>Kind:</span>
+                          <label className="flex items-center gap-1">
+                            <input
+                              type="radio"
+                              name={`obs-kind-${c.term}`}
+                              checked={newTermKinds[c.term] === "setup_observation"}
+                              onChange={() =>
+                                setNewTermKinds((prev) => ({ ...prev, [c.term]: "setup_observation" }))
+                              }
+                            />
+                            Setup observation
+                          </label>
+                          <label className="flex items-center gap-1">
+                            <input
+                              type="radio"
+                              name={`obs-kind-${c.term}`}
+                              checked={newTermKinds[c.term] === "app_defect"}
+                              onChange={() => setNewTermKinds((prev) => ({ ...prev, [c.term]: "app_defect" }))}
+                            />
+                            App defect
+                          </label>
+                          {!newTermKinds[c.term] && (
+                            <span className="text-amber-300">— choose one to enable save</span>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {c.status === "existing_reused" && (
+                      <div>
+                        <span className="font-mono text-muted-foreground">{c.term}</span>{" "}
+                        <span className="text-muted-foreground">(known) — {c.definition}</span>
+                      </div>
+                    )}
+
+                    {c.status === "existing_redefined" && (
+                      <div className="space-y-1 text-amber-200">
+                        <div className="flex items-start gap-1.5">
+                          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                          <div>
+                            <span className="font-mono">{c.term}</span> redefined — pick which definition to
+                            keep.
+                          </div>
+                        </div>
+                        <label className="flex items-start gap-1.5 pl-1">
+                          <input
+                            type="radio"
+                            name={`obs-redef-${c.term}`}
+                            checked={!useNewDefinitionFor.has(c.term)}
+                            onChange={() =>
+                              setUseNewDefinitionFor((prev) => {
+                                const next = new Set(prev);
+                                next.delete(c.term);
+                                return next;
+                              })
+                            }
+                          />
+                          Keep existing: {c.priorDefinition}
+                        </label>
+                        <label className="flex items-start gap-1.5 pl-1">
+                          <input
+                            type="radio"
+                            name={`obs-redef-${c.term}`}
+                            checked={useNewDefinitionFor.has(c.term)}
+                            onChange={() => setUseNewDefinitionFor((prev) => new Set(prev).add(c.term))}
+                          />
+                          Use new: {c.newDefinition}
+                        </label>
+                      </div>
+                    )}
+                  </div>
+                ))}
+            </div>
+          )}
 
           {hasMismatch && (
             <div className="flex items-start gap-1.5 rounded border-2 border-rose-500 bg-rose-500/10 p-2 text-rose-200">
@@ -422,7 +616,12 @@ export function ResearchAnalysisPasteBack({
           <Button
             size="sm"
             onClick={() => void handleSave()}
-            disabled={saving || (hasMismatch && !confirmedMismatch)}
+            disabled={
+              saving ||
+              (hasMismatch && !confirmedMismatch) ||
+              (parsed.observationsBlockFound &&
+                (observationsBlockedOnDictionary || !observationValidation.ok))
+            }
           >
             {saving ? (
               <>
@@ -433,6 +632,9 @@ export function ResearchAnalysisPasteBack({
               `Save analysis for ${symbol} / ${earningsDate}`
             )}
           </Button>
+          {parsed.observationsBlockFound && !observationsBlockedOnDictionary && !observationValidation.ok && (
+            <div className="text-rose-300">{observationValidation.error}</div>
+          )}
         </div>
       )}
     </div>

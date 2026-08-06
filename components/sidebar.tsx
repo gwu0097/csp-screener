@@ -77,6 +77,7 @@ const SCREENER_GROUP: NavGroup = {
     { href: "/", label: "Candidates" },
     { href: "/watchlist", label: "CSP Watchlist" },
     { href: "/screener/history", label: "History" },
+    { href: "/screener/dictionary", label: "Dictionary" },
   ],
 };
 

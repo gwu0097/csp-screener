@@ -17,7 +17,7 @@
 // numeric grade, never vetoes a trade, and the two are never merged or
 // averaged. See lib/research-analysis-parser.ts for how a pasted
 // response gets parsed back into structured fields.
-export const ANALYSIS_TEMPLATE_VERSION = "v3";
+export const ANALYSIS_TEMPLATE_VERSION = "v4";
 
 export const ANALYSIS_TEMPLATE = `=== RESEARCH ANALYSIS REQUEST ===
 
@@ -30,7 +30,7 @@ suggests — the things that would cause the market's own pricing to be wrong.
 The reference strike for this analysis is 2x EM below spot, regardless of
 what strike I may actually trade.
 
-PART 1 — CHECKLIST (v3)
+PART 1 — CHECKLIST (v4)
 Check each item. Report FIRED, CLEAR, N/A, or UNKNOWN with one line of
 evidence. N/A means the item does not apply to this company or setup.
 UNKNOWN means it applies but could not be determined. Both are valid and
@@ -87,7 +87,10 @@ next lesson comes from. Answer freely:
   - What is the market apparently NOT worried about that it should be?
 
 If you propose a risk that isn't in the checklist, name it explicitly as a
-candidate new flag.
+candidate observation — give it a short snake_case term and put it in
+CANDIDATE_OBSERVATIONS below with a one-line definition. If a term you've
+used before in a prior analysis applies again, reuse the exact same term
+name (no definition needed on reuse — see the response format).
 
 PART 3 — CUSHION MATH
 State plainly: what multiple of this ticker's worst historical DOWN move is
@@ -121,8 +124,18 @@ EARNINGS_DATE: <YYYY-MM-DD>
 FLAGS_FIRED: <comma-separated from the vocabulary above, or \`none\`>
 FLAGS_NA: <comma-separated, or \`none\`>
 FLAGS_UNKNOWN: <comma-separated, or \`none\`>
-CANDIDATE_FLAGS: <new risks you'd propose adding to the checklist, or \`none\`>
-CHECKLIST_VERSION: v3
+CHECKLIST_VERSION: v4
 === END METADATA ===
+
+CANDIDATE_OBSERVATIONS:
+  <one entry per line, snake_case term name, or \`none\`>
+  <term_name>: <definition text — REQUIRED the first time you use this
+    term. A definition may wrap onto further indented lines like this.>
+  <term_you_have_used_before>
+
+Give a definition only the first time a term is used. If you're reusing a
+term from an earlier analysis, list the bare term name with no colon and
+no definition — a definition on a term that already has one will be read
+as a proposed redefinition, not a restatement.
 
 Do not output a letter grade.`;

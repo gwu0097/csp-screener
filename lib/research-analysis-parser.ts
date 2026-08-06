@@ -1,3 +1,5 @@
+import type { ParsedCandidateObservation } from "@/lib/observation-dictionary";
+
 // Parses a pasted external-LLM response against
 // lib/analysis-dump-template.ts's ANALYSIS_TEMPLATE response format:
 //
@@ -7,9 +9,12 @@
 //   FLAGS_FIRED: <comma-separated, or `none`>
 //   FLAGS_NA: <comma-separated, or `none`>   (v3+ only, see below)
 //   FLAGS_UNKNOWN: <comma-separated, or `none`>
-//   CANDIDATE_FLAGS: <comma-separated, or `none`>
+//   CANDIDATE_FLAGS: <comma-separated, or `none`>   (v1-v3 only, see below)
 //   CHECKLIST_VERSION: <value>
 //   === END METADATA ===
+//   CANDIDATE_OBSERVATIONS:                          (v4+ only, see below)
+//     <term>: <definition, first use only>
+//     <term>                                          (bare = reuse)
 //   <prose>
 //
 // Must fail loudly, never guess: a missing/malformed metadata block
@@ -24,6 +29,17 @@
 // exist before v3, so a v1/v2 paste's absent FLAGS_NA line is expected,
 // not degraded input — treated as an empty list silently, no note, so
 // old-template pastes still parse at zero warnings.
+//
+// v4 replaced the single-line CANDIDATE_FLAGS metadata field with a
+// multi-line CANDIDATE_OBSERVATIONS block that sits in the prose region
+// (after === END METADATA ===), since each entry can carry a wrapped
+// definition. A v1-v3 paste has no such block — candidateObservations
+// comes back empty and CANDIDATE_FLAGS is still read from the metadata
+// block, exactly as before. A v4 paste has no CANDIDATE_FLAGS line —
+// that's expected too, not a defect, mirroring the FLAGS_NA treatment.
+// Whichever field the paste actually uses, the other comes back as an
+// empty array; callers should not treat "empty" as "this paste is
+// broken" for either one in isolation.
 
 // Current checklist vocabulary (lib/analysis-dump-template.ts's Part
 // 1, v3). Used only to flag unrecognized names in the UI preview —
@@ -37,6 +53,7 @@
 // checks this list), and a NEW paste using the retired v1/v2 name
 // should show as unrecognized, since v3's checklist no longer asks for
 // it under that name.
+
 export const KNOWN_FLAG_VOCABULARY = [
   "consensus_above_guide",
   "consecutive_deceleration",
@@ -61,6 +78,15 @@ export type ParsedResearchAnalysis = {
   flagsNa: string[];
   flagsUnknown: string[];
   candidateFlags: string[];
+  candidateObservations: ParsedCandidateObservation[];
+  // Whether a CANDIDATE_OBSERVATIONS: header was found at all — distinct
+  // from candidateObservations.length === 0 (a v4 paste can legitimately
+  // list zero observations). Callers use this, not the list length, to
+  // decide whether a save is v4-shaped (run the observation dictionary
+  // pipeline, sync usages down to zero if now empty) or a legacy v1-v3
+  // paste (skip the pipeline entirely, leave candidate_flags/usages as
+  // whatever they already were).
+  observationsBlockFound: boolean;
   checklistVersion: string | null;
   prose: string;
   proseCharCount: number;
@@ -73,6 +99,9 @@ export type ParsedResearchAnalysis = {
 
 const METADATA_START = /^===\s*ANALYSIS METADATA\s*===\s*$/m;
 const METADATA_END = /^===\s*END METADATA\s*===\s*$/m;
+const OBSERVATIONS_HEADER = /^[ \t]*CANDIDATE_OBSERVATIONS:[ \t]*$/;
+const OBSERVATION_TERM_LINE = /^([a-z][a-z0-9_]*):\s*(.*)$/;
+const OBSERVATION_BARE_TERM_LINE = /^([a-z][a-z0-9_]*)$/;
 
 function parseFlagList(raw: string): string[] {
   const trimmed = raw.trim();
@@ -91,6 +120,101 @@ function extractField(block: string, label: string): string | null {
   return value.length > 0 ? value : null;
 }
 
+// Extracts the CANDIDATE_OBSERVATIONS block from the region after ===
+// END METADATA ===, and returns the rest of that region — with the
+// block itself removed — as the free-form prose. Without stripping it,
+// the block would render duplicated at the top of every prose display
+// (Analysis Dump tab, the AI-badge modal, the History tab).
+//
+// The block is delimited structurally, not by a closing marker: every
+// blank or indented line right after the CANDIDATE_OBSERVATIONS: header
+// belongs to it; the first non-blank, unindented line ends it. A term
+// line is `term_name: definition text` (first use) or a bare
+// `term_name` (reuse of an already-known term, no colon). An indented
+// line under a just-defined term is a continuation of that definition.
+function extractCandidateObservationsBlock(proseRaw: string): {
+  found: boolean;
+  observations: ParsedCandidateObservation[];
+  remainder: string;
+  notes: string[];
+} {
+  const lines = proseRaw.split("\n");
+  const headerIdx = lines.findIndex((l) => OBSERVATIONS_HEADER.test(l));
+  if (headerIdx === -1) {
+    return { found: false, observations: [], remainder: proseRaw.trim(), notes: [] };
+  }
+
+  let i = headerIdx + 1;
+  const blockLines: string[] = [];
+  while (i < lines.length) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    const isIndented = /^[ \t]/.test(line) && trimmed.length > 0;
+    const isBlank = trimmed.length === 0;
+    if (!isIndented && !isBlank) break;
+    blockLines.push(line);
+    i += 1;
+  }
+
+  const remainder = [...lines.slice(0, headerIdx), ...lines.slice(i)].join("\n").trim();
+
+  const observations: ParsedCandidateObservation[] = [];
+  const seen = new Map<string, string | null>();
+  const notes: string[] = [];
+  let openTerm: string | null = null;
+
+  for (const rawLine of blockLines) {
+    const trimmed = rawLine.trim();
+    if (trimmed.length === 0 || trimmed.toLowerCase() === "none") {
+      openTerm = null;
+      continue;
+    }
+    const termMatch = OBSERVATION_TERM_LINE.exec(trimmed);
+    if (termMatch) {
+      const term = termMatch[1];
+      const defText = termMatch[2].trim();
+      const definition = defText.length > 0 ? defText : null;
+      if (seen.has(term)) {
+        if (seen.get(term) !== definition) {
+          notes.push(
+            `CANDIDATE_OBSERVATIONS lists "${term}" more than once with different text — using the first occurrence.`,
+          );
+        }
+        openTerm = null;
+        continue;
+      }
+      seen.set(term, definition);
+      observations.push({ term, definition });
+      openTerm = definition !== null ? term : null;
+      continue;
+    }
+    const bareMatch = OBSERVATION_BARE_TERM_LINE.exec(trimmed);
+    if (bareMatch) {
+      const term = bareMatch[1];
+      if (seen.has(term)) {
+        openTerm = null;
+        continue;
+      }
+      seen.set(term, null);
+      observations.push({ term, definition: null });
+      openTerm = null;
+      continue;
+    }
+    if (openTerm) {
+      const idx = observations.findIndex((o) => o.term === openTerm);
+      if (idx !== -1 && observations[idx].definition !== null) {
+        const merged = `${observations[idx].definition} ${trimmed}`;
+        observations[idx] = { ...observations[idx], definition: merged };
+        seen.set(openTerm, merged);
+      }
+    } else {
+      notes.push(`Unrecognized line in CANDIDATE_OBSERVATIONS, ignored: "${trimmed}"`);
+    }
+  }
+
+  return { found: true, observations, remainder, notes };
+}
+
 export function parseResearchAnalysisPaste(raw: string): ParsedResearchAnalysis {
   const rawPaste = raw;
   const notes: string[] = [];
@@ -107,6 +231,8 @@ export function parseResearchAnalysisPaste(raw: string): ParsedResearchAnalysis 
       flagsNa: [],
       flagsUnknown: [],
       candidateFlags: [],
+      candidateObservations: [],
+      observationsBlockFound: false,
       checklistVersion: null,
       prose: raw.trim(),
       proseCharCount: raw.trim().length,
@@ -116,7 +242,10 @@ export function parseResearchAnalysisPaste(raw: string): ParsedResearchAnalysis 
   }
 
   const block = raw.slice(startMatch.index + startMatch[0].length, endMatch.index);
-  const prose = raw.slice(endMatch.index + endMatch[0].length).trim();
+  const proseRaw = raw.slice(endMatch.index + endMatch[0].length);
+  const obsResult = extractCandidateObservationsBlock(proseRaw);
+  const prose = obsResult.remainder;
+  notes.push(...obsResult.notes);
 
   const ticker = extractField(block, "TICKER");
   if (ticker === null) notes.push("TICKER line missing or empty within the metadata block.");
@@ -134,8 +263,14 @@ export function parseResearchAnalysisPaste(raw: string): ParsedResearchAnalysis 
   const flagsNaRaw = extractField(block, "FLAGS_NA");
   const flagsUnknownRaw = extractField(block, "FLAGS_UNKNOWN");
   if (flagsUnknownRaw === null) notes.push("FLAGS_UNKNOWN line missing within the metadata block — treated as empty.");
+  // A v4 paste has no CANDIDATE_FLAGS line at all (see file-top
+  // comment) — only push the note when no CANDIDATE_OBSERVATIONS block
+  // was found either, i.e. this really does look like an older paste
+  // missing its field, not a v4 paste using the new format correctly.
   const candidateFlagsRaw = extractField(block, "CANDIDATE_FLAGS");
-  if (candidateFlagsRaw === null) notes.push("CANDIDATE_FLAGS line missing within the metadata block — treated as empty.");
+  if (candidateFlagsRaw === null && !obsResult.found) {
+    notes.push("CANDIDATE_FLAGS line missing within the metadata block — treated as empty.");
+  }
   const checklistVersion = extractField(block, "CHECKLIST_VERSION");
   if (checklistVersion === null) notes.push("CHECKLIST_VERSION line missing or empty within the metadata block.");
 
@@ -161,6 +296,8 @@ export function parseResearchAnalysisPaste(raw: string): ParsedResearchAnalysis 
     flagsNa,
     flagsUnknown,
     candidateFlags,
+    candidateObservations: obsResult.observations,
+    observationsBlockFound: obsResult.found,
     checklistVersion,
     prose,
     proseCharCount: prose.length,
