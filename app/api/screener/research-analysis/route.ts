@@ -121,30 +121,38 @@ export async function POST(req: NextRequest) {
   if (!maxDownsideRatio.ok) return NextResponse.json({ error: maxDownsideRatio.error }, { status: 400 });
 
   const sb = createServerClient();
-  const up = await sb.from("research_analyses").upsert(
-    {
-      symbol,
-      earnings_date: earningsDate,
-      flags_fired: flagsFired.value,
-      flags_unknown: flagsUnknown.value,
-      candidate_flags: candidateFlags.value,
-      checklist_version: asNullableString(body.checklistVersion),
-      template_version: asNullableString(body.templateVersion),
-      analysis_prose: asNullableString(body.analysisProse),
-      raw_paste: rawPaste,
-      parse_status: parseStatus,
-      reference_strike: referenceStrike.value,
-      spot_at_analysis: spotAtAnalysis.value,
-      em_pct_at_analysis: emPctAtAnalysis.value,
-      numeric_grade: asNullableString(body.numericGrade),
-      crush_grade: asNullableString(body.crushGrade),
-      max_downside_ratio: maxDownsideRatio.value,
-      updated_at: new Date().toISOString(),
-    },
-    { onConflict: "symbol,earnings_date" },
-  );
+  const up = await sb
+    .from("research_analyses")
+    .upsert(
+      {
+        symbol,
+        earnings_date: earningsDate,
+        flags_fired: flagsFired.value,
+        flags_unknown: flagsUnknown.value,
+        candidate_flags: candidateFlags.value,
+        checklist_version: asNullableString(body.checklistVersion),
+        template_version: asNullableString(body.templateVersion),
+        analysis_prose: asNullableString(body.analysisProse),
+        raw_paste: rawPaste,
+        parse_status: parseStatus,
+        reference_strike: referenceStrike.value,
+        spot_at_analysis: spotAtAnalysis.value,
+        em_pct_at_analysis: emPctAtAnalysis.value,
+        numeric_grade: asNullableString(body.numericGrade),
+        crush_grade: asNullableString(body.crushGrade),
+        max_downside_ratio: maxDownsideRatio.value,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "symbol,earnings_date" },
+    )
+    .select()
+    .single();
   if (up.error) {
     return NextResponse.json({ error: up.error.message }, { status: 500 });
   }
-  return NextResponse.json({ ok: true });
+  // Returning the upserted row lets the paste-back UI rehydrate the
+  // textarea from exactly what's now persisted, instead of clearing it
+  // or re-fetching separately — this is an iterative paste/revise/save
+  // workflow, not a one-shot submit.
+  return NextResponse.json({ ok: true, analysis: up.data });
 }

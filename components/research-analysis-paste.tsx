@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, CheckCircle2, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -10,10 +10,45 @@ import {
 } from "@/lib/research-analysis-parser";
 import { ANALYSIS_TEMPLATE_VERSION } from "@/lib/analysis-dump-template";
 
+// The full research_analyses row, as returned by GET/POST
+// /api/screener/research-analysis — the persisted source of truth this
+// component hydrates the textarea from and diffs live edits against.
+type SavedAnalysisRow = {
+  symbol: string;
+  earnings_date: string;
+  flags_fired: string[];
+  flags_unknown: string[];
+  candidate_flags: string[];
+  checklist_version: string | null;
+  template_version: string | null;
+  analysis_prose: string | null;
+  raw_paste: string;
+  parse_status: "parsed" | "prose_only" | "partial";
+  updated_at: string;
+};
+
+function formatSavedAt(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
 // Paste-back capture for the Analysis Dump tab's research layer.
 // Advisory only: this component only ever writes to research_analyses
 // (via /api/screener/research-analysis) — it never touches the
 // numeric grade, strike selection, POP, EV, or premium pricing.
+//
+// This is an iterative workflow (paste -> discuss -> revise -> re-save),
+// not a one-shot submit, so the textarea always reflects what's
+// currently persisted: hydrated from the DB on open, refilled (not
+// cleared) from the server's response after a save, and diffed live
+// against the saved raw_paste so an unsaved edit is never silently lost
+// by navigating away.
 export function ResearchAnalysisPasteBack({
   symbol,
   earningsDate,
@@ -36,6 +71,47 @@ export function ResearchAnalysisPasteBack({
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [savedRecord, setSavedRecord] = useState<SavedAnalysisRow | null>(null);
+
+  // Hydrate from research_analyses whenever the candidate changes (tab
+  // open, or switching to a different symbol/earnings date). Empty
+  // placeholder is just the natural result of no match existing — no
+  // separate "not found" state needed.
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setSavedRecord(null);
+    setRaw("");
+    setParsed(null);
+    setSaved(false);
+    setSaveError(null);
+    setConfirmedMismatch(false);
+    async function load() {
+      try {
+        const res = await fetch(
+          `/api/screener/research-analysis?symbol=${encodeURIComponent(symbol)}`,
+          { cache: "no-store" },
+        );
+        if (!res.ok) return;
+        const json = (await res.json()) as { analyses?: SavedAnalysisRow[] };
+        if (cancelled) return;
+        const match = (json.analyses ?? []).find((a) => a.earnings_date === earningsDate) ?? null;
+        if (match) {
+          setSavedRecord(match);
+          setRaw(match.raw_paste ?? "");
+        }
+      } catch {
+        /* hydration is best-effort — falls back to the empty placeholder */
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [symbol, earningsDate]);
 
   const tickerMismatch =
     parsed !== null && parsed.ticker !== null && parsed.ticker.toUpperCase() !== symbol.toUpperCase();
@@ -47,6 +123,12 @@ export function ResearchAnalysisPasteBack({
     () => (parsed ? parsed.flagsFired.filter((f) => !isKnownFlag(f)) : []),
     [parsed],
   );
+
+  // Unsaved-edit detection — the textarea vs. whatever's actually
+  // persisted (empty string when nothing's saved yet). Intentionally
+  // independent of the parsed-preview state so it stays accurate even
+  // before "Parse & preview" has been clicked.
+  const hasUnsavedEdits = !loading && raw !== (savedRecord?.raw_paste ?? "");
 
   function handleParse() {
     setSaved(false);
@@ -87,12 +169,19 @@ export function ResearchAnalysisPasteBack({
           maxDownsideRatio: snapshot.maxDownsideRatio,
         }),
       });
+      const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
         throw new Error(typeof body.error === "string" ? body.error : `HTTP ${res.status}`);
       }
+      // Rehydrate from the server's own upserted row rather than
+      // clearing the box — the box should always show what's currently
+      // persisted, and this is the freshest source of that.
+      if (body.analysis) {
+        const row = body.analysis as SavedAnalysisRow;
+        setSavedRecord(row);
+        setRaw(row.raw_paste ?? "");
+      }
       setSaved(true);
-      setRaw("");
       setParsed(null);
     } catch (e) {
       setSaveError(e instanceof Error ? e.message : String(e));
@@ -110,6 +199,38 @@ export function ResearchAnalysisPasteBack({
         Advisory only — never feeds the numeric grade, never vetoes a trade. Paste the full response
         from the external LLM conversation (including the metadata block) below.
       </p>
+
+      {loading ? (
+        <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          <Loader2 className="h-3 w-3 animate-spin" />
+          Loading saved analysis…
+        </div>
+      ) : savedRecord ? (
+        <div className="space-y-1 rounded border border-border bg-muted/20 p-2 text-xs">
+          <div className="font-medium text-foreground/80">
+            Currently saved — {formatSavedAt(savedRecord.updated_at)}
+          </div>
+          <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 font-mono text-muted-foreground">
+            <div>Parse status: {savedRecord.parse_status}</div>
+            <div>Checklist version: {savedRecord.checklist_version ?? "—"}</div>
+          </div>
+          <div className="text-muted-foreground">
+            Flags fired ({savedRecord.flags_fired.length}):{" "}
+            {savedRecord.flags_fired.length === 0 ? "none" : savedRecord.flags_fired.join(", ")}
+          </div>
+          <div className="text-muted-foreground">
+            Flags unknown ({savedRecord.flags_unknown.length}):{" "}
+            {savedRecord.flags_unknown.length === 0 ? "none" : savedRecord.flags_unknown.join(", ")}
+          </div>
+          <div className="text-muted-foreground">
+            Candidate flags ({savedRecord.candidate_flags.length}):{" "}
+            {savedRecord.candidate_flags.length === 0 ? "none" : savedRecord.candidate_flags.join(", ")}
+          </div>
+        </div>
+      ) : (
+        <div className="text-xs text-muted-foreground">No analysis saved yet for {symbol} / {earningsDate}.</div>
+      )}
+
       <textarea
         value={raw}
         onChange={(e) => {
@@ -126,11 +247,18 @@ export function ResearchAnalysisPasteBack({
         <Button size="sm" variant="secondary" onClick={handleParse} disabled={raw.trim().length === 0}>
           Parse &amp; preview
         </Button>
-        {saved && (
-          <span className="flex items-center gap-1 text-xs text-emerald-400">
-            <CheckCircle2 className="h-3.5 w-3.5" />
-            Saved.
+        {hasUnsavedEdits ? (
+          <span className="flex items-center gap-1 text-xs text-amber-300">
+            <AlertTriangle className="h-3.5 w-3.5" />
+            Unsaved edits — not yet saved
           </span>
+        ) : (
+          saved && (
+            <span className="flex items-center gap-1 text-xs text-emerald-400">
+              <CheckCircle2 className="h-3.5 w-3.5" />
+              Saved.
+            </span>
+          )
         )}
       </div>
 
