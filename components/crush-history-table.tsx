@@ -32,6 +32,73 @@ type ResearchAnalysisRow = {
   max_downside_ratio: number | null;
 };
 
+// Shared by both the pinned row (today's/most-recent event, rendered
+// separately from the historical rows below it — see the `sorted`
+// filter that excludes it) and the regular displayRows loop. Analyses
+// get written the day of the print, so the pinned row is the primary
+// place one needs to show — this was previously wired into displayRows
+// only, which is why a same-day paste never appeared.
+function ResearchAnalysisDetailRow({ rowKey, analysis }: { rowKey: string; analysis: ResearchAnalysisRow }) {
+  return (
+    <tr key={`${rowKey}-analysis`} className="border-t border-violet-500/20 bg-violet-500/[0.04]">
+      <td colSpan={6} className="px-2 py-2 text-xs">
+        <div className="space-y-1.5">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-muted-foreground">
+            <span>
+              parse: <span className="font-mono">{analysis.parse_status}</span>
+            </span>
+            {analysis.checklist_version && (
+              <span>
+                checklist: <span className="font-mono">{analysis.checklist_version}</span>
+              </span>
+            )}
+            {analysis.template_version && (
+              <span>
+                template: <span className="font-mono">{analysis.template_version}</span>
+              </span>
+            )}
+            {analysis.reference_strike !== null && (
+              <span>
+                ref strike: <span className="font-mono">${analysis.reference_strike.toFixed(2)}</span>
+              </span>
+            )}
+            {analysis.max_downside_ratio !== null && (
+              <span>
+                max downside ratio: <span className="font-mono">{analysis.max_downside_ratio.toFixed(3)}</span>
+              </span>
+            )}
+          </div>
+          {analysis.flags_fired.length > 0 && (
+            <div>
+              <span className="font-semibold text-violet-300">Fired: </span>
+              {analysis.flags_fired.join(", ")}
+            </div>
+          )}
+          {analysis.flags_unknown.length > 0 && (
+            <div>
+              <span className="font-semibold text-muted-foreground">Unknown: </span>
+              {analysis.flags_unknown.join(", ")}
+            </div>
+          )}
+          {analysis.candidate_flags.length > 0 && (
+            <div>
+              <span className="font-semibold text-amber-300">Candidate flags: </span>
+              {analysis.candidate_flags.join(", ")}
+            </div>
+          )}
+          {analysis.analysis_prose ? (
+            <div className="whitespace-pre-wrap rounded border border-border bg-background/60 p-2 font-sans text-xs leading-relaxed">
+              {analysis.analysis_prose}
+            </div>
+          ) : (
+            <div className="text-muted-foreground">No prose stored for this analysis.</div>
+          )}
+        </div>
+      </td>
+    </tr>
+  );
+}
+
 type CrushContext = {
   outlier_analyses: Array<{
     quarter: string;
@@ -449,6 +516,11 @@ export function CrushHistoryTable({
     .sort((a, b) => b.earningsDate.localeCompare(a.earningsDate));
 
   const pinnedDate = todayEarningsDate || upcoming?.earningsDate || todayIso;
+  // Analyses are written the day of the print — the pinned row (today's
+  // event, excluded from displayRows below) is the primary place one
+  // needs to show, not a secondary case.
+  const pinnedAnalysis = researchAnalyses?.[pinnedDate] ?? null;
+  const isPinnedAnalysisExpanded = expandedAnalysisDate === pinnedDate;
   const pinnedQtr = quarterLabel(pinnedDate);
   // (year, quarter) struct, not the label string — the pinned row's own
   // quarter needs to be excluded from the generated slots below by
@@ -480,12 +552,23 @@ export function CrushHistoryTable({
     if (!byQuarter.has(label)) byQuarter.set(label, e);
   }
   const displayRows: CrushHistoryEvent[] = [];
+  // Dates from representativeDate() are synthetic — no real
+  // earnings_history row exists for that quarter yet. Tracked
+  // explicitly (not inferred from the date shape, e.g. "day === 15")
+  // so a manual edit against one of these rows can be caught and
+  // redirected before it writes a fake date as if it were real — see
+  // saveField below. This is the fix for the exact bug that produced
+  // 23 wrong-dated rows (22 with real EM data on a fabricated date, 1
+  // fully empty) across BA/CDNS/ELF/GLW/SOFI/SPGI/TER/TSEM, repaired
+  // 2026-08-06.
+  const placeholderDates = new Set<string>();
   {
     let cursor = quarterOfDate(todayIso);
     for (let i = 0; i < HISTORY_QUARTER_COUNT; i += 1) {
       if (cursor.q !== pinnedQY.q || cursor.y !== pinnedQY.y) {
         const label = quarterYearLabel(cursor);
         const real = byQuarter.get(label);
+        if (!real) placeholderDates.add(representativeDate(cursor));
         displayRows.push(
           real ?? {
             earningsDate: representativeDate(cursor),
@@ -571,11 +654,41 @@ export function CrushHistoryTable({
   // there's never a request that changes one without the other being
   // present. rawPercent is what the user typed (e.g. 4.5 for 4.5%),
   // null clears the field.
+  // A manual edit on a placeholder row must never write
+  // representativeDate()'s synthetic date as if it were real — that's
+  // exactly the bug that produced 23 wrong-dated rows (repaired
+  // 2026-08-06). Prompting for the real date here (rather than
+  // blocking the edit outright) keeps the routine ThinkorSwim EM
+  // backfill workflow intact: the user is already looking at the real
+  // print date on ToS when they do this, so asking costs one extra
+  // step, not a blocked workflow. No default/pre-fill with the
+  // placeholder value — an empty prompt can't be click-through-saved
+  // with the wrong date by accident.
+  function resolveRealEarningsDate(): string | null {
+    const input = window.prompt(
+      "This quarter has no confirmed earnings date yet — enter the real announcement date (YYYY-MM-DD) from ThinkorSwim before saving:",
+      "",
+    );
+    if (input === null) return null; // cancelled
+    const trimmed = input.trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+      window.alert(`"${trimmed}" is not a valid date (expected YYYY-MM-DD). Not saved.`);
+      return null;
+    }
+    return trimmed;
+  }
+
   async function saveField(
     e: CrushHistoryEvent,
     field: "em" | "actual",
     rawPercent: number | null,
   ) {
+    let earningsDate = e.earningsDate;
+    if (placeholderDates.has(e.earningsDate)) {
+      const real = resolveRealEarningsDate();
+      if (real === null) return; // cancelled or invalid — do not save against the placeholder
+      earningsDate = real;
+    }
     const impliedMovePct =
       field === "em" ? (rawPercent === null ? null : rawPercent / 100) : e.impliedMovePct;
     const actualMovePct =
@@ -586,7 +699,7 @@ export function CrushHistoryTable({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           symbol: todaySymbol,
-          earningsDate: e.earningsDate,
+          earningsDate,
           impliedMovePct,
           actualMovePct,
         }),
@@ -734,6 +847,30 @@ export function CrushHistoryTable({
                 <span className="ml-1.5 rounded bg-amber-500/15 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-amber-200">
                   {timing.badge}
                 </span>
+                {pinnedAnalysis && (
+                  <TooltipProvider delayDuration={200}>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          onClick={() => setExpandedAnalysisDate(isPinnedAnalysisExpanded ? null : pinnedDate)}
+                          className="ml-1.5 inline-flex cursor-pointer items-center gap-0.5 rounded bg-violet-500/15 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-violet-300 hover:bg-violet-500/25"
+                        >
+                          {isPinnedAnalysisExpanded ? (
+                            <ChevronDown className="h-2.5 w-2.5" />
+                          ) : (
+                            <ChevronRight className="h-2.5 w-2.5" />
+                          )}
+                          research
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent className="max-w-xs text-sm">
+                        Advisory-only research analysis exists for this quarter — click to expand. Never feeds the
+                        numeric grade.
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                )}
               </td>
               <td className="px-2 py-1 text-right font-mono text-amber-200">
                 {fmtPct(pinnedEm)}
@@ -761,6 +898,9 @@ export function CrushHistoryTable({
                 {pinnedActual === null ? timing.note : "just reported"}
               </td>
             </tr>
+            {isPinnedAnalysisExpanded && pinnedAnalysis && (
+              <ResearchAnalysisDetailRow rowKey={pinnedDate} analysis={pinnedAnalysis} />
+            )}
             {displayRows.map((e) => {
               const isSimilar =
                 todayEmPct !== null &&
@@ -768,6 +908,7 @@ export function CrushHistoryTable({
                 Math.abs(e.impliedMovePct - todayEmPct) <= SIMILAR_EM_TOLERANCE;
               const isF = e.grade === "F";
               const isManual = e.impliedMoveSource === "manual";
+              const isPlaceholder = placeholderDates.has(e.earningsDate);
               const rowError = editErrors[e.earningsDate];
               const analysis = researchAnalyses?.[e.earningsDate] ?? null;
               const isExpanded = expandedAnalysisDate === e.earningsDate;
@@ -778,9 +919,25 @@ export function CrushHistoryTable({
                 >
                   <td className="px-2 py-1 font-mono">
                     {e.qtrLabel}
-                    <span className="ml-1.5 text-muted-foreground">
-                      {fmtEarningsDateShort(e.earningsDate)}
-                    </span>
+                    {isPlaceholder ? (
+                      <TooltipProvider delayDuration={200}>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <span className="ml-1.5 cursor-help italic text-muted-foreground/60">
+                              {fmtEarningsDateShort(e.earningsDate)}?
+                            </span>
+                          </TooltipTrigger>
+                          <TooltipContent className="max-w-xs text-sm">
+                            No confirmed earnings date for this quarter yet — this is a placeholder, not a real
+                            announcement date. Editing EM/Actual will prompt for the real date first.
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    ) : (
+                      <span className="ml-1.5 text-muted-foreground">
+                        {fmtEarningsDateShort(e.earningsDate)}
+                      </span>
+                    )}
                     {isManual && (
                       <TooltipProvider delayDuration={200}>
                         <Tooltip>
@@ -915,64 +1072,7 @@ export function CrushHistoryTable({
                     )}
                   </td>
                 </tr>
-                {isExpanded && analysis && (
-                  <tr key={`${e.earningsDate}-analysis`} className="border-t border-violet-500/20 bg-violet-500/[0.04]">
-                    <td colSpan={6} className="px-2 py-2 text-xs">
-                      <div className="space-y-1.5">
-                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-muted-foreground">
-                          <span>
-                            parse: <span className="font-mono">{analysis.parse_status}</span>
-                          </span>
-                          {analysis.checklist_version && (
-                            <span>
-                              checklist: <span className="font-mono">{analysis.checklist_version}</span>
-                            </span>
-                          )}
-                          {analysis.template_version && (
-                            <span>
-                              template: <span className="font-mono">{analysis.template_version}</span>
-                            </span>
-                          )}
-                          {analysis.reference_strike !== null && (
-                            <span>
-                              ref strike: <span className="font-mono">${analysis.reference_strike.toFixed(2)}</span>
-                            </span>
-                          )}
-                          {analysis.max_downside_ratio !== null && (
-                            <span>
-                              max downside ratio: <span className="font-mono">{analysis.max_downside_ratio.toFixed(3)}</span>
-                            </span>
-                          )}
-                        </div>
-                        {analysis.flags_fired.length > 0 && (
-                          <div>
-                            <span className="font-semibold text-violet-300">Fired: </span>
-                            {analysis.flags_fired.join(", ")}
-                          </div>
-                        )}
-                        {analysis.flags_unknown.length > 0 && (
-                          <div>
-                            <span className="font-semibold text-muted-foreground">Unknown: </span>
-                            {analysis.flags_unknown.join(", ")}
-                          </div>
-                        )}
-                        {analysis.candidate_flags.length > 0 && (
-                          <div>
-                            <span className="font-semibold text-amber-300">Candidate flags: </span>
-                            {analysis.candidate_flags.join(", ")}
-                          </div>
-                        )}
-                        {analysis.analysis_prose ? (
-                          <div className="whitespace-pre-wrap rounded border border-border bg-background/60 p-2 font-sans text-xs leading-relaxed">
-                            {analysis.analysis_prose}
-                          </div>
-                        ) : (
-                          <div className="text-muted-foreground">No prose stored for this analysis.</div>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                )}
+                {isExpanded && analysis && <ResearchAnalysisDetailRow rowKey={e.earningsDate} analysis={analysis} />}
                 </Fragment>
               );
             })}
