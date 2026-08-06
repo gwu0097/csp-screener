@@ -120,3 +120,64 @@ export function validateObservationResolutions(
   }
   return { ok: true };
 }
+
+// Phase B — dictionary injected into the dump so an analyst reuses terms
+// instead of re-coining synonyms. At ~240 analyses/year the table grows
+// past what's useful to inject every time, so a term only makes the cut
+// if it's either well-established (use_count) or recent (last_used_at) —
+// one-off terms stay in the dictionary for browsing/search but drop out
+// of the prompt. Both thresholds are named constants, not inlined, since
+// the injection call site (components/screener-view.tsx) may want to
+// override them (see the VALIDATION checklist's threshold test).
+export const DICTIONARY_INJECTION_MIN_USE_COUNT = 2;
+export const DICTIONARY_INJECTION_RECENCY_DAYS = 90;
+
+const KIND_LABELS: Record<ObservationKind, string> = {
+  setup_observation: "Setup Observations",
+  app_defect: "App Defects",
+};
+
+// Pure — no I/O, no Date.now() side effects unless `now` is omitted.
+// Filters entries by the use_count/recency threshold, groups by kind
+// (matching the Dictionary tab's two labeled sections), sorts each group
+// by use_count descending then term alphabetically, and renders
+// `term: definition` lines plus a header reporting how many terms made
+// the cut. Returned as an array of dump lines (not a joined string) so
+// the caller can push them through the same line-array builder every
+// other dump section uses.
+export function buildDictionaryInjectionSection(
+  entries: ObservationDictionaryEntry[],
+  opts?: { minUseCount?: number; recencyDays?: number; now?: number },
+): { lines: string[]; includedCount: number; totalCount: number } {
+  const minUseCount = opts?.minUseCount ?? DICTIONARY_INJECTION_MIN_USE_COUNT;
+  const recencyDays = opts?.recencyDays ?? DICTIONARY_INJECTION_RECENCY_DAYS;
+  const nowMs = opts?.now ?? Date.now();
+  const recencyThresholdMs = nowMs - recencyDays * 24 * 60 * 60 * 1000;
+
+  const included = entries.filter((e) => {
+    if (e.use_count >= minUseCount) return true;
+    if (e.last_used_at === null) return false;
+    const t = new Date(e.last_used_at).getTime();
+    return !Number.isNaN(t) && t >= recencyThresholdMs;
+  });
+
+  const sortGroup = (list: ObservationDictionaryEntry[]) =>
+    list.slice().sort((a, b) => b.use_count - a.use_count || a.term.localeCompare(b.term));
+
+  const lines: string[] = [];
+  lines.push(
+    `showing ${included.length} of ${entries.length} terms (use_count >= ${minUseCount} or used in last ${recencyDays} days)`,
+  );
+  for (const kind of ["setup_observation", "app_defect"] as const) {
+    const group = sortGroup(included.filter((e) => e.kind === kind));
+    lines.push("");
+    lines.push(`${KIND_LABELS[kind]}:`);
+    if (group.length === 0) {
+      lines.push("  none");
+    } else {
+      for (const e of group) lines.push(`  ${e.term}: ${e.definition}`);
+    }
+  }
+
+  return { lines, includedCount: included.length, totalCount: entries.length };
+}

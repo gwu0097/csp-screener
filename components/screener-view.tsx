@@ -51,6 +51,10 @@ import { SchwabTokenBanner } from "@/components/schwab-token-banner";
 import { CSP_EARNINGS_SCREENER } from "@/lib/screener-config";
 import { ANALYSIS_TEMPLATE, ANALYSIS_TEMPLATE_VERSION } from "@/lib/analysis-dump-template";
 import {
+  buildDictionaryInjectionSection,
+  type ObservationDictionaryEntry,
+} from "@/lib/observation-dictionary";
+import {
   interpretError,
   interpretFetchError,
   type InterpretedError,
@@ -4306,6 +4310,35 @@ function usePriceAction(symbol: string, price: number | null): PriceActionSnapsh
   return snapshot;
 }
 
+// Fetched once per Analysis Dump tab mount — the dictionary is global,
+// not per-symbol, so this has no dependency array beyond the initial
+// mount. Mirrors the paste-back component's own independent fetch of
+// this same endpoint (components/research-analysis-paste.tsx); no
+// shared cache layer exists yet, matching every other per-row fetch in
+// this file (useCompanyName, usePriceAction). Returns null while
+// loading or on fetch failure — the dump section degrades gracefully
+// (prints an "unavailable" line) rather than blocking the dump.
+function useObservationDictionary(): ObservationDictionaryEntry[] | null {
+  const [entries, setEntries] = useState<ObservationDictionaryEntry[] | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/screener/observation-dictionary", { cache: "no-store" });
+        if (!res.ok) return;
+        const json = (await res.json()) as { entries?: ObservationDictionaryEntry[] };
+        if (!cancelled) setEntries(json.entries ?? []);
+      } catch {
+        /* best-effort — the dump section notes the dictionary as unavailable */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  return entries;
+}
+
 // Nearest listed strike to `target` — same snapping EditableStrikeCell/
 // TweetTab's old commitStrike used, so typing a strike that isn't
 // exactly on the chain grid still lands on a real, quotable contract.
@@ -4438,6 +4471,7 @@ function AnalysisDumpTab({
 }) {
   const companyName = useCompanyName(r.symbol);
   const priceAction = usePriceAction(r.symbol, r.price);
+  const observationDictionary = useObservationDictionary();
   const stageFourStrikes = r.stageFour?.availableStrikes;
   const availableStrikes = useMemo(() => stageFourStrikes ?? [], [stageFourStrikes]);
   const recommended = recommendedStrikeFor(r);
@@ -4741,12 +4775,29 @@ function AnalysisDumpTab({
       }
     }
 
+    // ---------- OBSERVATION DICTIONARY ----------
+    // Injected at dump-build time from the live table, never stored in
+    // the template constant — so the dictionary can grow without a code
+    // change, and a stale dump copied earlier doesn't silently diverge
+    // from what's now in the table. Placed immediately before the
+    // RESEARCH ANALYSIS REQUEST block so the analyst reads known terms
+    // before being asked to reuse-or-coin. Threshold-gated (see
+    // lib/observation-dictionary.ts) so the section doesn't grow
+    // unboundedly as the dictionary fills with one-off terms.
+    section("OBSERVATION DICTIONARY");
+    if (observationDictionary === null) {
+      push("Dictionary unavailable — proceed without it; terms will still be captured and reconciled on save.");
+    } else {
+      const { lines: dictLines } = buildDictionaryInjectionSection(observationDictionary);
+      for (const l of dictLines) push(l);
+    }
+
     // ---------- RESEARCH ANALYSIS REQUEST (static template, verbatim) ----------
     push();
     push(ANALYSIS_TEMPLATE);
 
     return lines.join("\n").trim();
-  }, [r, tl, d, companyName, priceAction, screenedAt, effectiveStrike, effectiveDelta, effectivePremium, effectivePop, selectedRow, recommended, availableStrikes, spreadFlagPct, chainCampaigns, chainCampaignsFailed]);
+  }, [r, tl, d, companyName, priceAction, observationDictionary, screenedAt, effectiveStrike, effectiveDelta, effectivePremium, effectivePop, selectedRow, recommended, availableStrikes, spreadFlagPct, chainCampaigns, chainCampaignsFailed]);
 
   // Setup values snapshotted at analysis-save time (research_analyses
   // is never joined to live data later — spot/EM/grade all drift

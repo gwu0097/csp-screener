@@ -17,7 +17,7 @@
 // numeric grade, never vetoes a trade, and the two are never merged or
 // averaged. See lib/research-analysis-parser.ts for how a pasted
 // response gets parsed back into structured fields.
-export const ANALYSIS_TEMPLATE_VERSION = "v4";
+export const ANALYSIS_TEMPLATE_VERSION = "v5";
 
 export const ANALYSIS_TEMPLATE = `=== RESEARCH ANALYSIS REQUEST ===
 
@@ -30,7 +30,7 @@ suggests — the things that would cause the market's own pricing to be wrong.
 The reference strike for this analysis is 2x EM below spot, regardless of
 what strike I may actually trade.
 
-PART 1 — CHECKLIST (v4)
+PART 1 — CHECKLIST (v5)
 Check each item. Report FIRED, CLEAR, N/A, or UNKNOWN with one line of
 evidence. N/A means the item does not apply to this company or setup.
 UNKNOWN means it applies but could not be determined. Both are valid and
@@ -124,8 +124,31 @@ EARNINGS_DATE: <YYYY-MM-DD>
 FLAGS_FIRED: <comma-separated from the vocabulary above, or \`none\`>
 FLAGS_NA: <comma-separated, or \`none\`>
 FLAGS_UNKNOWN: <comma-separated, or \`none\`>
-CHECKLIST_VERSION: v4
+CHECKLIST_VERSION: v5
 === END METADATA ===
+
+DICTIONARY USE
+The observation dictionary above lists terms used in prior analyses, with
+definitions and use counts.
+
+Reuse an existing term ONLY if it means the same thing. If the mechanism you
+are describing differs from the definition in any material way, coin a NEW
+term with its own definition — do not stretch an existing term to fit.
+
+A term is close but not the same when it describes a similar-looking
+condition arising from a different cause, or the same cause producing a
+different consequence. Those are different observations and should be
+different terms.
+
+Worked example from this dataset: \`em_compressed_vs_history\` describes an
+implied move that is low relative to the ticker's own history AND looks like
+mispricing. On a ticker pinned to a pending acquisition, the implied move is
+also low relative to history — but correctly so, because the price is
+anchored to a deal rather than to earnings. Same observable condition,
+opposite meaning. That warranted \`pending_acquisition\`, not a reuse.
+
+When you coin a new term, state explicitly what distinguishes it from the
+nearest existing term.
 
 CANDIDATE_OBSERVATIONS:
   <one entry per line, snake_case term name, or \`none\`>
