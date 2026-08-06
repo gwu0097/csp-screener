@@ -44,7 +44,7 @@ async function writePositionSnapshots(): Promise<{ written: number; errors: stri
     const { data: opens, error: pErr } = await supabase
       .from("positions")
       .select(
-        "id, user_id, symbol, strike, expiry, total_contracts, avg_premium_sold, opened_date, entry_stock_price, entry_em_pct",
+        "id, user_id, symbol, strike, expiry, total_contracts, avg_premium_sold, opened_date, entry_stock_price, entry_em_pct, option_type",
       )
       .eq("status", "open");
     if (pErr) {
@@ -61,6 +61,7 @@ async function writePositionSnapshots(): Promise<{ written: number; errors: stri
       opened_date: string | null;
       entry_stock_price: number | null;
       entry_em_pct: number | null;
+      option_type: "put" | "call" | null;
     }>;
     if (positions.length === 0) return { written: 0, errors: [] };
 
@@ -81,12 +82,17 @@ async function writePositionSnapshots(): Promise<{ written: number; errors: stri
       fillsByPosition.set(f.position_id, arr);
     }
 
-    // One chain fetch per unique symbol.
+    // One chain fetch per unique symbol. "ALL" + wide strike window:
+    // this cache is per-symbol and may need to serve both a put and a
+    // call position on the same underlying, and a covered call's strike
+    // is often far enough OTM that the default 30-strike ATM-centered
+    // window wouldn't contain it — same reasoning as lib/snapshots.ts's
+    // fetchChainSafe.
     const chainCache = new Map<string, Awaited<ReturnType<typeof getOptionsChain>> | null>();
     await Promise.all(
       Array.from(new Set(positions.map((p) => p.symbol))).map(async (sym) => {
         try {
-          const chain = await getOptionsChain(sym);
+          const chain = await getOptionsChain(sym, undefined, "ALL", 200);
           chainCache.set(sym, chain);
         } catch (e) {
           console.warn(`[snapshots] chain(${sym}) failed: ${e instanceof Error ? e.message : e}`);

@@ -230,11 +230,23 @@ export function pickPutContract(
 // slightly off (e.g. Sunday settlement date) would cause Schwab to return
 // an empty putExpDateMap. pickPutContract handles expiry matching in-memory
 // with tolerance, so we fetch everything and let it pick.
+// contractType/strikeCount default to the historical PUT/30 behavior so
+// the runAutoExpire caller (lib/expire-positions.ts) is unaffected —
+// past expiries return null from the chain regardless of window size,
+// so widening it there wouldn't help and isn't this fix's concern.
+// writeOpenPositionSnapshots below passes ("ALL", 200) explicitly: its
+// chain cache is keyed per-symbol and can serve both a put and a call
+// position on the same underlying, and a covered call's strike is
+// often far enough OTM that the default 30-strike ATM-centered window
+// wouldn't contain it at all (same class of bug as the wide-chain fixes
+// elsewhere in this codebase — see refresh-chain's strikeCount=200).
 export async function fetchChainSafe(
   symbol: string,
+  contractType: "PUT" | "CALL" | "ALL" = "PUT",
+  strikeCount = 30,
 ): Promise<SchwabOptionsChain | null> {
   try {
-    return await getOptionsChain(symbol);
+    return await getOptionsChain(symbol, undefined, contractType, strikeCount);
   } catch (e) {
     console.warn(
       `[snapshots] chain(${symbol}) failed: ${e instanceof Error ? e.message : e}`,
@@ -373,7 +385,7 @@ export async function writeOpenPositionSnapshots(): Promise<{
     const { data: opens, error: pErr } = await supabase
       .from("positions")
       .select(
-        "id, user_id, symbol, strike, expiry, total_contracts, avg_premium_sold, opened_date, entry_stock_price, entry_em_pct",
+        "id, user_id, symbol, strike, expiry, total_contracts, avg_premium_sold, opened_date, entry_stock_price, entry_em_pct, option_type",
       )
       .eq("status", "open");
     if (pErr) {
@@ -390,6 +402,7 @@ export async function writeOpenPositionSnapshots(): Promise<{
       opened_date: string | null;
       entry_stock_price: number | null;
       entry_em_pct: number | null;
+      option_type: "put" | "call" | null;
     }>;
     if (positions.length === 0) return { written: 0, errors: [] };
 
@@ -410,10 +423,14 @@ export async function writeOpenPositionSnapshots(): Promise<{
       fillsByPosition.set(f.position_id, arr);
     }
 
+    // "ALL" + wide strike window: this cache is per-symbol and may need
+    // to serve both a put and a call position on the same underlying,
+    // and a covered call's strike is often far enough OTM that the
+    // default 30-strike window wouldn't contain it — see fetchChainSafe.
     const chainCache = new Map<string, SchwabOptionsChain | null>();
     await Promise.all(
       Array.from(new Set(positions.map((p) => p.symbol))).map(async (sym) => {
-        chainCache.set(sym, await fetchChainSafe(sym));
+        chainCache.set(sym, await fetchChainSafe(sym, "ALL", 200));
       }),
     );
 
