@@ -101,6 +101,40 @@ export async function getCIK(symbol: string): Promise<string | null> {
   return map.get(symbol.toUpperCase()) ?? null;
 }
 
+// Static per-company attribute — the submissions endpoint's top-level
+// fiscalYearEnd field (MMDD, e.g. "0331" for a March fiscal year-end),
+// reduced to just the month (1-12). This is the SAME endpoint
+// getRecentFilings already calls (data.sec.gov/submissions/CIK*.json)
+// but that function only reads the filings.recent.* arrays — this is
+// a separate, minimal fetch of the one top-level field it never
+// parsed. One lookup per symbol suffices; callers should cache/persist
+// (stock_encyclopedia.fiscal_year_end_month), not call this per event.
+export async function getFiscalYearEndMonth(symbol: string): Promise<number | null> {
+  const cik = await getCIK(symbol);
+  if (!cik) return null;
+  const padded = cik.padStart(10, "0");
+  let res: Response;
+  try {
+    res = await fetch(`${EDGAR_DATA_BASE}/submissions/CIK${padded}.json`, {
+      headers: DEFAULT_HEADERS,
+      cache: "no-store",
+    });
+  } catch {
+    return null;
+  }
+  if (!res.ok) return null;
+  let json: { fiscalYearEnd?: string };
+  try {
+    json = (await res.json()) as { fiscalYearEnd?: string };
+  } catch {
+    return null;
+  }
+  const fye = json.fiscalYearEnd;
+  if (typeof fye !== "string" || !/^\d{4}$/.test(fye)) return null;
+  const month = Number(fye.slice(0, 2));
+  return month >= 1 && month <= 12 ? month : null;
+}
+
 // Raw company-facts response shape from EDGAR. Each XBRL fact lives at
 // facts.<taxonomy>.<concept>.units.<unit>[].
 type FactEntry = {

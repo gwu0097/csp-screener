@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
-import { gradeFromRatio, quarterLabel, type CrushHistoryEvent } from "@/lib/earnings-history-table";
+import { gradeFromRatio, type CrushHistoryEvent } from "@/lib/earnings-history-table";
+import { quarterLabel } from "@/lib/quarter-label";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -85,16 +86,29 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: up.error.message }, { status: 500 });
   }
 
+  // This upsert doesn't touch fiscal_quarter/fiscal_year/period_end or
+  // date_confidence — whatever the row already has (or doesn't) is
+  // unknown here without a re-read, so the label falls back to
+  // calendar-only (fiscal ?) rather than guessing. The next real fetch
+  // (getCrushHistory) re-reads the row and shows the true stored label.
+  const label = quarterLabel({
+    earningsDate,
+    fiscalQuarter: null,
+    fiscalYear: null,
+    periodEnd: null,
+  });
   const event: CrushHistoryEvent = {
     earningsDate,
-    qtrLabel: quarterLabel(earningsDate),
+    qtrLabel: label.combined,
+    fiscalQuarter: null,
+    fiscalYear: null,
+    periodEnd: null,
+    fiscalKnown: false,
     impliedMovePct: em.value,
     actualMovePct: actual.value,
     ratio,
     grade,
     impliedMoveSource: "manual",
-    // This upsert doesn't touch date_confidence — whatever the row
-    // already has (or doesn't) is unknown here without a re-read.
     dateConfidence: null,
   };
   return NextResponse.json({ event });

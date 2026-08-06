@@ -1,13 +1,21 @@
 // Helpers for the per-quarter crush history surfaced on the screener
 // expanded row. Reads earnings_history rows for a symbol, derives a
-// per-event ratio + grade, and labels each row by calendar quarter.
+// per-event ratio + grade, and labels each row by fiscal + calendar
+// quarter (lib/quarter-label.ts — the single shared implementation;
+// see that file for why it isn't just re-exported here for client
+// components to import: this file pulls in createServerClient).
 
 import { createServerClient } from "@/lib/supabase";
 import type { OptionsFlow } from "@/lib/options-flow";
+import { quarterLabel as computeQuarterLabel } from "@/lib/quarter-label";
 
 export type CrushHistoryEvent = {
   earningsDate: string;
-  qtrLabel: string;
+  qtrLabel: string; // ready-to-print combined label, e.g. "FQ2 27 · CQ2 26"
+  fiscalQuarter: number | null;
+  fiscalYear: number | null;
+  periodEnd: string | null;
+  fiscalKnown: boolean;
   impliedMovePct: number | null;
   actualMovePct: number | null;
   ratio: number | null;
@@ -18,21 +26,6 @@ export type CrushHistoryEvent = {
   // the Analysis Dump export's per-row provenance.
   dateConfidence: "confirmed" | "low" | null;
 };
-
-// Quarter label from earnings date. Companies typically report a
-// fiscal quarter ~1 month after it ends, so:
-//   Jan-Mar → prior year Q4
-//   Apr-Jun → current year Q1
-//   Jul-Sep → current year Q2
-//   Oct-Dec → current year Q3
-export function quarterLabel(dateIso: string): string {
-  const [y, m] = dateIso.split("-").map(Number);
-  if (!y || !m) return "—";
-  if (m <= 3) return `Q4 ${y - 1}`;
-  if (m <= 6) return `Q1 ${y}`;
-  if (m <= 9) return `Q2 ${y}`;
-  return `Q3 ${y}`;
-}
 
 // Per-event grade from ratio (matches the global crush bands the user
 // described — A < 0.7, B < 0.85, C < 1.0, D < 1.2, F otherwise).
@@ -102,7 +95,7 @@ export async function getCrushHistory(
   const res = await sb
     .from("earnings_history")
     .select(
-      "earnings_date,implied_move_pct,actual_move_pct,move_ratio,implied_move_source,date_confidence",
+      "earnings_date,implied_move_pct,actual_move_pct,move_ratio,implied_move_source,date_confidence,fiscal_quarter,fiscal_year,period_end",
     )
     .eq("symbol", symbol.toUpperCase())
     .order("earnings_date", { ascending: false })
@@ -120,6 +113,9 @@ export async function getCrushHistory(
     move_ratio: number | null;
     implied_move_source: string | null;
     date_confidence: "confirmed" | "low" | null;
+    fiscal_quarter: number | null;
+    fiscal_year: number | null;
+    period_end: string | null;
   };
   const rows = (res.data ?? []) as Row[];
   return rows.map((r) => {
@@ -130,9 +126,19 @@ export async function getCrushHistory(
       r.implied_move_pct > 0
         ? Math.abs(r.actual_move_pct) / r.implied_move_pct
         : null);
+    const label = computeQuarterLabel({
+      earningsDate: r.earnings_date,
+      fiscalQuarter: r.fiscal_quarter,
+      fiscalYear: r.fiscal_year,
+      periodEnd: r.period_end,
+    });
     return {
       earningsDate: r.earnings_date,
-      qtrLabel: quarterLabel(r.earnings_date),
+      qtrLabel: label.combined,
+      fiscalQuarter: r.fiscal_quarter,
+      fiscalYear: r.fiscal_year,
+      periodEnd: r.period_end,
+      fiscalKnown: label.fiscalKnown,
       impliedMovePct: r.implied_move_pct,
       actualMovePct: r.actual_move_pct,
       ratio,

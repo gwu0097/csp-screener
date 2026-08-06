@@ -58,6 +58,8 @@ type QuoteSummaryResult = {
         date?: string;
         periodEndDate?: number;
         reportedDate?: number; // unix seconds — the actual announcement timestamp
+        fiscalQuarter?: string; // "NQYYYY", e.g. "2Q2027" — genuinely fiscal, distinct from calendarQuarter
+        calendarQuarter?: string;
       }>;
     };
   };
@@ -614,7 +616,19 @@ async function getPastEarningsDates(symbol: string): Promise<Date[]> {
 // (earningsChart.quarterly[].reportedDate, unix seconds). This is the real
 // press-release moment, not the fiscal quarter end. Finnhub's
 // /calendar/earnings is forward-only on the free tier, so we don't use it.
-type Announcement = { tsMs: number; iso: string };
+//
+// fiscalQuarter/fiscalYear: parsed ONLY from the genuine fiscalQuarter
+// string ("NQYYYY"), never a calendarQuarter/date fallback — null when
+// Yahoo doesn't supply it, not a mislabeled calendar-derived guess.
+// periodEndDate isn't unix-seconds-typed by yahoo-finance2 consistently
+// across symbols, so it's parsed the same tolerant way as reportedDate.
+type Announcement = {
+  tsMs: number;
+  iso: string;
+  fiscalQuarter: number | null;
+  fiscalYear: number | null;
+  periodEnd: string | null;
+};
 
 export async function getYahooPastAnnouncements(symbol: string): Promise<Announcement[]> {
   const summary = await quoteSummary(symbol, ["earnings"]);
@@ -625,7 +639,18 @@ export async function getYahooPastAnnouncements(symbol: string): Promise<Announc
       if (typeof rd !== "number" || rd <= 0) return null;
       const tsMs = rd < 1e12 ? rd * 1000 : rd;
       if (!Number.isFinite(tsMs)) return null;
-      return { tsMs, iso: new Date(tsMs).toISOString().slice(0, 10) };
+      let fiscalQuarter: number | null = null;
+      let fiscalYear: number | null = null;
+      if (typeof q.fiscalQuarter === "string") {
+        const m = /^(\d)Q(\d{4})$/.exec(q.fiscalQuarter);
+        if (m) {
+          fiscalQuarter = Number(m[1]);
+          fiscalYear = Number(m[2]);
+        }
+      }
+      const periodEndMs = typeof q.periodEndDate === "number" ? q.periodEndDate * 1000 : NaN;
+      const periodEnd = Number.isFinite(periodEndMs) ? new Date(periodEndMs).toISOString().slice(0, 10) : null;
+      return { tsMs, iso: new Date(tsMs).toISOString().slice(0, 10), fiscalQuarter, fiscalYear, periodEnd };
     })
     .filter((x): x is Announcement => x !== null)
     .filter((x) => x.tsMs < Date.now())

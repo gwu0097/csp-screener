@@ -4,6 +4,7 @@ import {
   gradeFromRatio,
   type CrushHistoryEvent,
 } from "@/lib/earnings-history-table";
+import { quarterLabel } from "@/lib/quarter-label";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -30,6 +31,10 @@ type FlowUnusualEntry = {
 type CspHistoryEvent = {
   earningsDate: string;
   qtrLabel: string;
+  fiscalQuarter: number | null;
+  fiscalYear: number | null;
+  periodEnd: string | null;
+  fiscalKnown: boolean;
   impliedMove: number | null;
   actualMove: number | null;
   direction: "up" | "down" | null;
@@ -61,6 +66,9 @@ type EarningsHistoryRow = {
   flow_deep_otm_put_pct?: number | string | null;
   flow_unusual_top3?: unknown;
   flow_captured_at?: string | null;
+  fiscal_quarter?: number | null;
+  fiscal_year?: number | null;
+  period_end?: string | null;
 };
 
 type CrushContextPayload = {
@@ -72,17 +80,6 @@ type CrushContextPayload = {
   safe_to_trade?: unknown;
   confidence?: unknown;
 };
-
-function quarterLabel(dateIso: string): string {
-  // Same convention as lib/earnings-history-table.quarterLabel — kept
-  // local so the route doesn't pull a UI helper.
-  const [y, m] = dateIso.split("-").map(Number);
-  if (!y || !m) return "—";
-  if (m <= 3) return `Q4 ${y - 1}`;
-  if (m <= 6) return `Q1 ${y}`;
-  if (m <= 9) return `Q2 ${y}`;
-  return `Q3 ${y}`;
-}
 
 function toNum(v: unknown): number | null {
   if (typeof v === "number" && Number.isFinite(v)) return v;
@@ -180,9 +177,19 @@ export async function GET(
         ? Math.abs(actual) / implied
         : null);
     const ctx = contextByDate.get(r.earnings_date) ?? null;
+    const label = quarterLabel({
+      earningsDate: r.earnings_date,
+      fiscalQuarter: r.fiscal_quarter ?? null,
+      fiscalYear: r.fiscal_year ?? null,
+      periodEnd: r.period_end ?? null,
+    });
     return {
       earningsDate: r.earnings_date,
-      qtrLabel: quarterLabel(r.earnings_date),
+      qtrLabel: label.combined,
+      fiscalQuarter: r.fiscal_quarter ?? null,
+      fiscalYear: r.fiscal_year ?? null,
+      periodEnd: r.period_end ?? null,
+      fiscalKnown: label.fiscalKnown,
       impliedMove: implied,
       actualMove: actual,
       direction: actual === null ? null : actual >= 0 ? "up" : "down",

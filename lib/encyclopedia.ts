@@ -57,6 +57,10 @@ export type StockEncyclopedia = {
   beat_rate: number | null;
   recovery_rate_after_breach: number | null;
   avg_iv_crush_magnitude: number | null;
+  // SEC EDGAR submissions.fiscalYearEnd (MMDD), reduced to just the
+  // month (1-12). Static per company — looked up once, lazily, on
+  // first getOrCreateEncyclopediaEntry() for a symbol (see below).
+  fiscal_year_end_month: number | null;
   created_at: string;
   updated_at: string;
 };
@@ -145,6 +149,32 @@ function sleep(ms: number): Promise<void> {
 
 // ---------- Encyclopedia row lifecycle ----------
 
+// Lazy, one-time-per-symbol SEC EDGAR lookup for fiscal_year_end_month
+// — static per company, so a null value here means "never looked up"
+// (or SEC EDGAR had nothing for this symbol), not "known to have no
+// fiscal year." Best-effort: a failed lookup leaves it null and the
+// next call to getOrCreateEncyclopediaEntry simply retries, same
+// pattern as every other best-effort external call in this file.
+async function backfillFiscalYearEndMonth(sb: ReturnType<typeof createServerClient>, row: StockEncyclopedia): Promise<StockEncyclopedia> {
+  if (row.fiscal_year_end_month !== null) return row;
+  try {
+    const { getFiscalYearEndMonth } = await import("@/lib/sec-edgar");
+    const month = await getFiscalYearEndMonth(row.symbol);
+    if (month === null) return row;
+    const updated = await sb
+      .from("stock_encyclopedia")
+      .update({ fiscal_year_end_month: month })
+      .eq("id", row.id)
+      .select()
+      .single();
+    if (updated.error || !updated.data) return row;
+    return updated.data as StockEncyclopedia;
+  } catch (e) {
+    console.warn(`[encyclopedia] fiscal_year_end_month lookup failed for ${row.symbol}: ${e instanceof Error ? e.message : e}`);
+    return row;
+  }
+}
+
 export async function getOrCreateEncyclopediaEntry(
   symbol: string,
 ): Promise<StockEncyclopedia> {
@@ -156,7 +186,7 @@ export async function getOrCreateEncyclopediaEntry(
     .eq("symbol", sym)
     .limit(1);
   const rows = (existing.data ?? []) as StockEncyclopedia[];
-  if (rows.length > 0) return rows[0];
+  if (rows.length > 0) return backfillFiscalYearEndMonth(sb, rows[0]);
 
   const inserted = await sb
     .from("stock_encyclopedia")
@@ -168,7 +198,7 @@ export async function getOrCreateEncyclopediaEntry(
       `encyclopedia create failed for ${sym}: ${inserted.error?.message ?? "no row"}`,
     );
   }
-  return inserted.data as StockEncyclopedia;
+  return backfillFiscalYearEndMonth(sb, inserted.data as StockEncyclopedia);
 }
 
 // Returns the date window we still need to fetch — from the last pull
@@ -745,6 +775,17 @@ export async function updateEncyclopedia(symbol: string): Promise<UpdateSummary>
     const payload = {
       symbol: sym,
       earnings_date,
+      // Fiscal identifiers from Finnhub's own /stock/earnings row —
+      // r.year/r.quarter are exactly what calMatch was looked up by
+      // (calendarByQuarter.get(`${r.year}|${r.quarter}`)), so there's
+      // no possibility of disagreement with calMatch's own year/quarter
+      // here. Written unconditionally (not gated on dateUntrusted) —
+      // these are valid fiscal identifiers independent of whether the
+      // resolved earnings_date is trusted; only the move DATA depends
+      // on that trust.
+      fiscal_quarter: r.quarter,
+      fiscal_year: r.year,
+      period_end: r.period,
       eps_estimate: r.estimate,
       eps_actual: r.actual,
       // Always compute from (actual, estimate) — Finnhub's surprisePercent
@@ -842,8 +883,21 @@ export async function updateEncyclopedia(symbol: string): Promise<UpdateSummary>
 export type CalendarEntry = {
   announcementDate: string; // YYYY-MM-DD
   hour: "bmo" | "amc" | "dmh" | null;
+  // year/quarter: the MATCH key against Finnhub's r.year/r.quarter —
+  // falls back through calendarQuarter/date when Yahoo's fiscalQuarter
+  // is absent (unchanged, pre-existing behavior; matching robustness
+  // is a separate concern from what's safe to persist as "fiscal").
   year: number | null;
   quarter: number | null;
+  // fiscalYear/fiscalQuarter: set ONLY from a genuine q.fiscalQuarter
+  // string, never the calendarQuarter/date fallback — these are what
+  // get written to earnings_history.fiscal_year/fiscal_quarter. A
+  // company where Yahoo only supplies calendarQuarter (no
+  // fiscalQuarter) correctly yields null here, not a mislabeled
+  // calendar-derived value passed off as fiscal.
+  fiscalYear: number | null;
+  fiscalQuarter: number | null;
+  periodEnd: string | null; // YYYY-MM-DD, from periodEndDate
   epsEstimate: number | null;
   epsActual: number | null;
   revenueEstimate: number | null;
@@ -916,12 +970,38 @@ export async function fetchFinnhubEarningsCalendar(
           year = Number(m[2]);
         }
       }
+      // Separately: the genuinely-fiscal pair, ONLY from q.fiscalQuarter
+      // itself (no calendarQuarter/date fallback) — this is what's
+      // safe to persist as fiscal_year/fiscal_quarter.
+      let fiscalYear: number | null = null;
+      let fiscalQuarter: number | null = null;
+      if (typeof q.fiscalQuarter === "string") {
+        const fm = /^(\d)Q(\d{4})$/.exec(q.fiscalQuarter);
+        if (fm) {
+          fiscalQuarter = Number(fm[1]);
+          fiscalYear = Number(fm[2]);
+        }
+      }
+      const periodEndMs =
+        typeof q.periodEndDate === "number"
+          ? q.periodEndDate * 1000
+          : q.periodEndDate instanceof Date
+            ? q.periodEndDate.getTime()
+            : typeof q.periodEndDate === "string"
+              ? new Date(q.periodEndDate).getTime()
+              : NaN;
+      const periodEnd = Number.isFinite(periodEndMs)
+        ? new Date(periodEndMs).toISOString().slice(0, 10)
+        : null;
 
       entries.push({
         announcementDate,
         hour,
         year,
         quarter,
+        fiscalYear,
+        fiscalQuarter,
+        periodEnd,
         epsEstimate: q.estimate ?? null,
         epsActual: q.actual ?? null,
         revenueEstimate: null,
@@ -1262,6 +1342,16 @@ export async function reingestHistoricalDates(
         timing: preserveNewerTiming ? newerRow.timing : match.hour,
         timing_source: preserveNewerTiming ? newerRow.timing_source : "yahoo_timestamp_heuristic",
         data_source: "finnhub+calendar-rekey",
+        // match.fiscalYear/fiscalQuarter/periodEnd are null unless
+        // Yahoo's own fiscalQuarter string was present (never the
+        // calendarQuarter fallback — see CalendarEntry's doc comment).
+        // Included only when non-null — newerRow may already carry
+        // fiscal data from a different source (Finnhub ingest, T0
+        // capture, or the fiscal backfill), and a null match here must
+        // never clobber it.
+        ...(match.fiscalQuarter !== null ? { fiscal_quarter: match.fiscalQuarter } : {}),
+        ...(match.fiscalYear !== null ? { fiscal_year: match.fiscalYear } : {}),
+        ...(match.periodEnd !== null ? { period_end: match.periodEnd } : {}),
       };
       const u = await sb
         .from("earnings_history")
@@ -1321,6 +1411,11 @@ export async function reingestHistoricalDates(
       timing: preserveRowTiming ? row.timing : match.hour,
       timing_source: preserveRowTiming ? row.timing_source : "yahoo_timestamp_heuristic",
       data_source: "finnhub+calendar-rekey",
+      // Same non-null-only guard as the merge branch above — row may
+      // already have fiscal data from another source.
+      ...(match.fiscalQuarter !== null ? { fiscal_quarter: match.fiscalQuarter } : {}),
+      ...(match.fiscalYear !== null ? { fiscal_year: match.fiscalYear } : {}),
+      ...(match.periodEnd !== null ? { period_end: match.periodEnd } : {}),
     };
     const u = await sb
       .from("earnings_history")
@@ -1394,6 +1489,9 @@ type HistoryRow = {
   revenue_estimate: number | null;
   revenue_actual: number | null;
   revenue_surprise_pct: number | null;
+  fiscal_quarter: number | null;
+  fiscal_year: number | null;
+  period_end: string | null;
 };
 
 async function readHistoryRow(
@@ -1604,6 +1702,32 @@ export async function captureEarningsT0(
     return { captured: true, implied_move_pct, iv_before, price_before, two_x_em_strike };
   }
 
+  // Best-effort fiscal metadata: T0's own data source (Finnhub's live
+  // /calendar/earnings, via getTodayEarnings) carries no fiscal
+  // quarter/year/period-end fields at all — unlike the historical
+  // ingest paths, there's nothing to "un-discard" here. Look it up
+  // separately via the Yahoo-backed calendar, matched by date, so a
+  // same-day row doesn't have to wait for a later maintenance sweep to
+  // pick it up. Skipped if already populated (e.g. a prior sweep beat
+  // T0 to this row) or if the lookup finds nothing — never blocks the
+  // time-critical IV/price capture above on this being slow or absent.
+  let fiscalFields: { fiscal_quarter: number | null; fiscal_year: number | null; period_end: string | null } | null = null;
+  if (row?.fiscal_quarter === null || row?.fiscal_quarter === undefined) {
+    try {
+      const calendar = await fetchFinnhubEarningsCalendar(sym);
+      const match = calendar.find((c) => c.announcementDate === earningsDate);
+      if (match && (match.fiscalQuarter !== null || match.periodEnd !== null)) {
+        fiscalFields = {
+          fiscal_quarter: match.fiscalQuarter,
+          fiscal_year: match.fiscalYear,
+          period_end: match.periodEnd,
+        };
+      }
+    } catch (e) {
+      console.warn(`[encyclopedia:T0] fiscal lookup failed for ${sym} ${earningsDate}: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+
   const sb = createServerClient();
   const up = await sb
     .from("earnings_history")
@@ -1621,6 +1745,7 @@ export async function captureEarningsT0(
       timing_source:
         timing !== "unknown" ? "finnhub_hour" : (row?.timing_source ?? null),
       t0_captured_at: new Date().toISOString(),
+      ...(fiscalFields ?? {}),
     })
     .eq("symbol", sym)
     .eq("earnings_date", earningsDate);

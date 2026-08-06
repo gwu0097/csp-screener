@@ -4,6 +4,7 @@ import {
   gradeFromRatio,
   type CrushHistoryEvent,
 } from "@/lib/earnings-history-table";
+import { quarterLabel } from "@/lib/quarter-label";
 import {
   getFinnhubEarningsPeriods,
 } from "@/lib/earnings";
@@ -22,15 +23,6 @@ export const revalidate = 0;
 // implied moves now only come from live screener runs (Schwab chain
 // at analysis time). Rows already backfilled keep their values.
 export const maxDuration = 60;
-
-function quarterLabel(dateIso: string): string {
-  const [y, m] = dateIso.split("-").map(Number);
-  if (!y || !m) return "—";
-  if (m <= 3) return `Q4 ${y - 1}`;
-  if (m <= 6) return `Q1 ${y}`;
-  if (m <= 9) return `Q2 ${y}`;
-  return `Q3 ${y}`;
-}
 
 // Seeds historical earnings_history rows when the table has no
 // actual_move_pct events for the symbol. Tries Finnhub /stock/earnings
@@ -105,6 +97,17 @@ async function seedHistoricalRows(symbol: string): Promise<SeedReport> {
       data_source: "yahoo",
       is_complete:
         price.price_before !== null && price.price_after !== null,
+      // ann's fiscal fields come straight from Yahoo's own
+      // fiscalQuarter string (getYahooPastAnnouncements never falls
+      // back to calendarQuarter/date) — null here means Yahoo simply
+      // didn't have it for this quarter, not a guess. Included only
+      // when non-null: this upsert can re-run against a row a later
+      // backfill already populated (e.g. from an older Yahoo-only
+      // window that predates the fiscal columns), and a null here must
+      // never clobber a value some other source already established.
+      ...(ann.fiscalQuarter !== null ? { fiscal_quarter: ann.fiscalQuarter } : {}),
+      ...(ann.fiscalYear !== null ? { fiscal_year: ann.fiscalYear } : {}),
+      ...(ann.periodEnd !== null ? { period_end: ann.periodEnd } : {}),
     };
     const up = await sb
       .from("earnings_history")
@@ -171,7 +174,7 @@ export async function POST(req: NextRequest) {
   const refreshed = await sb
     .from("earnings_history")
     .select(
-      "earnings_date,implied_move_pct,actual_move_pct,move_ratio,implied_move_source,date_confidence",
+      "earnings_date,implied_move_pct,actual_move_pct,move_ratio,implied_move_source,date_confidence,fiscal_quarter,fiscal_year,period_end",
     )
     .eq("symbol", symbol)
     .order("earnings_date", { ascending: false })
@@ -183,6 +186,9 @@ export async function POST(req: NextRequest) {
     move_ratio: number | null;
     implied_move_source: string | null;
     date_confidence: "confirmed" | "low" | null;
+    fiscal_quarter: number | null;
+    fiscal_year: number | null;
+    period_end: string | null;
   }>).map((row) => {
     const ratio =
       row.move_ratio ??
@@ -191,9 +197,19 @@ export async function POST(req: NextRequest) {
       row.implied_move_pct > 0
         ? Math.abs(row.actual_move_pct) / row.implied_move_pct
         : null);
+    const label = quarterLabel({
+      earningsDate: row.earnings_date,
+      fiscalQuarter: row.fiscal_quarter,
+      fiscalYear: row.fiscal_year,
+      periodEnd: row.period_end,
+    });
     return {
       earningsDate: row.earnings_date,
-      qtrLabel: quarterLabel(row.earnings_date),
+      qtrLabel: label.combined,
+      fiscalQuarter: row.fiscal_quarter,
+      fiscalYear: row.fiscal_year,
+      periodEnd: row.period_end,
+      fiscalKnown: label.fiscalKnown,
       impliedMovePct: row.implied_move_pct,
       actualMovePct: row.actual_move_pct,
       ratio,

@@ -13,6 +13,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { quarterLabel as computeQuarterLabel } from "@/lib/quarter-label";
 
 // Advisory-only research analysis (research_analyses table) — pasted
 // back from an external LLM conversation seeded by the Analysis Dump
@@ -118,6 +119,10 @@ type CrushContext = {
 type CrushHistoryEvent = {
   earningsDate: string;
   qtrLabel: string;
+  fiscalQuarter: number | null;
+  fiscalYear: number | null;
+  periodEnd: string | null;
+  fiscalKnown: boolean;
   impliedMovePct: number | null;
   actualMovePct: number | null;
   ratio: number | null;
@@ -127,19 +132,13 @@ type CrushHistoryEvent = {
 
 const SIMILAR_EM_TOLERANCE = 0.02; // ±2pp from today's EM
 
-// Quarter label from earnings date — same convention as
-// lib/earnings-history-table.ts quarterLabel (not imported: that module
-// pulls the server-only supabase client into this client bundle).
-function quarterLabel(dateIso: string): string {
-  const [y, m] = dateIso.split("-").map(Number);
-  if (!y || !m) return "—";
-  if (m <= 3) return `Q4 ${y - 1}`;
-  if (m <= 6) return `Q1 ${y}`;
-  if (m <= 9) return `Q2 ${y}`;
-  return `Q3 ${y}`;
-}
-
-// Inverse side of quarterLabel — needed to compute 8 quarter SLOTS
+// Calendar-quarter SLOT bucketing (report-date, ~1-month-lag heuristic)
+// used only to decide which of the 8 padded row slots an event belongs
+// in — a separate concern from the DISPLAYED label, which comes from
+// lib/quarter-label.ts's fiscal-aware quarterLabel (imported above as
+// computeQuarterLabel). quarterYearLabel(quarterOfDate(dateIso)) is
+// byte-identical to the old local quarterLabel(dateIso) this replaced,
+// so slot matching is unchanged.
 // working backward from today regardless of whether any event exists
 // for them yet. {q,y} arithmetic, not string parsing, so "one quarter
 // back" is exact at year boundaries (Q1 -> prior year's Q4).
@@ -521,7 +520,15 @@ export function CrushHistoryTable({
   // needs to show, not a secondary case.
   const pinnedAnalysis = researchAnalyses?.[pinnedDate] ?? null;
   const isPinnedAnalysisExpanded = expandedAnalysisDate === pinnedDate;
-  const pinnedQtr = quarterLabel(pinnedDate);
+  const pinnedFiscalKnown = upcoming?.fiscalKnown ?? false;
+  const pinnedQtr =
+    upcoming?.qtrLabel ??
+    computeQuarterLabel({
+      earningsDate: pinnedDate,
+      fiscalQuarter: null,
+      fiscalYear: null,
+      periodEnd: null,
+    }).combined;
   // (year, quarter) struct, not the label string — the pinned row's own
   // quarter needs to be excluded from the generated slots below by
   // identity, not by re-deriving and string-comparing a label that
@@ -548,7 +555,7 @@ export function CrushHistoryTable({
   const HISTORY_QUARTER_COUNT = 8;
   const byQuarter = new Map<string, CrushHistoryEvent>();
   for (const e of sorted) {
-    const label = quarterLabel(e.earningsDate);
+    const label = quarterYearLabel(quarterOfDate(e.earningsDate));
     if (!byQuarter.has(label)) byQuarter.set(label, e);
   }
   const displayRows: CrushHistoryEvent[] = [];
@@ -568,11 +575,21 @@ export function CrushHistoryTable({
       if (cursor.q !== pinnedQY.q || cursor.y !== pinnedQY.y) {
         const label = quarterYearLabel(cursor);
         const real = byQuarter.get(label);
-        if (!real) placeholderDates.add(representativeDate(cursor));
+        const repDate = representativeDate(cursor);
+        if (!real) placeholderDates.add(repDate);
         displayRows.push(
           real ?? {
-            earningsDate: representativeDate(cursor),
-            qtrLabel: label,
+            earningsDate: repDate,
+            qtrLabel: computeQuarterLabel({
+              earningsDate: repDate,
+              fiscalQuarter: null,
+              fiscalYear: null,
+              periodEnd: null,
+            }).combined,
+            fiscalQuarter: null,
+            fiscalYear: null,
+            periodEnd: null,
+            fiscalKnown: false,
             impliedMovePct: null,
             actualMovePct: null,
             ratio: null,
@@ -840,7 +857,20 @@ export function CrushHistoryTable({
           <tbody>
             <tr className="border-t border-border bg-amber-500/[0.04]">
               <td className="px-2 py-1 font-mono font-semibold">
-                {pinnedQtr}
+                {pinnedFiscalKnown ? (
+                  pinnedQtr
+                ) : (
+                  <TooltipProvider delayDuration={200}>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <span className="cursor-help italic text-foreground/70">{pinnedQtr}</span>
+                      </TooltipTrigger>
+                      <TooltipContent className="max-w-xs text-sm">
+                        Fiscal quarter not yet known for this event — showing calendar quarter only.
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                )}
                 <span className="ml-1.5 font-normal text-muted-foreground">
                   {fmtEarningsDateShort(pinnedDate)}
                 </span>
@@ -918,7 +948,20 @@ export function CrushHistoryTable({
                   className={`border-t border-border ${isSimilar ? "bg-emerald-500/[0.04]" : ""}`}
                 >
                   <td className="px-2 py-1 font-mono">
-                    {e.qtrLabel}
+                    {e.fiscalKnown ? (
+                      e.qtrLabel
+                    ) : (
+                      <TooltipProvider delayDuration={200}>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <span className="cursor-help italic text-foreground/70">{e.qtrLabel}</span>
+                          </TooltipTrigger>
+                          <TooltipContent className="max-w-xs text-sm">
+                            Fiscal quarter not yet known for this event — showing calendar quarter only.
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    )}
                     {isPlaceholder ? (
                       <TooltipProvider delayDuration={200}>
                         <Tooltip>
