@@ -46,6 +46,7 @@ import { TickerIntelligenceStrip } from "@/components/ticker-intelligence-strip"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { ErrorBanner } from "@/components/error-banner";
 import { ResearchAnalysisPasteBack, type SavedAnalysisInfo } from "@/components/research-analysis-paste";
+import { ResearchAnalysisModal } from "@/components/research-analysis-modal";
 import { SchwabTokenBanner } from "@/components/schwab-token-banner";
 import { CSP_EARNINGS_SCREENER } from "@/lib/screener-config";
 import { ANALYSIS_TEMPLATE, ANALYSIS_TEMPLATE_VERSION } from "@/lib/analysis-dump-template";
@@ -524,6 +525,11 @@ export function ScreenerView({ connected }: Props) {
   // onSaved callback so the badge appears without a page reload.
   // Display-only: never read by grading, sorting, or filtering.
   const [analysisIndex, setAnalysisIndex] = useState<Map<string, SavedAnalysisInfo>>(new Map());
+  // Which candidate's AI-badge read modal is open, if any — set by
+  // clicking the badge, cleared on close (Escape / backdrop / X).
+  const [analysisModal, setAnalysisModal] = useState<{ symbol: string; earningsDate: string } | null>(
+    null,
+  );
   const [screenedAt, setScreenedAt] = useState<Date | null>(null);
   // Escape hatch for the Finnhub (analyst estimates, earnings-surprise
   // history), daily-bars (realized-vol), and Perplexity-news caches —
@@ -2694,13 +2700,24 @@ export function ScreenerView({ connected }: Props) {
                               return (
                                 <Tooltip>
                                   <TooltipTrigger asChild>
-                                    <span className="cursor-help rounded border border-violet-500/40 bg-violet-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-violet-300">
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        // Row itself toggles expand on click
+                                        // (onClick on the TableRow above) —
+                                        // without this the badge click would
+                                        // also expand/collapse the row.
+                                        e.stopPropagation();
+                                        setAnalysisModal({ symbol: r.symbol, earningsDate: r.earningsDate });
+                                      }}
+                                      className="cursor-pointer rounded border border-violet-500/40 bg-violet-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-violet-300 hover:bg-violet-500/25"
+                                    >
                                       AI
-                                    </span>
+                                    </button>
                                   </TooltipTrigger>
                                   <TooltipContent>
                                     Research analysis saved {formatSavedAt(analysis.updatedAt)} ·
-                                    checklist {analysis.checklistVersion ?? "—"}
+                                    checklist {analysis.checklistVersion ?? "—"} — click to read
                                   </TooltipContent>
                                 </Tooltip>
                               );
@@ -2892,6 +2909,13 @@ export function ScreenerView({ connected }: Props) {
         })()}
 
       </div>
+      {analysisModal && (
+        <ResearchAnalysisModal
+          symbol={analysisModal.symbol}
+          earningsDate={analysisModal.earningsDate}
+          onClose={() => setAnalysisModal(null)}
+        />
+      )}
     </TooltipProvider>
   );
 }
@@ -4431,6 +4455,11 @@ function AnalysisDumpTab({
   }, [effectiveStrike]);
   const [spreadFlagPct, setSpreadFlagPct] = useState(50);
   const [copied, setCopied] = useState(false);
+  // Dump preview is read-once-then-copy, not read-repeatedly like the
+  // saved analysis below it — collapsed by default so it stops
+  // dominating the tab. Copy dump reads `dump` directly, not the DOM,
+  // so it copies the complete text regardless of this toggle.
+  const [dumpExpanded, setDumpExpanded] = useState(false);
 
   function commitStrike() {
     const target = Number(strikeInput);
@@ -4805,9 +4834,19 @@ function AnalysisDumpTab({
           )}
         </Button>
       </div>
-      <pre className="max-h-[600px] overflow-auto whitespace-pre-wrap rounded border border-border bg-background/40 p-3 font-mono text-xs leading-relaxed">
-        {dump}
-      </pre>
+      <button
+        type="button"
+        onClick={() => setDumpExpanded((v) => !v)}
+        className="flex w-full items-center gap-1.5 rounded border border-border bg-background/40 px-2 py-1.5 text-xs text-muted-foreground hover:text-foreground"
+      >
+        {dumpExpanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+        Dump preview ({dump.length.toLocaleString()} chars) — Copy dump above always copies the full text
+      </button>
+      {dumpExpanded && (
+        <pre className="max-h-[200px] overflow-auto whitespace-pre-wrap rounded border border-border bg-background/40 p-3 font-mono text-xs leading-relaxed">
+          {dump}
+        </pre>
+      )}
       <ResearchAnalysisPasteBack
         symbol={r.symbol}
         earningsDate={r.earningsDate}

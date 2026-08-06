@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, CheckCircle2, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { MarkdownBody } from "@/components/filing-analysis";
 import {
   parseResearchAnalysisPaste,
   isKnownFlag,
@@ -13,7 +14,9 @@ import { ANALYSIS_TEMPLATE_VERSION } from "@/lib/analysis-dump-template";
 // The full research_analyses row, as returned by GET/POST
 // /api/screener/research-analysis — the persisted source of truth this
 // component hydrates the textarea from and diffs live edits against.
-type SavedAnalysisRow = {
+// Exported so the AI-badge read modal (components/research-analysis-
+// modal.tsx) can share the exact same shape instead of redeclaring it.
+export type SavedAnalysisRow = {
   symbol: string;
   earnings_date: string;
   flags_fired: string[];
@@ -90,6 +93,12 @@ export function ResearchAnalysisPasteBack({
   const [saved, setSaved] = useState(false);
   const [loading, setLoading] = useState(true);
   const [savedRecord, setSavedRecord] = useState<SavedAnalysisRow | null>(null);
+  // Paste box starts compact (the saved analysis is the primary reading
+  // surface now, not this input) and grows once the user actually
+  // focuses it. Does NOT shrink back on blur — layout jumping the box
+  // out from under the cursor mid-click (e.g. right as "Parse &
+  // preview" is clicked) would be worse than staying expanded.
+  const [textareaExpanded, setTextareaExpanded] = useState(false);
 
   // Hydrate from research_analyses whenever the candidate changes (tab
   // open, or switching to a different symbol/earnings date). Empty
@@ -104,6 +113,7 @@ export function ResearchAnalysisPasteBack({
     setSaved(false);
     setSaveError(null);
     setConfirmedMismatch(false);
+    setTextareaExpanded(false);
     async function load() {
       try {
         const res = await fetch(
@@ -259,8 +269,27 @@ export function ResearchAnalysisPasteBack({
         <div className="text-xs text-muted-foreground">No analysis saved yet for {symbol} / {earningsDate}.</div>
       )}
 
+      {/* Primary reading surface — this is read repeatedly when deciding
+          a trade, unlike the dump above it (copied once). No max-height/
+          overflow here on purpose: the page scrolls naturally instead of
+          fighting a cramped inner scrollbar for a typical ~5k-char
+          analysis. */}
+      {!loading && savedRecord && (
+        <div className="rounded border border-border bg-background/60 p-3">
+          {savedRecord.analysis_prose ? (
+            <MarkdownBody text={savedRecord.analysis_prose} />
+          ) : (
+            <div className="text-xs text-muted-foreground">No prose stored for this analysis.</div>
+          )}
+        </div>
+      )}
+
+      <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/70">
+        Paste / revise
+      </div>
       <textarea
         value={raw}
+        onFocus={() => setTextareaExpanded(true)}
         onChange={(e) => {
           setRaw(e.target.value);
           setParsed(null);
@@ -268,8 +297,7 @@ export function ResearchAnalysisPasteBack({
           setSaveError(null);
         }}
         placeholder="Paste the full analysis response here..."
-        rows={6}
-        className="w-full rounded border border-border bg-background px-2 py-1.5 font-mono text-xs"
+        className={`w-full rounded border border-border bg-background px-2 py-1.5 font-mono text-xs transition-[height] duration-150 ${textareaExpanded ? "h-48" : "h-14"}`}
       />
       <div className="flex items-center gap-2">
         <Button size="sm" variant="secondary" onClick={handleParse} disabled={raw.trim().length === 0}>
