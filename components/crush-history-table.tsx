@@ -23,6 +23,11 @@ type ResearchAnalysisRow = {
   symbol: string;
   earnings_date: string;
   flags_fired: string[];
+  // Absent (undefined) on rows fetched before the flags_na column
+  // existed is not possible here — select("*") always returns it,
+  // defaulted to '{}' by the migration — but typed optional anyway so
+  // a stale cached response shape can't crash the .length reads below.
+  flags_na?: string[];
   flags_unknown: string[];
   candidate_flags: string[];
   checklist_version: string | null;
@@ -73,6 +78,12 @@ function ResearchAnalysisDetailRow({ rowKey, analysis }: { rowKey: string; analy
             <div>
               <span className="font-semibold text-violet-300">Fired: </span>
               {analysis.flags_fired.join(", ")}
+            </div>
+          )}
+          {(analysis.flags_na?.length ?? 0) > 0 && (
+            <div>
+              <span className="font-semibold text-sky-300">N/A: </span>
+              {(analysis.flags_na ?? []).join(", ")}
             </div>
           )}
           {analysis.flags_unknown.length > 0 && (

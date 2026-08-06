@@ -17,6 +17,7 @@ type SavedAnalysisRow = {
   symbol: string;
   earnings_date: string;
   flags_fired: string[];
+  flags_na: string[];
   flags_unknown: string[];
   candidate_flags: string[];
   checklist_version: string | null;
@@ -170,6 +171,7 @@ export function ResearchAnalysisPasteBack({
           symbol,
           earningsDate,
           flagsFired: parsed.flagsFired,
+          flagsNa: parsed.flagsNa,
           flagsUnknown: parsed.flagsUnknown,
           candidateFlags: parsed.candidateFlags,
           checklistVersion: parsed.checklistVersion,
@@ -239,6 +241,10 @@ export function ResearchAnalysisPasteBack({
           <div className="text-muted-foreground">
             Flags fired ({savedRecord.flags_fired.length}):{" "}
             {savedRecord.flags_fired.length === 0 ? "none" : savedRecord.flags_fired.join(", ")}
+          </div>
+          <div className="text-muted-foreground">
+            Flags N/A ({savedRecord.flags_na.length}):{" "}
+            {savedRecord.flags_na.length === 0 ? "none" : savedRecord.flags_na.join(", ")}
           </div>
           <div className="text-muted-foreground">
             Flags unknown ({savedRecord.flags_unknown.length}):{" "}
@@ -333,6 +339,10 @@ export function ResearchAnalysisPasteBack({
                   ))}
             </div>
             <div>
+              Flags N/A ({parsed.flagsNa.length}):{" "}
+              {parsed.flagsNa.length === 0 ? "none" : parsed.flagsNa.join(", ")}
+            </div>
+            <div>
               Flags unknown ({parsed.flagsUnknown.length}):{" "}
               {parsed.flagsUnknown.length === 0 ? "none" : parsed.flagsUnknown.join(", ")}
             </div>
@@ -342,7 +352,7 @@ export function ResearchAnalysisPasteBack({
             </div>
             {unrecognizedFired.length > 0 && (
               <div className="text-amber-300">
-                {unrecognizedFired.length} flag(s) in FLAGS_FIRED are outside the known v1 vocabulary —
+                {unrecognizedFired.length} flag(s) in FLAGS_FIRED are outside the current known vocabulary —
                 stored as-is, shown above as (unrecognized), not dropped.
               </div>
             )}

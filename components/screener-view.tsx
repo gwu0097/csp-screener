@@ -4240,6 +4240,48 @@ function useCompanyName(symbol: string): string | null {
   return name;
 }
 
+type PriceActionSnapshot = {
+  trailing20dReturnPct: number | null;
+  fiftyTwoWeekHigh: number | null;
+  fiftyTwoWeekLow: number | null;
+  distFromHighPct: number | null;
+  distFromLowPct: number | null;
+};
+
+// Trailing 20-trading-day return + 52-week range for the dump's PRICE
+// ACTION section (see app/api/screener/price-action/route.ts — sourced
+// entirely from Yahoo, no new provider). This is what makes the
+// template's runup_into_print flag answerable on every ticker instead
+// of structurally UNKNOWN — the dump previously carried no price-action
+// data at all.
+function usePriceAction(symbol: string, price: number | null): PriceActionSnapshot | null {
+  const [snapshot, setSnapshot] = useState<PriceActionSnapshot | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setSnapshot(null);
+    (async () => {
+      try {
+        const params = new URLSearchParams({ symbol });
+        if (price !== null && Number.isFinite(price) && price > 0) {
+          params.set("price", String(price));
+        }
+        const res = await fetch(`/api/screener/price-action?${params.toString()}`, {
+          cache: "no-store",
+        });
+        if (!res.ok) return;
+        const json = (await res.json()) as PriceActionSnapshot;
+        if (!cancelled) setSnapshot(json);
+      } catch {
+        /* best-effort — the dump section prints MISSING per field */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [symbol, price]);
+  return snapshot;
+}
+
 // Nearest listed strike to `target` — same snapping EditableStrikeCell/
 // TweetTab's old commitStrike used, so typing a strike that isn't
 // exactly on the chain grid still lands on a real, quotable contract.
@@ -4268,6 +4310,22 @@ function dumpPct(n: number | null | undefined, digits = 1): string {
 }
 function dumpInt(n: number | null | undefined): string {
   return n === null || n === undefined || !Number.isFinite(n) ? "—" : String(Math.round(n));
+}
+
+// PRICE ACTION section only — every other dump section uses "—" for a
+// missing value, but this section must print the literal word MISSING
+// per line instead of omitting the line or blending in with "—", so a
+// reader can't mistake "no data" for "zero".
+function dumpPctOrMissing(n: number | null | undefined): string {
+  return n === null || n === undefined || !Number.isFinite(n) ? "MISSING" : `${(n * 100).toFixed(1)}%`;
+}
+function dumpPctDirOrMissing(n: number | null | undefined, word: "below" | "above"): string {
+  return n === null || n === undefined || !Number.isFinite(n)
+    ? "MISSING"
+    : `${(n * 100).toFixed(1)}% ${word}`;
+}
+function dumpDollarOrMissing(n: number | null | undefined): string {
+  return n === null || n === undefined || !Number.isFinite(n) ? "MISSING" : `$${n.toFixed(2)}`;
 }
 
 // Shared by the dump's EARNINGS HISTORY section and the paste-back
@@ -4355,6 +4413,7 @@ function AnalysisDumpTab({
   onAnalysisSaved?: (info: SavedAnalysisInfo) => void;
 }) {
   const companyName = useCompanyName(r.symbol);
+  const priceAction = usePriceAction(r.symbol, r.price);
   const stageFourStrikes = r.stageFour?.availableStrikes;
   const availableStrikes = useMemo(() => stageFourStrikes ?? [], [stageFourStrikes]);
   const recommended = recommendedStrikeFor(r);
@@ -4404,6 +4463,17 @@ function AnalysisDumpTab({
     );
     push(`VIX: ${dumpNum(tl?.regimeFactors.vix ?? null, 1)} (${tl?.regimeFactors.vixRegime ?? "—"})`);
     push(`Research analysis template version: ${ANALYSIS_TEMPLATE_VERSION}`);
+
+    // ---------- PRICE ACTION ----------
+    // Answers runup_into_print — every value prints MISSING rather than
+    // being omitted when unavailable (see dumpPctOrMissing etc.).
+    section("PRICE ACTION");
+    push(`Trailing 20-trading-day return: ${dumpPctOrMissing(priceAction?.trailing20dReturnPct)}`);
+    push(`Distance from 52-week high: ${dumpPctDirOrMissing(priceAction?.distFromHighPct, "below")}`);
+    push(`Distance from 52-week low: ${dumpPctDirOrMissing(priceAction?.distFromLowPct, "above")}`);
+    push(
+      `52-week range: high ${dumpDollarOrMissing(priceAction?.fiftyTwoWeekHigh)}, low ${dumpDollarOrMissing(priceAction?.fiftyTwoWeekLow)}`,
+    );
 
     // ---------- SELECTED STRIKE ----------
     section("SELECTED STRIKE");
@@ -4647,7 +4717,7 @@ function AnalysisDumpTab({
     push(ANALYSIS_TEMPLATE);
 
     return lines.join("\n").trim();
-  }, [r, tl, d, companyName, screenedAt, effectiveStrike, effectiveDelta, effectivePremium, effectivePop, selectedRow, recommended, availableStrikes, spreadFlagPct, chainCampaigns, chainCampaignsFailed]);
+  }, [r, tl, d, companyName, priceAction, screenedAt, effectiveStrike, effectiveDelta, effectivePremium, effectivePop, selectedRow, recommended, availableStrikes, spreadFlagPct, chainCampaigns, chainCampaignsFailed]);
 
   // Setup values snapshotted at analysis-save time (research_analyses
   // is never joined to live data later — spot/EM/grade all drift

@@ -17,7 +17,7 @@
 // numeric grade, never vetoes a trade, and the two are never merged or
 // averaged. See lib/research-analysis-parser.ts for how a pasted
 // response gets parsed back into structured fields.
-export const ANALYSIS_TEMPLATE_VERSION = "v2";
+export const ANALYSIS_TEMPLATE_VERSION = "v3";
 
 export const ANALYSIS_TEMPLATE = `=== RESEARCH ANALYSIS REQUEST ===
 
@@ -30,23 +30,30 @@ suggests — the things that would cause the market's own pricing to be wrong.
 The reference strike for this analysis is 2x EM below spot, regardless of
 what strike I may actually trade.
 
-PART 1 — CHECKLIST (v2)
-Check each item. Report FIRED, CLEAR, or UNKNOWN with one line of evidence.
-"UNKNOWN" is a valid and useful answer — do not guess.
+PART 1 — CHECKLIST (v3)
+Check each item. Report FIRED, CLEAR, N/A, or UNKNOWN with one line of
+evidence. N/A means the item does not apply to this company or setup.
+UNKNOWN means it applies but could not be determined. Both are valid and
+useful answers — do not guess.
 
   consensus_above_guide
-    Does analyst consensus sit at or above the top of management's own
-    guidance range? If so, the company must beat its own high end merely to
-    meet expectations.
+    Compare analyst consensus to management's OWN guided range, on
+    whichever metric the company actually guides (EPS, revenue, bookings,
+    origination volume, etc.) — do not assume quarterly EPS. If consensus
+    sits at or above the top of that range, the company must beat its own
+    high end merely to meet expectations. If the company does not issue
+    comparable guidance for this period, answer N/A.
 
   consecutive_deceleration
     Has revenue or EPS growth decelerated for two or more consecutive
     quarters, including the guided quarter? Report the actual sequence.
 
-  guidance_streak_extrapolated
-    Has management beaten the high end of its own guidance repeatedly, and
-    has the Street extrapolated that streak into current estimates? A broken
-    streak reprices hard.
+  guidance_beat_streak
+    Has management beaten the high end of its own guidance, or consensus,
+    in each of the recent quarters? Report the actual record (e.g. "beat
+    3 of last 4, average surprise +8%"). A long streak is fragile — a
+    broken streak reprices hard. Report the record only; do not speculate
+    about whether estimates were built on it.
 
   peer_dropped_on_inline
     Has a sector peer already reported this cycle and been punished for an
@@ -112,9 +119,10 @@ Begin your response with exactly this block, then prose:
 TICKER: <symbol>
 EARNINGS_DATE: <YYYY-MM-DD>
 FLAGS_FIRED: <comma-separated from the vocabulary above, or \`none\`>
+FLAGS_NA: <comma-separated, or \`none\`>
 FLAGS_UNKNOWN: <comma-separated, or \`none\`>
 CANDIDATE_FLAGS: <new risks you'd propose adding to the checklist, or \`none\`>
-CHECKLIST_VERSION: v2
+CHECKLIST_VERSION: v3
 === END METADATA ===
 
 Do not output a letter grade.`;

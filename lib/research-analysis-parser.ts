@@ -5,6 +5,7 @@
 //   TICKER: <symbol>
 //   EARNINGS_DATE: <YYYY-MM-DD>
 //   FLAGS_FIRED: <comma-separated, or `none`>
+//   FLAGS_NA: <comma-separated, or `none`>   (v3+ only, see below)
 //   FLAGS_UNKNOWN: <comma-separated, or `none`>
 //   CANDIDATE_FLAGS: <comma-separated, or `none`>
 //   CHECKLIST_VERSION: <value>
@@ -18,16 +19,28 @@
 // treating it as absent. raw_paste is always the untouched input,
 // regardless of parse outcome, so a bad parse can be re-parsed later
 // without redoing the analysis.
+//
+// FLAGS_NA is the one exception to "missing = note pushed": it didn't
+// exist before v3, so a v1/v2 paste's absent FLAGS_NA line is expected,
+// not degraded input — treated as an empty list silently, no note, so
+// old-template pastes still parse at zero warnings.
 
-// v1 checklist vocabulary (lib/analysis-dump-template.ts's Part 1).
-// Used only to flag unrecognized names in the UI preview — never to
-// filter or drop them. The vocabulary is expected to grow; an entry
-// here going stale just means the "unrecognized" flag looks wrong
-// until this list is updated to match a new template version.
+// Current checklist vocabulary (lib/analysis-dump-template.ts's Part
+// 1, v3). Used only to flag unrecognized names in the UI preview —
+// never to filter or drop them. The vocabulary is expected to grow;
+// an entry here going stale just means the "unrecognized" flag looks
+// wrong until this list is updated to match a new template version.
+// guidance_streak_extrapolated (the v1/v2 name, renamed to
+// guidance_beat_streak in v3) is intentionally NOT kept here — stored
+// v1/v2 records render it fine regardless (crush-history-table.tsx
+// displays whatever's in flags_fired/flags_unknown verbatim, it never
+// checks this list), and a NEW paste using the retired v1/v2 name
+// should show as unrecognized, since v3's checklist no longer asks for
+// it under that name.
 export const KNOWN_FLAG_VOCABULARY = [
   "consensus_above_guide",
   "consecutive_deceleration",
-  "guidance_streak_extrapolated",
+  "guidance_beat_streak",
   "peer_dropped_on_inline",
   "live_narrative_risk",
   "runup_into_print",
@@ -45,6 +58,7 @@ export type ParsedResearchAnalysis = {
   ticker: string | null;
   earningsDate: string | null;
   flagsFired: string[];
+  flagsNa: string[];
   flagsUnknown: string[];
   candidateFlags: string[];
   checklistVersion: string | null;
@@ -90,6 +104,7 @@ export function parseResearchAnalysisPaste(raw: string): ParsedResearchAnalysis 
       ticker: null,
       earningsDate: null,
       flagsFired: [],
+      flagsNa: [],
       flagsUnknown: [],
       candidateFlags: [],
       checklistVersion: null,
@@ -113,6 +128,10 @@ export function parseResearchAnalysisPaste(raw: string): ParsedResearchAnalysis 
 
   const flagsFiredRaw = extractField(block, "FLAGS_FIRED");
   if (flagsFiredRaw === null) notes.push("FLAGS_FIRED line missing within the metadata block — treated as empty.");
+  // FLAGS_NA has no v1/v2 equivalent — a missing line is expected for
+  // those templates, not a defect, so no note is pushed (see file-top
+  // comment). It's treated identically to a present-but-empty list.
+  const flagsNaRaw = extractField(block, "FLAGS_NA");
   const flagsUnknownRaw = extractField(block, "FLAGS_UNKNOWN");
   if (flagsUnknownRaw === null) notes.push("FLAGS_UNKNOWN line missing within the metadata block — treated as empty.");
   const candidateFlagsRaw = extractField(block, "CANDIDATE_FLAGS");
@@ -121,6 +140,7 @@ export function parseResearchAnalysisPaste(raw: string): ParsedResearchAnalysis 
   if (checklistVersion === null) notes.push("CHECKLIST_VERSION line missing or empty within the metadata block.");
 
   const flagsFired = parseFlagList(flagsFiredRaw ?? "");
+  const flagsNa = parseFlagList(flagsNaRaw ?? "");
   const flagsUnknown = parseFlagList(flagsUnknownRaw ?? "");
   const candidateFlags = parseFlagList(candidateFlagsRaw ?? "");
 
@@ -138,6 +158,7 @@ export function parseResearchAnalysisPaste(raw: string): ParsedResearchAnalysis 
     ticker,
     earningsDate,
     flagsFired,
+    flagsNa,
     flagsUnknown,
     candidateFlags,
     checklistVersion,

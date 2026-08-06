@@ -79,6 +79,7 @@ type Body = {
   symbol?: unknown;
   earningsDate?: unknown;
   flagsFired?: unknown;
+  flagsNa?: unknown;
   flagsUnknown?: unknown;
   candidateFlags?: unknown;
   checklistVersion?: unknown;
@@ -147,6 +148,8 @@ export async function POST(req: NextRequest) {
 
   const flagsFired = asStringArray(body.flagsFired, "flagsFired");
   if (!flagsFired.ok) return NextResponse.json({ error: flagsFired.error }, { status: 400 });
+  const flagsNa = asStringArray(body.flagsNa, "flagsNa");
+  if (!flagsNa.ok) return NextResponse.json({ error: flagsNa.error }, { status: 400 });
   const flagsUnknown = asStringArray(body.flagsUnknown, "flagsUnknown");
   if (!flagsUnknown.ok) return NextResponse.json({ error: flagsUnknown.error }, { status: 400 });
   const candidateFlags = asStringArray(body.candidateFlags, "candidateFlags");
@@ -169,6 +172,7 @@ export async function POST(req: NextRequest) {
         symbol,
         earnings_date: earningsDate,
         flags_fired: flagsFired.value,
+        flags_na: flagsNa.value,
         flags_unknown: flagsUnknown.value,
         candidate_flags: candidateFlags.value,
         checklist_version: asNullableString(body.checklistVersion),
