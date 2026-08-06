@@ -4520,7 +4520,14 @@ function AnalysisDumpTab({
   // happened this session, else the screener-run's batch timestamp —
   // the same instant stageFour.availableStrikes was populated at (there
   // is no separate per-chain timestamp on the screener-run snapshot).
-  const chainCapturedAt = refreshedChain ? new Date(refreshedChain.asOf) : screenedAt;
+  // Memoized on refreshedChain?.asOf/screenedAt specifically (not the
+  // whole refreshedChain object) so this doesn't construct a new Date
+  // every render — that would make the dump useMemo below think its
+  // deps changed on every render and always recompute.
+  const chainCapturedAt = useMemo(
+    () => (refreshedChain ? new Date(refreshedChain.asOf) : screenedAt),
+    [refreshedChain, screenedAt],
+  );
   const recommended = recommendedStrikeFor(r);
   const effectiveStrike = strikeOverride?.strike ?? recommended;
   const effectiveDelta = strikeOverride?.delta ?? r.stageFour?.delta ?? null;
