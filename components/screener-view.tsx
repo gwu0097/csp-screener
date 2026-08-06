@@ -45,7 +45,7 @@ import { PriceChart } from "@/components/price-chart";
 import { TickerIntelligenceStrip } from "@/components/ticker-intelligence-strip";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { ErrorBanner } from "@/components/error-banner";
-import { ResearchAnalysisPasteBack } from "@/components/research-analysis-paste";
+import { ResearchAnalysisPasteBack, type SavedAnalysisInfo } from "@/components/research-analysis-paste";
 import { SchwabTokenBanner } from "@/components/schwab-token-banner";
 import { CSP_EARNINGS_SCREENER } from "@/lib/screener-config";
 import { ANALYSIS_TEMPLATE, ANALYSIS_TEMPLATE_VERSION } from "@/lib/analysis-dump-template";
@@ -246,6 +246,18 @@ function fmtPrice(n: number | null | undefined) {
 function fmtNum(n: number | null | undefined, digits = 2) {
   if (n === null || n === undefined || !Number.isFinite(n)) return "—";
   return n.toFixed(digits);
+}
+
+// For the AI-analysis badge tooltip's "saved" timestamp.
+function formatSavedAt(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
 }
 
 // CSP yield = premium / strike, expressed as a percent. The denominator
@@ -504,6 +516,14 @@ export function ScreenerView({ connected }: Props) {
   const [status, setStatus] = useState<RunStatus>("idle");
   const [results, setResults] = useState<ScreenerResult[] | null>(null);
   const [prices, setPrices] = useState<Record<string, number>>({});
+  // Which (symbol, earningsDate) pairs have a saved research_analyses
+  // row, for the Grade column's "AI" badge — keyed the same way as the
+  // news cache below (`${symbol}|${earningsDate}`), fetched once per
+  // distinct symbol set (not per row — see the effect below), and
+  // updated in place after a save via ResearchAnalysisPasteBack's
+  // onSaved callback so the badge appears without a page reload.
+  // Display-only: never read by grading, sorting, or filtering.
+  const [analysisIndex, setAnalysisIndex] = useState<Map<string, SavedAnalysisInfo>>(new Map());
   const [screenedAt, setScreenedAt] = useState<Date | null>(null);
   // Escape hatch for the Finnhub (analyst estimates, earnings-surprise
   // history), daily-bars (realized-vol), and Perplexity-news caches —
@@ -772,6 +792,60 @@ export function ScreenerView({ connected }: Props) {
       cancelled = true;
     };
   }, []);
+
+  // Distinct symbols currently in the candidates list, sorted into a
+  // stable string — recomputes only when the SET of symbols changes,
+  // not on every partial per-row update during Run Analysis (Stage 3/4
+  // passes replace rows in place without adding/removing symbols).
+  const resultSymbolsKey = useMemo(() => {
+    if (!results || results.length === 0) return "";
+    return Array.from(new Set(results.map((r) => r.symbol.toUpperCase()))).sort().join(",");
+  }, [results]);
+
+  // One batched fetch for the whole candidate list's AI-analysis
+  // indicator — never one request per row. Re-fetches only when the
+  // symbol set changes; a save from an already-open row updates
+  // analysisIndex directly via onSaved instead of waiting on this.
+  useEffect(() => {
+    if (!resultSymbolsKey) {
+      setAnalysisIndex(new Map());
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch(
+          `/api/screener/research-analysis?symbols=${encodeURIComponent(resultSymbolsKey)}`,
+          { cache: "no-store" },
+        );
+        if (!res.ok) return;
+        const json = (await res.json()) as {
+          analyses?: Array<{
+            symbol: string;
+            earnings_date: string;
+            checklist_version: string | null;
+            updated_at: string;
+          }>;
+        };
+        if (cancelled) return;
+        const next = new Map<string, SavedAnalysisInfo>();
+        for (const a of json.analyses ?? []) {
+          next.set(`${a.symbol}|${a.earnings_date}`, {
+            symbol: a.symbol,
+            earningsDate: a.earnings_date,
+            updatedAt: a.updated_at,
+            checklistVersion: a.checklist_version,
+          });
+        }
+        setAnalysisIndex(next);
+      } catch (e) {
+        console.warn("[screener] research-analysis batch fetch failed", e);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [resultSymbolsKey]);
 
   async function loadPrevious() {
     setError(null);
@@ -2599,18 +2673,39 @@ export function ScreenerView({ connected }: Props) {
                           </span>
                         </TableCell>
                         <TableCell>
-                          {r.threeLayer ? (
-                            <span
-                              className={cn(
-                                "rounded-md border px-3 py-1 text-base font-bold",
-                                finalGradeBadgeColor(displayFinalGrade(r.threeLayer)),
-                              )}
-                            >
-                              {displayFinalGrade(r.threeLayer)}
-                            </span>
-                          ) : (
-                            <span className="text-base text-muted-foreground">—</span>
-                          )}
+                          <div className="flex items-center gap-1.5">
+                            {r.threeLayer ? (
+                              <span
+                                className={cn(
+                                  "rounded-md border px-3 py-1 text-base font-bold",
+                                  finalGradeBadgeColor(displayFinalGrade(r.threeLayer)),
+                                )}
+                              >
+                                {displayFinalGrade(r.threeLayer)}
+                              </span>
+                            ) : (
+                              <span className="text-base text-muted-foreground">—</span>
+                            )}
+                            {(() => {
+                              const analysis = analysisIndex.get(
+                                `${r.symbol.toUpperCase()}|${r.earningsDate}`,
+                              );
+                              if (!analysis) return null;
+                              return (
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <span className="cursor-help rounded border border-violet-500/40 bg-violet-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-violet-300">
+                                      AI
+                                    </span>
+                                  </TooltipTrigger>
+                                  <TooltipContent>
+                                    Research analysis saved {formatSavedAt(analysis.updatedAt)} ·
+                                    checklist {analysis.checklistVersion ?? "—"}
+                                  </TooltipContent>
+                                </Tooltip>
+                              );
+                            })()}
+                          </div>
                         </TableCell>
                         <TableCell>
                           {r.threeLayer?.referenceStrikeCheck ? (
@@ -2747,6 +2842,13 @@ export function ScreenerView({ connected }: Props) {
                                 })
                               }
                               screenedAt={screenedAt}
+                              onAnalysisSaved={(info) =>
+                                setAnalysisIndex((prev) => {
+                                  const next = new Map(prev);
+                                  next.set(`${info.symbol}|${info.earningsDate}`, info);
+                                  return next;
+                                })
+                              }
                             />
                           </TableCell>
                         </TableRow>
@@ -3168,6 +3270,7 @@ function ExpandedDetail({
   onSelectStrike,
   onResetStrike,
   screenedAt,
+  onAnalysisSaved,
 }: {
   r: ScreenerResult;
   analyzing: boolean;
@@ -3179,6 +3282,11 @@ function ExpandedDetail({
   // batch timestamp, since price isn't stamped per-row. Null in the
   // sandbox tester until its own single-ticker fetch completes.
   screenedAt: Date | null;
+  // Threaded down to the Analysis Dump tab's paste-back component so a
+  // save updates the candidates table's AI-analysis badge immediately.
+  // Omitted at the sandbox call site (that result isn't in the main
+  // candidates list, so there's no row/badge to update).
+  onAnalysisSaved?: (info: SavedAnalysisInfo) => void;
 }) {
   // Live campaign data — hooks must run unconditionally, so this sits
   // above the pre-analysis early return. The Layer 2 card's "your
@@ -3754,6 +3862,7 @@ function ExpandedDetail({
             screenedAt={screenedAt}
             chainCampaigns={chainCampaigns}
             chainCampaignsFailed={chainCampaignsFailed}
+            onAnalysisSaved={onAnalysisSaved}
           />
         </TabsContent>
       </Tabs>
@@ -4234,6 +4343,7 @@ function AnalysisDumpTab({
   screenedAt,
   chainCampaigns,
   chainCampaignsFailed,
+  onAnalysisSaved,
 }: {
   r: ScreenerResult;
   strikeOverride: StrikeOverride | null;
@@ -4242,6 +4352,7 @@ function AnalysisDumpTab({
   screenedAt: Date | null;
   chainCampaigns: ChainCampaign[] | null;
   chainCampaignsFailed: boolean;
+  onAnalysisSaved?: (info: SavedAnalysisInfo) => void;
 }) {
   const companyName = useCompanyName(r.symbol);
   const stageFourStrikes = r.stageFour?.availableStrikes;
@@ -4631,6 +4742,7 @@ function AnalysisDumpTab({
         symbol={r.symbol}
         earningsDate={r.earningsDate}
         snapshot={analysisSnapshot}
+        onSaved={onAnalysisSaved}
       />
     </div>
   );

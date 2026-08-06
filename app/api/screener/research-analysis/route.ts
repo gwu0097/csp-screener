@@ -12,14 +12,55 @@ export const revalidate = 0;
 // fetch-em-history) — research_analyses is shared market analysis, not
 // a per-user table.
 
+const SYMBOL_RE = /^[A-Z][A-Z0-9.-]{0,9}$/;
+const MAX_BATCH_SYMBOLS = 200;
+
 // GET /api/screener/research-analysis?symbol=APP
 // Returns every stored analysis for the symbol (there are at most a
 // handful per ticker) — the History tab matches by earnings_date
 // client-side, and the paste-back UI uses it to detect an existing
 // analysis for the current quarter before overwriting.
+//
+// GET /api/screener/research-analysis?symbols=APP,ELF,TTWO
+// Batch form for the candidates table's AI-analysis indicator — one
+// query for the whole screen instead of one per row. Returns only the
+// columns that badge needs (not raw_paste/analysis_prose); callers
+// still match on BOTH symbol and earnings_date client-side, since this
+// intentionally returns every stored quarter per symbol, not just the
+// current candidate's.
 export async function GET(req: NextRequest) {
+  const symbolsParam = req.nextUrl.searchParams.get("symbols");
+  if (symbolsParam !== null) {
+    const symbols = Array.from(
+      new Set(
+        symbolsParam
+          .split(",")
+          .map((s) => s.trim().toUpperCase())
+          .filter((s) => SYMBOL_RE.test(s)),
+      ),
+    );
+    if (symbols.length === 0) {
+      return NextResponse.json({ analyses: [] });
+    }
+    if (symbols.length > MAX_BATCH_SYMBOLS) {
+      return NextResponse.json(
+        { error: `Too many symbols (max ${MAX_BATCH_SYMBOLS})` },
+        { status: 400 },
+      );
+    }
+    const sb = createServerClient();
+    const res = await sb
+      .from("research_analyses")
+      .select("symbol,earnings_date,checklist_version,updated_at")
+      .in("symbol", symbols);
+    if (res.error) {
+      return NextResponse.json({ error: res.error.message }, { status: 500 });
+    }
+    return NextResponse.json({ analyses: res.data ?? [] });
+  }
+
   const symbol = req.nextUrl.searchParams.get("symbol")?.trim().toUpperCase();
-  if (!symbol || !/^[A-Z][A-Z0-9.-]{0,9}$/.test(symbol)) {
+  if (!symbol || !SYMBOL_RE.test(symbol)) {
     return NextResponse.json({ error: "Invalid or missing symbol" }, { status: 400 });
   }
   const sb = createServerClient();

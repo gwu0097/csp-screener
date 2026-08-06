@@ -27,6 +27,17 @@ type SavedAnalysisRow = {
   updated_at: string;
 };
 
+// Shape handed to the optional onSaved callback — enough for a caller
+// (the candidates table's AI-analysis indicator) to update its own
+// index without re-fetching, and matching what the batch GET endpoint
+// returns per row so both paths populate the same shape.
+export type SavedAnalysisInfo = {
+  symbol: string;
+  earningsDate: string;
+  updatedAt: string;
+  checklistVersion: string | null;
+};
+
 function formatSavedAt(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";
@@ -53,6 +64,7 @@ export function ResearchAnalysisPasteBack({
   symbol,
   earningsDate,
   snapshot,
+  onSaved,
 }: {
   symbol: string;
   earningsDate: string;
@@ -64,6 +76,10 @@ export function ResearchAnalysisPasteBack({
     crushGrade: string | null;
     maxDownsideRatio: number | null;
   };
+  // Fires after a successful save with exactly what the server
+  // persisted — lets the candidates table light up its AI-analysis
+  // badge immediately, without a page reload or a redundant re-fetch.
+  onSaved?: (info: SavedAnalysisInfo) => void;
 }) {
   const [raw, setRaw] = useState("");
   const [parsed, setParsed] = useState<ParsedResearchAnalysis | null>(null);
@@ -180,6 +196,12 @@ export function ResearchAnalysisPasteBack({
         const row = body.analysis as SavedAnalysisRow;
         setSavedRecord(row);
         setRaw(row.raw_paste ?? "");
+        onSaved?.({
+          symbol: row.symbol,
+          earningsDate: row.earnings_date,
+          updatedAt: row.updated_at,
+          checklistVersion: row.checklist_version,
+        });
       }
       setSaved(true);
       setParsed(null);
