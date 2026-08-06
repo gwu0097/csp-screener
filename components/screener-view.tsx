@@ -54,6 +54,7 @@ import {
   buildDictionaryInjectionSection,
   type ObservationDictionaryEntry,
 } from "@/lib/observation-dictionary";
+import { formatCapturedLine, isChainStale } from "@/lib/dump-capture-timing";
 import {
   interpretError,
   interpretFetchError,
@@ -3324,6 +3325,43 @@ function ExpandedDetail({
   // come from the payload; a re-analyze refreshes those.
   const { campaigns: chainCampaigns, failed: chainCampaignsFailed } =
     useChainCampaigns(r.symbol);
+
+  // Chain refresh state lives HERE, not in OptionsChainTab, so both it
+  // and AnalysisDumpTab (siblings below) read the exact same refreshed
+  // snapshot. Previously this was OptionsChainTab's own local state —
+  // invisible to the dump, which kept reading the stale screener-run
+  // r.stageFour.availableStrikes even after a chain refresh. Also
+  // hooks-must-run-unconditionally, so this sits above the early return
+  // same as chainCampaigns above.
+  const [refreshedChain, setRefreshedChain] = useState<RefreshedChain | null>(null);
+  const [chainRefreshing, setChainRefreshing] = useState(false);
+  const [chainRefreshError, setChainRefreshError] = useState<string | null>(null);
+
+  async function refreshChain() {
+    if (!r.expiry) return;
+    setChainRefreshing(true);
+    setChainRefreshError(null);
+    try {
+      const res = await fetch("/api/screener/refresh-chain", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ symbol: r.symbol, expiry: r.expiry }),
+        cache: "no-store",
+      });
+      const json = await res.json().catch(() => ({}) as Record<string, unknown>);
+      if (!res.ok) {
+        setChainRefreshError(typeof json.error === "string" ? json.error : `HTTP ${res.status}`);
+        return;
+      }
+      const body = json as RefreshedChain;
+      setRefreshedChain({ strikes: body.strikes, asOf: body.asOf });
+    } catch (e) {
+      setChainRefreshError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setChainRefreshing(false);
+    }
+  }
+
   const tl = r.threeLayer;
   if (!tl) {
     // Before Run Analysis has populated threeLayer, fall back to the
@@ -3874,6 +3912,10 @@ function ExpandedDetail({
             vix={tl.regimeFactors.vix}
             penalty={tl.regimeFactors.gradePenalty}
             personalModifier={personalModifier}
+            refreshedChain={refreshedChain}
+            refreshing={chainRefreshing}
+            refreshError={chainRefreshError}
+            onRefreshChain={refreshChain}
           />
         </TabsContent>
 
@@ -3891,6 +3933,10 @@ function ExpandedDetail({
             chainCampaigns={chainCampaigns}
             chainCampaignsFailed={chainCampaignsFailed}
             onAnalysisSaved={onAnalysisSaved}
+            refreshedChain={refreshedChain}
+            chainRefreshing={chainRefreshing}
+            chainRefreshError={chainRefreshError}
+            onRefreshChain={refreshChain}
           />
         </TabsContent>
       </Tabs>
@@ -3982,6 +4028,10 @@ function OptionsChainTab({
   vix,
   penalty,
   personalModifier,
+  refreshedChain,
+  refreshing,
+  refreshError,
+  onRefreshChain,
 }: {
   r: ScreenerResult;
   strikeOverride: StrikeOverride | null;
@@ -3991,41 +4041,17 @@ function OptionsChainTab({
   vix: number | null;
   penalty: number;
   personalModifier: "boost" | "drop" | null;
+  // Lifted to the shared parent (ExpandedDetail) so AnalysisDumpTab reads
+  // the exact same refreshed snapshot instead of the stale screener-run
+  // one — see ExpandedDetail's refreshChain().
+  refreshedChain: RefreshedChain | null;
+  refreshing: boolean;
+  refreshError: string | null;
+  onRefreshChain: () => void;
 }) {
   const baseStrikes = r.stageFour?.availableStrikes ?? [];
   const recommended = recommendedStrikeFor(r);
-  const [refreshed, setRefreshed] = useState<RefreshedChain | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
-  const [refreshError, setRefreshError] = useState<string | null>(null);
-
-  async function refreshChain() {
-    if (!r.expiry) return;
-    setRefreshing(true);
-    setRefreshError(null);
-    try {
-      const res = await fetch("/api/screener/refresh-chain", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ symbol: r.symbol, expiry: r.expiry }),
-        cache: "no-store",
-      });
-      const json = await res.json().catch(() => ({}) as Record<string, unknown>);
-      if (!res.ok) {
-        setRefreshError(
-          typeof json.error === "string" ? json.error : `HTTP ${res.status}`,
-        );
-        return;
-      }
-      const body = json as RefreshedChain;
-      setRefreshed({ strikes: body.strikes, asOf: body.asOf });
-    } catch (e) {
-      setRefreshError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setRefreshing(false);
-    }
-  }
-
-  const availableStrikes = refreshed?.strikes ?? baseStrikes;
+  const availableStrikes = refreshedChain?.strikes ?? baseStrikes;
 
   // Same fields EditableStrikeCell.commit() writes for a typed strike —
   // clicking a chain row is the same override, just sourced from a
@@ -4100,15 +4126,15 @@ function OptionsChainTab({
         <div className="text-xs text-muted-foreground">
           Puts only · {band.length} strikes around the recommended strike
           {recommended !== null ? ` (${fmtPrice(recommended)})` : ""}.
-          {refreshed && (
+          {refreshedChain && (
             <span className="ml-1">
-              Chain as of {new Date(refreshed.asOf).toLocaleTimeString()}.
+              Chain as of {new Date(refreshedChain.asOf).toLocaleTimeString()}.
             </span>
           )}
         </div>
         <button
           type="button"
-          onClick={refreshChain}
+          onClick={onRefreshChain}
           disabled={refreshing}
           className={cn(
             "inline-flex shrink-0 items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground transition hover:text-foreground",
@@ -4459,6 +4485,10 @@ function AnalysisDumpTab({
   chainCampaigns,
   chainCampaignsFailed,
   onAnalysisSaved,
+  refreshedChain,
+  chainRefreshing,
+  chainRefreshError,
+  onRefreshChain,
 }: {
   r: ScreenerResult;
   strikeOverride: StrikeOverride | null;
@@ -4468,12 +4498,29 @@ function AnalysisDumpTab({
   chainCampaigns: ChainCampaign[] | null;
   chainCampaignsFailed: boolean;
   onAnalysisSaved?: (info: SavedAnalysisInfo) => void;
+  // Shared with OptionsChainTab via ExpandedDetail (their common parent)
+  // so a refresh clicked on either tab is visible to both — see
+  // ExpandedDetail's refreshChain(). Falls back to the screener-run
+  // snapshot (r.stageFour.availableStrikes) when no refresh has happened
+  // yet, exactly like OptionsChainTab's own fallback.
+  refreshedChain: RefreshedChain | null;
+  chainRefreshing: boolean;
+  chainRefreshError: string | null;
+  onRefreshChain: () => void;
 }) {
   const companyName = useCompanyName(r.symbol);
   const priceAction = usePriceAction(r.symbol, r.price);
   const observationDictionary = useObservationDictionary();
   const stageFourStrikes = r.stageFour?.availableStrikes;
-  const availableStrikes = useMemo(() => stageFourStrikes ?? [], [stageFourStrikes]);
+  const availableStrikes = useMemo(
+    () => refreshedChain?.strikes ?? stageFourStrikes ?? [],
+    [refreshedChain, stageFourStrikes],
+  );
+  // Chain capture time: the refresh's own asOf when a refresh has
+  // happened this session, else the screener-run's batch timestamp —
+  // the same instant stageFour.availableStrikes was populated at (there
+  // is no separate per-chain timestamp on the screener-run snapshot).
+  const chainCapturedAt = refreshedChain ? new Date(refreshedChain.asOf) : screenedAt;
   const recommended = recommendedStrikeFor(r);
   const effectiveStrike = strikeOverride?.strike ?? recommended;
   const effectiveDelta = strikeOverride?.delta ?? r.stageFour?.delta ?? null;
@@ -4514,11 +4561,15 @@ function AnalysisDumpTab({
 
     // ---------- HEADER ----------
     section("HEADER");
+    const nowMs = Date.now();
     push(`Ticker: ${r.symbol}`);
     push(`Company: ${companyName ?? "—"}`);
-    push(
-      `Spot: $${dumpNum(r.price)} (captured: ${screenedAt ? screenedAt.toISOString() : "unknown — no screen timestamp available"})`,
-    );
+    push(`Spot: $${dumpNum(r.price)}`);
+    push(formatCapturedLine("Spot captured", screenedAt, nowMs));
+    push(formatCapturedLine("Chain captured", chainCapturedAt, nowMs));
+    if (isChainStale(chainCapturedAt, nowMs)) {
+      push("STALE CHAIN — bid/ask/spread flags below may not reflect current market.");
+    }
     push(`Earnings: ${r.earningsDate} (${r.earningsTiming === "BMO" ? "before market open" : "after market close"})`);
     push(`DTE: ${r.daysToExpiry} (expiry ${r.expiry}, ${r.expirySource})`);
     push(
@@ -4797,7 +4848,7 @@ function AnalysisDumpTab({
     push(ANALYSIS_TEMPLATE);
 
     return lines.join("\n").trim();
-  }, [r, tl, d, companyName, priceAction, observationDictionary, screenedAt, effectiveStrike, effectiveDelta, effectivePremium, effectivePop, selectedRow, recommended, availableStrikes, spreadFlagPct, chainCampaigns, chainCampaignsFailed]);
+  }, [r, tl, d, companyName, priceAction, observationDictionary, screenedAt, chainCapturedAt, effectiveStrike, effectiveDelta, effectivePremium, effectivePop, selectedRow, recommended, availableStrikes, spreadFlagPct, chainCampaigns, chainCampaignsFailed]);
 
   // Setup values snapshotted at analysis-save time (research_analyses
   // is never joined to live data later — spot/EM/grade all drift
@@ -4827,8 +4878,49 @@ function AnalysisDumpTab({
     }
   }
 
+  const chainStale = isChainStale(chainCapturedAt, Date.now());
+
   return (
     <div className="space-y-3">
+      {/* Chain status — reuses ExpandedDetail's refreshChain (same fetch
+          the Options Chain tab's own Refresh Chain button uses), so the
+          dump can be brought current without switching tabs. See the
+          HEADER section above for the exact captured-at/staleness text
+          this mirrors. */}
+      <div
+        className={cn(
+          "flex flex-wrap items-center gap-2 rounded border px-2 py-1.5 text-xs",
+          chainStale ? "border-amber-500/40 bg-amber-500/10 text-amber-200" : "border-border bg-background/40 text-muted-foreground",
+        )}
+      >
+        <span>
+          Chain {refreshedChain ? "refreshed" : "as of screener run"}{" "}
+          {chainCapturedAt ? new Date(chainCapturedAt).toLocaleTimeString() : "— unknown"}
+          {chainStale ? " — STALE, may not reflect current market" : ""}
+        </span>
+        <button
+          type="button"
+          onClick={onRefreshChain}
+          disabled={chainRefreshing}
+          className={cn(
+            "inline-flex shrink-0 items-center gap-1 rounded px-2 py-1 transition hover:text-foreground",
+            chainRefreshing && "opacity-60",
+          )}
+        >
+          {chainRefreshing ? (
+            <>
+              <Loader2 className="h-3 w-3 animate-spin" />
+              Refreshing…
+            </>
+          ) : (
+            <>
+              <RefreshCcw className="h-3 w-3" />
+              Refresh chain
+            </>
+          )}
+        </button>
+        {chainRefreshError && <span className="text-red-400">Refresh failed: {chainRefreshError}</span>}
+      </div>
       <div className="flex flex-wrap items-center gap-2 rounded border border-border bg-background/40 px-2 py-1.5 text-sm">
         <label className="flex items-center gap-1.5">
           <span className="text-muted-foreground">Strike</span>
