@@ -17,7 +17,7 @@
 // numeric grade, never vetoes a trade, and the two are never merged or
 // averaged. See lib/research-analysis-parser.ts for how a pasted
 // response gets parsed back into structured fields.
-export const ANALYSIS_TEMPLATE_VERSION = "v1";
+export const ANALYSIS_TEMPLATE_VERSION = "v2";
 
 export const ANALYSIS_TEMPLATE = `=== RESEARCH ANALYSIS REQUEST ===
 
@@ -30,7 +30,7 @@ suggests — the things that would cause the market's own pricing to be wrong.
 The reference strike for this analysis is 2x EM below spot, regardless of
 what strike I may actually trade.
 
-PART 1 — CHECKLIST (v1)
+PART 1 — CHECKLIST (v2)
 Check each item. Report FIRED, CLEAR, or UNKNOWN with one line of evidence.
 "UNKNOWN" is a valid and useful answer — do not guess.
 
@@ -90,6 +90,21 @@ PART 4 — HONEST UNCERTAINTY
 What could you not determine? What are you least confident about? Where
 might you be wrong?
 
+PART 5 — DATA GAPS TO FIX
+List specifically what would need to be backfilled or corrected in the app
+for this analysis to be better next quarter. Be concrete: which quarters,
+which fields, which source. If the data is complete, say so.
+
+PART 6 — RECOMMENDATION
+Given everything above, state plainly:
+  - Would you take this trade at the reference strike? Take / take smaller /
+    pass — and why, in one or two sentences.
+  - If the reference strike is wrong, name the strike that would work and
+    what it costs in premium.
+  - What single thing would change your answer?
+This is advisory. It does not override the numeric grade and it does not
+veto anything.
+
 === RESPONSE FORMAT ===
 Begin your response with exactly this block, then prose:
 
@@ -99,7 +114,7 @@ EARNINGS_DATE: <YYYY-MM-DD>
 FLAGS_FIRED: <comma-separated from the vocabulary above, or \`none\`>
 FLAGS_UNKNOWN: <comma-separated, or \`none\`>
 CANDIDATE_FLAGS: <new risks you'd propose adding to the checklist, or \`none\`>
-CHECKLIST_VERSION: v1
+CHECKLIST_VERSION: v2
 === END METADATA ===
 
 Do not output a letter grade.`;
