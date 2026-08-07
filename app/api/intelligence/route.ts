@@ -207,6 +207,38 @@ export async function GET(req: NextRequest) {
     }
   }
 
+  // Still-open positions with banked realized P&L from a partial close
+  // (some contracts bought back / sold, the rest still open). Fetched
+  // here — earlier than the "partial closes" display section further
+  // down — because the equity curve needs it too: these fills feed the
+  // Total series (bucketed by their own fill_date, see below) but never
+  // the Realized series, matching the same "resolved trades only" rule
+  // win_rate/ROC/expectancy already follow. The display section reuses
+  // this array instead of re-querying.
+  let stillOpenQuery = sb
+    .from("positions")
+    .select(
+      "id,symbol,strike,expiry,total_contracts,avg_premium_sold,opened_date,closed_date,realized_pnl,entry_final_grade,entry_crush_grade,entry_opportunity_grade,entry_iv_edge,entry_em_pct,entry_vix,status,broker,position_type,assignment_source_id,entry_stock_price,direction,entry_dte,updated_at",
+    )
+    .eq("user_id", userId)
+    .eq("status", "open");
+  if (broker) stillOpenQuery = stillOpenQuery.eq("broker", broker);
+  const stillOpenRes = await stillOpenQuery;
+  if (stillOpenRes.error) {
+    return NextResponse.json({ error: stillOpenRes.error.message }, { status: 500 });
+  }
+  type StillOpenRow = PositionRow & { updated_at: string };
+  // Filter in JS — matches the SQL guard: realized_pnl IS NOT NULL AND
+  // realized_pnl != 0 AND closed_date IS NULL. status='open' rows
+  // should already have a null closed_date, but don't assume it.
+  const stillOpenPartialRows = ((stillOpenRes.data ?? []) as StillOpenRow[]).filter(
+    (p) =>
+      p.closed_date === null &&
+      p.realized_pnl !== null &&
+      Math.abs(Number(p.realized_pnl)) > 0.001,
+  );
+  const stillOpenPartialIds = new Set(stillOpenPartialRows.map((p) => p.id));
+
   // In-range: filter by closed_date within [from, to] inclusive.
   const windowed = allClosed.filter((p) => {
     const cd = p.closed_date ?? "";
@@ -284,14 +316,24 @@ export async function GET(req: NextRequest) {
     tradeCount: number;
     trades: Array<{ symbol: string; pnl: number }>;
   };
-  const bucketMap = new Map<string, BucketAcc>();
+  // Two parallel bucket maps. Realized mirrors the pre-existing
+  // behavior exactly (resolved trades only — must keep matching
+  // combined_realized_pnl / win_rate / ROC's "resolved only" scope).
+  // Total additionally includes still-open positions' already-banked
+  // partial-close fills, bucketed on their own fill_date — that money
+  // is real and current, but the position hasn't fully resolved, so it
+  // stays out of Realized/win_rate/ROC/best-worst by the same rule that
+  // already excludes it from those (see stillOpenPartialRows above).
+  const bucketMapRealized = new Map<string, BucketAcc>();
+  const bucketMapTotal = new Map<string, BucketAcc>();
   const pushIntoBucket = (
+    map: Map<string, BucketAcc>,
     closedDate: string,
     pnl: number,
     label: string,
   ) => {
     const key = bucketKeyFor(closedDate, granularity);
-    let b = bucketMap.get(key);
+    let b = map.get(key);
     if (!b) {
       b = {
         bucketKey: key,
@@ -300,34 +342,44 @@ export async function GET(req: NextRequest) {
         tradeCount: 0,
         trades: [],
       };
-      bucketMap.set(key, b);
+      map.set(key, b);
     }
     b.tradePnl += pnl;
     b.tradeCount += 1;
     b.trades.push({ symbol: label, pnl });
   };
   // Fill-level bucketing for fully-closed option positions + stock
-  // sales. Partial closes inside the window land on their OWN
-  // fill_date rather than getting lumped onto the position's final
-  // closed_date. expired_worthless + assigned positions stay
-  // position-level because the expire / assign flows never insert
-  // close fills — their P&L lives on the row, not in the fills
-  // table.
+  // sales + still-open positions' banked partial closes. Partial
+  // closes land on their OWN fill_date rather than getting lumped onto
+  // the position's final closed_date (or, for still-open positions,
+  // not appearing at all until full resolution). expired_worthless +
+  // assigned positions stay position-level because the expire / assign
+  // flows never insert close fills — their P&L lives on the row, not
+  // in the fills table.
   //
-  // Old vs new total can diverge ONLY when a fully-closed position
-  // has partial-close fills straddling the window boundary. The
-  // log line below prints both so it's visible.
+  // Old vs new total can diverge ONLY when a fully-closed position has
+  // partial-close fills straddling the window boundary. The log line
+  // below prints both (Realized-scoped, unchanged) so it's visible.
   const fillLevelOptionPositions = allClosed.filter((p) => p.status === "closed");
   const rowLevelOptionPositions = allClosed.filter((p) => p.status !== "closed");
   const parentById = new Map<string, PositionRow>();
   for (const p of fillLevelOptionPositions) parentById.set(p.id, p);
   for (const p of closedStocks) parentById.set(p.id, p);
+  for (const p of stillOpenPartialRows) parentById.set(p.id, p);
 
   let fillLevelOptionsTotal = 0;
   let fillLevelStocksTotal = 0;
+  // Sum of pnl from stillOpenPartialRows' fills that fall inside
+  // [from, to] — i.e. the slice of "current banked-but-unresolved
+  // money" already represented in equity_curve_total's dated buckets.
+  // The StatCard/Now-point client logic needs this to avoid counting
+  // the same dollars twice: once here (on their real date) and again
+  // via the undated, non-windowed total_partial_pnl snapshot.
+  let partialClosePnlInWindow = 0;
   const fillLevelIds = [
     ...fillLevelOptionPositions.map((p) => p.id),
     ...closedStocks.map((p) => p.id),
+    ...stillOpenPartialRows.map((p) => p.id),
   ];
   if (fillLevelIds.length > 0) {
     const fillsRes = await sb
@@ -351,6 +403,7 @@ export async function GET(req: NextRequest) {
       for (const f of fillRows) {
         const parent = parentById.get(f.position_id);
         if (!parent) continue;
+        const isStillOpenPartial = stillOpenPartialIds.has(f.position_id);
         const isStock =
           parent.position_type === "stock_long" ||
           parent.position_type === "stock_short";
@@ -361,7 +414,7 @@ export async function GET(req: NextRequest) {
           // value and contracts is the share count.
           const basis = Number(parent.entry_stock_price ?? 0);
           pnl = (Number(f.premium) - basis) * Number(f.contracts);
-          fillLevelStocksTotal += pnl;
+          if (!isStillOpenPartial) fillLevelStocksTotal += pnl;
         } else {
           // Options: avg open premium against this close fill's
           // premium, sign-flipped for longs. Uses the row's stored
@@ -375,21 +428,33 @@ export async function GET(req: NextRequest) {
               ? Number(f.premium) - avg
               : avg - Number(f.premium);
           pnl = diff * Number(f.contracts) * 100;
-          fillLevelOptionsTotal += pnl;
+          if (!isStillOpenPartial) fillLevelOptionsTotal += pnl;
         }
-        pushIntoBucket(f.fill_date, pnl, isStock ? `${parent.symbol} (stock)` : parent.symbol);
+        const label = isStock ? `${parent.symbol} (stock)` : parent.symbol;
+        // Total always gets it. Realized only gets it when the
+        // position has actually resolved — still-open partial closes
+        // are current, banked, real money, but not a finished trade.
+        pushIntoBucket(bucketMapTotal, f.fill_date, pnl, label);
+        if (isStillOpenPartial) {
+          partialClosePnlInWindow += pnl;
+        } else {
+          pushIntoBucket(bucketMapRealized, f.fill_date, pnl, label);
+        }
       }
     }
   }
 
   // expired_worthless + assigned (no fills) — bucket on closed_date.
+  // Always fully resolved by definition (drawn from allClosed, which
+  // excludes status='open'), so both series get it.
   let rowLevelTotal = 0;
   for (const p of rowLevelOptionPositions) {
     if (!p.closed_date) continue;
     if (p.closed_date < from || p.closed_date > to) continue;
     const pnl = Number(p.realized_pnl ?? 0);
     rowLevelTotal += pnl;
-    pushIntoBucket(p.closed_date, pnl, p.symbol);
+    pushIntoBucket(bucketMapRealized, p.closed_date, pnl, p.symbol);
+    pushIntoBucket(bucketMapTotal, p.closed_date, pnl, p.symbol);
   }
 
   const oldEquityTotal =
@@ -409,33 +474,39 @@ export async function GET(req: NextRequest) {
   if (granularity === "day") {
     let cursor = from;
     while (cursor <= to) {
-      if (!bucketMap.has(cursor)) {
-        bucketMap.set(cursor, {
-          bucketKey: cursor,
-          label: labelFor(cursor, "day"),
-          tradePnl: 0,
-          tradeCount: 0,
-          trades: [],
-        });
+      for (const map of [bucketMapRealized, bucketMapTotal]) {
+        if (!map.has(cursor)) {
+          map.set(cursor, {
+            bucketKey: cursor,
+            label: labelFor(cursor, "day"),
+            tradePnl: 0,
+            tradeCount: 0,
+            trades: [],
+          });
+        }
       }
       cursor = addDaysIso(cursor, 1);
     }
   }
 
-  const sortedKeys = Array.from(bucketMap.keys()).sort();
-  let running = 0;
-  const equity_curve = sortedKeys.map((k) => {
-    const b = bucketMap.get(k)!;
-    running += b.tradePnl;
-    return {
-      bucketKey: b.bucketKey,
-      label: b.label,
-      tradePnl: b.tradePnl,
-      cumulativePnl: running,
-      tradeCount: b.tradeCount,
-      trades: b.trades,
-    };
-  });
+  function buildCurve(map: Map<string, BucketAcc>) {
+    const sortedKeys = Array.from(map.keys()).sort();
+    let running = 0;
+    return sortedKeys.map((k) => {
+      const b = map.get(k)!;
+      running += b.tradePnl;
+      return {
+        bucketKey: b.bucketKey,
+        label: b.label,
+        tradePnl: b.tradePnl,
+        tradeCount: b.tradeCount,
+        trades: b.trades,
+        cumulativePnl: Math.round(running * 100) / 100,
+      };
+    });
+  }
+  const equity_curve = buildCurve(bucketMapRealized);
+  const equity_curve_total = buildCurve(bucketMapTotal);
 
   // ---------- Section 2: ticker rankings (uses ALL closed within broker filter) ----------
   type TickerBucket = {
@@ -894,41 +965,16 @@ export async function GET(req: NextRequest) {
   // Surfaced separately (NOT rolled into total_pnl / win_rate /
   // ROC) because the position hasn't fully resolved yet and the
   // realized number is provisional. Broker filter respected.
-  let partialQuery = sb
-    .from("positions")
-    .select(
-      "id,symbol,strike,broker,position_type,realized_pnl,total_contracts,updated_at,closed_date",
-    )
-    .eq("user_id", userId)
-    .eq("status", "open");
-  if (broker) partialQuery = partialQuery.eq("broker", broker);
-  const partialRes = await partialQuery;
-  type PartialRow = {
-    id: string;
-    symbol: string;
-    strike: number | null;
-    broker: string | null;
-    position_type: string | null;
-    realized_pnl: number;
-    total_contracts: number | null;
-    updated_at: string;
-    closed_date: string | null;
-  };
-  // Filter in JS — the custom REST client doesn't expose .not() /
-  // .neq() for null + zero checks together. Match the SQL guard:
-  // realized_pnl IS NOT NULL AND realized_pnl != 0 AND closed_date
-  // IS NULL.
-  const partialRows = ((partialRes.data ?? []) as PartialRow[]).filter(
-    (p) =>
-      p.closed_date === null &&
-      p.realized_pnl !== null &&
-      Math.abs(Number(p.realized_pnl)) > 0.001,
-  );
+  // Reuses stillOpenPartialRows (fetched earlier, same filter — status
+  // 'open' + nonzero realized_pnl + null closed_date) rather than
+  // re-querying; that array already feeds the equity curve's Total
+  // series with the exact same position set, so this can't drift from
+  // it.
 
   // Compute remaining contracts (or shares) per position from fills.
   const remainingByPosition = new Map<string, number>();
-  if (partialRows.length > 0) {
-    const ids = partialRows.map((p) => p.id);
+  if (stillOpenPartialRows.length > 0) {
+    const ids = stillOpenPartialRows.map((p) => p.id);
     const fillsRes = await sb
       .from("fills")
       .select("position_id,fill_type,contracts")
@@ -966,7 +1012,7 @@ export async function GET(req: NextRequest) {
     remainingContracts: number;
     updatedAt: string;
   };
-  const partial_closes: PartialClose[] = partialRows
+  const partial_closes: PartialClose[] = stillOpenPartialRows
     .map((p) => {
       const remaining = remainingByPosition.get(p.id) ?? 0;
       const pt =
@@ -1014,6 +1060,19 @@ export async function GET(req: NextRequest) {
       worst_trade: totals.worst,
     },
     equity_curve,
+    // Total-mode series: same bucketing, but still-open positions'
+    // already-banked partial-close fills are included on their own
+    // fill_date (equity_curve stays resolved-trades-only, unchanged).
+    equity_curve_total,
+    // Sum of still-open partial-close pnl whose fill_date falls inside
+    // [from, to] — i.e. the slice already reflected in
+    // equity_curve_total's dated buckets. The client subtracts this
+    // from total_partial_pnl (which is a non-windowed "right now"
+    // snapshot) before adding the remainder to the "Now" point, so
+    // in-window banked money isn't counted both on its real date and
+    // again in the snapshot.
+    partial_close_pnl_in_window:
+      Math.round(partialClosePnlInWindow * 100) / 100,
     ticker_rankings,
     patterns: {
       enabled: patternsEnabled,

@@ -160,6 +160,15 @@ export type IntelligenceResponse = {
     worst_trade: { symbol: string; pnl: number; roc: number | null } | null;
   };
   equity_curve: EquityPoint[];
+  // Total-mode series — same bucketing as equity_curve, but includes
+  // still-open positions' already-banked partial-close fills on their
+  // own fill_date. equity_curve itself stays resolved-trades-only.
+  equity_curve_total?: EquityPoint[];
+  // Slice of total_partial_pnl (below) whose contributing fills fall
+  // inside the current date_range — already reflected in
+  // equity_curve_total's dated buckets. Used to avoid double-counting
+  // that slice again in the "Now" point's snapshot.
+  partial_close_pnl_in_window?: number;
   em_calibration: EmCalibrationRow[];
   paired_assignments: PairedAssignment[];
   partial_closes?: PartialClose[];
@@ -714,35 +723,71 @@ export function PerformanceSection({
         : `${p.symbol} $${p.strike}P ×${p.remainingContracts} ${unit} left (banked)`;
       return { label, pnl: p.realizedPnl };
     });
+  // Total mode's own equity series — same historical bucketing as
+  // equity_curve, but still-open positions' banked partial-close fills
+  // land on their own fill_date instead of being invisible until the
+  // position fully resolves. equity_curve (Realized) is untouched by
+  // design — it must keep matching combined_realized_pnl exactly, the
+  // same "resolved trades only" scope as win_rate/ROC/expectancy.
+  // Falls back to equity_curve for any API response predating this
+  // field (mid-deploy race), which just means Total briefly looks like
+  // Realized rather than erroring.
+  const equityCurveTotal = data.equity_curve_total ?? equity_curve;
+  const baseCurve = mode === "total" ? equityCurveTotal : equity_curve;
+  // The slice of totalPartialClosePnl whose fills already landed in
+  // equityCurveTotal's dated buckets (fill_date inside the current
+  // window). Only the LEFTOVER — banked money whose fill happened
+  // outside the window, or when the server response predates this
+  // field — still needs adding at the "Now" point. Without this
+  // subtraction, in-window banked money would count twice: once on its
+  // real date, once again in the snapshot.
+  const partialClosePnlInWindow = data.partial_close_pnl_in_window ?? 0;
+  const partialCloseLeftoverForNow = totalPartialClosePnl - partialClosePnlInWindow;
   const lastCumulative =
-    equity_curve.length > 0
-      ? equity_curve[equity_curve.length - 1].cumulativePnl
-      : 0;
-  const totalDelta = totalUnrealized + totalPartialClosePnl;
+    baseCurve.length > 0 ? baseCurve[baseCurve.length - 1].cumulativePnl : 0;
+  // Two different deltas on purpose. The StatCard headline (grandTotal
+  // below) is a single "current standing" snapshot — it always wants
+  // the FULL banked amount, regardless of how the curve happens to
+  // slice it across dates. The curve's synthetic "Now" point instead
+  // wants only the LEFTOVER (nowPointDelta) — the in-window portion is
+  // already sitting in one of baseCurve's earlier buckets via
+  // lastCumulative, so adding the full amount again here would double
+  // it. Conflating these into one variable was the bug this comment is
+  // here to prevent reintroducing.
+  const grandTotalDelta = totalUnrealized + totalPartialClosePnl;
+  const nowPointDelta = totalUnrealized + partialCloseLeftoverForNow;
+  // Only surface still-open positions' banked-money lines in the "Now"
+  // breakdown when there's genuinely a leftover to attribute there —
+  // if every fill landed inside the window, that money is already
+  // fully visible on its own historical bucket (equityCurveTotal), and
+  // repeating it here (even at the correct, already-fixed $0 total)
+  // would read as a second, redundant mention of the same position.
+  const nowPartialCloseLines =
+    partialCloseLeftoverForNow !== 0 ? partialClosePositionLines : [];
   const displayCurve: ChartPoint[] =
-    mode === "total" && unrealized && equity_curve.length > 0
+    mode === "total" && unrealized && baseCurve.length > 0
       ? [
-          ...equity_curve,
+          ...baseCurve,
           {
             bucketKey: "now",
             label: "Now",
-            tradePnl: totalDelta,
-            cumulativePnl: lastCumulative + totalDelta,
+            tradePnl: nowPointDelta,
+            cumulativePnl: lastCumulative + nowPointDelta,
             tradeCount:
               unrealized.optionsCount +
               unrealized.stockCount +
-              partialClosePositionLines.length,
+              nowPartialCloseLines.length,
             trades: [] as Array<{ symbol: string; pnl: number }>,
             nowDetails: {
-              lines: [...unrealized.positionLines, ...partialClosePositionLines],
+              lines: [...unrealized.positionLines, ...nowPartialCloseLines],
               unrealized: totalUnrealized,
-              partialClose: totalPartialClosePnl,
+              partialClose: partialCloseLeftoverForNow,
               realized: combinedRealized,
             },
           },
         ]
-      : equity_curve;
-  const grandTotal = combinedRealized + (mode === "total" ? totalDelta : 0);
+      : baseCurve;
+  const grandTotal = combinedRealized + (mode === "total" ? grandTotalDelta : 0);
   const grandTotalColor =
     grandTotal >= 0 ? "text-emerald-300" : "text-rose-300";
   const partialCloseColor =
