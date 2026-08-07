@@ -266,6 +266,20 @@ export function presetToRange(key: PresetKey, today: Date = new Date()): DateRan
   return { from: "2020-01-01", to: todayStr };
 }
 
+// Which named preset (if any) produced this exact range — matches by
+// recomputing each preset's range against "now" and comparing. Returns
+// null for a manually-typed/custom range that doesn't match any
+// preset. Shared by DateRangeControls (button highlighting) and the
+// equity-curve tooltip (per-fill vs. consolidated-by-symbol decision)
+// so the two can't disagree about which preset is active.
+export function presetForRange(range: DateRange): PresetKey | null {
+  for (const p of PRESET_OPTIONS) {
+    const r = presetToRange(p.value);
+    if (r.from === range.from && r.to === range.to) return p.value;
+  }
+  return null;
+}
+
 // -------- Formatters + color helpers --------
 
 export function fmtMoney(n: number | null | undefined, signed = false): string {
@@ -365,13 +379,7 @@ export function DateRangeControls({
   // Derive the active preset by matching the current range against each
   // preset's computed range. If nothing matches (manual edit), no preset
   // is highlighted.
-  const activePreset = useMemo<PresetKey | null>(() => {
-    for (const p of PRESET_OPTIONS) {
-      const r = presetToRange(p.value);
-      if (r.from === range.from && r.to === range.to) return p.value;
-    }
-    return null;
-  }, [range.from, range.to]);
+  const activePreset = useMemo<PresetKey | null>(() => presetForRange(range), [range]);
 
   function pickPreset(key: PresetKey) {
     onRangeChange(presetToRange(key));
@@ -469,6 +477,28 @@ export function PerformanceSection({
   broker?: BrokerFilter;
 }) {
   const { stats, equity_curve } = data;
+  // Drives the equity-curve tooltip's per-fill-vs-consolidated-by-
+  // symbol decision. Named presets decide it directly — Today/Week
+  // always stay per-fill, Month/Quarter/YTD/All Time always
+  // consolidate — rather than going through a day-count threshold,
+  // because "Month" resolves to month-TO-DATE (start of month through
+  // today): early in a month that can be under a week wide, which
+  // would otherwise wrongly fall through to per-fill on, say, the 3rd
+  // of the month. A genuinely custom range (no matching preset) falls
+  // back to the day-count rule, exactly as specified for "any custom
+  // range beyond 7 days".
+  const activePreset = presetForRange(data.date_range);
+  const windowDays = Math.floor(
+    (Date.parse(data.date_range.to + "T00:00:00Z") -
+      Date.parse(data.date_range.from + "T00:00:00Z")) /
+      86400000,
+  );
+  const shouldConsolidateTooltip =
+    activePreset === "today" || activePreset === "week"
+      ? false
+      : activePreset !== null
+        ? true
+        : windowDays > TOOLTIP_CONSOLIDATE_THRESHOLD_DAYS;
   // Combined headline = options + closed stocks; per-component
   // colors track their own sign. The fallback handles older API
   // responses that didn't carry the combined fields.
@@ -1067,7 +1097,7 @@ export function PerformanceSection({
                 <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
                 <XAxis dataKey="label" stroke="#71717a" tick={{ fontSize: 11 }} />
                 <YAxis stroke="#71717a" tick={{ fontSize: 11 }} />
-                <Tooltip content={<EquityTooltip />} />
+                <Tooltip content={<EquityTooltip consolidate={shouldConsolidateTooltip} />} />
                 <Area
                   type="monotone"
                   dataKey="cumulativePnl"
@@ -1240,15 +1270,62 @@ type NowDetails = {
 };
 type ChartPoint = EquityPoint & { nowDetails?: NowDetails };
 
-// Rich tooltip for the equity curve — lists every trade inside the
-// bucket, then shows bucket total + running cumulative P&L. Recharts
-// passes `payload` with the raw data point at payload[0].payload.
+const DEFAULT_TOOLTIP_MAX_ROWS = 15;
+// Consolidate the per-fill list once the selected window exceeds one
+// week — Today/Week stay per-fill (seeing individual fills matters at
+// that granularity), Month/Quarter/YTD/All Time and any custom range
+// this wide group by symbol instead, since a single busy day can carry
+// dozens of fills on a long window and blow out the tooltip.
+const TOOLTIP_CONSOLIDATE_THRESHOLD_DAYS = 7;
+
+type ConsolidatedRow = { symbol: string; pnl: number; count: number };
+
+// Groups a bucket's fills by symbol, summing pnl and counting fills.
+// Pure resummation of the same numbers — never rounds or drops
+// anything, so the consolidated total always equals the per-fill
+// total exactly. TSLA (option) and "TSLA (stock)" are already distinct
+// strings at the source (see the server's fill-label construction in
+// app/api/intelligence/route.ts), so grouping by the literal symbol
+// string can't merge an option leg into its paired stock leg.
+function consolidateBySymbol(
+  trades: Array<{ symbol: string; pnl: number }>,
+): ConsolidatedRow[] {
+  const bySymbol = new Map<string, ConsolidatedRow>();
+  for (const t of trades) {
+    const existing = bySymbol.get(t.symbol);
+    if (existing) {
+      existing.pnl += t.pnl;
+      existing.count += 1;
+    } else {
+      bySymbol.set(t.symbol, { symbol: t.symbol, pnl: t.pnl, count: 1 });
+    }
+  }
+  return Array.from(bySymbol.values()).sort(
+    (a, b) => Math.abs(b.pnl) - Math.abs(a.pnl),
+  );
+}
+
+// Rich tooltip for the equity curve. Total/Cumulative (or, on the
+// synthetic "Now" point, Unrealized/Partial closes/Realized/Total)
+// render FIRST, above the per-trade list, so they're always visible
+// regardless of how long that list runs. Recharts passes `payload`
+// with the raw data point at payload[0].payload; consolidate/maxRows
+// are passed through from PerformanceSection via the element it hands
+// to <Tooltip content={...}> (recharts merges its own active/payload
+// props onto whatever props are already set on that element).
 function EquityTooltip({
   active,
   payload,
+  consolidate = false,
+  maxRows = DEFAULT_TOOLTIP_MAX_ROWS,
 }: {
   active?: boolean;
   payload?: Array<{ payload: ChartPoint }>;
+  // Whether to group the per-trade list by symbol (Month/Quarter/YTD/
+  // All Time and custom ranges beyond a week) or show one row per fill
+  // (Today/Week) — see shouldConsolidateTooltip in PerformanceSection.
+  consolidate?: boolean;
+  maxRows?: number;
 }) {
   if (!active || !payload || payload.length === 0) return null;
   const b = payload[0].payload;
@@ -1268,22 +1345,6 @@ function EquityTooltip({
             ({b.tradeCount} open {b.tradeCount === 1 ? "position" : "positions"})
           </span>
         </div>
-        {nd.lines.length > 0 && (
-          <div className="space-y-0.5">
-            {nd.lines.map((l, i) => (
-              <div
-                key={`${l.label}-${i}`}
-                className="flex justify-between gap-3 font-mono"
-              >
-                <span>{l.label}</span>
-                <span className={l.pnl >= 0 ? "text-emerald-300" : "text-rose-300"}>
-                  {fmtMoney(l.pnl, true)}
-                </span>
-              </div>
-            ))}
-          </div>
-        )}
-        <div className="my-1 border-t border-border" />
         <div className="flex justify-between gap-3">
           <span className="text-muted-foreground">Unrealized:</span>
           <span className={unrealizedColor}>{fmtMoney(nd.unrealized, true)}</span>
@@ -1298,13 +1359,40 @@ function EquityTooltip({
           <span className="text-muted-foreground">Realized:</span>
           <span className={realizedColor}>{fmtMoney(nd.realized, true)}</span>
         </div>
-        <div className="flex justify-between gap-3">
+        <div className="flex justify-between gap-3 font-semibold">
           <span className="text-muted-foreground">Total:</span>
           <span className={cumColor}>{fmtMoney(b.cumulativePnl, true)}</span>
         </div>
+        {nd.lines.length > 0 && (
+          <>
+            <div className="my-1 border-t border-border" />
+            <div className="space-y-0.5">
+              {nd.lines.map((l, i) => (
+                <div
+                  key={`${l.label}-${i}`}
+                  className="flex justify-between gap-3 font-mono"
+                >
+                  <span>{l.label}</span>
+                  <span className={l.pnl >= 0 ? "text-emerald-300" : "text-rose-300"}>
+                    {fmtMoney(l.pnl, true)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
       </div>
     );
   }
+
+  const rows: ConsolidatedRow[] = consolidate
+    ? consolidateBySymbol(b.trades)
+    : b.trades.map((t) => ({ symbol: t.symbol, pnl: t.pnl, count: 1 }));
+  // Cap only applies once consolidated — per-fill lists (Today/Week)
+  // render every row exactly as before, uncapped.
+  const visibleRows = consolidate ? rows.slice(0, maxRows) : rows;
+  const hiddenRows = consolidate ? rows.slice(maxRows) : [];
+  const hiddenPnl = hiddenRows.reduce((s, r) => s + r.pnl, 0);
 
   return (
     <div className="min-w-[180px] rounded border border-border bg-zinc-900/95 p-2 text-sm shadow-lg">
@@ -1314,38 +1402,45 @@ function EquityTooltip({
           ({b.tradeCount} {b.tradeCount === 1 ? "trade" : "trades"})
         </span>
       </div>
-      {b.trades.length > 0 ? (
-        <>
-          <div className="space-y-0.5">
-            {b.trades.map((t, i) => (
-              <div
-                key={`${t.symbol}-${i}`}
-                className="flex justify-between gap-3 font-mono"
-              >
-                <span>{t.symbol}</span>
-                <span
-                  className={
-                    t.pnl >= 0 ? "text-emerald-300" : "text-rose-300"
-                  }
-                >
-                  {fmtMoney(t.pnl, true)}
-                </span>
-              </div>
-            ))}
-          </div>
-          <div className="my-1 border-t border-border" />
-          <div className="flex justify-between gap-3">
-            <span className="text-muted-foreground">Total:</span>
-            <span className={totalColor}>{fmtMoney(b.tradePnl, true)}</span>
-          </div>
-        </>
-      ) : (
-        <div className="text-muted-foreground">No trades</div>
-      )}
       <div className="flex justify-between gap-3">
+        <span className="text-muted-foreground">Total:</span>
+        <span className={totalColor}>{fmtMoney(b.tradePnl, true)}</span>
+      </div>
+      <div className="flex justify-between gap-3 font-semibold">
         <span className="text-muted-foreground">Cumulative:</span>
         <span className={cumColor}>{fmtMoney(b.cumulativePnl, true)}</span>
       </div>
+      {rows.length > 0 ? (
+        <>
+          <div className="my-1 border-t border-border" />
+          <div className="space-y-0.5">
+            {visibleRows.map((r, i) => (
+              <div
+                key={`${r.symbol}-${i}`}
+                className="flex justify-between gap-3 font-mono"
+              >
+                <span>
+                  {r.symbol}
+                  {r.count > 1 && (
+                    <span className="text-muted-foreground"> ×{r.count}</span>
+                  )}
+                </span>
+                <span className={r.pnl >= 0 ? "text-emerald-300" : "text-rose-300"}>
+                  {fmtMoney(r.pnl, true)}
+                </span>
+              </div>
+            ))}
+            {hiddenRows.length > 0 && (
+              <div className="flex justify-between gap-3 font-mono text-muted-foreground">
+                <span>+{hiddenRows.length} more</span>
+                <span>{fmtMoney(hiddenPnl, true)}</span>
+              </div>
+            )}
+          </div>
+        </>
+      ) : (
+        <div className="mt-1 text-muted-foreground">No trades</div>
+      )}
     </div>
   );
 }
