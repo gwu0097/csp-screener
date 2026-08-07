@@ -688,10 +688,37 @@ export function PerformanceSection({
   const totalUnrealized = unrealized
     ? unrealized.optionsUnrealized + unrealized.stockUnrealized
     : 0;
+  // Money already banked by closing SOME contracts of a position that's
+  // still open overall (e.g. 2 of 4 puts bought back at a gain, 2 still
+  // live). realized_pnl accrues on the position row as soon as those
+  // fills land, but the position's status stays "open" until every
+  // contract is closed — so this cash sat in neither Realized (filtered
+  // to closed/expired/assigned) nor Unrealized (marks only the
+  // `remaining` open contracts) until now. Server-computed in
+  // /api/intelligence from the same partial_closes rows the panel below
+  // renders, so the two can never disagree. Deliberately NOT date-
+  // windowed (mirrors totalUnrealized) — this is current standing, not
+  // a historical bucket.
+  const totalPartialClosePnl = data.total_partial_pnl ?? 0;
+  const partialClosePositionLines = (data.partial_closes ?? [])
+    .filter((p) => p.realizedPnl !== 0)
+    .map((p) => {
+      const isStock =
+        p.positionType === "stock_long" || p.positionType === "stock_short";
+      const unit = isStock ? "shares" : "contracts";
+      // PartialClose has no put/call field (matches PartialClosesPanel's
+      // own label below, which has the same gap) — "P" is a known
+      // simplification, not new to this change.
+      const label = isStock
+        ? `${p.symbol} stock ×${p.remainingContracts} ${unit} left (banked)`
+        : `${p.symbol} $${p.strike}P ×${p.remainingContracts} ${unit} left (banked)`;
+      return { label, pnl: p.realizedPnl };
+    });
   const lastCumulative =
     equity_curve.length > 0
       ? equity_curve[equity_curve.length - 1].cumulativePnl
       : 0;
+  const totalDelta = totalUnrealized + totalPartialClosePnl;
   const displayCurve: ChartPoint[] =
     mode === "total" && unrealized && equity_curve.length > 0
       ? [
@@ -699,21 +726,27 @@ export function PerformanceSection({
           {
             bucketKey: "now",
             label: "Now",
-            tradePnl: totalUnrealized,
-            cumulativePnl: lastCumulative + totalUnrealized,
-            tradeCount: unrealized.optionsCount + unrealized.stockCount,
+            tradePnl: totalDelta,
+            cumulativePnl: lastCumulative + totalDelta,
+            tradeCount:
+              unrealized.optionsCount +
+              unrealized.stockCount +
+              partialClosePositionLines.length,
             trades: [] as Array<{ symbol: string; pnl: number }>,
             nowDetails: {
-              lines: unrealized.positionLines,
+              lines: [...unrealized.positionLines, ...partialClosePositionLines],
               unrealized: totalUnrealized,
+              partialClose: totalPartialClosePnl,
               realized: combinedRealized,
             },
           },
         ]
       : equity_curve;
-  const grandTotal = combinedRealized + (mode === "total" ? totalUnrealized : 0);
+  const grandTotal = combinedRealized + (mode === "total" ? totalDelta : 0);
   const grandTotalColor =
     grandTotal >= 0 ? "text-emerald-300" : "text-rose-300";
+  const partialCloseColor =
+    totalPartialClosePnl >= 0 ? "text-emerald-300" : "text-rose-300";
   // Cap the chart's right edge at today (PST). The date-range
   // picker can extend into the future (Quarter, YTD, All Time all
   // do), but the chart shouldn't show empty/projected days — that
@@ -783,6 +816,18 @@ export function PerformanceSection({
                       {unrealizedLoading && !unrealized
                         ? "…"
                         : fmtMoney(totalUnrealized, true)}
+                    </span>
+                  </div>
+                )}
+                {mode === "total" && totalPartialClosePnl !== 0 && (
+                  <div className="flex items-baseline justify-between gap-2">
+                    <span
+                      title="Realized gain/loss on contracts already closed within positions that are still open overall — banked, not yet in Realized P&L because the position hasn't fully resolved."
+                    >
+                      Partial closes
+                    </span>
+                    <span className={`font-mono ${partialCloseColor}`}>
+                      {fmtMoney(totalPartialClosePnl, true)}
                     </span>
                   </div>
                 )}
@@ -1061,7 +1106,9 @@ function PartialClosesPanel({
         </span>
       </div>
       <div className="mt-1 text-[10px] text-muted-foreground/70">
-        These positions are still open — P&L finalizes when fully closed. Not included in the Realized P&L headline above.
+        These positions are still open — P&L finalizes when fully closed. Excluded from Realized P&L, win rate, ROC,
+        and expectancy above (those score fully-resolved trades only) — but included in Total P&L when the Total
+        toggle is on, since this money is already banked.
       </div>
     </div>
   );
@@ -1141,6 +1188,9 @@ function PairedAssignmentsPanel({ pairs }: { pairs: PairedAssignment[] }) {
 type NowDetails = {
   lines: Array<{ label: string; pnl: number }>;
   unrealized: number;
+  // Banked gain/loss on already-closed contracts of positions still
+  // open overall — see totalPartialClosePnl above.
+  partialClose: number;
   realized: number;
 };
 type ChartPoint = EquityPoint & { nowDetails?: NowDetails };
@@ -1163,6 +1213,7 @@ function EquityTooltip({
   if (b.nowDetails) {
     const nd = b.nowDetails;
     const unrealizedColor = nd.unrealized >= 0 ? "text-emerald-300" : "text-rose-300";
+    const partialCloseColor = nd.partialClose >= 0 ? "text-emerald-300" : "text-rose-300";
     const realizedColor = nd.realized >= 0 ? "text-emerald-300" : "text-rose-300";
     return (
       <div className="min-w-[220px] rounded border border-border bg-zinc-900/95 p-2 text-sm shadow-lg">
@@ -1192,6 +1243,12 @@ function EquityTooltip({
           <span className="text-muted-foreground">Unrealized:</span>
           <span className={unrealizedColor}>{fmtMoney(nd.unrealized, true)}</span>
         </div>
+        {nd.partialClose !== 0 && (
+          <div className="flex justify-between gap-3">
+            <span className="text-muted-foreground">Partial closes:</span>
+            <span className={partialCloseColor}>{fmtMoney(nd.partialClose, true)}</span>
+          </div>
+        )}
         <div className="flex justify-between gap-3">
           <span className="text-muted-foreground">Realized:</span>
           <span className={realizedColor}>{fmtMoney(nd.realized, true)}</span>
