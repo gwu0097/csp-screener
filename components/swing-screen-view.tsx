@@ -170,6 +170,11 @@ type SwingCandidate = {
   rs60?: number | null;
   higherLowVsSpy?: boolean | null;
   rsPullbackList?: "ready" | "leading_extended" | "in_zone_lagging" | null;
+  // True if this candidate's sector/earnings check failed (rate limit,
+  // API error) rather than returning a real answer — fail-open still
+  // includes it, but it hasn't actually been confirmed clean.
+  dataQualityDegraded?: boolean;
+  dataQualityIssues?: string[];
 };
 
 // Mirror of lib/swing-screener.ts ScoreComponent — the score IS the sum
@@ -756,7 +761,7 @@ function sortCandidates(
   });
 }
 
-type RunPhase = "idle" | "pass1" | "pass2" | "pass3" | "saving";
+type RunPhase = "idle" | "pass1" | "pass2" | "rs_pullback" | "pass3" | "saving";
 
 // Fetch + parse defensively. Vercel kills a function that exceeds the
 // 60s production ceiling with a PLAIN-TEXT body ("An error occurred…"),
@@ -803,6 +808,12 @@ type Pass1Wire = {
   trades: Record<string, unknown>;
   tier2ByCandidate: Record<string, string[]>;
   durationMs?: number;
+  rsPullback: {
+    pregatedCount: number;
+    needsEnrichment: string[];
+    excludedBySectorPrefilter: number;
+    excludedBySma50RisingPrefilter: number;
+  };
 };
 
 export function SwingScreenView() {
@@ -854,7 +865,14 @@ export function SwingScreenView() {
   const [rsPullbackSettingsOpen, setRsPullbackSettingsOpen] = useState(false);
   const [rsPullbackDiagnostics, setRsPullbackDiagnostics] = useState<{
     pregatedCount: number;
-    excludedBySma50Rising: number;
+    needsEnrichmentCount: number;
+    excludedBySectorPrefilter: number;
+    excludedBySma50RisingPrefilter: number;
+    excludedBySma50RisingEnrichment: number;
+    insufficientData: number;
+    degradedCount: number;
+    chunksDone: number;
+    chunksTotal: number;
   } | null>(null);
   // Regime banner — independent of the scan pipeline, fetched once on
   // mount. Display-only; feeds market_regime on the journal's entry form,
@@ -929,47 +947,114 @@ export function SwingScreenView() {
       setPass1Count(p1.survivors.length);
 
       // Pass 2 — Finnhub insider + earnings + Schwab options on
-      // survivors (fatal — no candidates exist for the four legacy tabs
-      // without it), run in parallel with RS Pullback's own enrichment
-      // (a separate route/function so neither risks tipping the other
-      // past the 60s ceiling). RS Pullback is NON-FATAL, same treatment
-      // as pass 3 below — a failure there shouldn't take down the other
-      // four tabs.
+      // survivors. Fatal — no candidates exist for the four legacy tabs
+      // without it. Deliberately NOT run in parallel with RS Pullback's
+      // enrichment below: both hit Finnhub, and running them concurrently
+      // doubled the effective request rate against its rate limit — the
+      // 2026-08 run that tried this saw sustained 429s and silently lost
+      // legacy-tab candidates to degraded (empty) insider/earnings data.
+      // Sequencing costs wall-clock time but is what keeps every result
+      // — on either side — actually representing real data.
       setPhase("pass2");
-      const [p2, p2rs] = await Promise.all([
-        fetchPassJson<{ candidates?: SwingCandidate[] }>(
-          "Pass 2 (insider/options enrichment)",
-          "/api/swings/screen/pass2",
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ ...p1, forceFresh }),
-          },
-        ),
-        fetchPassJson<{
-          candidates?: SwingCandidate[];
-          pregatedCount?: number;
-          excludedBySma50Rising?: number;
-        }>("RS Pullback enrichment", "/api/swings/screen/pass2-rs-pullback", {
+      const p2 = await fetchPassJson<{ candidates?: SwingCandidate[] }>(
+        "Pass 2 (insider/options enrichment)",
+        "/api/swings/screen/pass2",
+        {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ...p1, forceFresh, rsPullbackThresholds }),
-        }).catch((e) => {
-          console.warn("[swing-screen] RS Pullback enrichment failed:", e);
-          setRunWarning(
-            (prev) =>
-              prev ??
-              `RS Pullback tab failed to enrich (${e instanceof Error ? e.message : "unknown error"}) — the other four tabs are unaffected.`,
-          );
-          return { candidates: [], pregatedCount: 0, excludedBySma50Rising: 0 };
-        }),
-      ]);
+          body: JSON.stringify({ ...p1, forceFresh }),
+        },
+      );
       const enriched = p2.candidates ?? [];
-      const rsPullbackCandidates = p2rs.candidates ?? [];
+
+      // RS Pullback enrichment — chunked, sequential calls over
+      // pass1's rsPullback.needsEnrichment (already narrowed by the free
+      // cache-only pre-filter in pass1Filter). Every symbol in that list
+      // gets a chunk call; a chunk that reports deadlineSkipped symbols
+      // gets those re-queued into the NEXT chunk rather than dropped, so
+      // coverage is a mechanical guarantee, not a best-effort. NON-FATAL
+      // as a whole (matches pass 3's treatment) — a chunk failure is
+      // logged and surfaced as a warning, not an aborted run.
+      setPhase("rs_pullback");
+      const needsEnrichment = p1.rsPullback?.needsEnrichment ?? [];
+      const RS_PULLBACK_CHUNK_SIZE = 100;
+      let rsPullbackCandidates: SwingCandidate[] = [];
+      let excludedBySma50RisingEnrichment = 0;
+      let insufficientData = 0;
+      let degradedCount = 0;
+      let rsPullbackChunkFailed = false;
+      let queue = [...needsEnrichment];
+      let chunksDone = 0;
+      // chunksTotal is an estimate for the progress banner — it grows if
+      // a chunk re-queues deadlineSkipped symbols, so "chunk 3 of 3" can
+      // become "chunk 3 of 4" rather than silently going over.
+      let chunksTotalEstimate = Math.ceil(queue.length / RS_PULLBACK_CHUNK_SIZE);
       setRsPullbackDiagnostics({
-        pregatedCount: p2rs.pregatedCount ?? 0,
-        excludedBySma50Rising: p2rs.excludedBySma50Rising ?? 0,
+        pregatedCount: p1.rsPullback?.pregatedCount ?? 0,
+        needsEnrichmentCount: needsEnrichment.length,
+        excludedBySectorPrefilter: p1.rsPullback?.excludedBySectorPrefilter ?? 0,
+        excludedBySma50RisingPrefilter: p1.rsPullback?.excludedBySma50RisingPrefilter ?? 0,
+        excludedBySma50RisingEnrichment: 0,
+        insufficientData: 0,
+        degradedCount: 0,
+        chunksDone: 0,
+        chunksTotal: chunksTotalEstimate,
       });
+      while (queue.length > 0) {
+        const chunk = queue.slice(0, RS_PULLBACK_CHUNK_SIZE);
+        queue = queue.slice(RS_PULLBACK_CHUNK_SIZE);
+        try {
+          const res = await fetchPassJson<{
+            candidates?: SwingCandidate[];
+            excludedBySma50Rising?: number;
+            insufficientData?: number;
+            degradedCount?: number;
+            deadlineSkipped?: string[];
+          }>(
+            `RS Pullback enrichment (chunk ${chunksDone + 1})`,
+            "/api/swings/screen/pass2-rs-pullback",
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ ...p1, symbols: chunk, forceFresh, rsPullbackThresholds }),
+            },
+          );
+          rsPullbackCandidates = [...rsPullbackCandidates, ...(res.candidates ?? [])];
+          excludedBySma50RisingEnrichment += res.excludedBySma50Rising ?? 0;
+          insufficientData += res.insufficientData ?? 0;
+          degradedCount += res.degradedCount ?? 0;
+          if (res.deadlineSkipped && res.deadlineSkipped.length > 0) {
+            queue = [...queue, ...res.deadlineSkipped];
+            chunksTotalEstimate = chunksDone + 1 + Math.ceil(queue.length / RS_PULLBACK_CHUNK_SIZE);
+          }
+        } catch (e) {
+          console.warn(`[swing-screen] RS Pullback chunk ${chunksDone + 1} failed:`, e);
+          rsPullbackChunkFailed = true;
+          // Don't re-queue on a hard failure (network/500) — retrying the
+          // same chunk immediately would likely just fail again; the
+          // warning below tells the user this run's RS Pullback coverage
+          // is incomplete rather than silently under-reporting it.
+        }
+        chunksDone += 1;
+        setRsPullbackDiagnostics({
+          pregatedCount: p1.rsPullback?.pregatedCount ?? 0,
+          needsEnrichmentCount: needsEnrichment.length,
+          excludedBySectorPrefilter: p1.rsPullback?.excludedBySectorPrefilter ?? 0,
+          excludedBySma50RisingPrefilter: p1.rsPullback?.excludedBySma50RisingPrefilter ?? 0,
+          excludedBySma50RisingEnrichment,
+          insufficientData,
+          degradedCount,
+          chunksDone,
+          chunksTotal: chunksTotalEstimate,
+        });
+      }
+      if (rsPullbackChunkFailed) {
+        setRunWarning(
+          (prev) =>
+            prev ??
+            "RS Pullback enrichment failed partway through — its lists may be incomplete for this run. The other four tabs are unaffected.",
+        );
+      }
 
       // Pass 3 — Perplexity catalyst discovery. NON-FATAL: if it
       // fails, the run continues with pass-2 candidates (tabs intact,
@@ -1220,7 +1305,9 @@ export function SwingScreenView() {
         onMinAdrPctChange={setMinAdrPct}
       />
 
-      {running && <RunningBanner phase={phase} pass1Count={pass1Count} />}
+      {running && (
+        <RunningBanner phase={phase} pass1Count={pass1Count} rsPullbackDiagnostics={rsPullbackDiagnostics} />
+      )}
       {runError && (
         <div className="rounded border border-rose-500/40 bg-rose-500/10 p-3 text-base text-rose-300">
           {runError}
@@ -1402,9 +1489,11 @@ function ControlsBar({
 function RunningBanner({
   phase,
   pass1Count,
+  rsPullbackDiagnostics,
 }: {
   phase: RunPhase;
   pass1Count: number | null;
+  rsPullbackDiagnostics: { chunksDone: number; chunksTotal: number; needsEnrichmentCount: number } | null;
 }) {
   const { title, detail } = (() => {
     if (phase === "pass1") {
@@ -1420,6 +1509,15 @@ function RunningBanner({
         title: `Pass 2 — enriching ${n} survivors`,
         detail:
           "Pulling Finnhub insider transactions + earnings dates and Schwab options flow on candidates that survive the technical filter. ~25-45 seconds.",
+      };
+    }
+    if (phase === "rs_pullback") {
+      const d = rsPullbackDiagnostics;
+      const chunkText = d ? `chunk ${Math.min(d.chunksDone + 1, d.chunksTotal)} of ${d.chunksTotal}` : "starting";
+      return {
+        title: `RS Pullback — enriching ${d?.needsEnrichmentCount ?? "—"} survivors (${chunkText})`,
+        detail:
+          "Sequential chunked calls (bars + earnings + sector per symbol) so every pre-filtered survivor gets evaluated without racing Pass 2 for the same Finnhub rate limit. ~10-20 seconds per chunk.",
       };
     }
     if (phase === "pass3") {
@@ -1849,7 +1947,17 @@ function RsPullbackTabContent({
     leadingExtended: SwingCandidate[];
     inZoneLagging: SwingCandidate[];
   };
-  diagnostics: { pregatedCount: number; excludedBySma50Rising: number } | null;
+  diagnostics: {
+    pregatedCount: number;
+    needsEnrichmentCount: number;
+    excludedBySectorPrefilter: number;
+    excludedBySma50RisingPrefilter: number;
+    excludedBySma50RisingEnrichment: number;
+    insufficientData: number;
+    degradedCount: number;
+    chunksDone: number;
+    chunksTotal: number;
+  } | null;
   thresholds: RsPullbackThresholds;
   onThresholdsChange: (t: RsPullbackThresholds) => void;
   settingsOpen: boolean;
@@ -1865,13 +1973,31 @@ function RsPullbackTabContent({
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-3 text-sm text-muted-foreground">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-muted-foreground">
           <span>{total} qualifying</span>
           {diagnostics && (
-            <span>
-              · {diagnostics.pregatedCount} pre-gated, {diagnostics.excludedBySma50Rising} excluded
-              by the 50MA-rising check
-            </span>
+            <>
+              <span>
+                · {diagnostics.pregatedCount} pre-gated → {diagnostics.needsEnrichmentCount} needed real
+                enrichment ({diagnostics.excludedBySectorPrefilter} sector + {diagnostics.excludedBySma50RisingPrefilter}{" "}
+                50MA-rising excluded for free from cache)
+              </span>
+              <span>
+                · {diagnostics.excludedBySma50RisingEnrichment} more excluded by 50MA-rising on fresh
+                bars
+              </span>
+              {diagnostics.insufficientData > 0 && (
+                <span className="text-amber-300">
+                  · {diagnostics.insufficientData} could not be evaluated (no usable data)
+                </span>
+              )}
+              {diagnostics.degradedCount > 0 && (
+                <span className="text-amber-300">
+                  · {diagnostics.degradedCount} enriched with incomplete data (sector/earnings check
+                  failed)
+                </span>
+              )}
+            </>
           )}
         </div>
         <div className="flex items-center gap-3">
@@ -1989,7 +2115,19 @@ function RsPullbackListSection({
                 const tracked = trackedSymbols.has(c.symbol);
                 return (
                   <tr key={c.symbol} className="border-b border-border/40 last:border-0">
-                    <td className="px-2 py-1.5 font-mono font-medium text-foreground">{c.symbol}</td>
+                    <td className="px-2 py-1.5 font-mono font-medium text-foreground">
+                      <span className="inline-flex items-center gap-1">
+                        {c.symbol}
+                        {c.dataQualityDegraded && (
+                          <span
+                            title={`Enriched with incomplete data: ${(c.dataQualityIssues ?? []).join(", ") || "unknown issue"} — this candidate's sector or earnings check failed rather than returning a real answer.`}
+                            className="cursor-help text-amber-400"
+                          >
+                            ⚠
+                          </span>
+                        )}
+                      </span>
+                    </td>
                     <td className="px-2 py-1.5 text-xs text-muted-foreground">{c.sector ?? "—"}</td>
                     <td className="px-2 py-1.5 text-right font-mono">{fmtMoney(c.currentPrice)}</td>
                     <td

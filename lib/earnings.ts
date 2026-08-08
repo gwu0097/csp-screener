@@ -457,7 +457,14 @@ export type NextEarningsAnnouncement = {
   timing: "BMO" | "AMC" | "DMH" | "unknown";
 };
 
-export async function getFinnhubNextEarningsDate(
+// Throws on failure (rate limit, network, malformed response) instead of
+// swallowing it — for callers that need to tell "no earnings scheduled"
+// apart from "the check itself failed" (e.g. RS Pullback's data-quality
+// tracking, where a 429 here must not silently look identical to a real
+// negative result). getFinnhubNextEarningsDate below is the original,
+// kept byte-for-byte behaviorally identical for its existing callers
+// (which all rely on it never throwing).
+export async function getFinnhubNextEarningsDateOrThrow(
   symbol: string,
   opts: { forceFresh?: boolean } = {},
 ): Promise<NextEarningsAnnouncement | null> {
@@ -466,24 +473,31 @@ export async function getFinnhubNextEarningsDate(
   to.setUTCDate(to.getUTCDate() + 120);
   const toIso = `${to.getUTCFullYear()}-${String(to.getUTCMonth() + 1).padStart(2, "0")}-${String(to.getUTCDate()).padStart(2, "0")}`;
 
+  const data = await cachedFinnhubGet<{ earningsCalendar: FinnhubCalendarEntry[] }>(
+    "next-earnings-date",
+    "/calendar/earnings",
+    { symbol: symbol.toUpperCase(), from: todayIso, to: toIso },
+    { symbol, maxAgeMs: FINNHUB_STATIC_MAX_AGE_MS, forceFresh: opts.forceFresh },
+  );
+  const rows = data.earningsCalendar ?? [];
+  const matching = rows
+    .filter((r) => (r.symbol ?? "").toUpperCase() === symbol.toUpperCase())
+    .filter((r) => typeof r.date === "string" && r.date >= todayIso)
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  const next = matching[0];
+  if (!next) return null;
+  const h = (next.hour ?? "").toLowerCase();
+  const timing: NextEarningsAnnouncement["timing"] =
+    h === "bmo" ? "BMO" : h === "amc" ? "AMC" : h === "dmh" ? "DMH" : "unknown";
+  return { date: next.date, timing };
+}
+
+export async function getFinnhubNextEarningsDate(
+  symbol: string,
+  opts: { forceFresh?: boolean } = {},
+): Promise<NextEarningsAnnouncement | null> {
   try {
-    const data = await cachedFinnhubGet<{ earningsCalendar: FinnhubCalendarEntry[] }>(
-      "next-earnings-date",
-      "/calendar/earnings",
-      { symbol: symbol.toUpperCase(), from: todayIso, to: toIso },
-      { symbol, maxAgeMs: FINNHUB_STATIC_MAX_AGE_MS, forceFresh: opts.forceFresh },
-    );
-    const rows = data.earningsCalendar ?? [];
-    const matching = rows
-      .filter((r) => (r.symbol ?? "").toUpperCase() === symbol.toUpperCase())
-      .filter((r) => typeof r.date === "string" && r.date >= todayIso)
-      .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
-    const next = matching[0];
-    if (!next) return null;
-    const h = (next.hour ?? "").toLowerCase();
-    const timing: NextEarningsAnnouncement["timing"] =
-      h === "bmo" ? "BMO" : h === "amc" ? "AMC" : h === "dmh" ? "DMH" : "unknown";
-    return { date: next.date, timing };
+    return await getFinnhubNextEarningsDateOrThrow(symbol, opts);
   } catch (e) {
     console.warn(
       `[finnhub] getFinnhubNextEarningsDate(${symbol}) failed:`,

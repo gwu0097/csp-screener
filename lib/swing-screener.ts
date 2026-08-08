@@ -13,6 +13,7 @@
 import {
   getFinnhubInsiderTransactions,
   getFinnhubNextEarningsDate,
+  getFinnhubNextEarningsDateOrThrow,
   type FinnhubInsiderTx,
   type NextEarningsAnnouncement,
 } from "./earnings";
@@ -22,14 +23,14 @@ import {
   type SchwabOptionContract,
   type SchwabOptionsChain,
 } from "./schwab";
-import { getResearchSnapshot, getSectorIndustry } from "./yahoo";
+import { getResearchSnapshot, getSectorIndustryOrThrow } from "./yahoo";
 import {
   batchRefreshSnapshots,
   type SymbolSnapshot,
 } from "./market-snapshot";
 import { computeATR, computeADRPercent, computeSMA } from "./indicators";
 import { createServerClient } from "./supabase";
-import { getOrFetchDailyBars, type DailyBar } from "./daily-bars-cache";
+import { getOrFetchDailyBars, DAILY_BARS_STALE_MS, type DailyBar } from "./daily-bars-cache";
 import YahooFinance from "yahoo-finance2";
 
 // Reuse the same yahoo-finance2 instance pattern as lib/yahoo.ts.
@@ -300,6 +301,13 @@ export type SwingCandidate = {
   higherLowVsSpy?: boolean | null;
   // Which of the three output lists this candidate landed in.
   rsPullbackList?: RsPullbackList | null;
+  // True if this candidate was produced with a sector or earnings check
+  // that failed (Finnhub 429, Yahoo error, etc.) rather than a real
+  // answer — fail-open still includes the candidate, but the caller
+  // couldn't actually confirm it isn't disqualified. Surfaced rather
+  // than silently absorbed, per the 2026-08 throttling incident.
+  dataQualityDegraded?: boolean;
+  dataQualityIssues?: string[];
 };
 
 export type RsPullbackList = "ready" | "leading_extended" | "in_zone_lagging";
@@ -962,7 +970,12 @@ async function fetchAtrAndAdr(
 // quoteSummary call on every screen run. getSectorIndustry already
 // existed in lib/yahoo.ts (unused anywhere until now); this just gives
 // its result somewhere to land.
-async function getOrFetchSector(symbol: string): Promise<string | null> {
+// `failed` distinguishes "checked, no sector on file" from "the live
+// fetch itself failed" (rate limit, network) — RS Pullback's enrichment
+// needs that distinction for data-quality tracking; pass2Enrich (the
+// four legacy tabs) just reads `.sector` and ignores `.failed`, so this
+// is a behavior-preserving change for that caller.
+async function getOrFetchSector(symbol: string): Promise<{ sector: string | null; failed: boolean }> {
   const sb = createServerClient();
   try {
     const cached = await sb
@@ -971,12 +984,12 @@ async function getOrFetchSector(symbol: string): Promise<string | null> {
       .eq("symbol", symbol)
       .maybeSingle();
     const row = cached.data as { sector: string | null } | null;
-    if (row?.sector) return row.sector;
+    if (row?.sector) return { sector: row.sector, failed: false };
   } catch {
     // fall through to a live fetch
   }
   try {
-    const { sector } = await getSectorIndustry(symbol);
+    const { sector } = await getSectorIndustryOrThrow(symbol);
     if (sector) {
       // Partial upsert — only touches `sector`/`updated_at`, leaves
       // industry/industry_pass/market_cap_billions alone if the row
@@ -986,9 +999,12 @@ async function getOrFetchSector(symbol: string): Promise<string | null> {
         .from("stock_profiles")
         .upsert({ symbol, sector, updated_at: new Date().toISOString() }, { onConflict: "symbol" });
     }
-    return sector;
-  } catch {
-    return null;
+    return { sector, failed: false };
+  } catch (e) {
+    console.warn(
+      `[swing-screener] getOrFetchSector(${symbol}) live fetch failed: ${e instanceof Error ? e.message : e}`,
+    );
+    return { sector: null, failed: true };
   }
 }
 
@@ -1029,19 +1045,18 @@ const RS_PULLBACK_DISQUALIFIED_SECTORS = new Set(["Real Estate", "Utilities"]);
 const RS_PULLBACK_MIN_PRICE = 10;
 const RS_PULLBACK_MIN_MARKET_CAP = 500_000_000;
 
-// Bounds the enrichment fan-out (bars + earnings + sector fetch per
-// symbol) to protect the 60s route ceiling, same philosophy as
-// MAX_SNAPSHOT_ENRICH for capitulation/pullback.
-const MAX_RS_PULLBACK_ENRICH = 150;
-
 // Cheap pre-gate using only the already-fetched Pass1Quote (Yahoo's
 // point-in-time 50MA/200MA) — narrows the ~520-symbol universe before any
 // per-symbol bars/earnings/sector fetch. This is the part of the trend
 // filter that doesn't need bar history; the 50MA-RISING leg needs a
-// historical SMA50 and can only be checked once bars are fetched, in
-// computeRsPullbackCandidates below. Exported so pass1Filter can union
-// pregated symbols into its survivor set (otherwise serializePass1 would
-// strip their quotes before pass 2 ever sees them).
+// historical SMA50 and can only be checked once bars are fetched. No cap
+// here — every symbol that passes goes on to applyRsPullbackPrefilter
+// (free, cache-only) and then real enrichment, chunked as needed; capping
+// the pregate itself would silently drop symbols before they're ever
+// evaluated, which is exactly what the 2026-08 audit flagged. Exported so
+// pass1Filter can union pregated symbols into its survivor set (otherwise
+// serializePass1 would strip their quotes before enrichment ever sees
+// them).
 export function pregateRsPullbackSymbols(
   quotes: Map<string, Pass1Quote>,
   thresholds: RsPullbackThresholds = DEFAULT_RS_PULLBACK_THRESHOLDS,
@@ -1056,7 +1071,127 @@ export function pregateRsPullbackSymbols(
     if (vsMA50 < -thresholds.ma50BelowTolerancePct / 100) continue;
     out.push(q.symbol);
   }
-  return out.slice(0, MAX_RS_PULLBACK_ENRICH);
+  return out;
+}
+
+// ---- Bulk (cache-only, no live calls) pre-filter ----
+//
+// Runs once, up front, over the full pregate set — narrows how many
+// symbols the (expensive, Finnhub-bound) chunked enrichment below has to
+// touch. Two DB-only checks, chunked at 100 symbols per query to stay
+// well under the PostgREST wrapper's read cap and keep URL length sane:
+//   1. Sector, if already cached in stock_profiles (indefinite TTL) —
+//      excludes Real Estate/Utilities for symbols we already know about.
+//   2. 50MA-rising, computed from daily_bars_cache IF a fresh (<30h) row
+//      already exists — excludes symbols whose cached bars already show
+//      a clearly-failing rising check.
+// A symbol with no cached sector or no fresh cached bars simply passes
+// through to needsEnrichment unchanged — this step only ever removes
+// symbols it can PROVE fail, from data already sitting in the DB. It
+// never asserts a symbol passes; the real (fresh-bars, live-earnings)
+// check in enrichRsPullbackChunk is still authoritative for anything
+// that survives here.
+const PREFILTER_CHUNK = 100;
+
+async function bulkCachedSectors(symbols: string[]): Promise<Map<string, string>> {
+  const sb = createServerClient();
+  const out = new Map<string, string>();
+  for (let i = 0; i < symbols.length; i += PREFILTER_CHUNK) {
+    const chunk = symbols.slice(i, i + PREFILTER_CHUNK);
+    try {
+      const res = await sb.from("stock_profiles").select("symbol,sector").in("symbol", chunk);
+      if (res.error || !res.data) continue;
+      for (const row of res.data as Array<{ symbol: string; sector: string | null }>) {
+        if (row.sector) out.set(row.symbol, row.sector);
+      }
+    } catch {
+      // best-effort — a failed chunk just means those symbols fall
+      // through to full enrichment instead of being pre-excluded
+    }
+  }
+  return out;
+}
+
+async function bulkFreshBars(symbols: string[]): Promise<Map<string, DailyBar[]>> {
+  const sb = createServerClient();
+  const out = new Map<string, DailyBar[]>();
+  const now = Date.now();
+  for (let i = 0; i < symbols.length; i += PREFILTER_CHUNK) {
+    const chunk = symbols.slice(i, i + PREFILTER_CHUNK);
+    try {
+      // Sorted desc by trading_day, no per-symbol grouping available
+      // through this wrapper — so we take the FIRST row seen per symbol
+      // while iterating (that's the latest, since the whole result set
+      // is sorted). limit() is generous headroom for symbols carrying a
+      // few historical rows (daily_bars_cache today: mostly 1 row/symbol,
+      // up to 4 for a few).
+      const res = await sb
+        .from("daily_bars_cache")
+        .select("symbol,bars,last_refreshed_at")
+        .in("symbol", chunk)
+        .order("trading_day", { ascending: false })
+        .limit(chunk.length * 5);
+      if (res.error || !res.data) continue;
+      for (const row of res.data as Array<{
+        symbol: string;
+        bars: DailyBar[];
+        last_refreshed_at: string;
+      }>) {
+        if (out.has(row.symbol)) continue;
+        const ageMs = now - new Date(row.last_refreshed_at).getTime();
+        if (ageMs < DAILY_BARS_STALE_MS) out.set(row.symbol, row.bars);
+      }
+    } catch {
+      // best-effort — falls through to full enrichment for this chunk
+    }
+  }
+  return out;
+}
+
+export async function applyRsPullbackPrefilter(
+  pregatedSymbols: string[],
+  thresholds: RsPullbackThresholds = DEFAULT_RS_PULLBACK_THRESHOLDS,
+): Promise<{
+  needsEnrichment: string[];
+  excludedBySectorPrefilter: number;
+  excludedBySma50RisingPrefilter: number;
+}> {
+  if (pregatedSymbols.length === 0) {
+    return { needsEnrichment: [], excludedBySectorPrefilter: 0, excludedBySma50RisingPrefilter: 0 };
+  }
+  const [sectors, freshBars] = await Promise.all([
+    bulkCachedSectors(pregatedSymbols),
+    bulkFreshBars(pregatedSymbols),
+  ]);
+
+  const minBarsNeeded = Math.max(thresholds.sma50RisingLookbackSessions + 50, 61);
+  let excludedBySectorPrefilter = 0;
+  let excludedBySma50RisingPrefilter = 0;
+  const needsEnrichment: string[] = [];
+
+  for (const symbol of pregatedSymbols) {
+    const sector = sectors.get(symbol);
+    if (sector && RS_PULLBACK_DISQUALIFIED_SECTORS.has(sector)) {
+      excludedBySectorPrefilter += 1;
+      continue;
+    }
+    const bars = freshBars.get(symbol);
+    if (bars && bars.length >= minBarsNeeded) {
+      const closes = bars.map((b) => b.close);
+      const sma50Now = computeSMA(closes, 50);
+      const sma50Ago = smaAsOfSessionsAgo(closes, 50, thresholds.sma50RisingLookbackSessions);
+      if (sma50Now !== null && sma50Ago !== null && sma50Ago > 0) {
+        const risingPct = ((sma50Now - sma50Ago) / sma50Ago) * 100;
+        if (risingPct < thresholds.sma50RisingMinPct) {
+          excludedBySma50RisingPrefilter += 1;
+          continue;
+        }
+      }
+    }
+    needsEnrichment.push(symbol);
+  }
+
+  return { needsEnrichment, excludedBySectorPrefilter, excludedBySma50RisingPrefilter };
 }
 
 // Bars-derived SMA50 "as of N sessions ago" — drop the most recent N
@@ -1110,18 +1245,38 @@ function nSessionReturn(closes: number[], n: number): number | null {
 }
 
 export async function computeRsPullbackCandidates(
+  symbols: string[],
   pass1Data: Map<string, Pass1Quote>,
   thresholds: RsPullbackThresholds = DEFAULT_RS_PULLBACK_THRESHOLDS,
   opts: { forceFresh?: boolean } = {},
 ): Promise<{
   candidates: SwingCandidate[];
-  pregatedCount: number;
   excludedBySma50Rising: number;
+  // Pregate survivor whose data couldn't be evaluated at all (bars
+  // fetch failed or came back with too little history) — never became a
+  // candidate, in any list. Distinct from a real disqualification: we
+  // don't actually know if this name would have qualified.
+  insufficientData: number;
+  // Of the candidates actually produced, how many carry
+  // dataQualityDegraded — i.e. were evaluated with a sector or earnings
+  // check that failed rather than returning a real answer.
+  degradedCount: number;
+  // Symbols in this chunk not reached before the internal deadline —
+  // should be near-empty given chunk sizes are chosen to fit comfortably
+  // under it, but if not, the caller MUST re-queue these (e.g. as part
+  // of the next chunk) to keep the "every survivor evaluated" guarantee
+  // mechanical rather than probabilistic.
+  deadlineSkipped: string[];
 }> {
   const forceFresh = opts.forceFresh ?? false;
-  const pregated = pregateRsPullbackSymbols(pass1Data, thresholds);
-  if (pregated.length === 0) {
-    return { candidates: [], pregatedCount: 0, excludedBySma50Rising: 0 };
+  if (symbols.length === 0) {
+    return {
+      candidates: [],
+      excludedBySma50Rising: 0,
+      insufficientData: 0,
+      degradedCount: 0,
+      deadlineSkipped: [],
+    };
   }
 
   const spyBars = await getOrFetchDailyBars("SPY", { forceFresh }).catch(() => [] as DailyBar[]);
@@ -1134,29 +1289,60 @@ export async function computeRsPullbackCandidates(
 
   const candidates: SwingCandidate[] = [];
   let excludedBySma50Rising = 0;
+  let insufficientData = 0;
+  let degradedCount = 0;
+  const deadlineSkipped: string[] = [];
   const started = Date.now();
+  // Safety backstop, not the primary coverage mechanism — chunk sizes are
+  // chosen (client-side) to comfortably finish well under this. If it
+  // still trips, deadlineSkipped carries the symbols that didn't get
+  // processed so the caller can re-queue them rather than silently lose
+  // coverage.
   const DEADLINE_MS = 45_000;
 
-  await mapWithConcurrency(pregated, 5, async (symbol) => {
-    if (Date.now() - started > DEADLINE_MS) return null;
+  await mapWithConcurrency(symbols, 5, async (symbol) => {
+    if (Date.now() - started > DEADLINE_MS) {
+      deadlineSkipped.push(symbol);
+      return null;
+    }
     const q = pass1Data.get(symbol);
     if (!q) return null;
 
-    const [bars, sector, nextEarn] = await Promise.all([
+    // getOrFetchSector already distinguishes fetch failure from "no
+    // sector on file" (returns .failed), so its own internal try/catch
+    // is enough — no wrapping .catch needed here. Earnings uses the
+    // OrThrow variant specifically so a Finnhub 429 actually rejects
+    // instead of silently resolving to null (which is what
+    // getFinnhubNextEarningsDate's own internal catch would otherwise
+    // do, making a throttled call indistinguishable from a real "no
+    // earnings" result).
+    let earningsFailed = false;
+    const [bars, sectorResult, nextEarn] = await Promise.all([
       getOrFetchDailyBars(symbol, { forceFresh }).catch(() => [] as DailyBar[]),
-      getOrFetchSector(symbol).catch(() => null),
-      getFinnhubNextEarningsDate(symbol, { forceFresh }).catch(() => null),
+      getOrFetchSector(symbol),
+      getFinnhubNextEarningsDateOrThrow(symbol, { forceFresh }).catch(() => {
+        earningsFailed = true;
+        return null;
+      }),
     ]);
+    const sector = sectorResult.sector;
+    const sectorFailed = sectorResult.failed;
 
     // Earnings <7 days out — same disqualifier pass2Enrich applies to
-    // every other tab.
+    // every other tab. earningsFailed means we DON'T actually know this
+    // — the candidate proceeds (fail-open, same as elsewhere in this
+    // file) but gets flagged as degraded below rather than silently
+    // treated as "no earnings risk confirmed."
     const daysToEarn = nextEarn?.date ? daysFromTodayUtc(nextEarn.date) : null;
     if (daysToEarn !== null && daysToEarn < 7) return null;
 
     if (sector !== null && RS_PULLBACK_DISQUALIFIED_SECTORS.has(sector)) return null;
 
     const closes = bars.map((b) => b.close);
-    if (closes.length < minBarsNeeded || spyCloses.length < minBarsNeeded) return null;
+    if (closes.length < minBarsNeeded || spyCloses.length < minBarsNeeded) {
+      insufficientData += 1;
+      return null;
+    }
 
     const sma50Now = computeSMA(closes, 50);
     const sma50Ago = smaAsOfSessionsAgo(
@@ -1164,7 +1350,10 @@ export async function computeRsPullbackCandidates(
       50,
       thresholds.sma50RisingLookbackSessions,
     );
-    if (sma50Now === null || sma50Ago === null || !(sma50Ago > 0)) return null;
+    if (sma50Now === null || sma50Ago === null || !(sma50Ago > 0)) {
+      insufficientData += 1;
+      return null;
+    }
 
     const sma50RisingPct = ((sma50Now - sma50Ago) / sma50Ago) * 100;
     if (sma50RisingPct < thresholds.sma50RisingMinPct) {
@@ -1293,11 +1482,23 @@ export async function computeRsPullbackCandidates(
       rs60,
       higherLowVsSpy,
       rsPullbackList: list,
+      dataQualityDegraded: sectorFailed || earningsFailed,
+      dataQualityIssues: [
+        ...(sectorFailed ? ["sector_check_failed"] : []),
+        ...(earningsFailed ? ["earnings_check_failed"] : []),
+      ],
     });
+    if (sectorFailed || earningsFailed) degradedCount += 1;
     return null;
   });
 
-  return { candidates, pregatedCount: pregated.length, excludedBySma50Rising };
+  return {
+    candidates,
+    excludedBySma50Rising,
+    insufficientData,
+    degradedCount,
+    deadlineSkipped,
+  };
 }
 
 // Real trade geometry, replacing both computeTradeLevels and
@@ -1449,6 +1650,12 @@ export async function pass1Filter(
   errors: string[];
   capitulation: Record<string, TabStats>;
   pullback: Record<string, TabStats>;
+  rsPullback: {
+    pregatedCount: number;
+    needsEnrichment: string[];
+    excludedBySectorPrefilter: number;
+    excludedBySma50RisingPrefilter: number;
+  };
 }> {
   const routeStarted = Date.now();
   const errors: string[] = [];
@@ -1549,9 +1756,18 @@ export async function pass1Filter(
   // default thresholds even if the caller doesn't pass any, so an older
   // client that doesn't know about this tab still gets correct survivor
   // data for free.
-  const rsPullbackPregated = pregateRsPullbackSymbols(
-    quotes,
-    opts.rsPullbackThresholds ?? DEFAULT_RS_PULLBACK_THRESHOLDS,
+  const rsPullbackThresholds = opts.rsPullbackThresholds ?? DEFAULT_RS_PULLBACK_THRESHOLDS;
+  const rsPullbackPregated = pregateRsPullbackSymbols(quotes, rsPullbackThresholds);
+
+  // Cheap, cache-only narrowing (sector + cached-bars 50MA-rising) — runs
+  // once here so the client knows exactly which (much smaller) set needs
+  // real per-symbol enrichment, and can chunk that set into sequential
+  // calls that each safely fit under the 60s ceiling. See
+  // applyRsPullbackPrefilter's own comment for why this can only ever
+  // narrow, never wrongly include/exclude beyond what cached data proves.
+  const rsPullbackPrefilter = await applyRsPullbackPrefilter(
+    rsPullbackPregated,
+    rsPullbackThresholds,
   );
 
   // Survivors = union of the legacy funnel (insider/options path), the
@@ -1581,6 +1797,12 @@ export async function pass1Filter(
     errors,
     capitulation,
     pullback,
+    rsPullback: {
+      pregatedCount: rsPullbackPregated.length,
+      needsEnrichment: rsPullbackPrefilter.needsEnrichment,
+      excludedBySectorPrefilter: rsPullbackPrefilter.excludedBySectorPrefilter,
+      excludedBySma50RisingPrefilter: rsPullbackPrefilter.excludedBySma50RisingPrefilter,
+    },
   };
 }
 
@@ -2172,7 +2394,9 @@ export async function pass2Enrich(
           })
         : Promise.resolve(null),
       fetchAtrAndAdr(symbol, { forceFresh }),
-      getOrFetchSector(symbol).catch(() => null),
+      getOrFetchSector(symbol)
+        .then((r) => r.sector)
+        .catch(() => null),
     ]);
 
     const insider = classifyInsiderTxs(insiderRows);
@@ -2788,6 +3012,12 @@ export type Pass1Wire = {
   tier2ByCandidate: Record<string, string[]>;
   capitulation: Record<string, TabStats>;
   pullback: Record<string, TabStats>;
+  rsPullback: {
+    pregatedCount: number;
+    needsEnrichment: string[];
+    excludedBySectorPrefilter: number;
+    excludedBySma50RisingPrefilter: number;
+  };
 };
 
 export function serializePass1(
@@ -2816,6 +3046,7 @@ export function serializePass1(
     tier2ByCandidate,
     capitulation: result.capitulation,
     pullback: result.pullback,
+    rsPullback: result.rsPullback,
   };
 }
 

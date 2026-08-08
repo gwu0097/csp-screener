@@ -848,16 +848,27 @@ export async function getHistoricalEarningsMovements(symbol: string): Promise<Ea
   }
 }
 
+// Throws on failure instead of swallowing it — for callers that need to
+// tell "no sector on file" apart from "the fetch failed" (e.g. RS
+// Pullback's data-quality tracking). getSectorIndustry below is the
+// original, kept byte-for-byte behaviorally identical for its existing
+// callers (which all rely on it never throwing).
+export async function getSectorIndustryOrThrow(
+  symbol: string,
+): Promise<{ sector: string | null; industry: string | null }> {
+  const summary = await quoteSummary(symbol, ["assetProfile", "summaryProfile"]);
+  const profile = summary?.assetProfile ?? summary?.summaryProfile ?? null;
+  return {
+    sector: profile?.sector ?? null,
+    industry: profile?.industry ?? null,
+  };
+}
+
 export async function getSectorIndustry(
   symbol: string,
 ): Promise<{ sector: string | null; industry: string | null }> {
   try {
-    const summary = await quoteSummary(symbol, ["assetProfile", "summaryProfile"]);
-    const profile = summary?.assetProfile ?? summary?.summaryProfile ?? null;
-    return {
-      sector: profile?.sector ?? null,
-      industry: profile?.industry ?? null,
-    };
+    return await getSectorIndustryOrThrow(symbol);
   } catch (e) {
     logYahooFailure(`getSectorIndustry(${symbol})`, e);
     return { sector: null, industry: null };
