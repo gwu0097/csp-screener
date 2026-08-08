@@ -22,12 +22,12 @@ import {
   type SchwabOptionContract,
   type SchwabOptionsChain,
 } from "./schwab";
-import { getResearchSnapshot } from "./yahoo";
+import { getResearchSnapshot, getSectorIndustry } from "./yahoo";
 import {
   batchRefreshSnapshots,
   type SymbolSnapshot,
 } from "./market-snapshot";
-import { computeATR } from "./indicators";
+import { computeATR, computeADRPercent } from "./indicators";
 import { createServerClient } from "./supabase";
 import { getOrFetchDailyBars } from "./daily-bars-cache";
 import YahooFinance from "yahoo-finance2";
@@ -267,6 +267,16 @@ export type SwingCandidate = {
   // stop (see computeStructuralLevels). Null when Yahoo's daily history
   // didn't return enough bars (e.g. a recent IPO).
   atr14: number | null;
+
+  // 20-day Average Daily Range, as a % of price — display + filter only,
+  // never a scoring input (see scoreCapitulationComponents etc., none of
+  // which reference this field). Same daily_bars_cache bars as atr14,
+  // computed in the same pass so there's no extra cache read.
+  adr20Pct: number | null;
+
+  // Yahoo sector, cached in stock_profiles (see getOrFetchSector). Display
+  // only — not used by any tab qualifier or scorer.
+  sector: string | null;
 };
 
 // ---------- Pass 1 helpers ----------
@@ -906,13 +916,52 @@ function fallbackLevels(q: Pass1Quote): TradeLevels {
 // fetch if the cached row is more than ~30h old, independent of
 // forceFresh — a stop computed off multi-day-stale volatility with no
 // visible sign anything's wrong is a real risk, not a theoretical one.
-async function fetchAtr14(
+// Single bars fetch feeds both ATR14 (stop/target geometry) and ADR%20
+// (display + filter, added alongside the plan-vs-actual journal) — no
+// reason to hit daily_bars_cache twice for the same symbol.
+async function fetchAtrAndAdr(
   symbol: string,
   opts: { forceFresh?: boolean } = {},
-): Promise<number | null> {
+): Promise<{ atr14: number | null; adr20Pct: number | null }> {
   try {
     const bars = await getOrFetchDailyBars(symbol, opts);
-    return computeATR(bars, 14);
+    return { atr14: computeATR(bars, 14), adr20Pct: computeADRPercent(bars, 20) };
+  } catch {
+    return { atr14: null, adr20Pct: null };
+  }
+}
+
+// Sector is cached indefinitely in stock_profiles (same table/TTL policy
+// lib/classification.ts already uses for industry — sector drifts about
+// as often, i.e. essentially never) — a cache hit avoids a live Yahoo
+// quoteSummary call on every screen run. getSectorIndustry already
+// existed in lib/yahoo.ts (unused anywhere until now); this just gives
+// its result somewhere to land.
+async function getOrFetchSector(symbol: string): Promise<string | null> {
+  const sb = createServerClient();
+  try {
+    const cached = await sb
+      .from("stock_profiles")
+      .select("sector")
+      .eq("symbol", symbol)
+      .maybeSingle();
+    const row = cached.data as { sector: string | null } | null;
+    if (row?.sector) return row.sector;
+  } catch {
+    // fall through to a live fetch
+  }
+  try {
+    const { sector } = await getSectorIndustry(symbol);
+    if (sector) {
+      // Partial upsert — only touches `sector`/`updated_at`, leaves
+      // industry/industry_pass/market_cap_billions alone if the row
+      // already exists (same pattern as classification.ts's
+      // cacheMarketCapBillions).
+      await sb
+        .from("stock_profiles")
+        .upsert({ symbol, sector, updated_at: new Date().toISOString() }, { onConflict: "symbol" });
+    }
+    return sector;
   } catch {
     return null;
   }
@@ -922,20 +971,33 @@ async function fetchAtr14(
 // fallbackLevels above for what's actually displayed to the user (those
 // two remain as pass-1's cheap pre-filter — see pass1Filter).
 //
-// Stop: 1.5x ATR14 below entry (volatility-sized risk), but never
-// placed above the structural level the setup is actually defending —
-// the 50d MA for anything trading above it (pullback/insider/options
-// theses all rest on the 50d holding), or the 52-week low for anything
-// still below its 50d (capitulation). We take the wider (lower) of the
-// two so the stop sits below both "normal chop" and the level being
-// tested, then clamp to a 3-15% risk band so a near-zero-ATR name
-// doesn't produce a stop basically at entry and a wild name doesn't
-// blow past a sane swing-trade risk budget.
+// Stop: ATR14-primary, not a structural-level switch. Earlier this picked
+// the WIDER of an ATR stop and a structural floor that flipped between
+// 50MA*0.985 (above the 50d) and 52wLow*0.97 (below it) — a stock 0.1%
+// under its 50MA got the 52-week-low anchor, which for a name merely
+// pulling back (not actually near its yearly low) sits 15-45% away and
+// blew straight through the 15% ceiling. Result: two nearly-identical
+// setups a fraction of a percent apart on either side of the 50MA got
+// stop distances 4x apart (see the 2026-08-08/09 audit: 13 above-50MA
+// candidates averaged 3.8% stop distance; 18 below-50MA candidates
+// averaged 14.6%, 15 of them pinned exactly at the ceiling).
+//
+// Now: stop = 1.5x ATR14 below entry, full stop. Structural levels only
+// act as a SANITY FLOOR — if entry is actually resting close to (within
+// 3%, either side of) its 50MA or 200MA, the stop isn't allowed to sit
+// above that level, since a trade genuinely testing a support needs room
+// for that support to hold, not just whatever the volatility math says.
+// This only ever widens the ATR stop, and only when price is close to a
+// real level — it does not apply as a blanket override the way the old
+// binary switch did. atr14 unavailable (e.g. too little daily history for
+// a recent IPO) falls back to that same sanity-floor logic, and finally
+// to the 52-week low, as the only levels left to anchor on.
 //
 // Target: the nearer of analyst consensus and real overhead structure
 // (52-week high, or a 3x-ATR projection when price is already above its
 // 52w high) — never a fixed percentage. A close target is a more
-// realistic multi-week swing objective than a distant one.
+// realistic multi-week swing objective than a distant one. Unchanged by
+// this revision.
 function computeStructuralLevels(
   q: Pass1Quote,
   atr14: number | null,
@@ -943,10 +1005,26 @@ function computeStructuralLevels(
   const entryPrice = q.currentPrice;
   if (!Number.isFinite(entryPrice) || entryPrice <= 0) return null;
 
-  const atrStop = atr14 !== null && atr14 > 0 ? entryPrice - 1.5 * atr14 : Infinity;
-  const structuralFloor =
-    entryPrice > q.ma50 ? q.ma50 * 0.985 : q.week52Low * 0.97;
-  let stopPrice = Math.min(atrStop, structuralFloor);
+  const nearMA50 = q.ma50 > 0 && Math.abs(entryPrice - q.ma50) / entryPrice <= 0.03;
+  const nearMA200 = q.ma200 > 0 && Math.abs(entryPrice - q.ma200) / entryPrice <= 0.03;
+  const sanityFloorCandidates = [
+    nearMA50 ? q.ma50 * 0.985 : null,
+    nearMA200 ? q.ma200 * 0.985 : null,
+  ].filter((v): v is number => v !== null && v < entryPrice);
+  // The tighter of the two if price is close to both — a real support
+  // level is a floor, not an average of floors.
+  const sanityFloor =
+    sanityFloorCandidates.length > 0 ? Math.max(...sanityFloorCandidates) : null;
+
+  let stopPrice: number;
+  if (atr14 !== null && atr14 > 0) {
+    const atrStop = entryPrice - 1.5 * atr14;
+    // Widen only if the ATR stop would sit above (tighter than) a support
+    // level price is actually resting on.
+    stopPrice = sanityFloor !== null ? Math.min(atrStop, sanityFloor) : atrStop;
+  } else {
+    stopPrice = sanityFloor ?? q.week52Low * 0.97;
+  }
   stopPrice = Math.min(stopPrice, entryPrice * 0.97); // floor: at least 3% risk
   stopPrice = Math.max(stopPrice, entryPrice * 0.85); // ceiling: at most 15% risk
 
@@ -1725,10 +1803,11 @@ export async function pass2Enrich(
       nextEarn = null;
     }
 
-    // Schwab options + ATR history hit different hosts — run concurrently.
+    // Schwab options, ATR/ADR history, and sector hit different
+    // hosts/tables — run concurrently.
     // Schwab (options chain) is never cached — force-fresh or not, this
     // is always a live fetch.
-    const [optionsChain, atr14] = await Promise.all([
+    const [optionsChain, { atr14, adr20Pct }, sector] = await Promise.all([
       schwabAvailable
         ? getCallOptionsChainRange(symbol, fromIso, toIso).catch((e) => {
             const msg = e instanceof Error ? e.message : String(e);
@@ -1736,7 +1815,8 @@ export async function pass2Enrich(
             return null;
           })
         : Promise.resolve(null),
-      fetchAtr14(symbol, { forceFresh }),
+      fetchAtrAndAdr(symbol, { forceFresh }),
+      getOrFetchSector(symbol).catch(() => null),
     ]);
 
     const insider = classifyInsiderTxs(insiderRows);
@@ -1957,6 +2037,8 @@ export async function pass2Enrich(
       capitulationStats: capStats,
       pullbackStats: pullStats,
       atr14,
+      adr20Pct,
+      sector,
     });
     return null;
   });

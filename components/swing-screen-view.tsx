@@ -156,6 +156,13 @@ type SwingCandidate = {
   // null for rows saved before the real-levels redesign or when Yahoo
   // didn't return enough daily history.
   atr14?: number | null;
+  // 20-day Average Daily Range, as a % of price. Display + filter only —
+  // never read by any scorer/qualifier. Optional for rows saved before
+  // this field existed.
+  adr20Pct?: number | null;
+  // Yahoo sector, cached in stock_profiles. Display only. Optional for
+  // rows saved before this field existed.
+  sector?: string | null;
 };
 
 // Mirror of lib/swing-screener.ts ScoreComponent — the score IS the sum
@@ -269,6 +276,14 @@ type SortDir = "asc" | "desc";
 type SortState = { key: SortKey; dir: SortDir };
 
 const DEFAULT_SORT: SortState = { key: "setupScore", dir: "desc" };
+
+// Minimum-ADR%% filter — persisted the same way screener-view.tsx
+// persists its own controls (localStorage, restored on mount). Default
+// 3.0%: below that, a 1.5x-ATR stop and a 3R target both sit inside a
+// typical day's noise for the underlying, so the setup's geometry can't
+// really work regardless of score.
+const LS_MIN_ADR_PCT = "swing-screen-min-adr-pct";
+const DEFAULT_MIN_ADR_PCT = 3.0;
 
 type SortValue = number | string | null;
 
@@ -606,15 +621,18 @@ const TAB_COLUMNS: Record<SetupTab, MetricColumn[]> = {
 // from a runtime template string.
 const ROW_GRID_MOBILE =
   "grid-cols-[minmax(60px,1fr)_70px_60px_60px_minmax(80px,1fr)]";
+// Each tab's literal grid string gains two fixed columns (ADR%, Sector)
+// right after Chg% — same position in every tab, adjacent to whichever
+// column shows vs 50MA for that tab.
 const ROW_GRID_DESKTOP: Record<SetupTab, string> = {
   capitulation:
-    "md:grid-cols-[minmax(60px,80px)_minmax(120px,1.5fr)_80px_70px_70px_60px_70px_70px_70px_minmax(120px,1fr)_190px]",
+    "md:grid-cols-[minmax(60px,80px)_minmax(120px,1.5fr)_80px_70px_60px_90px_70px_60px_70px_70px_70px_minmax(120px,1fr)_190px]",
   pullback:
-    "md:grid-cols-[minmax(60px,80px)_minmax(120px,1.5fr)_80px_70px_70px_70px_80px_70px_minmax(120px,1fr)_190px]",
+    "md:grid-cols-[minmax(60px,80px)_minmax(120px,1.5fr)_80px_70px_60px_90px_70px_70px_70px_80px_70px_minmax(120px,1fr)_190px]",
   insider:
-    "md:grid-cols-[minmax(60px,80px)_minmax(120px,1.5fr)_80px_70px_80px_60px_80px_70px_70px_minmax(120px,1fr)_190px]",
+    "md:grid-cols-[minmax(60px,80px)_minmax(120px,1.5fr)_80px_70px_60px_90px_70px_80px_60px_80px_70px_70px_minmax(120px,1fr)_190px]",
   options_flow:
-    "md:grid-cols-[minmax(60px,80px)_minmax(120px,1.5fr)_80px_70px_70px_90px_70px_90px_70px_minmax(120px,1fr)_190px]",
+    "md:grid-cols-[minmax(60px,80px)_minmax(120px,1.5fr)_80px_70px_60px_90px_70px_70px_90px_70px_90px_70px_minmax(120px,1fr)_190px]",
 };
 
 function rowGridClass(tab: SetupTab): string {
@@ -660,6 +678,8 @@ const COMMON_SORT_VALUES: Record<
   company: { value: (c) => c.companyName, defaultDir: "asc" },
   currentPrice: { value: (c) => c.currentPrice, defaultDir: "desc" },
   priceChange1d: { value: (c) => c.priceChange1d, defaultDir: "desc" },
+  adr20pct: { value: (c) => c.adr20Pct ?? null, defaultDir: "desc" },
+  sector: { value: (c) => c.sector ?? null, defaultDir: "asc" },
   setupScore: { value: (c, activeTab) => tabScoreOf(c, activeTab), defaultDir: "desc" },
   signalCount: { value: (c) => c.signalCount, defaultDir: "desc" },
 };
@@ -759,6 +779,19 @@ export function SwingScreenView() {
   // freshly-refreshed field sitting next to stale trade geometry is a
   // worse, misleading state than just re-running everything.
   const [forceFresh, setForceFresh] = useState(false);
+  // Minimum ADR%% filter — restored from localStorage on mount (same
+  // persistence convention screener-view.tsx uses for its own controls),
+  // defaulting to 3.0 for a first-ever visit. Lazy initializer so SSR/first
+  // paint doesn't show the default and then jump.
+  const [minAdrPct, setMinAdrPct] = useState<number>(() => {
+    if (typeof window === "undefined") return DEFAULT_MIN_ADR_PCT;
+    const raw = window.localStorage.getItem(LS_MIN_ADR_PCT);
+    const n = raw !== null ? Number(raw) : NaN;
+    return Number.isFinite(n) && n >= 0 ? n : DEFAULT_MIN_ADR_PCT;
+  });
+  useEffect(() => {
+    window.localStorage.setItem(LS_MIN_ADR_PCT, String(minAdrPct));
+  }, [minAdrPct]);
   const [importOpen, setImportOpen] = useState(false);
   // Which symbol Enter was clicked for, so the import modal opens
   // knowing what it's importing a fill for instead of blank/generic.
@@ -992,16 +1025,24 @@ export function SwingScreenView() {
     return counts;
   }, [data]);
 
+  // ADR% filter is display/filter only — never touches score, tabs, or
+  // qualification. A candidate with adr20Pct === null (daily_bars_cache
+  // miss, e.g. a too-recent IPO) fails the filter rather than bypassing
+  // it — "unknown" shouldn't get a pass a known-too-low name wouldn't.
   const sortedCandidates = useMemo(
     () =>
       sortCandidates(
-        (data?.candidates ?? []).filter((c) =>
-          candidateTabs(c).includes(activeTab),
+        (data?.candidates ?? []).filter(
+          (c) =>
+            candidateTabs(c).includes(activeTab) &&
+            c.adr20Pct !== null &&
+            c.adr20Pct !== undefined &&
+            c.adr20Pct >= minAdrPct,
         ),
         sort,
         activeTab,
       ),
-    [data, sort, activeTab],
+    [data, sort, activeTab, minAdrPct],
   );
 
   function handleHeaderClick(key: SortKey) {
@@ -1037,6 +1078,8 @@ export function SwingScreenView() {
         onRun={runScreen}
         forceFresh={forceFresh}
         onForceFreshChange={setForceFresh}
+        minAdrPct={minAdrPct}
+        onMinAdrPctChange={setMinAdrPct}
       />
 
       {running && <RunningBanner phase={phase} pass1Count={pass1Count} />}
@@ -1117,6 +1160,8 @@ function ControlsBar({
   onRun,
   forceFresh,
   onForceFreshChange,
+  minAdrPct,
+  onMinAdrPctChange,
 }: {
   data: CachedResult | null;
   loading: boolean;
@@ -1124,6 +1169,8 @@ function ControlsBar({
   onRun: () => void;
   forceFresh: boolean;
   onForceFreshChange: (v: boolean) => void;
+  minAdrPct: number;
+  onMinAdrPctChange: (v: number) => void;
 }) {
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border bg-background/40 p-3">
@@ -1143,6 +1190,23 @@ function ControlsBar({
         )}
       </div>
       <div className="flex items-center gap-3">
+        <label
+          className="flex items-center gap-1.5 text-sm text-muted-foreground"
+          title="Hides candidates whose 20-day Average Daily Range is below this — a 3R target needs enough daily movement to be reachable in a multi-week hold. Display/filter only; doesn't change any tab's score."
+        >
+          Min ADR%
+          <input
+            type="number"
+            step="0.5"
+            min="0"
+            value={minAdrPct}
+            onChange={(e) => {
+              const n = Number(e.target.value);
+              if (Number.isFinite(n) && n >= 0) onMinAdrPctChange(n);
+            }}
+            className="w-16 rounded border border-border bg-background px-1.5 py-1 text-right text-sm"
+          />
+        </label>
         <label
           className="flex cursor-pointer items-center gap-1.5 text-sm text-muted-foreground"
           title={
@@ -1392,6 +1456,22 @@ function TableHeader({
         onSort={onSort}
         align="right"
       />
+      <SortHeader
+        label="ADR%"
+        sortKey="adr20pct"
+        sort={sort}
+        onSort={onSort}
+        align="right"
+        className="hidden md:block"
+        tooltip="20-day Average Daily Range, as a % of price — how much this name typically moves in a day. Display + filter only, not part of any tab's score."
+      />
+      <SortHeader
+        label="Sector"
+        sortKey="sector"
+        sort={sort}
+        onSort={onSort}
+        className="hidden md:block"
+      />
       {TAB_COLUMNS[activeTab].map((col) => (
         <SortHeader
           key={col.key}
@@ -1582,6 +1662,14 @@ function CandidateRow({
           {Number.isFinite(c.priceChange1d)
             ? `${c.priceChange1d >= 0 ? "▲" : "▼"}${Math.abs(c.priceChange1d).toFixed(2)}%`
             : "—"}
+        </div>
+        {/* ADR% — hidden mobile, display + filter only, not a score input */}
+        <div className="hidden text-right font-mono text-foreground md:block">
+          {c.adr20Pct !== null && c.adr20Pct !== undefined ? `${c.adr20Pct.toFixed(1)}%` : "—"}
+        </div>
+        {/* Sector — hidden mobile */}
+        <div className="hidden truncate text-left text-[11px] text-muted-foreground md:block">
+          {c.sector ?? "—"}
         </div>
         {/* 5+. Tab-specific metric columns — whatever this tab's own
             qualifier/scorer reads (see TAB_COLUMNS). */}
