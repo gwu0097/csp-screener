@@ -4,8 +4,22 @@ import { requireUserId, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
-// Stock-trade shape that the import pipeline feeds us (matches
-// ParsedStockTrade from app/api/trades/parse-screenshot/route.ts).
+const EXIT_REASONS = [
+  "stop_hit",
+  "target_hit",
+  "time_stop",
+  "trailing_stop",
+  "discretionary_override",
+] as const;
+
+// Stock-trade shape the import pipeline feeds us (matches ParsedStockTrade
+// from app/api/trades/parse-screenshot/route.ts), plus two fields the
+// review table in import-stock-screenshot-modal.tsx collects that the OCR
+// itself can never read off a screenshot: a broker fill has a price, not a
+// plan. planned_stop (buys) and exit_reason (sells) are required here for
+// the same reason they're required on the manual entry/exit forms — a
+// trade without a stop has no R, and an exit without a reason can't be
+// reviewed later.
 type ParsedStockTrade = {
   symbol: string;
   action: "buy" | "sell";
@@ -13,15 +27,19 @@ type ParsedStockTrade = {
   price: number;
   date: string;
   broker?: string;
+  planned_stop?: number;
+  exit_reason?: string;
 };
 
 type SwingIdeaRow = { id: string; symbol: string; status: string };
 type SwingTradeRow = {
   id: string;
   symbol: string;
-  shares: number | null;
-  entry_price: number | null;
-  entry_date: string | null;
+  shares: number;
+  entry_price: number;
+  entry_date: string;
+  planned_stop: number;
+  initial_risk_dollars: number;
   status: string;
   broker: string | null;
 };
@@ -35,11 +53,28 @@ function validTrade(t: unknown): ParsedStockTrade | null {
   const price = Number(r.price);
   const date = typeof r.date === "string" ? r.date : "";
   const broker = typeof r.broker === "string" ? r.broker : undefined;
+  const plannedStop = Number(r.planned_stop);
+  const exitReason =
+    typeof r.exit_reason === "string" &&
+    (EXIT_REASONS as readonly string[]).includes(r.exit_reason)
+      ? r.exit_reason
+      : undefined;
   if (!symbol || !action) return null;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
   if (!Number.isFinite(shares) || shares <= 0) return null;
   if (!Number.isFinite(price) || price <= 0) return null;
-  return { symbol, action, shares, price, date, broker };
+  if (action === "buy") {
+    if (!Number.isFinite(plannedStop) || plannedStop <= 0 || plannedStop >= price) return null;
+    return { symbol, action, shares, price, date, broker, planned_stop: plannedStop };
+  }
+  if (!exitReason) return null;
+  return { symbol, action, shares, price, date, broker, exit_reason: exitReason };
+}
+
+function daysBetween(a: string, b: string): number {
+  const start = new Date(a + "T00:00:00Z").getTime();
+  const end = new Date(b + "T00:00:00Z").getTime();
+  return Math.round((end - start) / (24 * 60 * 60 * 1000));
 }
 
 export async function POST(req: NextRequest) {
@@ -61,11 +96,19 @@ export async function POST(req: NextRequest) {
   const bodyBroker =
     typeof body.broker === "string" && body.broker.trim() ? body.broker.trim() : null;
 
-  const trades = (body.trades as unknown[])
-    .map(validTrade)
-    .filter((t): t is ParsedStockTrade => t !== null);
+  const rawTrades = body.trades as unknown[];
+  const trades = rawTrades.map(validTrade).filter((t): t is ParsedStockTrade => t !== null);
+  const invalidCount = rawTrades.length - trades.length;
   if (trades.length === 0) {
-    return NextResponse.json({ error: "No valid trades" }, { status: 400 });
+    return NextResponse.json(
+      {
+        error:
+          invalidCount > 0
+            ? "No valid trades — buy rows need a planned stop, sell rows need an exit reason"
+            : "No valid trades",
+      },
+      { status: 400 },
+    );
   }
 
   // Stable order: chronological, so buy → sell pairings across the same
@@ -73,7 +116,6 @@ export async function POST(req: NextRequest) {
   trades.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
 
   const sb = createServerClient();
-
   const symbols = Array.from(new Set(trades.map((t) => t.symbol)));
 
   // Preload ideas (with status) so we can both link trades and auto-sync
@@ -89,7 +131,6 @@ export async function POST(req: NextRequest) {
   }
   const ideaBySymbol = new Map<string, { id: string; status: string }>();
   for (const i of (ideasRes.data ?? []) as SwingIdeaRow[]) {
-    // If multiple ideas per symbol, last one wins — good enough for Phase 1.
     ideaBySymbol.set(i.symbol, { id: i.id, status: i.status });
   }
 
@@ -97,7 +138,7 @@ export async function POST(req: NextRequest) {
   // close the oldest open position for that symbol.
   const openRes = await sb
     .from("swing_trades")
-    .select("id,symbol,shares,entry_price,entry_date,status,broker")
+    .select("id,symbol,shares,entry_price,entry_date,planned_stop,initial_risk_dollars,status,broker")
     .eq("user_id", userId)
     .eq("status", "open")
     .in("symbol", symbols)
@@ -105,7 +146,6 @@ export async function POST(req: NextRequest) {
   if (openRes.error) {
     return NextResponse.json({ error: openRes.error.message }, { status: 500 });
   }
-  // Group by symbol, oldest-first — we pop from the head when matching sells.
   const openBySymbol = new Map<string, SwingTradeRow[]>();
   for (const t of (openRes.data ?? []) as SwingTradeRow[]) {
     const list = openBySymbol.get(t.symbol) ?? [];
@@ -115,25 +155,16 @@ export async function POST(req: NextRequest) {
 
   let inserted = 0;
   let closed = 0;
-  let orphaned = 0; // sells with no matching open buy
-  let ideasPromoted = 0; // watching/conviction → entered
-  let ideasDemoted = 0; // entered → exited
-  let ideasCreated = 0; // buy with no existing idea
+  let skippedOrphanSells = 0;
+  let ideasPromoted = 0;
+  let ideasDemoted = 0;
+  let ideasCreated = 0;
   const errors: string[] = [];
+  const orphanSells: Array<{ symbol: string; date: string; shares: number; price: number }> = [];
 
-  // Helper: look up or create the idea for a symbol. Used by both buy
-  // (promotes to 'entered') and orphan-sell (attaches to an existing idea
-  // so the trade shows up on the right card, but doesn't force a status
-  // change). Returns the id or null on error.
-  async function ensureIdeaForBuy(
-    symbol: string,
-    entryPrice: number,
-  ): Promise<string | null> {
+  async function ensureIdeaForBuy(symbol: string, entryPrice: number): Promise<string | null> {
     const existing = ideaBySymbol.get(symbol);
     if (existing) {
-      // Only promote manual stages — ENTERED stays ENTERED (another open
-      // position for the same symbol) and EXITED stays EXITED rather than
-      // resurrecting an already-closed idea.
       if (existing.status === "setup_ready") {
         const upd = await sb
           .from("swing_ideas")
@@ -192,19 +223,20 @@ export async function POST(req: NextRequest) {
     const broker = t.broker ?? bodyBroker ?? null;
 
     if (t.action === "buy") {
+      const plannedStop = t.planned_stop as number; // guaranteed by validTrade
+      const initialRiskDollars = (t.price - plannedStop) * t.shares;
       const ideaId = await ensureIdeaForBuy(t.symbol, t.price);
       const insertRow = {
         user_id: userId,
         swing_idea_id: ideaId,
         symbol: t.symbol,
         broker,
-        shares: t.shares,
-        entry_price: t.price,
+        thesis: "Imported from broker screenshot",
         entry_date: t.date,
-        thesis: null,
-        realized_pnl: null,
-        return_pct: null,
-        exit_reason: null,
+        entry_price: t.price,
+        shares: t.shares,
+        planned_stop: plannedStop,
+        initial_risk_dollars: initialRiskDollars,
         status: "open",
       };
       const ins = await sb.from("swing_trades").insert(insertRow).select().single();
@@ -222,17 +254,21 @@ export async function POST(req: NextRequest) {
     // action === "sell" — try to match the oldest open buy.
     const candidates = openBySymbol.get(t.symbol) ?? [];
     const match = candidates.shift();
-    if (match && match.entry_price !== null && match.shares !== null) {
+    if (match) {
       const realizedPnl = (t.price - match.entry_price) * match.shares;
-      const returnPct = (t.price - match.entry_price) / match.entry_price;
+      const rMultiple =
+        match.initial_risk_dollars > 0 ? realizedPnl / match.initial_risk_dollars : null;
+      const returnPct = match.entry_price > 0 ? (t.price - match.entry_price) / match.entry_price : null;
       const upd = await sb
         .from("swing_trades")
         .update({
           exit_price: t.price,
           exit_date: t.date,
+          exit_reason: t.exit_reason,
           realized_pnl: realizedPnl,
+          r_multiple: rMultiple,
           return_pct: returnPct,
-          exit_reason: "manual",
+          days_held: daysBetween(match.entry_date, t.date),
           status: "closed",
           updated_at: new Date().toISOString(),
         })
@@ -247,49 +283,32 @@ export async function POST(req: NextRequest) {
       }
       openBySymbol.set(t.symbol, candidates);
       closed += 1;
-      // If this was the last open position for the symbol, flip the
-      // linked idea to 'exited'. Still-open positions keep the idea
-      // in 'entered'.
       if (candidates.length === 0) {
         await demoteIdeaOnClose(t.symbol);
       }
       continue;
     }
 
-    // No open buy to close against — record as a closed trade with only
-    // exit data. Link to any existing idea but don't force a status change.
-    const orphanRow = {
-      user_id: userId,
-      swing_idea_id: ideaBySymbol.get(t.symbol)?.id ?? null,
-      symbol: t.symbol,
-      broker,
-      shares: t.shares,
-      entry_price: null,
-      entry_date: null,
-      exit_price: t.price,
-      exit_date: t.date,
-      realized_pnl: null,
-      return_pct: null,
-      thesis: null,
-      exit_reason: "manual",
-      status: "closed",
-    };
-    const ins = await sb.from("swing_trades").insert(orphanRow).select().single();
-    if (ins.error) {
-      errors.push(`${t.symbol} sell @ ${t.date} (orphan): ${ins.error.message}`);
-      continue;
-    }
-    orphaned += 1;
+    // No open buy to close against. Unlike the prior version of this
+    // route, we do NOT insert a stopless "trade" here — planned_stop and
+    // entry_price are both required (NOT NULL) on swing_trades now, and
+    // there is no plan to attach to a fill whose entry was never logged
+    // in this journal. Reported back so the user can log the original
+    // entry (with a stop) manually first.
+    skippedOrphanSells += 1;
+    orphanSells.push({ symbol: t.symbol, date: t.date, shares: t.shares, price: t.price });
   }
 
   return NextResponse.json({
     inserted,
     closed,
-    orphaned,
-    total: inserted + closed + orphaned,
+    skipped_orphan_sells: skippedOrphanSells,
+    orphan_sells: orphanSells,
+    total: inserted + closed,
     ideas_promoted: ideasPromoted,
     ideas_demoted: ideasDemoted,
     ideas_created: ideasCreated,
+    invalid_rows: invalidCount,
     errors,
   });
 }

@@ -4,30 +4,42 @@ import { requireUserId, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
-const ALLOWED_EXIT_REASONS = [
-  "target_hit",
-  "stop_loss",
-  "thesis_broken",
-  "manual",
-] as const;
+const DEFAULT_MAX_RISK_PCT = 0.5;
 
-type TradeRow = {
+export type TradeRow = {
   id: string;
   swing_idea_id: string | null;
   symbol: string;
   broker: string | null;
-  shares: number | null;
-  entry_price: number | null;
-  entry_date: string | null;
-  exit_price: number | null;
-  exit_date: string | null;
-  realized_pnl: number | null;
-  return_pct: number | null;
-  thesis: string | null;
-  exit_reason: string | null;
-  status: string;
   created_at: string;
   updated_at: string;
+  setup_name: string | null;
+  thesis: string;
+  entry_date: string;
+  entry_price: number;
+  shares: number;
+  planned_stop: number;
+  planned_target: number | null;
+  initial_risk_dollars: number;
+  risk_pct_of_portfolio: number | null;
+  portfolio_value_at_entry: number | null;
+  risk_limit_overridden: boolean;
+  atr_at_entry: number | null;
+  adr_pct_at_entry: number | null;
+  conviction: number | null;
+  market_regime: string | null;
+  exit_date: string | null;
+  exit_price: number | null;
+  exit_reason: string | null;
+  realized_pnl: number | null;
+  r_multiple: number | null;
+  return_pct: number | null;
+  days_held: number | null;
+  max_favorable_excursion_r: number | null;
+  max_adverse_excursion_r: number | null;
+  price_two_weeks_after_exit: number | null;
+  exit_quality_note: string | null;
+  status: "open" | "closed";
 };
 
 export async function GET() {
@@ -53,19 +65,33 @@ type CreateBody = {
   swing_idea_id?: unknown;
   symbol?: unknown;
   broker?: unknown;
-  shares?: unknown;
-  entry_price?: unknown;
-  entry_date?: unknown;
-  exit_price?: unknown;
-  exit_date?: unknown;
+  setup_name?: unknown;
   thesis?: unknown;
-  exit_reason?: unknown;
+  entry_date?: unknown;
+  entry_price?: unknown;
+  shares?: unknown;
+  planned_stop?: unknown;
+  planned_target?: unknown;
+  portfolio_value_at_entry?: unknown;
+  atr_at_entry?: unknown;
+  adr_pct_at_entry?: unknown;
+  conviction?: unknown;
+  market_regime?: unknown;
+  // Set by the client after the user has seen the risk-limit warning and
+  // explicitly chosen to proceed anyway. Absent (or false) on the first
+  // submit of an oversized trade — that first submit is intentionally
+  // rejected with needs_confirmation so the UI can show the warning.
+  confirmed_override?: unknown;
 };
 
 function num(v: unknown): number | null {
   if (v === null || v === undefined || v === "") return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
+}
+
+function str(v: unknown): string | null {
+  return typeof v === "string" && v.trim().length > 0 ? v.trim() : null;
 }
 
 export async function POST(req: NextRequest) {
@@ -82,45 +108,86 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  if (typeof body.symbol !== "string" || body.symbol.trim().length === 0) {
-    return NextResponse.json({ error: "Missing symbol" }, { status: 400 });
-  }
-  const symbol = body.symbol.trim().toUpperCase();
-
-  const shares = num(body.shares);
+  const symbol = str(body.symbol)?.toUpperCase() ?? null;
+  const thesis = str(body.thesis);
   const entryPrice = num(body.entry_price);
-  if (shares === null || shares <= 0) {
-    return NextResponse.json({ error: "shares must be > 0" }, { status: 400 });
-  }
+  const shares = num(body.shares);
+  const plannedStop = num(body.planned_stop);
+  const entryDate = str(body.entry_date);
+
+  if (!symbol) return NextResponse.json({ error: "Missing symbol" }, { status: 400 });
+  if (!thesis) return NextResponse.json({ error: "Thesis is required" }, { status: 400 });
   if (entryPrice === null || entryPrice <= 0) {
     return NextResponse.json({ error: "entry_price must be > 0" }, { status: 400 });
   }
-  if (typeof body.entry_date !== "string" || body.entry_date.trim() === "") {
+  if (shares === null || shares <= 0) {
+    return NextResponse.json({ error: "shares must be > 0" }, { status: 400 });
+  }
+  if (!entryDate) {
     return NextResponse.json({ error: "Missing entry_date" }, { status: 400 });
   }
+  // The trade cannot be logged without a planned stop — without it there
+  // is no R, and without R no trade is comparable to any other.
+  if (plannedStop === null) {
+    return NextResponse.json(
+      { error: "planned_stop is required — a trade cannot be logged without one" },
+      { status: 400 },
+    );
+  }
+  if (plannedStop >= entryPrice) {
+    return NextResponse.json(
+      { error: "planned_stop must be below entry_price" },
+      { status: 400 },
+    );
+  }
 
-  const exitPrice = num(body.exit_price);
-  const exitDate =
-    typeof body.exit_date === "string" && body.exit_date.trim() !== ""
-      ? body.exit_date
+  const plannedTarget = num(body.planned_target);
+  const initialRiskDollars = (entryPrice - plannedStop) * shares;
+
+  const sb = createServerClient();
+
+  // Portfolio value: prefer what the client sent (it already read the
+  // setting to live-compute the risk % the user saw), fall back to the
+  // stored setting so a client that omits it still gets a meaningful %.
+  let portfolioValue = num(body.portfolio_value_at_entry);
+  let maxRiskPct = DEFAULT_MAX_RISK_PCT;
+  const settingsRes = await sb
+    .from("swing_journal_settings")
+    .select("max_risk_pct,portfolio_value")
+    .eq("user_id", userId)
+    .maybeSingle();
+  const settings = settingsRes.data as
+    | { max_risk_pct: number; portfolio_value: number | null }
+    | null;
+  if (settings) {
+    maxRiskPct = settings.max_risk_pct ?? DEFAULT_MAX_RISK_PCT;
+    if (portfolioValue === null) portfolioValue = settings.portfolio_value;
+  }
+
+  const riskPctOfPortfolio =
+    portfolioValue !== null && portfolioValue > 0
+      ? (initialRiskDollars / portfolioValue) * 100
       : null;
 
-  let realizedPnl: number | null = null;
-  let returnPct: number | null = null;
-  let status: "open" | "closed" = "open";
-  let exitReason: string | null = null;
+  const exceedsLimit = riskPctOfPortfolio !== null && riskPctOfPortfolio > maxRiskPct;
+  const confirmedOverride = body.confirmed_override === true;
 
-  if (exitPrice !== null && exitPrice > 0) {
-    realizedPnl = (exitPrice - entryPrice) * shares;
-    returnPct = (exitPrice - entryPrice) / entryPrice;
-    status = "closed";
-    if (
-      typeof body.exit_reason === "string" &&
-      (ALLOWED_EXIT_REASONS as readonly string[]).includes(body.exit_reason)
-    ) {
-      exitReason = body.exit_reason;
-    }
+  if (exceedsLimit && !confirmedOverride) {
+    // Not an error — a real, expected pause in the flow. The client shows
+    // this as a warning and re-submits with confirmed_override: true.
+    return NextResponse.json(
+      {
+        needs_confirmation: true,
+        reason: "risk_limit_exceeded",
+        risk_pct_of_portfolio: riskPctOfPortfolio,
+        max_risk_pct: maxRiskPct,
+        initial_risk_dollars: initialRiskDollars,
+      },
+      { status: 200 },
+    );
   }
+
+  const conviction = num(body.conviction);
 
   const insertRow = {
     user_id: userId,
@@ -129,20 +196,25 @@ export async function POST(req: NextRequest) {
         ? body.swing_idea_id
         : null,
     symbol,
-    broker: typeof body.broker === "string" ? body.broker : null,
-    shares,
+    broker: str(body.broker),
+    setup_name: str(body.setup_name),
+    thesis,
+    entry_date: entryDate,
     entry_price: entryPrice,
-    entry_date: body.entry_date,
-    exit_price: exitPrice,
-    exit_date: exitDate,
-    thesis: typeof body.thesis === "string" ? body.thesis : null,
-    realized_pnl: realizedPnl,
-    return_pct: returnPct,
-    exit_reason: exitReason,
-    status,
+    shares,
+    planned_stop: plannedStop,
+    planned_target: plannedTarget,
+    initial_risk_dollars: initialRiskDollars,
+    risk_pct_of_portfolio: riskPctOfPortfolio,
+    portfolio_value_at_entry: portfolioValue,
+    risk_limit_overridden: exceedsLimit && confirmedOverride,
+    atr_at_entry: num(body.atr_at_entry),
+    adr_pct_at_entry: num(body.adr_pct_at_entry),
+    conviction: conviction !== null ? Math.round(conviction) : null,
+    market_regime: str(body.market_regime),
+    status: "open" as const,
   };
 
-  const sb = createServerClient();
   const res = await sb.from<TradeRow>("swing_trades").insert(insertRow).select().single();
   if (res.error) {
     return NextResponse.json({ error: res.error.message }, { status: 400 });

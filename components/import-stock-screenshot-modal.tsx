@@ -10,6 +10,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { EXIT_REASONS } from "@/components/swing-trade-exit-dialog";
 
 type ParsedStockTrade = {
   symbol: string;
@@ -18,6 +19,11 @@ type ParsedStockTrade = {
   price: number;
   date: string;
   broker: string;
+  // Neither of these comes off the screenshot — the OCR reads a fill, not
+  // a plan. Collected here because swing_trades now requires a stop on
+  // every open position and a deliberate exit_reason on every close.
+  planned_stop?: number;
+  exit_reason?: string;
 };
 
 type Props = {
@@ -161,8 +167,27 @@ export function ImportStockScreenshotModal({
     }
   }
 
+  function rowError(t: ParsedStockTrade): string | null {
+    if (t.action === "buy") {
+      if (t.planned_stop === undefined || !Number.isFinite(t.planned_stop) || t.planned_stop <= 0) {
+        return `${t.symbol}: needs a planned stop`;
+      }
+      if (t.planned_stop >= t.price) {
+        return `${t.symbol}: planned stop must be below the fill price`;
+      }
+    } else if (!t.exit_reason) {
+      return `${t.symbol}: needs an exit reason`;
+    }
+    return null;
+  }
+
   async function confirm() {
     if (!parsed || parsed.length === 0) return;
+    const rowErrors = parsed.map(rowError).filter((e): e is string => e !== null);
+    if (rowErrors.length > 0) {
+      setError(`Fix before importing — ${rowErrors.join("; ")}`);
+      return;
+    }
     setConfirming(true);
     setError(null);
     try {
@@ -174,7 +199,7 @@ export function ImportStockScreenshotModal({
       const json = (await res.json()) as {
         inserted?: number;
         closed?: number;
-        orphaned?: number;
+        skipped_orphan_sells?: number;
         errors?: string[];
         error?: string;
       };
@@ -182,7 +207,9 @@ export function ImportStockScreenshotModal({
       const parts = [
         (json.inserted ?? 0) > 0 ? `${json.inserted} opened` : null,
         (json.closed ?? 0) > 0 ? `${json.closed} closed` : null,
-        (json.orphaned ?? 0) > 0 ? `${json.orphaned} orphaned sell` : null,
+        (json.skipped_orphan_sells ?? 0) > 0
+          ? `${json.skipped_orphan_sells} sell${json.skipped_orphan_sells === 1 ? "" : "s"} skipped (no matching open position — log the original entry manually)`
+          : null,
       ].filter(Boolean);
       const msg = parts.length > 0 ? parts.join(", ") : "Imported 0 trades";
       if (json.errors && json.errors.length > 0) {
@@ -291,11 +318,12 @@ export function ImportStockScreenshotModal({
             <div className="max-h-96 overflow-auto rounded border border-border">
               <table className="w-full table-fixed">
                 <colgroup>
-                  <col style={{ width: "130px" }} />
-                  <col style={{ width: "85px" }} />
+                  <col style={{ width: "120px" }} />
+                  <col style={{ width: "75px" }} />
+                  <col style={{ width: "70px" }} />
+                  <col style={{ width: "75px" }} />
                   <col style={{ width: "80px" }} />
-                  <col style={{ width: "90px" }} />
-                  <col style={{ width: "90px" }} />
+                  <col style={{ width: "120px" }} />
                   <col style={{ width: "40px" }} />
                 </colgroup>
                 <thead className="sticky top-0 z-10 bg-muted/40 text-left">
@@ -305,6 +333,7 @@ export function ImportStockScreenshotModal({
                     <th className="whitespace-nowrap px-2 py-1">Action</th>
                     <th className="whitespace-nowrap px-2 py-1">Shares</th>
                     <th className="whitespace-nowrap px-2 py-1">Price</th>
+                    <th className="whitespace-nowrap px-2 py-1">Stop / exit reason</th>
                     <th className="px-2 py-1"></th>
                   </tr>
                 </thead>
@@ -355,6 +384,38 @@ export function ImportStockScreenshotModal({
                           onChange={(e) => updateRow(idx, { price: Number(e.target.value) })}
                           className="w-20 rounded border border-border bg-background px-1 py-0.5"
                         />
+                      </td>
+                      <td className="px-2 py-1">
+                        {t.action === "buy" ? (
+                          <input
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            placeholder="planned stop *"
+                            value={t.planned_stop ?? ""}
+                            onChange={(e) =>
+                              updateRow(idx, {
+                                planned_stop: e.target.value === "" ? undefined : Number(e.target.value),
+                              })
+                            }
+                            className="w-full rounded border border-border bg-background px-1 py-0.5"
+                          />
+                        ) : (
+                          <select
+                            value={t.exit_reason ?? ""}
+                            onChange={(e) => updateRow(idx, { exit_reason: e.target.value || undefined })}
+                            className="w-full rounded border border-border bg-background px-1 py-0.5"
+                          >
+                            <option value="" disabled>
+                              reason *
+                            </option>
+                            {EXIT_REASONS.map((r) => (
+                              <option key={r.value} value={r.value}>
+                                {r.label}
+                              </option>
+                            ))}
+                          </select>
+                        )}
                       </td>
                       <td className="px-2 py-1 text-right">
                         <button

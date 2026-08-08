@@ -113,6 +113,35 @@ function emaSeries(values: number[], period: number): Array<number | null> {
   return out;
 }
 
+// Average Daily Range as a % of price: mean of (high-low)/close over the
+// trailing `period` bars, expressed as a percent (e.g. 3.2 = 3.2%/day).
+// Unlike ATR (a dollar figure, smoothed), this is a plain average of the
+// *relative* daily range — the swing entry form's "how much does this
+// normally move in a day" context number.
+//   bars: daily OHLC, OLDEST FIRST. Needs >= period bars.
+export function computeADRPercent(
+  bars: Array<{ high: number; low: number; close: number }>,
+  period = 20,
+): number | null {
+  if (!Array.isArray(bars) || bars.length < period) return null;
+  const window = bars.slice(-period);
+  let sum = 0;
+  let n = 0;
+  for (const b of window) {
+    if (
+      !Number.isFinite(b.high) ||
+      !Number.isFinite(b.low) ||
+      !Number.isFinite(b.close) ||
+      b.close <= 0
+    ) {
+      continue;
+    }
+    sum += ((b.high - b.low) / b.close) * 100;
+    n += 1;
+  }
+  return n > 0 ? sum / n : null;
+}
+
 export type MACDPoint = { macd: number; signal: number; histogram: number };
 
 // Standard 12/26/9 MACD: fast EMA - slow EMA = MACD line, signal = EMA

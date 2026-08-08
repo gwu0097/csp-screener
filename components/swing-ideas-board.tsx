@@ -63,7 +63,12 @@ function scoreColor(score: number | null): string {
 }
 
 function exitReasonLabel(r: string | null): string {
+  if (r === "stop_hit") return "Stop hit";
   if (r === "target_hit") return "Target hit";
+  if (r === "time_stop") return "Time stop";
+  if (r === "trailing_stop") return "Trailing stop";
+  if (r === "discretionary_override") return "Discretionary override";
+  // Legacy values from trades logged before the plan-vs-actual rebuild.
   if (r === "stop_loss") return "Stop loss";
   if (r === "thesis_broken") return "Thesis broken";
   if (r === "manual") return "Manual";
