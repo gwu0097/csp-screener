@@ -28,10 +28,14 @@ export async function GET(): Promise<NextResponse> {
     return authErrorResponse(e);
   }
   const sb = createServerClient();
+  // Scoped to kind='legacy' — swing_screen_results also holds append-only
+  // 'rs_pullback' rows (see /save and /rs-pullback/history) that must
+  // never shadow the four existing tabs' single latest-row cache here.
   const res = await sb
     .from("swing_screen_results")
     .select("*")
     .eq("user_id", userId)
+    .eq("kind", "legacy")
     .order("screened_at", { ascending: false })
     .limit(1);
   if (res.error) {

@@ -27,9 +27,9 @@ import {
   batchRefreshSnapshots,
   type SymbolSnapshot,
 } from "./market-snapshot";
-import { computeATR, computeADRPercent } from "./indicators";
+import { computeATR, computeADRPercent, computeSMA } from "./indicators";
 import { createServerClient } from "./supabase";
-import { getOrFetchDailyBars } from "./daily-bars-cache";
+import { getOrFetchDailyBars, type DailyBar } from "./daily-bars-cache";
 import YahooFinance from "yahoo-finance2";
 
 // Reuse the same yahoo-finance2 instance pattern as lib/yahoo.ts.
@@ -77,10 +77,16 @@ export type CatalystType =
   | "other"
   | "none";
 
-// The four setup-type tabs. A candidate can qualify for several
+// The five setup-type tabs. A candidate can qualify for several
 // (confluence) — setupTabs lists every tab it belongs to and
 // tabScores carries the per-tab ranking score (0-10).
-export type SetupTab = "capitulation" | "pullback" | "insider" | "options_flow";
+//
+// rs_pullback is structurally different from the other four: it's a
+// pass/fail trend+RS classification split into three lists rather than a
+// 0-10 ranked score (see RsPullbackList/computeRsPullbackCandidates
+// below) — rs_pullback candidates carry setupScore 0 and empty
+// tabScores/tabScoreComponents/tabNarrative by design, not by omission.
+export type SetupTab = "capitulation" | "pullback" | "insider" | "options_flow" | "rs_pullback";
 
 // Snapshot-derived stats for the technical tabs. Computed in pass 1
 // from symbol_market_snapshot (rsi14 + price_history_5d + sma20 +
@@ -277,7 +283,26 @@ export type SwingCandidate = {
   // Yahoo sector, cached in stock_profiles (see getOrFetchSector). Display
   // only — not used by any tab qualifier or scorer.
   sector: string | null;
+
+  // ---- RS Pullback tab only (see computeRsPullbackCandidates). All
+  // null/undefined for every other tab's candidates. ----
+  // ((price - SMA50) / SMA50 * 100) / ADR% — how many "average days of
+  // range" price sits from its 50MA. The gate/list-partition input.
+  extensionAdrDays?: number | null;
+  // Stock's N-day return minus SPY's N-day return, both computed from
+  // daily_bars_cache closes (not a live quote — see the function's own
+  // comment for why). > 0 is the RS gate; the raw number is displayed.
+  rs20?: number | null;
+  rs60?: number | null;
+  // Whether the stock made a higher low than SPY while SPY made a lower
+  // low over the trailing 30 sessions. Display-only, never gates — see
+  // computeHigherLowVsSpy for the exact (documented-heuristic) definition.
+  higherLowVsSpy?: boolean | null;
+  // Which of the three output lists this candidate landed in.
+  rsPullbackList?: RsPullbackList | null;
 };
+
+export type RsPullbackList = "ready" | "leading_extended" | "in_zone_lagging";
 
 // ---------- Pass 1 helpers ----------
 
@@ -967,6 +992,314 @@ async function getOrFetchSector(symbol: string): Promise<string | null> {
   }
 }
 
+// ---------- RS Pullback (fifth tab) ----------
+//
+// Structurally different from the other four tabs: no 0-10 score, no
+// narrative. A candidate either passes the trend+volatility filter or it
+// doesn't, and if it does, it lands in exactly one of three lists based
+// on relative strength and how extended it is from its own 50MA. See
+// computeRsPullbackCandidates for the full pipeline.
+
+export type RsPullbackThresholds = {
+  minAdrPct: number;
+  entryZoneAdrDays: number;
+  extendedAdrDaysThreshold: number;
+  sma50RisingMinPct: number;
+  sma50RisingLookbackSessions: number;
+  ma50BelowTolerancePct: number;
+};
+
+export const DEFAULT_RS_PULLBACK_THRESHOLDS: RsPullbackThresholds = {
+  minAdrPct: 3.0,
+  entryZoneAdrDays: 1.0,
+  extendedAdrDaysThreshold: 2.0,
+  sma50RisingMinPct: 3.0,
+  sma50RisingLookbackSessions: 20,
+  ma50BelowTolerancePct: 3.0,
+};
+
+// Sector disqualifiers — checked in enrichment (needs getOrFetchSector),
+// not the pregate below (which only has Pass1Quote, no sector).
+const RS_PULLBACK_DISQUALIFIED_SECTORS = new Set(["Real Estate", "Utilities"]);
+
+// Same liquidity floor the legacy funnel applies (price >= $10, mcap >=
+// $500M) — RS Pullback has its own independent gate chain, not a
+// subset of the legacy funnel, so it needs this stated explicitly rather
+// than inheriting it.
+const RS_PULLBACK_MIN_PRICE = 10;
+const RS_PULLBACK_MIN_MARKET_CAP = 500_000_000;
+
+// Bounds the enrichment fan-out (bars + earnings + sector fetch per
+// symbol) to protect the 60s route ceiling, same philosophy as
+// MAX_SNAPSHOT_ENRICH for capitulation/pullback.
+const MAX_RS_PULLBACK_ENRICH = 150;
+
+// Cheap pre-gate using only the already-fetched Pass1Quote (Yahoo's
+// point-in-time 50MA/200MA) — narrows the ~520-symbol universe before any
+// per-symbol bars/earnings/sector fetch. This is the part of the trend
+// filter that doesn't need bar history; the 50MA-RISING leg needs a
+// historical SMA50 and can only be checked once bars are fetched, in
+// computeRsPullbackCandidates below. Exported so pass1Filter can union
+// pregated symbols into its survivor set (otherwise serializePass1 would
+// strip their quotes before pass 2 ever sees them).
+export function pregateRsPullbackSymbols(
+  quotes: Map<string, Pass1Quote>,
+  thresholds: RsPullbackThresholds = DEFAULT_RS_PULLBACK_THRESHOLDS,
+): string[] {
+  const out: string[] = [];
+  for (const q of Array.from(quotes.values())) {
+    if (q.currentPrice < RS_PULLBACK_MIN_PRICE) continue;
+    if (q.marketCap < RS_PULLBACK_MIN_MARKET_CAP) continue;
+    if (!(q.ma50 > 0) || !(q.ma200 > 0)) continue;
+    if (q.currentPrice <= q.ma200) continue;
+    const vsMA50 = (q.currentPrice - q.ma50) / q.ma50;
+    if (vsMA50 < -thresholds.ma50BelowTolerancePct / 100) continue;
+    out.push(q.symbol);
+  }
+  return out.slice(0, MAX_RS_PULLBACK_ENRICH);
+}
+
+// Bars-derived SMA50 "as of N sessions ago" — drop the most recent N
+// closes, then take the 50-bar SMA of what's left. Same computeSMA
+// semantics as everywhere else in this file ("last `period` of the given
+// array"), just given a trimmed array.
+function smaAsOfSessionsAgo(
+  closes: number[],
+  period: number,
+  sessionsAgo: number,
+): number | null {
+  const trimmed = sessionsAgo > 0 ? closes.slice(0, closes.length - sessionsAgo) : closes;
+  return computeSMA(trimmed, period);
+}
+
+// Whether the stock made a higher low than SPY while SPY made a lower
+// low, over the trailing `sessions` days. Display-only — never gates.
+// This is a documented heuristic, not full swing-low detection: splits
+// the window into two equal halves and compares each half's lowest LOW.
+// A real swing-low algorithm would find local minima; a fixed 15/15 split
+// is a simpler, defensible stand-in given this field is explicitly
+// non-gating.
+function computeHigherLowVsSpy(
+  stockBars: DailyBar[],
+  spyBars: DailyBar[],
+  sessions = 30,
+): boolean | null {
+  const half = Math.floor(sessions / 2);
+  if (stockBars.length < sessions || spyBars.length < sessions) return null;
+  const sWindow = stockBars.slice(-sessions);
+  const pWindow = spyBars.slice(-sessions);
+  const sEarlyLow = Math.min(...sWindow.slice(0, half).map((b) => b.low));
+  const sRecentLow = Math.min(...sWindow.slice(half).map((b) => b.low));
+  const pEarlyLow = Math.min(...pWindow.slice(0, half).map((b) => b.low));
+  const pRecentLow = Math.min(...pWindow.slice(half).map((b) => b.low));
+  return sRecentLow > sEarlyLow && pRecentLow < pEarlyLow;
+}
+
+// N-session return from a closes series (OLDEST FIRST), both endpoints
+// from the array — not the live quote. This keeps the stock side and the
+// SPY side on identical footing (SPY has no "live quote" fetched
+// anywhere in this pipeline, only cached bars); mixing a live stock price
+// against a bars-derived SPY return would put a few-hours-old skew into
+// the RS diff that has nothing to do with actual relative strength.
+function nSessionReturn(closes: number[], n: number): number | null {
+  if (closes.length < n + 1) return null;
+  const now = closes[closes.length - 1];
+  const then = closes[closes.length - 1 - n];
+  if (!(then > 0)) return null;
+  return ((now - then) / then) * 100;
+}
+
+export async function computeRsPullbackCandidates(
+  pass1Data: Map<string, Pass1Quote>,
+  thresholds: RsPullbackThresholds = DEFAULT_RS_PULLBACK_THRESHOLDS,
+  opts: { forceFresh?: boolean } = {},
+): Promise<{
+  candidates: SwingCandidate[];
+  pregatedCount: number;
+  excludedBySma50Rising: number;
+}> {
+  const forceFresh = opts.forceFresh ?? false;
+  const pregated = pregateRsPullbackSymbols(pass1Data, thresholds);
+  if (pregated.length === 0) {
+    return { candidates: [], pregatedCount: 0, excludedBySma50Rising: 0 };
+  }
+
+  const spyBars = await getOrFetchDailyBars("SPY", { forceFresh }).catch(() => [] as DailyBar[]);
+  const spyCloses = spyBars.map((b) => b.close);
+
+  // Minimum history: 50-bar SMA anchored `sma50RisingLookbackSessions`
+  // sessions back (default 70 bars) and a 60-session return (61 bars) —
+  // whichever is larger.
+  const minBarsNeeded = Math.max(thresholds.sma50RisingLookbackSessions + 50, 61);
+
+  const candidates: SwingCandidate[] = [];
+  let excludedBySma50Rising = 0;
+  const started = Date.now();
+  const DEADLINE_MS = 45_000;
+
+  await mapWithConcurrency(pregated, 5, async (symbol) => {
+    if (Date.now() - started > DEADLINE_MS) return null;
+    const q = pass1Data.get(symbol);
+    if (!q) return null;
+
+    const [bars, sector, nextEarn] = await Promise.all([
+      getOrFetchDailyBars(symbol, { forceFresh }).catch(() => [] as DailyBar[]),
+      getOrFetchSector(symbol).catch(() => null),
+      getFinnhubNextEarningsDate(symbol, { forceFresh }).catch(() => null),
+    ]);
+
+    // Earnings <7 days out — same disqualifier pass2Enrich applies to
+    // every other tab.
+    const daysToEarn = nextEarn?.date ? daysFromTodayUtc(nextEarn.date) : null;
+    if (daysToEarn !== null && daysToEarn < 7) return null;
+
+    if (sector !== null && RS_PULLBACK_DISQUALIFIED_SECTORS.has(sector)) return null;
+
+    const closes = bars.map((b) => b.close);
+    if (closes.length < minBarsNeeded || spyCloses.length < minBarsNeeded) return null;
+
+    const sma50Now = computeSMA(closes, 50);
+    const sma50Ago = smaAsOfSessionsAgo(
+      closes,
+      50,
+      thresholds.sma50RisingLookbackSessions,
+    );
+    if (sma50Now === null || sma50Ago === null || !(sma50Ago > 0)) return null;
+
+    const sma50RisingPct = ((sma50Now - sma50Ago) / sma50Ago) * 100;
+    if (sma50RisingPct < thresholds.sma50RisingMinPct) {
+      excludedBySma50Rising += 1;
+      return null;
+    }
+
+    // Re-derive price-vs-50MA from the SAME bars-based SMA50 used for the
+    // rising check and the extension calc below, rather than Yahoo's
+    // separately-sourced point quote — one consistent SMA50 throughout,
+    // not two numbers that could quietly disagree.
+    const vsMA50Bars = (q.currentPrice - sma50Now) / sma50Now;
+    if (vsMA50Bars < -thresholds.ma50BelowTolerancePct / 100) return null;
+
+    const adr20Pct = computeADRPercent(bars, 20);
+    if (adr20Pct === null || adr20Pct < thresholds.minAdrPct) return null;
+
+    const extensionAdrDays = (((q.currentPrice - sma50Now) / sma50Now) * 100) / adr20Pct;
+
+    const stockReturn20 = nSessionReturn(closes, 20);
+    const stockReturn60 = nSessionReturn(closes, 60);
+    const spyReturn20 = nSessionReturn(spyCloses, 20);
+    const spyReturn60 = nSessionReturn(spyCloses, 60);
+    if (
+      stockReturn20 === null ||
+      stockReturn60 === null ||
+      spyReturn20 === null ||
+      spyReturn60 === null
+    ) {
+      return null;
+    }
+    const rs20 = stockReturn20 - spyReturn20;
+    const rs60 = stockReturn60 - spyReturn60;
+    const higherLowVsSpy = computeHigherLowVsSpy(bars, spyBars, 30);
+
+    const passesRs = rs20 > 0 && rs60 > 0;
+    const inEntryZone = Math.abs(extensionAdrDays) <= thresholds.entryZoneAdrDays;
+    const isExtended = extensionAdrDays > thresholds.extendedAdrDaysThreshold;
+
+    // Ready takes priority over In-zone/lagging when both technically
+    // apply (they can't — inEntryZone+passesRs is Ready, inEntryZone
+    // without passesRs is lagging — but written this way so the
+    // precedence is explicit, matching the spec's list order). A
+    // candidate that passes RS but sits in the dead zone between the
+    // entry-zone and extended thresholds (entryZoneAdrDays < |ext| <=
+    // extendedAdrDaysThreshold) matches none of the three defined lists
+    // and is simply not shown — see the validation report for how often
+    // that happens.
+    let list: RsPullbackList | null = null;
+    if (passesRs && inEntryZone) list = "ready";
+    else if (passesRs && isExtended) list = "leading_extended";
+    else if (inEntryZone && !passesRs) list = "in_zone_lagging";
+    if (list === null) return null;
+
+    const atr14 = computeATR(bars, 14);
+    const structural = computeStructuralLevels(q, atr14);
+    if (!structural) return null;
+
+    const pctFromHigh = (q.currentPrice - q.week52High) / q.week52High;
+    const pctFrom52wLow = (q.currentPrice - q.week52Low) / q.week52Low;
+    const vsMA200 = (q.currentPrice - q.ma200) / q.ma200;
+    const volumeRatio = q.avgVolume10d > 0 ? q.todayVolume / q.avgVolume10d : 0;
+
+    candidates.push({
+      symbol: q.symbol,
+      companyName: q.companyName,
+      currentPrice: q.currentPrice,
+      priceChange1d: q.priceChange1d,
+      ma50: q.ma50,
+      ma200: q.ma200,
+      week52Low: q.week52Low,
+      week52High: q.week52High,
+      analystTarget: q.analystTarget,
+      numAnalysts: q.numAnalysts,
+      avgVolume10d: q.avgVolume10d,
+      todayVolume: q.todayVolume,
+      marketCap: q.marketCap,
+      shortPercentFloat: q.shortPercentFloat,
+      revenueGrowth: q.revenueGrowth,
+      pctFromHigh,
+      pctFrom52wLow,
+      vsMA50: vsMA50Bars,
+      vsMA200,
+      volumeRatio,
+      rr: structural.rr,
+      entryPrice: structural.entryPrice,
+      targetPrice: structural.targetPrice,
+      stopPrice: structural.stopPrice,
+      nextEarningsDate: nextEarn?.date ?? null,
+      daysToEarnings: daysToEarn,
+      insiderTransactions: [],
+      insiderSignal: "neutral",
+      executiveBuys: [],
+      insiderBuyDollars: 0,
+      insiderBuyerCount: 0,
+      insiderLastBuyDaysAgo: null,
+      unusualOptionsActivity: false,
+      callVolumeOiRatio: null,
+      optionsSignal: "neutral",
+      topOptionsStrike: null,
+      topOptionsExpiry: null,
+      catalystFound: false,
+      catalystType: "none",
+      catalystDate: null,
+      catalystDescription: null,
+      catalystConfidence: "none",
+      catalystInsiderAngle: null,
+      catalystRawResponse: null,
+      tier1Signals: [],
+      tier2Signals: [],
+      redFlags: [],
+      signalCount: 0,
+      setupScore: 0,
+      setupTabs: ["rs_pullback"],
+      tabScores: {},
+      tabScoreComponents: {},
+      tabNarrative: {},
+      tabStats: null,
+      capitulationStats: null,
+      pullbackStats: null,
+      atr14,
+      adr20Pct,
+      sector,
+      extensionAdrDays,
+      rs20,
+      rs60,
+      higherLowVsSpy,
+      rsPullbackList: list,
+    });
+    return null;
+  });
+
+  return { candidates, pregatedCount: pregated.length, excludedBySma50Rising };
+}
+
 // Real trade geometry, replacing both computeTradeLevels and
 // fallbackLevels above for what's actually displayed to the user (those
 // two remain as pass-1's cheap pre-filter — see pass1Filter).
@@ -1107,7 +1440,7 @@ function pregateTabSymbols(quotes: Map<string, Pass1Quote>): string[] {
 
 export async function pass1Filter(
   symbols: string[],
-  opts: { forceFresh?: boolean } = {},
+  opts: { forceFresh?: boolean; rsPullbackThresholds?: RsPullbackThresholds } = {},
 ): Promise<{
   survivors: string[];
   quotes: Map<string, Pass1Quote>;
@@ -1209,14 +1542,27 @@ export async function pass1Filter(
       `pullback=${Object.keys(pullback).length} funnel=${funnelSurvivors.length}`,
   );
 
-  // Survivors = union of the legacy funnel (insider/options path) and
-  // the tab-qualified symbols, so pass 2 enriches (and earnings-gates)
-  // everything. Tab symbols that didn't clear the legacy R/R funnel
-  // get swing-sized fallback levels.
+  // RS Pullback pregate — cheap (Pass1Quote-only) check, unioned into
+  // survivors below so serializePass1 doesn't strip these symbols'
+  // quotes before the real enrichment (bars-derived 50MA-rising, ADR,
+  // RS) gets a chance to run in pass 2. Always run with at least the
+  // default thresholds even if the caller doesn't pass any, so an older
+  // client that doesn't know about this tab still gets correct survivor
+  // data for free.
+  const rsPullbackPregated = pregateRsPullbackSymbols(
+    quotes,
+    opts.rsPullbackThresholds ?? DEFAULT_RS_PULLBACK_THRESHOLDS,
+  );
+
+  // Survivors = union of the legacy funnel (insider/options path), the
+  // tab-qualified symbols, and the RS Pullback pregate, so pass 2
+  // enriches (and earnings-gates) everything. Tab symbols that didn't
+  // clear the legacy R/R funnel get swing-sized fallback levels.
   const survivorSet = new Set<string>(funnelSurvivors);
   for (const sym of [
     ...Object.keys(capitulation),
     ...Object.keys(pullback),
+    ...rsPullbackPregated,
   ]) {
     survivorSet.add(sym);
     if (!trades.has(sym)) {
@@ -1547,6 +1893,11 @@ const TAB_THESIS_LABEL: Record<SetupTab, string> = {
   pullback: "pullback-to-trend",
   insider: "insider-conviction",
   options_flow: "options-flow",
+  // buildNarrative is never called for rs_pullback candidates (see
+  // computeRsPullbackCandidates — they're built independently of the
+  // tabScores/buildNarrative machinery) — entry present only to satisfy
+  // Record<SetupTab, string> exhaustiveness.
+  rs_pullback: "RS pullback",
 };
 
 function pctStr(n: number, digits = 1): string {
@@ -1619,6 +1970,11 @@ function thesisIntro(n: NarrativeInput): string {
         `${n.symbol} is seeing unusual call activity: ${n.callVolumeOiRatio !== null ? n.callVolumeOiRatio.toFixed(2) : "?"}x ` +
         `volume/OI on the $${n.topOptionsStrike ?? "?"} strike expiring ${n.topOptionsExpiry ?? "unknown"}.`
       );
+    case "rs_pullback":
+      // Unreachable — buildNarrative is never invoked for rs_pullback
+      // candidates (see computeRsPullbackCandidates). Present only so
+      // this switch stays exhaustive over SetupTab.
+      return `${n.symbol} — RS pullback (no narrative generated for this tab).`;
   }
 }
 

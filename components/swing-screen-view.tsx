@@ -163,6 +163,13 @@ type SwingCandidate = {
   // Yahoo sector, cached in stock_profiles. Display only. Optional for
   // rows saved before this field existed.
   sector?: string | null;
+  // RS Pullback tab only — null/undefined for every other tab's
+  // candidates. See lib/swing-screener.ts computeRsPullbackCandidates.
+  extensionAdrDays?: number | null;
+  rs20?: number | null;
+  rs60?: number | null;
+  higherLowVsSpy?: boolean | null;
+  rsPullbackList?: "ready" | "leading_extended" | "in_zone_lagging" | null;
 };
 
 // Mirror of lib/swing-screener.ts ScoreComponent — the score IS the sum
@@ -186,7 +193,7 @@ type TabStats = {
   return1y: number | null;
 };
 
-type SetupTab = "capitulation" | "pullback" | "insider" | "options_flow";
+type SetupTab = "capitulation" | "pullback" | "insider" | "options_flow" | "rs_pullback";
 
 const SETUP_TABS: Array<{ key: SetupTab; label: string; blurb: string }> = [
   {
@@ -213,6 +220,12 @@ const SETUP_TABS: Array<{ key: SetupTab; label: string; blurb: string }> = [
     blurb:
       "Unusual call activity (volume/OI on the hottest strike). Ranked by flow aggressiveness (vol/OI ratio + OTM skew).",
   },
+  {
+    key: "rs_pullback",
+    label: "RS Pullback",
+    blurb:
+      "Trend (above a rising 50d/above the 200d) + volatility floor (ADR% >= min) + relative strength vs SPY, split into three lists by extension from the 50d in ADR-days: Ready (in the entry zone), Leading/extended (strong RS but too far from entry), and In-zone/lagging (a control group). No 0-10 score — pass/fail plus a list, not a ranking.",
+  },
 ];
 
 const TAB_LABEL: Record<SetupTab, string> = {
@@ -220,6 +233,7 @@ const TAB_LABEL: Record<SetupTab, string> = {
   pullback: "Pullback",
   insider: "Insider",
   options_flow: "Options Flow",
+  rs_pullback: "RS Pullback",
 };
 
 // Rows saved before the tab redesign carry tier1Signals but no
@@ -284,6 +298,31 @@ const DEFAULT_SORT: SortState = { key: "setupScore", dir: "desc" };
 // really work regardless of score.
 const LS_MIN_ADR_PCT = "swing-screen-min-adr-pct";
 const DEFAULT_MIN_ADR_PCT = 3.0;
+
+// RS Pullback thresholds — mirrors lib/swing-screener.ts's
+// RsPullbackThresholds/DEFAULT_RS_PULLBACK_THRESHOLDS. Kept as a plain
+// object (not imported — this file already hand-mirrors SwingCandidate
+// the same way) so the settings panel can edit it directly and persist
+// via localStorage, same convention as minAdrPct above.
+type RsPullbackThresholds = {
+  minAdrPct: number;
+  entryZoneAdrDays: number;
+  extendedAdrDaysThreshold: number;
+  sma50RisingMinPct: number;
+  sma50RisingLookbackSessions: number;
+  ma50BelowTolerancePct: number;
+};
+
+const DEFAULT_RS_PULLBACK_THRESHOLDS: RsPullbackThresholds = {
+  minAdrPct: 3.0,
+  entryZoneAdrDays: 1.0,
+  extendedAdrDaysThreshold: 2.0,
+  sma50RisingMinPct: 3.0,
+  sma50RisingLookbackSessions: 20,
+  ma50BelowTolerancePct: 3.0,
+};
+
+const LS_RS_PULLBACK_THRESHOLDS = "swing-screen-rs-pullback-thresholds";
 
 type SortValue = number | string | null;
 
@@ -612,6 +651,10 @@ const TAB_COLUMNS: Record<SetupTab, MetricColumn[]> = {
       defaultDir: "asc",
     },
   ],
+  // RS Pullback doesn't use the standard column system — it has its own
+  // three-section renderer (RsPullbackResults) rather than a single
+  // flat sorted table. Empty on purpose.
+  rs_pullback: [],
 };
 
 // Mobile stays a fixed 5-col strip (Symbol/Price/Chg%/Score/Actions) —
@@ -633,6 +676,8 @@ const ROW_GRID_DESKTOP: Record<SetupTab, string> = {
     "md:grid-cols-[minmax(60px,80px)_minmax(120px,1.5fr)_80px_70px_60px_90px_70px_80px_60px_80px_70px_70px_minmax(120px,1fr)_190px]",
   options_flow:
     "md:grid-cols-[minmax(60px,80px)_minmax(120px,1.5fr)_80px_70px_60px_90px_70px_70px_90px_70px_90px_70px_minmax(120px,1fr)_190px]",
+  // Unused — RS Pullback never renders through ResultsTable/CandidateRow.
+  rs_pullback: "",
 };
 
 function rowGridClass(tab: SetupTab): string {
@@ -792,6 +837,37 @@ export function SwingScreenView() {
   useEffect(() => {
     window.localStorage.setItem(LS_MIN_ADR_PCT, String(minAdrPct));
   }, [minAdrPct]);
+  const [rsPullbackThresholds, setRsPullbackThresholds] = useState<RsPullbackThresholds>(() => {
+    if (typeof window === "undefined") return DEFAULT_RS_PULLBACK_THRESHOLDS;
+    try {
+      const raw = window.localStorage.getItem(LS_RS_PULLBACK_THRESHOLDS);
+      if (!raw) return DEFAULT_RS_PULLBACK_THRESHOLDS;
+      const parsed = JSON.parse(raw) as Partial<RsPullbackThresholds>;
+      return { ...DEFAULT_RS_PULLBACK_THRESHOLDS, ...parsed };
+    } catch {
+      return DEFAULT_RS_PULLBACK_THRESHOLDS;
+    }
+  });
+  useEffect(() => {
+    window.localStorage.setItem(LS_RS_PULLBACK_THRESHOLDS, JSON.stringify(rsPullbackThresholds));
+  }, [rsPullbackThresholds]);
+  const [rsPullbackSettingsOpen, setRsPullbackSettingsOpen] = useState(false);
+  const [rsPullbackDiagnostics, setRsPullbackDiagnostics] = useState<{
+    pregatedCount: number;
+    excludedBySma50Rising: number;
+  } | null>(null);
+  // Regime banner — independent of the scan pipeline, fetched once on
+  // mount. Display-only; feeds market_regime on the journal's entry form,
+  // never gates anything here.
+  const [regime, setRegime] = useState<{ label: string } | null>(null);
+  useEffect(() => {
+    fetch("/api/swings/screen/regime", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((j: { label?: string }) => {
+        if (j.label) setRegime({ label: j.label });
+      })
+      .catch(() => {});
+  }, []);
   const [importOpen, setImportOpen] = useState(false);
   // Which symbol Enter was clicked for, so the import modal opens
   // knowing what it's importing a fill for instead of blank/generic.
@@ -847,25 +923,53 @@ export function SwingScreenView() {
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ forceFresh }),
+          body: JSON.stringify({ forceFresh, rsPullbackThresholds }),
         },
       );
       setPass1Count(p1.survivors.length);
 
       // Pass 2 — Finnhub insider + earnings + Schwab options on
-      // survivors. A failure here also aborts (no candidates exist
-      // without it).
+      // survivors (fatal — no candidates exist for the four legacy tabs
+      // without it), run in parallel with RS Pullback's own enrichment
+      // (a separate route/function so neither risks tipping the other
+      // past the 60s ceiling). RS Pullback is NON-FATAL, same treatment
+      // as pass 3 below — a failure there shouldn't take down the other
+      // four tabs.
       setPhase("pass2");
-      const p2 = await fetchPassJson<{ candidates?: SwingCandidate[] }>(
-        "Pass 2 (insider/options enrichment)",
-        "/api/swings/screen/pass2",
-        {
+      const [p2, p2rs] = await Promise.all([
+        fetchPassJson<{ candidates?: SwingCandidate[] }>(
+          "Pass 2 (insider/options enrichment)",
+          "/api/swings/screen/pass2",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ...p1, forceFresh }),
+          },
+        ),
+        fetchPassJson<{
+          candidates?: SwingCandidate[];
+          pregatedCount?: number;
+          excludedBySma50Rising?: number;
+        }>("RS Pullback enrichment", "/api/swings/screen/pass2-rs-pullback", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ...p1, forceFresh }),
-        },
-      );
+          body: JSON.stringify({ ...p1, forceFresh, rsPullbackThresholds }),
+        }).catch((e) => {
+          console.warn("[swing-screen] RS Pullback enrichment failed:", e);
+          setRunWarning(
+            (prev) =>
+              prev ??
+              `RS Pullback tab failed to enrich (${e instanceof Error ? e.message : "unknown error"}) — the other four tabs are unaffected.`,
+          );
+          return { candidates: [], pregatedCount: 0, excludedBySma50Rising: 0 };
+        }),
+      ]);
       const enriched = p2.candidates ?? [];
+      const rsPullbackCandidates = p2rs.candidates ?? [];
+      setRsPullbackDiagnostics({
+        pregatedCount: p2rs.pregatedCount ?? 0,
+        excludedBySma50Rising: p2rs.excludedBySma50Rising ?? 0,
+      });
 
       // Pass 3 — Perplexity catalyst discovery. NON-FATAL: if it
       // fails, the run continues with pass-2 candidates (tabs intact,
@@ -913,6 +1017,14 @@ export function SwingScreenView() {
           `${e instanceof Error ? e.message : "Pass 3 failed"}. Showing the screen without catalyst enrichment — all four tabs are still populated.`,
         );
       }
+
+      // RS Pullback candidates are appended AFTER pass 3, not before —
+      // they carry setupScore 0 by design, and pass 3's Perplexity
+      // budget is spent highest-score-first, so merging them in earlier
+      // risks wasting fresh catalyst calls on a tab that doesn't use
+      // catalysts at all (never displayed) if the other tabs produce
+      // fewer than the per-run cap.
+      candidates = [...candidates, ...rsPullbackCandidates.map(normalizeCandidate)];
 
       const result: CachedResult = {
         candidates,
@@ -1018,6 +1130,7 @@ export function SwingScreenView() {
       pullback: 0,
       insider: 0,
       options_flow: 0,
+      rs_pullback: 0,
     };
     for (const c of data?.candidates ?? []) {
       for (const t of candidateTabs(c)) counts[t] += 1;
@@ -1045,6 +1158,26 @@ export function SwingScreenView() {
     [data, sort, activeTab, minAdrPct],
   );
 
+  // RS Pullback bypasses the generic minAdrPct control/sortedCandidates
+  // pipeline entirely — it has its own dedicated ADR threshold as part of
+  // rsPullbackThresholds, and mixing the two would mean two different
+  // ADR minimums silently fighting each other. viewCandidates is either
+  // the live run's data or a past run selected from history (see
+  // RsPullbackHistoryPicker) — null means "live".
+  const [rsPullbackHistoryView, setRsPullbackHistoryView] = useState<SwingCandidate[] | null>(
+    null,
+  );
+  const rsPullbackLists = useMemo(() => {
+    const source = rsPullbackHistoryView ?? data?.candidates ?? [];
+    const all = source.filter((c) => (c.setupTabs ?? []).includes("rs_pullback"));
+    const ready = all.filter((c) => c.rsPullbackList === "ready");
+    const leadingExtended = all
+      .filter((c) => c.rsPullbackList === "leading_extended")
+      .sort((a, b) => (a.extensionAdrDays ?? Infinity) - (b.extensionAdrDays ?? Infinity));
+    const inZoneLagging = all.filter((c) => c.rsPullbackList === "in_zone_lagging");
+    return { ready, leadingExtended, inZoneLagging };
+  }, [rsPullbackHistoryView, data]);
+
   function handleHeaderClick(key: SortKey) {
     setSort((cur) => {
       if (cur.key !== key) {
@@ -1071,6 +1204,11 @@ export function SwingScreenView() {
   return (
     <TooltipProvider delayDuration={200}>
     <div className="space-y-4">
+      {regime && (
+        <div className="rounded-md border border-border/60 bg-background/40 px-3 py-1.5 text-sm text-muted-foreground">
+          Regime: <span className="text-foreground">{regime.label}</span>
+        </div>
+      )}
       <ControlsBar
         data={data}
         loading={loading}
@@ -1112,7 +1250,25 @@ export function SwingScreenView() {
             counts={tabCounts}
             onSelect={handleTabSelect}
           />
-          {sortedCandidates.length === 0 ? (
+          {activeTab === "rs_pullback" ? (
+            <RsPullbackTabContent
+              lists={rsPullbackLists}
+              diagnostics={rsPullbackDiagnostics}
+              thresholds={rsPullbackThresholds}
+              onThresholdsChange={setRsPullbackThresholds}
+              settingsOpen={rsPullbackSettingsOpen}
+              onSettingsOpenChange={setRsPullbackSettingsOpen}
+              viewingHistory={rsPullbackHistoryView !== null}
+              onSelectRun={setRsPullbackHistoryView}
+              onEnterTrade={(symbol) => {
+                setImportSymbol(symbol);
+                setImportOpen(true);
+              }}
+              onTrack={(c) => handleTrack(c, "rs_pullback")}
+              trackedSymbols={trackedSymbols}
+              trackingSymbol={trackingSymbol}
+            />
+          ) : sortedCandidates.length === 0 ? (
             data.candidates.length === 0 ? (
               <EmptyStateNoResults data={data} />
             ) : (
@@ -1564,6 +1720,345 @@ function SortHeader({
         <span className="text-[9px]">{sort.dir === "asc" ? "▲" : "▼"}</span>
       )}
     </button>
+  );
+}
+
+// ---------- RS Pullback (fifth tab) ----------
+//
+// Structurally different from the other four tabs' single sorted table:
+// three named lists instead of one ranking, no score badge. Built as its
+// own render path rather than shoehorned into ResultsTable/CandidateRow.
+
+function fmtSigned(n: number | null | undefined, digits = 1): string {
+  if (n === null || n === undefined || !Number.isFinite(n)) return "—";
+  return `${n >= 0 ? "+" : ""}${n.toFixed(digits)}`;
+}
+
+function RsPullbackSettingsPanel({
+  thresholds,
+  onChange,
+}: {
+  thresholds: RsPullbackThresholds;
+  onChange: (t: RsPullbackThresholds) => void;
+}) {
+  function field(key: keyof RsPullbackThresholds, label: string, step = 0.5) {
+    return (
+      <label className="grid gap-1 text-xs">
+        <span className="text-muted-foreground">{label}</span>
+        <input
+          type="number"
+          step={step}
+          value={thresholds[key]}
+          onChange={(e) => {
+            const n = Number(e.target.value);
+            if (Number.isFinite(n)) onChange({ ...thresholds, [key]: n });
+          }}
+          className="w-24 rounded border border-border bg-background px-2 py-1 text-sm"
+        />
+      </label>
+    );
+  }
+  return (
+    <div className="grid grid-cols-2 gap-3 rounded-md border border-border bg-background/40 p-3 sm:grid-cols-3 md:grid-cols-6">
+      {field("minAdrPct", "Min ADR%")}
+      {field("entryZoneAdrDays", "Entry zone (ADR-days)")}
+      {field("extendedAdrDaysThreshold", "Extended threshold (ADR-days)")}
+      {field("sma50RisingMinPct", "50MA rising min %")}
+      {field("sma50RisingLookbackSessions", "50MA rising lookback (sessions)", 1)}
+      {field("ma50BelowTolerancePct", "Max % below 50MA")}
+    </div>
+  );
+}
+
+function RsPullbackHistoryPicker({
+  onSelect,
+}: {
+  onSelect: (candidates: SwingCandidate[] | null) => void;
+}) {
+  const [runs, setRuns] = useState<Array<{ screenedAt: string; candidates: SwingCandidate[] }> | null>(
+    null,
+  );
+  const [loading, setLoading] = useState(false);
+  const [selected, setSelected] = useState<string>("live");
+
+  async function load() {
+    setLoading(true);
+    try {
+      const res = await fetch("/api/swings/screen/rs-pullback/history", { cache: "no-store" });
+      const json = (await res.json()) as {
+        runs?: Array<{ screenedAt: string; candidates: SwingCandidate[] }>;
+      };
+      setRuns(json.runs ?? []);
+    } catch {
+      setRuns([]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return (
+    <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+      Run:
+      <select
+        value={selected}
+        disabled={loading}
+        onChange={(e) => {
+          const v = e.target.value;
+          setSelected(v);
+          if (v === "live") {
+            onSelect(null);
+            return;
+          }
+          const run = runs?.find((r) => r.screenedAt === v);
+          onSelect(run?.candidates ?? []);
+        }}
+        className="rounded border border-border bg-background px-2 py-1 text-sm"
+      >
+        <option value="live">Live (current run)</option>
+        {(runs ?? []).map((r) => (
+          <option key={r.screenedAt} value={r.screenedAt}>
+            {fmtRelDate(r.screenedAt)}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+function RsPullbackTabContent({
+  lists,
+  diagnostics,
+  thresholds,
+  onThresholdsChange,
+  settingsOpen,
+  onSettingsOpenChange,
+  viewingHistory,
+  onSelectRun,
+  onEnterTrade,
+  onTrack,
+  trackedSymbols,
+  trackingSymbol,
+}: {
+  lists: {
+    ready: SwingCandidate[];
+    leadingExtended: SwingCandidate[];
+    inZoneLagging: SwingCandidate[];
+  };
+  diagnostics: { pregatedCount: number; excludedBySma50Rising: number } | null;
+  thresholds: RsPullbackThresholds;
+  onThresholdsChange: (t: RsPullbackThresholds) => void;
+  settingsOpen: boolean;
+  onSettingsOpenChange: (v: boolean) => void;
+  viewingHistory: boolean;
+  onSelectRun: (candidates: SwingCandidate[] | null) => void;
+  onEnterTrade: (symbol: string) => void;
+  onTrack: (c: SwingCandidate) => void;
+  trackedSymbols: Set<string>;
+  trackingSymbol: string | null;
+}) {
+  const total = lists.ready.length + lists.leadingExtended.length + lists.inZoneLagging.length;
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-3 text-sm text-muted-foreground">
+          <span>{total} qualifying</span>
+          {diagnostics && (
+            <span>
+              · {diagnostics.pregatedCount} pre-gated, {diagnostics.excludedBySma50Rising} excluded
+              by the 50MA-rising check
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-3">
+          <RsPullbackHistoryPicker onSelect={onSelectRun} />
+          <button
+            type="button"
+            onClick={() => onSettingsOpenChange(!settingsOpen)}
+            className="text-xs text-muted-foreground underline decoration-dotted hover:text-foreground"
+          >
+            {settingsOpen ? "Hide thresholds" : "Edit thresholds"}
+          </button>
+        </div>
+      </div>
+
+      {settingsOpen && (
+        <RsPullbackSettingsPanel thresholds={thresholds} onChange={onThresholdsChange} />
+      )}
+
+      {viewingHistory && (
+        <div className="rounded border border-sky-500/40 bg-sky-500/5 px-3 py-1.5 text-xs text-sky-200">
+          Viewing a past run — read-only snapshot, not live prices.
+        </div>
+      )}
+
+      <RsPullbackListSection
+        title="Ready"
+        subtitle="Passes RS (both windows) and sits in the entry zone."
+        candidates={lists.ready}
+        emptyText="No names currently pass RS with a tight-enough entry zone."
+        onEnterTrade={onEnterTrade}
+        onTrack={onTrack}
+        trackedSymbols={trackedSymbols}
+        trackingSymbol={trackingSymbol}
+      />
+      <RsPullbackListSection
+        title="Leading, extended"
+        subtitle="Passes RS but too far above its 50MA to enter yet — sorted closest-to-entry first."
+        candidates={lists.leadingExtended}
+        emptyText="No names are currently leading-but-extended."
+        onEnterTrade={onEnterTrade}
+        onTrack={onTrack}
+        trackedSymbols={trackedSymbols}
+        trackingSymbol={trackingSymbol}
+      />
+      <RsPullbackListSection
+        title="In zone, lagging"
+        subtitle="Sits in the entry zone but fails relative strength — a control group, not a buy list."
+        candidates={lists.inZoneLagging}
+        emptyText="Nothing in the entry zone is currently lagging SPY."
+        onEnterTrade={onEnterTrade}
+        onTrack={onTrack}
+        trackedSymbols={trackedSymbols}
+        trackingSymbol={trackingSymbol}
+      />
+    </div>
+  );
+}
+
+function RsPullbackListSection({
+  title,
+  subtitle,
+  candidates,
+  emptyText,
+  onEnterTrade,
+  onTrack,
+  trackedSymbols,
+  trackingSymbol,
+}: {
+  title: string;
+  subtitle: string;
+  candidates: SwingCandidate[];
+  emptyText: string;
+  onEnterTrade: (symbol: string) => void;
+  onTrack: (c: SwingCandidate) => void;
+  trackedSymbols: Set<string>;
+  trackingSymbol: string | null;
+}) {
+  return (
+    <div className="space-y-2">
+      <div>
+        <div className="flex items-baseline gap-2">
+          <h3 className="text-sm font-semibold text-foreground">{title}</h3>
+          <span className="text-xs text-muted-foreground">({candidates.length})</span>
+        </div>
+        <div className="text-xs text-muted-foreground">{subtitle}</div>
+      </div>
+      {candidates.length === 0 ? (
+        <div className="rounded border border-border/60 bg-background/30 px-3 py-2 text-xs text-muted-foreground">
+          {emptyText}
+        </div>
+      ) : (
+        <div className="overflow-x-auto rounded border border-border">
+          <table className="w-full min-w-[900px] text-sm">
+            <thead className="border-b border-border/60 text-left text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+              <tr>
+                <th className="px-2 py-1.5">Symbol</th>
+                <th className="px-2 py-1.5 text-left">Sector</th>
+                <th className="px-2 py-1.5 text-right">Price</th>
+                <th className="px-2 py-1.5 text-right">vs 50MA</th>
+                <th className="px-2 py-1.5 text-right">ADR%</th>
+                <th className="px-2 py-1.5 text-right">Ext (ADR-days)</th>
+                <th className="px-2 py-1.5 text-right">RS20</th>
+                <th className="px-2 py-1.5 text-right">RS60</th>
+                <th className="px-2 py-1.5 text-center">Higher low</th>
+                <th className="px-2 py-1.5 text-right">Entry</th>
+                <th className="px-2 py-1.5 text-right">Target</th>
+                <th className="px-2 py-1.5 text-right">Stop</th>
+                <th className="px-2 py-1.5 text-right">R:R</th>
+                <th className="px-2 py-1.5 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {candidates.map((c) => {
+                const rr = fmtRr(c.rr);
+                const tracked = trackedSymbols.has(c.symbol);
+                return (
+                  <tr key={c.symbol} className="border-b border-border/40 last:border-0">
+                    <td className="px-2 py-1.5 font-mono font-medium text-foreground">{c.symbol}</td>
+                    <td className="px-2 py-1.5 text-xs text-muted-foreground">{c.sector ?? "—"}</td>
+                    <td className="px-2 py-1.5 text-right font-mono">{fmtMoney(c.currentPrice)}</td>
+                    <td
+                      className={`px-2 py-1.5 text-right ${c.vsMA50 < 0 ? "text-rose-300" : "text-foreground"}`}
+                    >
+                      {fmtPct(c.vsMA50, 1)}
+                    </td>
+                    <td className="px-2 py-1.5 text-right">
+                      {c.adr20Pct !== null && c.adr20Pct !== undefined ? `${c.adr20Pct.toFixed(1)}%` : "—"}
+                    </td>
+                    <td className="px-2 py-1.5 text-right font-mono">
+                      {fmtSigned(c.extensionAdrDays, 2)}
+                    </td>
+                    <td
+                      className={`px-2 py-1.5 text-right ${
+                        (c.rs20 ?? 0) > 0 ? "text-emerald-300" : "text-rose-300"
+                      }`}
+                    >
+                      {fmtSigned(c.rs20, 1)}
+                    </td>
+                    <td
+                      className={`px-2 py-1.5 text-right ${
+                        (c.rs60 ?? 0) > 0 ? "text-emerald-300" : "text-rose-300"
+                      }`}
+                    >
+                      {fmtSigned(c.rs60, 1)}
+                    </td>
+                    <td className="px-2 py-1.5 text-center text-xs">
+                      {c.higherLowVsSpy === null || c.higherLowVsSpy === undefined
+                        ? "—"
+                        : c.higherLowVsSpy
+                          ? "Yes"
+                          : "No"}
+                    </td>
+                    <td className="px-2 py-1.5 text-right">{fmtMoney(c.entryPrice)}</td>
+                    <td className="px-2 py-1.5 text-right text-emerald-300">{fmtMoney(c.targetPrice)}</td>
+                    <td className="px-2 py-1.5 text-right text-rose-300">{fmtMoney(c.stopPrice)}</td>
+                    <td className={`px-2 py-1.5 text-right ${rr.cls}`}>{rr.text}</td>
+                    <td className="px-2 py-1.5">
+                      <div className="flex items-center justify-end gap-1">
+                        <button
+                          type="button"
+                          onClick={() => onEnterTrade(c.symbol)}
+                          className="rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-white/5 hover:text-foreground"
+                        >
+                          Enter
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onTrack(c)}
+                          disabled={tracked || trackingSymbol === c.symbol}
+                          className={`rounded border px-1.5 py-0.5 text-[10px] font-medium ${
+                            tracked
+                              ? "cursor-default border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
+                              : "border-border text-muted-foreground hover:bg-white/5 hover:text-foreground"
+                          }`}
+                        >
+                          {tracked ? "Tracked" : "Track"}
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
   );
 }
 

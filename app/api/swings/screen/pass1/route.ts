@@ -1,5 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { pass1Filter, serializePass1 } from "@/lib/swing-screener";
+import {
+  pass1Filter,
+  serializePass1,
+  type RsPullbackThresholds,
+} from "@/lib/swing-screener";
 import { SWING_UNIVERSE } from "@/lib/stock-universe";
 
 export const dynamic = "force-dynamic";
@@ -12,14 +16,21 @@ export const maxDuration = 60;
 export async function POST(req: NextRequest): Promise<NextResponse> {
   const started = Date.now();
   let forceFresh = false;
+  let rsPullbackThresholds: RsPullbackThresholds | undefined;
   try {
-    const body = (await req.json().catch(() => ({}))) as { forceFresh?: unknown };
+    const body = (await req.json().catch(() => ({}))) as {
+      forceFresh?: unknown;
+      rsPullbackThresholds?: unknown;
+    };
     forceFresh = body.forceFresh === true;
+    if (body.rsPullbackThresholds && typeof body.rsPullbackThresholds === "object") {
+      rsPullbackThresholds = body.rsPullbackThresholds as RsPullbackThresholds;
+    }
   } catch {
     forceFresh = false;
   }
   try {
-    const result = await pass1Filter(SWING_UNIVERSE, { forceFresh });
+    const result = await pass1Filter(SWING_UNIVERSE, { forceFresh, rsPullbackThresholds });
     const wire = serializePass1(result, SWING_UNIVERSE.length);
     return NextResponse.json({
       ...wire,

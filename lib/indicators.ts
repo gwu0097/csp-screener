@@ -113,6 +113,16 @@ function emaSeries(values: number[], period: number): Array<number | null> {
   return out;
 }
 
+// Exponential moving average series, exposed for callers that need the
+// raw EMA (e.g. a regime indicator's 8/21 EMA read) rather than MACD's
+// fast/slow/signal composition. Same underlying math as the private
+// series computeMACD builds on.
+//   values: OLDEST FIRST. Returns an array aligned 1:1 with `values`;
+//   indices before the period warms up are null.
+export function computeEMA(values: number[], period: number): Array<number | null> {
+  return emaSeries(values, period);
+}
+
 // Average Daily Range as a % of price: mean of (high-low)/close over the
 // trailing `period` bars, expressed as a percent (e.g. 3.2 = 3.2%/day).
 // Unlike ATR (a dollar figure, smoothed), this is a plain average of the

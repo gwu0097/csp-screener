@@ -17,11 +17,16 @@ export type DailyBar = {
 };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-// Wide enough for the swing screener's ~40-calendar-day ATR window and
-// the CSP screener's ~45-calendar-day realized-vol window, with margin
-// for weekends/holidays — both callers slice what they need off the
-// tail.
-const DAILY_BARS_WINDOW_DAYS = 95;
+// Wide enough for the swing screener's ~40-calendar-day ATR window, the
+// CSP screener's ~45-calendar-day realized-vol window, AND the RS
+// Pullback setup's 50MA-rising check (needs a 50-day SMA anchored 20
+// trading days back — 70 trading days minimum, ~98 calendar days before
+// holiday/weekend margin) and its 60-day relative-strength window (61
+// trading days minimum). 150 calendar days ≈ 100-103 trading days after
+// typical holidays, comfortably covering the 70-bar floor with margin.
+// Widening this is safe for every existing caller — daily-bars-cache.ts's
+// own callers only ever slice what they need off the tail.
+const DAILY_BARS_WINDOW_DAYS = 150;
 
 // Hard requirement: a row older than this is treated as unusable and a
 // live fetch is always performed instead, REGARDLESS of force-fresh. A
