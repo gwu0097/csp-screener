@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   AlertTriangle,
@@ -392,6 +392,39 @@ const DEFAULT_RS_PULLBACK_THRESHOLDS: RsPullbackThresholds = {
 
 const LS_RS_PULLBACK_THRESHOLDS = "swing-screen-rs-pullback-thresholds";
 
+// Purely client-side, DISPLAY-ONLY color bands for the two RS Pullback
+// metrics that actually vary row to row and determine whether a name is
+// buyable (Extension, R:R) — unlike RsPullbackThresholds above, these
+// never round-trip to the server and never affect what qualifies,
+// what's pregated, or which of the three lists a candidate lands in.
+// Provisional, hence editable — see RsPullbackSettingsPanel.
+type RsPullbackColorBands = {
+  // Extension (ADR-days), lower is better WITHIN a floor: below
+  // extensionFloor, price is essentially at the 50-day, leaving no room
+  // for a stop above the level that defines the trend — that's red, not
+  // green, even though it's a small number.
+  extensionFloor: number; // below this: red
+  extensionGreenMax: number; // [floor, this]: green — ideal entry zone
+  extensionYellowMax: number; // (greenMax, this]: yellow
+  extensionOrangeMax: number; // (yellowMax, this]: orange; above: red
+  // R:R, higher is better — no floor, just four bands top to bottom.
+  rrGreenMin: number; // >= this: green
+  rrYellowMin: number; // >= this: yellow
+  rrOrangeMin: number; // >= this: orange; below: red
+};
+
+const DEFAULT_RS_PULLBACK_COLOR_BANDS: RsPullbackColorBands = {
+  extensionFloor: 0.3,
+  extensionGreenMax: 1.0,
+  extensionYellowMax: 1.5,
+  extensionOrangeMax: 2.0,
+  rrGreenMin: 2.0,
+  rrYellowMin: 1.5,
+  rrOrangeMin: 1.0,
+};
+
+const LS_RS_PULLBACK_COLOR_BANDS = "swing-screen-rs-pullback-color-bands";
+
 type SortValue = number | string | null;
 
 // Nulls/missing sort last regardless of direction — a sparse column
@@ -456,6 +489,39 @@ function fmtRr(rr: number | null): { text: string; cls: string } {
   const cls =
     rr >= 3 ? "text-emerald-300" : rr >= 2 ? "text-amber-300" : "text-rose-300";
   return { text: `${rr.toFixed(1)}:1`, cls };
+}
+
+// RS Pullback-specific 4-step color bands for Extension and R:R —
+// deliberately separate from fmtRr above (that one backs RrBadge, used
+// by the other tabs on a different 3-tier scale that stays untouched).
+// Both take the current RsPullbackColorBands so editing the thresholds
+// in RsPullbackSettingsPanel changes the rendered color, not just the
+// number.
+function extensionBandCls(ext: number | null | undefined, bands: RsPullbackColorBands): string {
+  if (ext === null || ext === undefined || !Number.isFinite(ext)) return "text-muted-foreground";
+  if (ext < bands.extensionFloor || ext > bands.extensionOrangeMax) return "text-rose-300";
+  if (ext <= bands.extensionGreenMax) return "text-emerald-300";
+  if (ext <= bands.extensionYellowMax) return "text-amber-300";
+  return "text-orange-300";
+}
+
+function rrBandCls(rr: number | null | undefined, bands: RsPullbackColorBands): string {
+  if (rr === null || rr === undefined || !Number.isFinite(rr)) return "text-muted-foreground";
+  if (rr >= bands.rrGreenMin) return "text-emerald-300";
+  if (rr >= bands.rrYellowMin) return "text-amber-300";
+  if (rr >= bands.rrOrangeMin) return "text-orange-300";
+  return "text-rose-300";
+}
+
+// Renders the live band boundaries as a caption string — doubles as
+// "surface the thresholds in the UI" without requiring the settings
+// panel to be open, and updates automatically when they're edited.
+function extensionBandCaption(bands: RsPullbackColorBands): string {
+  return `${bands.extensionFloor.toFixed(1)}–${bands.extensionGreenMax.toFixed(1)} green · –${bands.extensionYellowMax.toFixed(1)} yellow · –${bands.extensionOrangeMax.toFixed(1)} orange · outside red`;
+}
+
+function rrBandCaption(bands: RsPullbackColorBands): string {
+  return `≥${bands.rrGreenMin.toFixed(1)} green · ≥${bands.rrYellowMin.toFixed(1)} yellow · ≥${bands.rrOrangeMin.toFixed(1)} orange · below red`;
 }
 
 // Insider $ / buyer-count / recency for rows saved before those fields
@@ -958,6 +1024,24 @@ export function SwingScreenView() {
   useEffect(() => {
     window.localStorage.setItem(LS_RS_PULLBACK_THRESHOLDS, JSON.stringify(rsPullbackThresholds));
   }, [rsPullbackThresholds]);
+  // Display-only Extension/R:R color bands — same persistence
+  // convention as rsPullbackThresholds above, but this one never enters
+  // the screen request body (see the two fetch calls below); it only
+  // ever reaches RsPullbackRow as a prop for coloring.
+  const [rsPullbackColorBands, setRsPullbackColorBands] = useState<RsPullbackColorBands>(() => {
+    if (typeof window === "undefined") return DEFAULT_RS_PULLBACK_COLOR_BANDS;
+    try {
+      const raw = window.localStorage.getItem(LS_RS_PULLBACK_COLOR_BANDS);
+      if (!raw) return DEFAULT_RS_PULLBACK_COLOR_BANDS;
+      const parsed = JSON.parse(raw) as Partial<RsPullbackColorBands>;
+      return { ...DEFAULT_RS_PULLBACK_COLOR_BANDS, ...parsed };
+    } catch {
+      return DEFAULT_RS_PULLBACK_COLOR_BANDS;
+    }
+  });
+  useEffect(() => {
+    window.localStorage.setItem(LS_RS_PULLBACK_COLOR_BANDS, JSON.stringify(rsPullbackColorBands));
+  }, [rsPullbackColorBands]);
   // Universe & Themes, Phase B — which universe the screener runs
   // against. Persisted the same way minAdrPct/rsPullbackThresholds are;
   // defaults to the index universe only, matching pre-Phase-B behavior
@@ -1685,6 +1769,8 @@ export function SwingScreenView() {
               diagnostics={rsPullbackDiagnostics}
               thresholds={rsPullbackThresholds}
               onThresholdsChange={setRsPullbackThresholds}
+              colorBands={rsPullbackColorBands}
+              onColorBandsChange={setRsPullbackColorBands}
               settingsOpen={rsPullbackSettingsOpen}
               onSettingsOpenChange={setRsPullbackSettingsOpen}
               viewingHistory={rsPullbackHistoryView !== null}
@@ -2299,9 +2385,13 @@ function fmtSigned(n: number | null | undefined, digits = 1): string {
 function RsPullbackSettingsPanel({
   thresholds,
   onChange,
+  colorBands,
+  onColorBandsChange,
 }: {
   thresholds: RsPullbackThresholds;
   onChange: (t: RsPullbackThresholds) => void;
+  colorBands: RsPullbackColorBands;
+  onColorBandsChange: (b: RsPullbackColorBands) => void;
 }) {
   function field(key: keyof RsPullbackThresholds, label: string, step = 0.5) {
     return (
@@ -2320,13 +2410,46 @@ function RsPullbackSettingsPanel({
       </label>
     );
   }
+  function colorField(key: keyof RsPullbackColorBands, label: string, step = 0.1) {
+    return (
+      <label className="grid gap-1 text-xs">
+        <span className="text-muted-foreground">{label}</span>
+        <input
+          type="number"
+          step={step}
+          value={colorBands[key]}
+          onChange={(e) => {
+            const n = Number(e.target.value);
+            if (Number.isFinite(n)) onColorBandsChange({ ...colorBands, [key]: n });
+          }}
+          className="w-24 rounded border border-border bg-background px-2 py-1 text-sm"
+        />
+      </label>
+    );
+  }
   return (
-    <div className="grid grid-cols-2 gap-3 rounded-md border border-border bg-background/40 p-3 sm:grid-cols-3 md:grid-cols-5">
-      {field("minAdrPct", "Min ADR%")}
-      {field("entryZoneAdrDays", "Entry zone (ADR-days)")}
-      {field("sma50RisingMinPct", "50MA rising min %")}
-      {field("sma50RisingLookbackSessions", "50MA rising lookback (sessions)", 1)}
-      {field("ma50BelowTolerancePct", "Max % below 50MA")}
+    <div className="space-y-3 rounded-md border border-border bg-background/40 p-3">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-5">
+        {field("minAdrPct", "Min ADR%")}
+        {field("entryZoneAdrDays", "Entry zone (ADR-days)")}
+        {field("sma50RisingMinPct", "50MA rising min %")}
+        {field("sma50RisingLookbackSessions", "50MA rising lookback (sessions)", 1)}
+        {field("ma50BelowTolerancePct", "Max % below 50MA")}
+      </div>
+      <div className="border-t border-border/60 pt-3">
+        <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+          Display color bands — Extension &amp; R:R only, provisional, does not affect gating
+        </div>
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 md:grid-cols-7">
+          {colorField("extensionFloor", "Ext floor (red below)")}
+          {colorField("extensionGreenMax", "Ext green max")}
+          {colorField("extensionYellowMax", "Ext yellow max")}
+          {colorField("extensionOrangeMax", "Ext orange max (red above)")}
+          {colorField("rrOrangeMin", "R:R orange min")}
+          {colorField("rrYellowMin", "R:R yellow min")}
+          {colorField("rrGreenMin", "R:R green min")}
+        </div>
+      </div>
     </div>
   );
 }
@@ -2406,6 +2529,8 @@ function RsPullbackTabContent({
   diagnostics,
   thresholds,
   onThresholdsChange,
+  colorBands,
+  onColorBandsChange,
   settingsOpen,
   onSettingsOpenChange,
   viewingHistory,
@@ -2433,6 +2558,8 @@ function RsPullbackTabContent({
   } | null;
   thresholds: RsPullbackThresholds;
   onThresholdsChange: (t: RsPullbackThresholds) => void;
+  colorBands: RsPullbackColorBands;
+  onColorBandsChange: (b: RsPullbackColorBands) => void;
   settingsOpen: boolean;
   onSettingsOpenChange: (v: boolean) => void;
   viewingHistory: boolean;
@@ -2486,7 +2613,12 @@ function RsPullbackTabContent({
       </div>
 
       {settingsOpen && (
-        <RsPullbackSettingsPanel thresholds={thresholds} onChange={onThresholdsChange} />
+        <RsPullbackSettingsPanel
+          thresholds={thresholds}
+          onChange={onThresholdsChange}
+          colorBands={colorBands}
+          onColorBandsChange={onColorBandsChange}
+        />
       )}
 
       {viewingHistory && (
@@ -2504,6 +2636,7 @@ function RsPullbackTabContent({
         onTrack={onTrack}
         trackedSymbols={trackedSymbols}
         trackingSymbol={trackingSymbol}
+        colorBands={colorBands}
       />
       <RsPullbackListSection
         title="Leading, extended"
@@ -2514,6 +2647,7 @@ function RsPullbackTabContent({
         onTrack={onTrack}
         trackedSymbols={trackedSymbols}
         trackingSymbol={trackingSymbol}
+        colorBands={colorBands}
       />
       <RsPullbackListSection
         title="In zone, lagging"
@@ -2524,6 +2658,7 @@ function RsPullbackTabContent({
         onTrack={onTrack}
         trackedSymbols={trackedSymbols}
         trackingSymbol={trackingSymbol}
+        colorBands={colorBands}
       />
     </div>
   );
@@ -2613,6 +2748,7 @@ function RsPullbackListSection({
   onTrack,
   trackedSymbols,
   trackingSymbol,
+  colorBands,
 }: {
   title: string;
   subtitle: string;
@@ -2622,6 +2758,7 @@ function RsPullbackListSection({
   onTrack: (c: SwingCandidate) => void;
   trackedSymbols: Set<string>;
   trackingSymbol: string | null;
+  colorBands: RsPullbackColorBands;
 }) {
   const [sort, setSort] = useState<{ key: RsPullbackSortKey; dir: "asc" | "desc" }>({
     key: "extensionAbs",
@@ -2678,6 +2815,7 @@ function RsPullbackListSection({
                   onTrack={() => onTrack(c)}
                   tracked={trackedSymbols.has(c.symbol)}
                   tracking={trackingSymbol === c.symbol}
+                  colorBands={colorBands}
                 />
               ))}
             </tbody>
@@ -2688,13 +2826,54 @@ function RsPullbackListSection({
   );
 }
 
-function DetailStat({ label, value, sub }: { label: string; value: string; sub?: string }) {
+function DetailStat({
+  label,
+  value,
+  sub,
+  helper,
+  valueCls,
+}: {
+  // Usually a plain string, but a few RS Pullback gate stats embed a
+  // GateMark inline (e.g. "RS20 = diff ✓") — hence ReactNode.
+  label: ReactNode;
+  value: string;
+  // Computation/formula breakdown — "how this number was derived."
+  sub?: string;
+  // "Why the system wants this" — one short teaching line, distinct from
+  // sub above. Every stat in the RS Pullback expanded panel gets one.
+  helper?: string;
+  valueCls?: string;
+}) {
   return (
     <div>
       <div className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</div>
-      <div className="font-mono text-sm text-foreground">{value}</div>
+      <div className={`font-mono text-sm ${valueCls ?? "text-foreground"}`}>{value}</div>
       {sub && <div className="text-[10px] text-muted-foreground">{sub}</div>}
+      {helper && (
+        <div className="mt-0.5 text-[10px] leading-snug text-muted-foreground/70">{helper}</div>
+      )}
     </div>
+  );
+}
+
+// Neutral pass/fail marker for hard gates — deliberately NOT colored.
+// 50MA rising, RS20, and RS60 are gates: a candidate only reaches this
+// panel having already cleared 50MA-rising (a universal pregate, see the
+// excludedBySma50Rising* diagnostics), and only "Ready"/"Leading,
+// extended" rows have cleared both RS windows — "In zone, lagging" rows
+// explicitly fail at least one (that's the whole reason they're in that
+// list, not a buy list). So this can genuinely render either glyph;
+// coloring it green/red would still carry no MORE information than the
+// glyph itself once it's per-window like this, and the constraint is
+// explicit: don't color the gates.
+function GateMark({ pass, label }: { pass: boolean; label: string }) {
+  return (
+    <span
+      className="ml-1 inline-flex items-center text-[10px] text-muted-foreground"
+      title={`${label}: ${pass ? "passed" : "failed"}`}
+    >
+      {pass ? "✓" : "✗"}
+    </span>
   );
 }
 
@@ -2704,12 +2883,14 @@ function RsPullbackRow({
   onTrack,
   tracked,
   tracking,
+  colorBands,
 }: {
   candidate: SwingCandidate;
   onEnterTrade: () => void;
   onTrack: () => void;
   tracked: boolean;
   tracking: boolean;
+  colorBands: RsPullbackColorBands;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [chartData, setChartData] = useState<ChartPoint[] | null>(null);
@@ -2746,7 +2927,14 @@ function RsPullbackRow({
     };
   }, [expanded, c.symbol]);
 
+  // rr.text stays from fmtRr (just formatting, "X.X:1") — the color
+  // comes from rrBandCls/colorBands instead of fmtRr's own 3-tier cls,
+  // which is a different scale used only by RrBadge on the other tabs.
   const rr = fmtRr(c.rr);
+  const rrCls = rrBandCls(c.rr, colorBands);
+  const extCls = extensionBandCls(c.extensionAdrDays, colorBands);
+  const rs20Pass = (c.rs20 ?? 0) > 0;
+  const rs60Pass = (c.rs60 ?? 0) > 0;
   const riskPerShare = c.entryPrice - c.stopPrice;
   const rewardPerShare = c.targetPrice - c.entryPrice;
   const atrMultiple = c.atr14 && c.atr14 > 0 ? riskPerShare / c.atr14 : null;
@@ -2781,20 +2969,24 @@ function RsPullbackRow({
         <td className="px-2 py-1.5 text-right">
           {c.adr20Pct !== null && c.adr20Pct !== undefined ? `${c.adr20Pct.toFixed(1)}%` : "—"}
         </td>
-        <td className="px-2 py-1.5 text-right font-mono">{fmtSigned(c.extensionAdrDays, 2)}</td>
-        <td className={`px-2 py-1.5 text-right ${(c.rs20 ?? 0) > 0 ? "text-emerald-300" : "text-rose-300"}`}>
+        <td className={`px-2 py-1.5 text-right font-mono font-semibold ${extCls}`}>
+          {fmtSigned(c.extensionAdrDays, 2)}
+        </td>
+        <td className="px-2 py-1.5 text-right font-mono text-muted-foreground">
           {fmtSigned(c.rs20, 1)}
+          <GateMark pass={rs20Pass} label="RS20 (beat SPY, 20 sessions)" />
         </td>
-        <td className={`px-2 py-1.5 text-right ${(c.rs60 ?? 0) > 0 ? "text-emerald-300" : "text-rose-300"}`}>
+        <td className="px-2 py-1.5 text-right font-mono text-muted-foreground">
           {fmtSigned(c.rs60, 1)}
+          <GateMark pass={rs60Pass} label="RS60 (beat SPY, 60 sessions)" />
         </td>
-        <td className="px-2 py-1.5 text-center text-xs">
+        <td className="px-2 py-1.5 text-center text-xs text-muted-foreground">
           {c.higherLowVsSpy === null || c.higherLowVsSpy === undefined ? "—" : c.higherLowVsSpy ? "Yes" : "No"}
         </td>
         <td className="px-2 py-1.5 text-right">{fmtMoney(c.entryPrice)}</td>
         <td className="px-2 py-1.5 text-right text-emerald-300">{fmtMoney(c.targetPrice)}</td>
         <td className="px-2 py-1.5 text-right text-rose-300">{fmtMoney(c.stopPrice)}</td>
-        <td className={`px-2 py-1.5 text-right ${rr.cls}`}>{rr.text}</td>
+        <td className={`px-2 py-1.5 text-right font-semibold ${rrCls}`}>{rr.text}</td>
         <td className="px-2 py-1.5" onClick={(e) => e.stopPropagation()}>
           <div className="flex items-center justify-end gap-1">
             <button
@@ -2829,14 +3021,35 @@ function RsPullbackRow({
                     Trend (underlying values behind the gates)
                   </div>
                   <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                    <DetailStat label="SMA20 (bars)" value={fmtMoney(c.sma20 ?? null)} />
+                    <DetailStat
+                      label="SMA20 (bars)"
+                      value={fmtMoney(c.sma20 ?? null)}
+                      helper="Short-term trend reference only — not part of any gate here."
+                    />
                     <DetailStat
                       label="SMA50 (bars, used in calc)"
                       value={fmtMoney(c.sma50AtEntry ?? null)}
                       sub="Not the same as ma50 below — this is the number extensionAdrDays and the rising check both use."
+                      helper="The line this setup pulls back to. Extension and the rising check are both measured off this number."
                     />
-                    <DetailStat label="SMA200 (Yahoo quote)" value={fmtMoney(c.ma200)} sub="Bars window doesn't reach 200 sessions back." />
-                    <DetailStat label="ATR14 (bars)" value={fmtMoney(c.atr14 ?? null)} />
+                    <DetailStat
+                      label="SMA200 (Yahoo quote)"
+                      value={fmtMoney(c.ma200)}
+                      sub="Bars window doesn't reach 200 sessions back."
+                      helper="Long-term trend context only — not part of any RS Pullback gate."
+                    />
+                    <DetailStat
+                      label="ATR14 (bars)"
+                      value={fmtMoney(c.atr14 ?? null)}
+                      helper="Average daily dollar range — sizes the stop wide enough for this stock's normal noise instead of a flat percentage."
+                    />
+                    <DetailStat
+                      label="Extension (ADR-days)"
+                      value={fmtSigned(c.extensionAdrDays, 2)}
+                      valueCls={extCls}
+                      sub={extensionBandCaption(colorBands)}
+                      helper="How far above the 50-day in units of this stock's own daily range. Buying a pullback means buying near the average, not far above it — and below the floor there's no room left for a stop above the trend line."
+                    />
                   </div>
                 </div>
                 <div>
@@ -2844,16 +3057,30 @@ function RsPullbackRow({
                     50MA slope (20-session rising check)
                   </div>
                   <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-                    <DetailStat label="SMA50, 20 sessions ago" value={fmtMoney(c.sma50TwentySessionsAgo ?? null)} />
-                    <DetailStat label="SMA50, today" value={fmtMoney(c.sma50AtEntry ?? null)} />
                     <DetailStat
-                      label="Rising %"
+                      label="SMA50, 20 sessions ago"
+                      value={fmtMoney(c.sma50TwentySessionsAgo ?? null)}
+                      helper="The baseline the rising check compares against."
+                    />
+                    <DetailStat
+                      label="SMA50, today"
+                      value={fmtMoney(c.sma50AtEntry ?? null)}
+                      helper="Compared to 20 sessions ago to confirm the average is actually climbing."
+                    />
+                    <DetailStat
+                      label={
+                        <span className="inline-flex items-center">
+                          Rising %
+                          <GateMark pass label="50MA rising" />
+                        </span>
+                      }
                       value={fmtSigned(c.sma50RisingPct, 2) + "%"}
                       sub={
                         c.sma50AtEntry != null && c.sma50TwentySessionsAgo != null
                           ? `(${c.sma50AtEntry.toFixed(2)} − ${c.sma50TwentySessionsAgo.toFixed(2)}) / ${c.sma50TwentySessionsAgo.toFixed(2)} × 100`
                           : undefined
                       }
+                      helper="The average itself must be rising, not just price above it. A bounce inside a downtrend has price above a falling 50-day. Hard gate — every candidate here already cleared it, so this isn't colored."
                     />
                   </div>
                 </div>
@@ -2862,31 +3089,60 @@ function RsPullbackRow({
                     Relative strength (raw returns behind RS20 / RS60)
                   </div>
                   <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                    <DetailStat label={`${c.symbol} 20d return`} value={fmtSigned(c.stockReturn20, 2) + "%"} />
-                    <DetailStat label="SPY 20d return" value={fmtSigned(c.spyReturn20, 2) + "%"} />
                     <DetailStat
-                      label="RS20 = diff"
+                      label={`${c.symbol} 20d return`}
+                      value={fmtSigned(c.stockReturn20, 2) + "%"}
+                      helper="This stock's own 20-session return — only meaningful compared to SPY's below."
+                    />
+                    <DetailStat
+                      label="SPY 20d return"
+                      value={fmtSigned(c.spyReturn20, 2) + "%"}
+                      helper="The benchmark this stock has to beat to count as relative strength."
+                    />
+                    <DetailStat
+                      label={
+                        <span className="inline-flex items-center">
+                          RS20 = diff
+                          <GateMark pass={rs20Pass} label="RS20 (beat SPY, 20 sessions)" />
+                        </span>
+                      }
                       value={fmtSigned(c.rs20, 2)}
                       sub={
                         c.stockReturn20 != null && c.spyReturn20 != null
                           ? `${c.stockReturn20.toFixed(2)}% − ${c.spyReturn20.toFixed(2)}%`
                           : undefined
                       }
+                      helper="Beating SPY over both windows means leadership that has persisted, not one hot month. Hard gate — not colored; the mark shows whether this window passed."
                     />
                     <DetailStat
                       label="Higher low vs SPY (30d)"
                       value={c.higherLowVsSpy === null || c.higherLowVsSpy === undefined ? "—" : c.higherLowVsSpy ? "Yes" : "No"}
+                      helper="On days SPY fell, did this stock's pullback lows keep rising? Holding up on down days is harder to fake than outperforming on up days — shown for context, it never gates list membership."
                     />
-                    <DetailStat label={`${c.symbol} 60d return`} value={fmtSigned(c.stockReturn60, 2) + "%"} />
-                    <DetailStat label="SPY 60d return" value={fmtSigned(c.spyReturn60, 2) + "%"} />
                     <DetailStat
-                      label="RS60 = diff"
+                      label={`${c.symbol} 60d return`}
+                      value={fmtSigned(c.stockReturn60, 2) + "%"}
+                      helper="This stock's own 60-session return — the longer window RS60 is built from."
+                    />
+                    <DetailStat
+                      label="SPY 60d return"
+                      value={fmtSigned(c.spyReturn60, 2) + "%"}
+                      helper="The benchmark for the 60-session window."
+                    />
+                    <DetailStat
+                      label={
+                        <span className="inline-flex items-center">
+                          RS60 = diff
+                          <GateMark pass={rs60Pass} label="RS60 (beat SPY, 60 sessions)" />
+                        </span>
+                      }
                       value={fmtSigned(c.rs60, 2)}
                       sub={
                         c.stockReturn60 != null && c.spyReturn60 != null
                           ? `${c.stockReturn60.toFixed(2)}% − ${c.spyReturn60.toFixed(2)}%`
                           : undefined
                       }
+                      helper="Beating SPY over the quarter too — paired with RS20, confirms the outperformance isn't a one-month blip. Hard gate — not colored."
                     />
                   </div>
                 </div>
@@ -2895,26 +3151,35 @@ function RsPullbackRow({
                     Trade levels
                   </div>
                   <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                    <DetailStat label="Entry" value={fmtMoney(c.entryPrice)} />
+                    <DetailStat
+                      label="Entry"
+                      value={fmtMoney(c.entryPrice)}
+                      helper="Where the order would go in — today's reference price for the plan below."
+                    />
                     <DetailStat
                       label="Target"
                       value={fmtMoney(c.targetPrice)}
                       sub={`reward ${fmtMoney(rewardPerShare)}/sh`}
+                      helper="Where the trade closes for a win — defines the reward half of R:R."
                     />
                     <DetailStat
                       label="Stop"
                       value={fmtMoney(c.stopPrice)}
                       sub={`risk ${fmtMoney(riskPerShare)}/sh${atrMultiple !== null ? ` (${atrMultiple.toFixed(2)}× ATR14)` : ""}`}
+                      helper="Where the trade closes for a loss — defines the risk half of R:R, and the level that failing means the pullback thesis was wrong."
                     />
                     <DetailStat
                       label="R:R"
                       value={rr.text}
-                      sub={`${fmtMoney(rewardPerShare)} / ${fmtMoney(riskPerShare)}`}
+                      valueCls={rrCls}
+                      sub={rrBandCaption(colorBands)}
+                      helper="Reward divided by risk. Below 1:1 you are risking more than the trade can pay."
                     />
                     <DetailStat
                       label="Earnings"
                       value={c.nextEarningsDate ?? "unknown"}
                       sub={c.daysToEarnings !== null ? `${c.daysToEarnings}d away` : undefined}
+                      helper="An earnings date inside the hold period adds event risk this setup isn't designed to price in."
                     />
                   </div>
                 </div>
