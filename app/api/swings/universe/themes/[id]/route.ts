@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
 import { requireUserId, authErrorResponse } from "@/lib/auth";
 import { enrichSymbols } from "@/lib/universe";
+import { listThemeRejections } from "@/lib/theme-expansion";
 
 export const dynamic = "force-dynamic";
 
@@ -72,6 +73,18 @@ export async function GET(
   // Cache-only enrichment — a page view must never trigger a live fetch.
   const enrichment = await enrichSymbols(members.map((m) => m.symbol));
 
+  // Full rejection history, each row flagged against the theme's CURRENT
+  // theme_type/expansion_prompt — powers both the "Rejected (N)" panel
+  // and the stale-rejection banner (rejections.filter(r =>
+  // !r.is_current_scope) on the client). Computed on every page load
+  // rather than only right after an edit, so the notice is correct
+  // regardless of where theme_type was changed (the list page's edit
+  // dialog, not this detail page) or how long ago.
+  const rejections = await listThemeRejections(userId, id, {
+    themeType: themeRes.data.theme_type,
+    expansionPromptOverride: themeRes.data.expansion_prompt,
+  });
+
   return NextResponse.json({
     theme: themeRes.data,
     members: members.map((m) => ({
@@ -84,6 +97,7 @@ export async function GET(
         adr20Pct: null,
       }),
     })),
+    rejections,
   });
 }
 

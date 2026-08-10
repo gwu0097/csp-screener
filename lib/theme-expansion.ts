@@ -13,6 +13,7 @@
 // happens in the pending-review accept endpoint, after a human looks at
 // the queue. A pending row is invisible to resolveUniverseSymbols (see
 // lib/universe.ts) until then.
+import { createHash } from "node:crypto";
 import { createServerClient } from "./supabase";
 import { askPerplexityRaw } from "./perplexity";
 import { getSymbolExpansionProfile } from "./yahoo";
@@ -44,6 +45,47 @@ const PROMPT_TEMPLATES: Record<string, string> = {
 export function defaultExpansionPrompt(themeType: string | null | undefined): string | null {
   if (!themeType) return null;
   return PROMPT_TEMPLATES[themeType] ?? null;
+}
+
+// The stable "question" a theme is currently asking: the theme's
+// expansion_prompt override if set, else the theme_type's default
+// template. Deliberately the TEMPLATE, not buildFullPrompt's fully
+// interpolated per-run text — that embeds the anchor list and "already a
+// member" exclusions, which change on every membership edit and would
+// make two runs of the identical question hash differently. This is
+// what theme_rejections.theme_type/prompt_hash freeze at write time (see
+// currentRejectionScope) so a later change to theme_type or the prompt
+// can be detected instead of silently reusing a stale judgment.
+export function effectiveExpansionPrompt(
+  themeType: string | null | undefined,
+  expansionPromptOverride: string | null | undefined,
+): string | null {
+  return (expansionPromptOverride ?? "").trim() || defaultExpansionPrompt(themeType);
+}
+
+// Not a security hash — just a deterministic equality check so a
+// rejection row can record "this exact question" without duplicating the
+// full prompt text on every row. sha256 of the empty/null case still
+// produces a stable digest (rather than a wildcard "anything"), which is
+// correct: two themes/edits that both resolve to no prompt (e.g. an
+// unrecognized theme_type) still count as asking the same non-question.
+export function hashPromptText(text: string | null | undefined): string {
+  return createHash("sha256").update(text ?? "").digest("hex");
+}
+
+export type RejectionScope = { themeType: string | null; promptHash: string };
+
+// What a NEW rejection should be stamped with, and what an expansion run
+// should match existing rejections against — both derived the same way
+// so writes and reads can never quietly diverge.
+export function currentRejectionScope(
+  themeType: string | null | undefined,
+  expansionPromptOverride: string | null | undefined,
+): RejectionScope {
+  return {
+    themeType: themeType ?? null,
+    promptHash: hashPromptText(effectiveExpansionPrompt(themeType, expansionPromptOverride)),
+  };
 }
 
 export type ExpansionSuggestion = {
@@ -136,7 +178,7 @@ export async function runExpansionSuggest(opts: {
   description: string | null;
   existingSymbols: string[];
 }): Promise<SuggestResult> {
-  const template = (opts.promptOverride ?? "").trim() || defaultExpansionPrompt(opts.themeType);
+  const template = effectiveExpansionPrompt(opts.themeType, opts.promptOverride);
   if (!template) {
     return {
       ok: false,
@@ -192,6 +234,17 @@ export async function filterAndQueueSuggestions(opts: {
   userId: string;
   themeId: string;
   suggestions: ExpansionSuggestion[];
+  // The theme's CURRENT theme_type/expansion_prompt — the caller already
+  // has these from fetching the theme row to validate it exists, so this
+  // function doesn't re-fetch. Used to scope which theme_rejections rows
+  // actually suppress: a rejection only counts if it was written under
+  // this same question (see currentRejectionScope). Missing/omitted
+  // resolves to { themeType: null, promptHash: hash(null) } — a legacy
+  // caller that doesn't pass this would then only match legacy
+  // (theme_type IS NULL) unbackfilled rows, never real ones, which is
+  // the safe failure direction (under-suppress, not over-suppress).
+  themeType?: string | null;
+  expansionPromptOverride?: string | null;
 }): Promise<{ verdicts: FilterVerdict[] }> {
   const sb = createServerClient();
   const dedupedBySymbol = new Map<string, ExpansionSuggestion>();
@@ -209,10 +262,26 @@ export async function filterAndQueueSuggestions(opts: {
 
   // Cheap DB-only checks first: already a member (any review_status —
   // the unique(theme_id,symbol) constraint would reject the insert
-  // anyway) or previously rejected for this theme.
+  // anyway) or previously rejected for THIS SAME QUESTION on this theme.
+  // A rejection written under a different theme_type/prompt is retained
+  // in the table but does not suppress — see currentRejectionScope.
+  const scope = currentRejectionScope(opts.themeType ?? null, opts.expansionPromptOverride ?? null);
+  let rejectedQuery = sb
+    .from("theme_rejections")
+    .select("symbol")
+    .eq("theme_id", opts.themeId)
+    .eq("user_id", opts.userId)
+    .in("symbol", symbols)
+    .eq("prompt_hash", scope.promptHash);
+  // PostgREST's eq operator does NOT match NULL columns — a legitimate
+  // null theme_type (theme has no type set) needs `is.null`, not
+  // `eq.null`.
+  rejectedQuery =
+    scope.themeType === null ? rejectedQuery.is("theme_type", null) : rejectedQuery.eq("theme_type", scope.themeType);
+
   const [existingRes, rejectedRes] = await Promise.all([
     sb.from("theme_members").select("symbol").eq("theme_id", opts.themeId).eq("user_id", opts.userId).in("symbol", symbols),
-    sb.from("theme_rejections").select("symbol").eq("theme_id", opts.themeId).eq("user_id", opts.userId).in("symbol", symbols),
+    rejectedQuery,
   ]);
   const existingSet = new Set(((existingRes.data ?? []) as Array<{ symbol: string }>).map((r) => r.symbol));
   const rejectedSet = new Set(((rejectedRes.data ?? []) as Array<{ symbol: string }>).map((r) => r.symbol));
@@ -371,8 +440,18 @@ export async function rejectPendingMembers(
   userId: string,
   themeId: string,
   items: Array<{ memberId: string; reason?: string | null }>,
+  // The theme's CURRENT theme_type/expansion_prompt — stamped onto every
+  // rejection this call writes, so it records the question actually
+  // being answered right now, not a value re-derived later. The caller
+  // (the pending/review route) already fetched the theme row to validate
+  // it exists, so this is threaded in rather than re-queried here.
+  scopeInput: { themeType: string | null; expansionPromptOverride: string | null } = {
+    themeType: null,
+    expansionPromptOverride: null,
+  },
 ): Promise<ReviewOutcome[]> {
   const sb = createServerClient();
+  const scope = currentRejectionScope(scopeInput.themeType, scopeInput.expansionPromptOverride);
   const out: ReviewOutcome[] = [];
   for (const { memberId, reason } of items) {
     const memberRes = await sb
@@ -393,6 +472,8 @@ export async function rejectPendingMembers(
       user_id: userId,
       symbol,
       reason: reason && reason.trim() ? reason.trim() : null,
+      theme_type: scope.themeType,
+      prompt_hash: scope.promptHash,
     });
     if (rejIns.error) {
       out.push({ symbol, ok: false, error: rejIns.error.message });
@@ -415,4 +496,86 @@ export async function rejectPendingMembers(
     out.push({ symbol, ok: true });
   }
   return out;
+}
+
+export type ThemeRejectionRow = {
+  id: string;
+  symbol: string;
+  reason: string | null;
+  rejected_at: string;
+  theme_type: string | null;
+  // Whether this row's scope matches the theme's CURRENT question — the
+  // detail page's "Rejected (N)" panel and the stale-rejection banner
+  // both derive from this rather than the client re-deriving the hash
+  // (there's no reason to duplicate hashPromptText's algorithm client-
+  // side when the server already knows the answer at fetch time).
+  is_current_scope: boolean;
+};
+
+// Every rejection for a theme, newest first — deliberately unfiltered by
+// scope (the panel shows the full history; scope match is a per-row
+// badge, not a visibility filter). Rows never expire out of this list on
+// their own; only undoRejection removes one.
+export async function listThemeRejections(
+  userId: string,
+  themeId: string,
+  currentTheme: { themeType: string | null; expansionPromptOverride: string | null },
+): Promise<ThemeRejectionRow[]> {
+  const sb = createServerClient();
+  const scope = currentRejectionScope(currentTheme.themeType, currentTheme.expansionPromptOverride);
+  const res = await sb
+    .from("theme_rejections")
+    .select("id,symbol,reason,rejected_at,theme_type,prompt_hash")
+    .eq("theme_id", themeId)
+    .eq("user_id", userId)
+    .order("rejected_at", { ascending: false });
+  if (res.error || !res.data) return [];
+  return (
+    res.data as Array<{
+      id: string;
+      symbol: string;
+      reason: string | null;
+      rejected_at: string;
+      theme_type: string | null;
+      prompt_hash: string | null;
+    }>
+  ).map((r) => ({
+    id: r.id,
+    symbol: r.symbol,
+    reason: r.reason,
+    rejected_at: r.rejected_at,
+    theme_type: r.theme_type,
+    is_current_scope: r.theme_type === scope.themeType && r.prompt_hash === scope.promptHash,
+  }));
+}
+
+// Explicit, permanent removal of one rejection — the only way a
+// theme_rejections row disappears (never automatically). Scoped to
+// theme_id + user_id at the query level so an id from another user's
+// theme can't be reached even given a stray value.
+export async function undoRejection(
+  userId: string,
+  themeId: string,
+  rejectionId: string,
+): Promise<{ ok: boolean; symbol?: string; error?: string }> {
+  const sb = createServerClient();
+  const existing = await sb
+    .from("theme_rejections")
+    .select("id,symbol")
+    .eq("id", rejectionId)
+    .eq("theme_id", themeId)
+    .eq("user_id", userId)
+    .maybeSingle();
+  if (existing.error || !existing.data) {
+    return { ok: false, error: existing.error?.message ?? "rejection not found" };
+  }
+  const symbol = (existing.data as { symbol: string }).symbol;
+  const del = await sb
+    .from("theme_rejections")
+    .delete()
+    .eq("id", rejectionId)
+    .eq("theme_id", themeId)
+    .eq("user_id", userId);
+  if (del.error) return { ok: false, symbol, error: del.error.message };
+  return { ok: true, symbol };
 }

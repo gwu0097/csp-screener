@@ -42,6 +42,15 @@ const EXPANDABLE_THEME_TYPES = ["supply_chain", "sector_comparable", "policy_dri
 // discipline as the RS Pullback enrichment pipeline.
 const FILTER_CHUNK_SIZE = 8;
 
+type Rejection = {
+  id: string;
+  symbol: string;
+  reason: string | null;
+  rejected_at: string;
+  theme_type: string | null;
+  is_current_scope: boolean;
+};
+
 type Suggestion = { symbol: string; companyName: string; rationale: string };
 type FilterVerdict = {
   symbol: string;
@@ -191,6 +200,10 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
   const [reviewBusy, setReviewBusy] = useState(false);
   const [rejectReason, setRejectReason] = useState("");
 
+  // ---- Rejection scoping: visible + reversible history ----
+  const [rejections, setRejections] = useState<Rejection[]>([]);
+  const [undoingId, setUndoingId] = useState<string | null>(null);
+
   async function load() {
     setLoading(true);
     setError(null);
@@ -201,6 +214,7 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
       const t = json.theme as Theme;
       setTheme(t);
       setMembers(json.members as Member[]);
+      setRejections((json.rejections as Rejection[]) ?? []);
       if (!promptTouched) setPromptDraft(t.expansion_prompt ?? "");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load");
@@ -244,6 +258,14 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
   );
 
   const canExpand = !!theme?.theme_type && EXPANDABLE_THEME_TYPES.includes(theme.theme_type);
+
+  // Rejections whose theme_type/prompt no longer matches the theme's
+  // current question — retained (never auto-deleted), just no longer
+  // suppressing. This is the notice requirement 4 asks for: it doesn't
+  // only fire right after an edit, it stays true for as long as the
+  // mismatch exists, however the edit happened (this page's prompt
+  // textarea, or the theme_type dropdown on the list page).
+  const staleRejections = useMemo(() => rejections.filter((r) => !r.is_current_scope), [rejections]);
 
   async function runExpansion() {
     if (!theme) return;
@@ -350,6 +372,24 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
     }
   }
 
+  async function undoOneRejection(rejection: Rejection) {
+    setUndoingId(rejection.id);
+    setActionError(null);
+    try {
+      const res = await fetch(`/api/swings/universe/themes/${themeId}/rejections/${rejection.id}`, {
+        method: "DELETE",
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+      setRejections((prev) => prev.filter((r) => r.id !== rejection.id));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Undo failed";
+      setActionError(`Could not undo rejection of ${rejection.symbol}: ${msg}`);
+    } finally {
+      setUndoingId(null);
+    }
+  }
+
   async function patchMember(member: Member, patch: Partial<Pick<Member, "is_anchor" | "is_active">>) {
     setActionError(null);
     try {
@@ -433,6 +473,23 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
           <button type="button" onClick={() => setActionError(null)} className="text-sm text-rose-200 hover:text-white">
             Dismiss
           </button>
+        </div>
+      )}
+
+      {staleRejections.length > 0 && (
+        <div className="rounded border border-sky-500/40 bg-sky-500/5 p-3 text-sm text-sky-200">
+          <div className="font-semibold">
+            {staleRejections.length} rejection{staleRejections.length === 1 ? "" : "s"} no longer apply
+          </div>
+          <p className="mt-0.5 text-xs text-sky-200/80">
+            {theme.theme_type ? `This theme is now "${theme.theme_type}"` : "This theme's type or expansion prompt"}{" "}
+            — the rejections below were made answering a different question and no longer suppress these symbols on
+            expansion. They&apos;re kept in the Rejected panel below for the record; nothing was deleted or
+            re-suggested automatically.
+          </p>
+          <p className="mt-1 text-xs">
+            {Array.from(new Set(staleRejections.map((r) => r.symbol))).join(", ")}
+          </p>
         </div>
       )}
 
@@ -623,6 +680,65 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
                           className="rounded border border-rose-500/40 px-2 py-1 text-[10px] text-rose-300 hover:bg-rose-500/10"
                         >
                           Reject
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {rejections.length > 0 && (
+        <div className="rounded border border-border bg-background/40 p-3">
+          <div className="mb-2 text-sm font-semibold text-foreground">
+            Rejected ({rejections.length})
+          </div>
+          <div className="overflow-x-auto rounded border border-border/60">
+            <table className="w-full min-w-[820px] text-sm">
+              <thead className="border-b border-border/60 text-left text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                <tr>
+                  <th className="px-2 py-1.5">Symbol</th>
+                  <th className="px-2 py-1.5">Reason</th>
+                  <th className="px-2 py-1.5">Rejected</th>
+                  <th className="px-2 py-1.5">Rejected under</th>
+                  <th className="px-2 py-1.5">Scope</th>
+                  <th className="px-2 py-1.5 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rejections.map((r) => (
+                  <tr key={r.id} className="border-b border-border/40 last:border-0 hover:bg-white/[0.02]">
+                    <td className="px-2 py-1.5 font-mono font-semibold text-foreground">{r.symbol}</td>
+                    <td className="max-w-[280px] px-2 py-1.5 text-muted-foreground">{r.reason ?? "—"}</td>
+                    <td className="px-2 py-1.5 text-muted-foreground">{fmtDate(r.rejected_at)}</td>
+                    <td className="px-2 py-1.5 text-muted-foreground">{r.theme_type ?? "—"}</td>
+                    <td className="px-2 py-1.5">
+                      {r.is_current_scope ? (
+                        <span className="rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                          Current question — suppresses
+                        </span>
+                      ) : (
+                        <span
+                          className="rounded border border-sky-500/40 bg-sky-500/10 px-1.5 py-0.5 text-[10px] text-sky-200"
+                          title="Rejected under a different theme_type or expansion prompt — retained for the record, but does not suppress this symbol on the next expansion run."
+                        >
+                          Different question — inactive
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-2 py-1.5">
+                      <div className="flex justify-end">
+                        <button
+                          type="button"
+                          disabled={undoingId === r.id}
+                          onClick={() => undoOneRejection(r)}
+                          className="rounded border border-border px-2 py-1 text-[10px] text-muted-foreground hover:bg-white/5 hover:text-foreground"
+                          title="Remove this rejection — the symbol can be suggested again"
+                        >
+                          {undoingId === r.id ? "Undoing…" : "Undo"}
                         </button>
                       </div>
                     </td>

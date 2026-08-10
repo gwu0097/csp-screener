@@ -54,14 +54,25 @@ export async function POST(
 
   const sb = createServerClient();
   const themeRes = await sb
-    .from("themes")
-    .select("id")
+    .from<{ id: string; theme_type: string | null; expansion_prompt: string | null }>("themes")
+    .select("id,theme_type,expansion_prompt")
     .eq("id", themeId)
     .eq("user_id", userId)
     .maybeSingle();
   if (themeRes.error) return NextResponse.json({ error: themeRes.error.message }, { status: 500 });
   if (!themeRes.data) return NextResponse.json({ error: "Theme not found" }, { status: 404 });
 
-  const { verdicts } = await filterAndQueueSuggestions({ userId, themeId, suggestions });
+  // The theme's CURRENT theme_type/expansion_prompt — by the time /filter
+  // runs, /suggest has already persisted any edited prompt (see its own
+  // route), so this reflects exactly the question that produced these
+  // suggestions. Scopes which theme_rejections rows actually suppress
+  // (see filterAndQueueSuggestions's own comment).
+  const { verdicts } = await filterAndQueueSuggestions({
+    userId,
+    themeId,
+    suggestions,
+    themeType: themeRes.data.theme_type,
+    expansionPromptOverride: themeRes.data.expansion_prompt,
+  });
   return NextResponse.json({ verdicts });
 }

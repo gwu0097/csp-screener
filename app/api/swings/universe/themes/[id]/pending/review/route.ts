@@ -39,8 +39,8 @@ export async function POST(
 
   const sb = createServerClient();
   const themeRes = await sb
-    .from("themes")
-    .select("id")
+    .from<{ id: string; theme_type: string | null; expansion_prompt: string | null }>("themes")
+    .select("id,theme_type,expansion_prompt")
     .eq("id", themeId)
     .eq("user_id", userId)
     .maybeSingle();
@@ -67,7 +67,13 @@ export async function POST(
           .filter((x) => x.memberId.length > 0)
       : [];
     if (items.length === 0) return NextResponse.json({ error: "Missing items" }, { status: 400 });
-    const outcomes = await rejectPendingMembers(userId, themeId, items);
+    // Stamps each rejection with the theme's CURRENT theme_type/prompt —
+    // the question actually being answered right now — so a later
+    // theme_type or prompt edit can be detected against it.
+    const outcomes = await rejectPendingMembers(userId, themeId, items, {
+      themeType: themeRes.data.theme_type,
+      expansionPromptOverride: themeRes.data.expansion_prompt,
+    });
     return NextResponse.json({ outcomes });
   }
 
