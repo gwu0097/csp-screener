@@ -333,6 +333,22 @@ type ResolvedUniverse = {
   label: string;
 };
 
+// RS Pullback's pregate/enrichment funnel counts for one run — persisted
+// alongside the rs_pullback row (see /save) so a zero-candidate run still
+// explains why: nothing pregated, vs. pregated-but-excluded, vs.
+// evaluated-and-disqualified. A subset of the live progress banner's own
+// state (that one also tracks chunksDone/chunksTotal, which are
+// UI-progress-only and not meaningful to persist).
+type RsPullbackRunDiagnostics = {
+  pregatedCount: number;
+  needsEnrichmentCount: number;
+  excludedBySectorPrefilter: number;
+  excludedBySma50RisingPrefilter: number;
+  excludedBySma50RisingEnrichment: number;
+  insufficientData: number;
+  degradedCount: number;
+};
+
 // Column keys are dynamic per tab (see TAB_COLUMNS) plus a fixed set of
 // common columns (symbol/company/price/chg/score/signals) — no longer a
 // closed union, since each tab defines its own metric columns.
@@ -1266,6 +1282,13 @@ export function SwingScreenView() {
       }
 
       let rsPullbackCandidates: SwingCandidate[] = existingRsPullbackPortion;
+      // Set below whenever RS Pullback actually runs this target — carried
+      // into the save call so a zero-candidate run still records why:
+      // nothing pregated, vs. pregated-but-excluded, vs.
+      // evaluated-and-disqualified. Left undefined for a "legacy"-only
+      // run, where save's mode gating skips the rs_pullback row entirely
+      // and this would be stale from a prior run otherwise.
+      let rsPullbackDiagnosticsForSave: RsPullbackRunDiagnostics | undefined;
       if (target === "all" || target === "rs_pullback") {
         // RS Pullback enrichment — chunked, sequential calls over
         // pass1's rsPullback.needsEnrichment (already narrowed by the
@@ -1358,6 +1381,15 @@ export function SwingScreenView() {
           );
         }
         rsPullbackCandidates = freshRsPullbackCandidates.map(normalizeCandidate);
+        rsPullbackDiagnosticsForSave = {
+          pregatedCount: p1.rsPullback?.pregatedCount ?? 0,
+          needsEnrichmentCount: needsEnrichment.length,
+          excludedBySectorPrefilter: p1.rsPullback?.excludedBySectorPrefilter ?? 0,
+          excludedBySma50RisingPrefilter: p1.rsPullback?.excludedBySma50RisingPrefilter ?? 0,
+          excludedBySma50RisingEnrichment,
+          insufficientData,
+          degradedCount,
+        };
       }
 
       const candidates = [...legacyCandidates, ...rsPullbackCandidates];
@@ -1394,6 +1426,7 @@ export function SwingScreenView() {
               durationMs: result.durationMs,
               mode: target,
               universe: universeDescriptor,
+              rsPullbackDiagnostics: rsPullbackDiagnosticsForSave,
             }),
           },
         );
@@ -2307,6 +2340,7 @@ function RsPullbackHistoryPicker({
     screenedAt: string;
     candidates: SwingCandidate[];
     universe: UniverseDescriptor | null;
+    rsPullbackDiagnostics: RsPullbackRunDiagnostics | null;
   }> | null>(null);
   const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState<string>("live");
@@ -2320,6 +2354,7 @@ function RsPullbackHistoryPicker({
           screenedAt: string;
           candidates: SwingCandidate[];
           universe: UniverseDescriptor | null;
+          rsPullbackDiagnostics: RsPullbackRunDiagnostics | null;
         }>;
       };
       setRuns(json.runs ?? []);
@@ -2358,6 +2393,7 @@ function RsPullbackHistoryPicker({
           <option key={r.screenedAt} value={r.screenedAt}>
             {fmtRelDate(r.screenedAt)}
             {r.universe?.label ? ` — ${r.universe.label}` : ""}
+            {` (${r.candidates.length})`}
           </option>
         ))}
       </select>

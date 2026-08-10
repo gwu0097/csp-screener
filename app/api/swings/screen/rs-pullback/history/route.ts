@@ -14,6 +14,7 @@ type RunRow = {
   screenedAt: string;
   candidates: SwingCandidate[];
   universe: unknown;
+  rsPullbackDiagnostics: unknown;
 };
 
 export async function GET(): Promise<NextResponse> {
@@ -26,7 +27,7 @@ export async function GET(): Promise<NextResponse> {
   const sb = createServerClient();
   const res = await sb
     .from("swing_screen_results")
-    .select("screened_at,candidates,universe")
+    .select("screened_at,candidates,universe,rs_pullback_diagnostics")
     .eq("user_id", userId)
     .eq("kind", "rs_pullback")
     .order("screened_at", { ascending: false })
@@ -35,11 +36,19 @@ export async function GET(): Promise<NextResponse> {
     return NextResponse.json({ error: res.error.message }, { status: 500 });
   }
   const runs: RunRow[] = (
-    (res.data ?? []) as Array<{ screened_at: string; candidates: unknown; universe: unknown }>
+    (res.data ?? []) as Array<{
+      screened_at: string;
+      candidates: unknown;
+      universe: unknown;
+      rs_pullback_diagnostics: unknown;
+    }>
   ).map((row) => ({
     screenedAt: row.screened_at,
+    // Empty is a legitimate, intentionally-persisted result now (see
+    // /save) — not treated as missing/degraded data.
     candidates: Array.isArray(row.candidates) ? (row.candidates as SwingCandidate[]) : [],
     universe: row.universe ?? null,
+    rsPullbackDiagnostics: row.rs_pullback_diagnostics ?? null,
   }));
   return NextResponse.json({ runs });
 }
