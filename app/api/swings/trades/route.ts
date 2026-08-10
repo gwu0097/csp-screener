@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
 import { requireUserId, authErrorResponse } from "@/lib/auth";
+import { insertEntryFill, type FillRow } from "@/lib/swing-trade-fills";
 
 export const dynamic = "force-dynamic";
 
@@ -18,7 +19,9 @@ export type TradeRow = {
   entry_date: string;
   entry_price: number;
   shares: number;
-  planned_stop: number;
+  open_shares: number;
+  initial_stop: number;
+  current_stop: number;
   planned_target: number | null;
   initial_risk_dollars: number;
   risk_pct_of_portfolio: number | null;
@@ -58,7 +61,33 @@ export async function GET() {
   if (res.error) {
     return NextResponse.json({ error: res.error.message }, { status: 500 });
   }
-  return NextResponse.json({ trades: res.data ?? [] });
+  const trades = (res.data ?? []) as TradeRow[];
+
+  // Fills embedded per trade — a personal journal's fill volume is small
+  // enough that one extra bulk query beats a lazy per-trade endpoint;
+  // the UI's expandable fill history renders instantly off this.
+  let fillsByTrade = new Map<string, FillRow[]>();
+  if (trades.length > 0) {
+    const fillsRes = await sb
+      .from<FillRow>("swing_trade_fills")
+      .select("*")
+      .eq("user_id", userId)
+      .order("fill_date", { ascending: true })
+      .order("created_at", { ascending: true });
+    if (!fillsRes.error) {
+      const grouped = new Map<string, FillRow[]>();
+      for (const f of (fillsRes.data ?? []) as FillRow[]) {
+        const list = grouped.get(f.trade_id) ?? [];
+        list.push(f);
+        grouped.set(f.trade_id, list);
+      }
+      fillsByTrade = grouped;
+    }
+  }
+
+  return NextResponse.json({
+    trades: trades.map((t) => ({ ...t, fills: fillsByTrade.get(t.id) ?? [] })),
+  });
 }
 
 type CreateBody = {
@@ -112,6 +141,10 @@ export async function POST(req: NextRequest) {
   const thesis = str(body.thesis);
   const entryPrice = num(body.entry_price);
   const shares = num(body.shares);
+  // Client field name stays "planned_stop" (matches the entry form's
+  // "Planned stop" label) — it becomes initial_stop on write, the
+  // immutable R denominator. current_stop starts equal to it and trails
+  // independently from there.
   const plannedStop = num(body.planned_stop);
   const entryDate = str(body.entry_date);
 
@@ -202,7 +235,9 @@ export async function POST(req: NextRequest) {
     entry_date: entryDate,
     entry_price: entryPrice,
     shares,
-    planned_stop: plannedStop,
+    open_shares: shares,
+    initial_stop: plannedStop,
+    current_stop: plannedStop,
     planned_target: plannedTarget,
     initial_risk_dollars: initialRiskDollars,
     risk_pct_of_portfolio: riskPctOfPortfolio,
@@ -219,5 +254,21 @@ export async function POST(req: NextRequest) {
   if (res.error) {
     return NextResponse.json({ error: res.error.message }, { status: 400 });
   }
-  return NextResponse.json({ trade: res.data });
+  const trade = res.data as TradeRow;
+
+  // Every position's opening buy is itself a fill — this is what FIFO
+  // matching on the exit side walks against. One entry fill per position
+  // today (this app has no scale-in feature), but the fill model is
+  // correct if that changes later.
+  await insertEntryFill(sb, trade.id, userId, {
+    price: entryPrice,
+    shares,
+    date: entryDate,
+    broker: str(body.broker),
+  });
+
+  // The list view (GET, above) is the source of embedded fills — the
+  // caller reloads the full list right after a successful create, so
+  // this response doesn't need to carry the just-inserted entry fill.
+  return NextResponse.json({ trade });
 }

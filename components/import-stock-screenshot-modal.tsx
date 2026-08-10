@@ -199,6 +199,7 @@ export function ImportStockScreenshotModal({
       const json = (await res.json()) as {
         inserted?: number;
         closed?: number;
+        partial_closes?: number;
         skipped_orphan_sells?: number;
         errors?: string[];
         error?: string;
@@ -207,8 +208,9 @@ export function ImportStockScreenshotModal({
       const parts = [
         (json.inserted ?? 0) > 0 ? `${json.inserted} opened` : null,
         (json.closed ?? 0) > 0 ? `${json.closed} closed` : null,
+        (json.partial_closes ?? 0) > 0 ? `${json.partial_closes} trimmed` : null,
         (json.skipped_orphan_sells ?? 0) > 0
-          ? `${json.skipped_orphan_sells} sell${json.skipped_orphan_sells === 1 ? "" : "s"} skipped (no matching open position — log the original entry manually)`
+          ? `${json.skipped_orphan_sells} sell${json.skipped_orphan_sells === 1 ? "" : "s"} unmatched — saved for review under Orphan sells`
           : null,
       ].filter(Boolean);
       const msg = parts.length > 0 ? parts.join(", ") : "Imported 0 trades";

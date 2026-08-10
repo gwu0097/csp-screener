@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
 import { requireUserId, authErrorResponse } from "@/lib/auth";
+import { insertEntryFill, applySellAcrossPositions, recordOrphanSell } from "@/lib/swing-trade-fills";
 
 export const dynamic = "force-dynamic";
 
@@ -32,17 +33,6 @@ type ParsedStockTrade = {
 };
 
 type SwingIdeaRow = { id: string; symbol: string; status: string };
-type SwingTradeRow = {
-  id: string;
-  symbol: string;
-  shares: number;
-  entry_price: number;
-  entry_date: string;
-  planned_stop: number;
-  initial_risk_dollars: number;
-  status: string;
-  broker: string | null;
-};
 
 function validTrade(t: unknown): ParsedStockTrade | null {
   if (!t || typeof t !== "object") return null;
@@ -69,12 +59,6 @@ function validTrade(t: unknown): ParsedStockTrade | null {
   }
   if (!exitReason) return null;
   return { symbol, action, shares, price, date, broker, exit_reason: exitReason };
-}
-
-function daysBetween(a: string, b: string): number {
-  const start = new Date(a + "T00:00:00Z").getTime();
-  const end = new Date(b + "T00:00:00Z").getTime();
-  return Math.round((end - start) / (24 * 60 * 60 * 1000));
 }
 
 export async function POST(req: NextRequest) {
@@ -111,9 +95,17 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Stable order: chronological, so buy → sell pairings across the same
-  // import always match the earlier fill as the entry.
-  trades.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  // Stable order: chronological, buys before sells on the same date. A
+  // same-day scale-in-then-trim (or open-then-close) must see the buy
+  // applied first — sorting on date alone leaves same-day ordering to
+  // whatever order the screenshot happened to list rows in, and a sell
+  // processed first would find no position yet and become a spurious
+  // orphan.
+  trades.sort((a, b) => {
+    if (a.date !== b.date) return a.date < b.date ? -1 : 1;
+    if (a.action !== b.action) return a.action === "buy" ? -1 : 1;
+    return 0;
+  });
 
   const sb = createServerClient();
   const symbols = Array.from(new Set(trades.map((t) => t.symbol)));
@@ -134,33 +126,15 @@ export async function POST(req: NextRequest) {
     ideaBySymbol.set(i.symbol, { id: i.id, status: i.status });
   }
 
-  // Preload open swing_trades for the same symbols — a sell will try to
-  // close the oldest open position for that symbol.
-  const openRes = await sb
-    .from("swing_trades")
-    .select("id,symbol,shares,entry_price,entry_date,planned_stop,initial_risk_dollars,status,broker")
-    .eq("user_id", userId)
-    .eq("status", "open")
-    .in("symbol", symbols)
-    .order("entry_date", { ascending: true });
-  if (openRes.error) {
-    return NextResponse.json({ error: openRes.error.message }, { status: 500 });
-  }
-  const openBySymbol = new Map<string, SwingTradeRow[]>();
-  for (const t of (openRes.data ?? []) as SwingTradeRow[]) {
-    const list = openBySymbol.get(t.symbol) ?? [];
-    list.push(t);
-    openBySymbol.set(t.symbol, list);
-  }
-
   let inserted = 0;
-  let closed = 0;
+  let fullyClosedPositions = 0;
+  let partialCloses = 0;
   let skippedOrphanSells = 0;
   let ideasPromoted = 0;
   let ideasDemoted = 0;
   let ideasCreated = 0;
   const errors: string[] = [];
-  const orphanSells: Array<{ symbol: string; date: string; shares: number; price: number }> = [];
+  const orphanSells: Array<{ id: string; symbol: string; date: string; shares: number; price: number }> = [];
 
   async function ensureIdeaForBuy(symbol: string, entryPrice: number): Promise<string | null> {
     const existing = ideaBySymbol.get(symbol);
@@ -206,6 +180,19 @@ export async function POST(req: NextRequest) {
   async function demoteIdeaOnClose(symbol: string) {
     const existing = ideaBySymbol.get(symbol);
     if (!existing || existing.status !== "entered") return;
+    // Re-derived from the DB rather than an in-memory decrement — the
+    // matcher (lib/swing-trade-fills.ts) is itself fills-derived, so the
+    // idea-demotion signal should be too: still-open positions for this
+    // symbol mean the idea stays ENTERED.
+    const stillOpenRes = await sb
+      .from("swing_trades")
+      .select("id")
+      .eq("user_id", userId)
+      .eq("symbol", symbol)
+      .eq("status", "open")
+      .limit(1);
+    const stillOpen = (stillOpenRes.data ?? []).length > 0;
+    if (stillOpen) return;
     const upd = await sb
       .from("swing_ideas")
       .update({ status: "exited", updated_at: new Date().toISOString() })
@@ -235,7 +222,9 @@ export async function POST(req: NextRequest) {
         entry_date: t.date,
         entry_price: t.price,
         shares: t.shares,
-        planned_stop: plannedStop,
+        open_shares: t.shares,
+        initial_stop: plannedStop,
+        current_stop: plannedStop,
         initial_risk_dollars: initialRiskDollars,
         status: "open",
       };
@@ -244,67 +233,77 @@ export async function POST(req: NextRequest) {
         errors.push(`${t.symbol} buy @ ${t.date}: ${ins.error.message}`);
         continue;
       }
-      const list = openBySymbol.get(t.symbol) ?? [];
-      if (ins.data) list.push(ins.data as SwingTradeRow);
-      openBySymbol.set(t.symbol, list);
+      const insertedTrade = ins.data as { id: string } | null;
+      if (insertedTrade) {
+        await insertEntryFill(sb, insertedTrade.id, userId, {
+          price: t.price,
+          shares: t.shares,
+          date: t.date,
+          broker,
+        });
+      }
       inserted += 1;
       continue;
     }
 
-    // action === "sell" — try to match the oldest open buy.
-    const candidates = openBySymbol.get(t.symbol) ?? [];
-    const match = candidates.shift();
-    if (match) {
-      const realizedPnl = (t.price - match.entry_price) * match.shares;
-      const rMultiple =
-        match.initial_risk_dollars > 0 ? realizedPnl / match.initial_risk_dollars : null;
-      const returnPct = match.entry_price > 0 ? (t.price - match.entry_price) / match.entry_price : null;
-      const upd = await sb
-        .from("swing_trades")
-        .update({
-          exit_price: t.price,
-          exit_date: t.date,
-          exit_reason: t.exit_reason,
-          realized_pnl: realizedPnl,
-          r_multiple: rMultiple,
-          return_pct: returnPct,
-          days_held: daysBetween(match.entry_date, t.date),
-          status: "closed",
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", match.id)
-        .eq("user_id", userId)
-        .select()
-        .single();
-      if (upd.error) {
-        errors.push(`${t.symbol} sell @ ${t.date}: ${upd.error.message}`);
-        candidates.unshift(match);
-        continue;
-      }
-      openBySymbol.set(t.symbol, candidates);
-      closed += 1;
-      if (candidates.length === 0) {
-        await demoteIdeaOnClose(t.symbol);
-      }
-      continue;
+    // action === "sell" — FIFO across every open position for this
+    // symbol, oldest entry first, spilling into the next open position
+    // once one is fully consumed. Any leftover after every open position
+    // is exhausted is a genuine oversell relative to everything
+    // currently held for this symbol — persisted for review, not
+    // dropped.
+    const result = await applySellAcrossPositions(sb, userId, t.symbol, {
+      shares: t.shares,
+      price: t.price,
+      date: t.date,
+      exitReason: t.exit_reason as string,
+      broker,
+    });
+    for (const e of result.errors) errors.push(e);
+    for (const f of result.filledTrades) {
+      // A fill that didn't fully consume the position it was matched
+      // against (checked via the still-open query in demoteIdeaOnClose
+      // below) is a partial close; otherwise it's a full close. We don't
+      // know which without asking, so just count fills applied and let
+      // demoteIdeaOnClose's still-open check drive idea lifecycle —
+      // partial vs. full is reported per-fill via a follow-up query.
+      const stillOpenRes = await sb.from("swing_trades").select("status").eq("id", f.tradeId).maybeSingle();
+      const status = (stillOpenRes.data as { status?: string } | null)?.status;
+      if (status === "closed") fullyClosedPositions += 1;
+      else partialCloses += 1;
     }
-
-    // No open buy to close against. Unlike the prior version of this
-    // route, we do NOT insert a stopless "trade" here — planned_stop and
-    // entry_price are both required (NOT NULL) on swing_trades now, and
-    // there is no plan to attach to a fill whose entry was never logged
-    // in this journal. Reported back so the user can log the original
-    // entry (with a stop) manually first.
-    skippedOrphanSells += 1;
-    orphanSells.push({ symbol: t.symbol, date: t.date, shares: t.shares, price: t.price });
+    if (result.filledTrades.length > 0) {
+      await demoteIdeaOnClose(t.symbol);
+    }
+    if (result.remainderShares > 0) {
+      const rec = await recordOrphanSell(sb, userId, {
+        symbol: t.symbol,
+        date: t.date,
+        shares: result.remainderShares,
+        price: t.price,
+        exitReason: t.exit_reason ?? null,
+        broker,
+        source: "import",
+      });
+      skippedOrphanSells += 1;
+      const created = rec.data as { id: string } | null;
+      orphanSells.push({
+        id: created?.id ?? "",
+        symbol: t.symbol,
+        date: t.date,
+        shares: result.remainderShares,
+        price: t.price,
+      });
+    }
   }
 
   return NextResponse.json({
     inserted,
-    closed,
+    closed: fullyClosedPositions,
+    partial_closes: partialCloses,
     skipped_orphan_sells: skippedOrphanSells,
     orphan_sells: orphanSells,
-    total: inserted + closed,
+    total: inserted + fullyClosedPositions + partialCloses,
     ideas_promoted: ideasPromoted,
     ideas_demoted: ideasDemoted,
     ideas_created: ideasCreated,

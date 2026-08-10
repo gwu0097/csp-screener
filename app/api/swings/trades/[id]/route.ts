@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
 import { requireUserId, authErrorResponse } from "@/lib/auth";
+import { recordExitFill } from "@/lib/swing-trade-fills";
 
 export const dynamic = "force-dynamic";
 
@@ -23,19 +24,20 @@ function num(v: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-function daysBetween(a: string, b: string): number {
-  const start = new Date(a + "T00:00:00Z").getTime();
-  const end = new Date(b + "T00:00:00Z").getTime();
-  return Math.round((end - start) / (24 * 60 * 60 * 1000));
-}
-
 type PatchBody = {
-  // Close-the-trade path — all three required together, exit_reason must
-  // be a deliberate selection (no default) since it's the field the whole
-  // plan-vs-actual review depends on.
+  // Exit path — a full close or a partial sell, same mechanism either
+  // way. shares defaults to the position's full open_shares when
+  // omitted, matching the old all-or-nothing behavior for callers that
+  // don't send it. exit_reason must be a deliberate selection (no
+  // default) since it's the field the whole plan-vs-actual review
+  // depends on.
+  shares?: unknown;
   exit_date?: unknown;
   exit_price?: unknown;
   exit_reason?: unknown;
+  // Trail-stop path — updates the mutable current_stop only. Never
+  // touches initial_stop, so it can never move an already-recorded R.
+  current_stop?: unknown;
   // Follow-up path — independent of the close path, usually submitted
   // weeks later via the follow-up prompt.
   price_two_weeks_after_exit?: unknown;
@@ -64,18 +66,19 @@ export async function PATCH(
 
   const sb = createServerClient();
   const isClosing =
-    body.exit_date !== undefined ||
-    body.exit_price !== undefined ||
-    body.exit_reason !== undefined;
+    body.shares !== undefined || body.exit_date !== undefined ||
+    body.exit_price !== undefined || body.exit_reason !== undefined;
+  const isTrailingStop = body.current_stop !== undefined;
   const isFollowUp =
     body.price_two_weeks_after_exit !== undefined || body.exit_quality_note !== undefined;
 
-  if (!isClosing && !isFollowUp) {
+  const modes = [isClosing, isTrailingStop, isFollowUp].filter(Boolean).length;
+  if (modes === 0) {
     return NextResponse.json({ error: "No recognized fields to update" }, { status: 400 });
   }
-  if (isClosing && isFollowUp) {
+  if (modes > 1) {
     return NextResponse.json(
-      { error: "Close and follow-up fields cannot be submitted together" },
+      { error: "Exit, trail-stop, and follow-up fields cannot be submitted together" },
       { status: 400 },
     );
   }
@@ -100,9 +103,25 @@ export async function PATCH(
     return NextResponse.json({ trade: res.data });
   }
 
-  // Closing. exit_reason must be a real enum member — never defaulted —
-  // since it's how "exited a winner early" or "widened a stop" becomes
-  // visible at all.
+  if (isTrailingStop) {
+    const newStop = num(body.current_stop);
+    if (newStop === null || newStop <= 0) {
+      return NextResponse.json({ error: "current_stop must be > 0" }, { status: 400 });
+    }
+    const res = await sb
+      .from<TradeRow>("swing_trades")
+      .update({ current_stop: newStop, updated_at: new Date().toISOString() })
+      .eq("id", id)
+      .eq("user_id", userId)
+      .select()
+      .single();
+    if (res.error) return NextResponse.json({ error: res.error.message }, { status: 400 });
+    return NextResponse.json({ trade: res.data });
+  }
+
+  // Closing / partial sell. exit_reason must be a real enum member —
+  // never defaulted — since it's how "exited a winner early" or
+  // "widened a stop" becomes visible at all.
   const exitDate = typeof body.exit_date === "string" ? body.exit_date : null;
   const exitPrice = num(body.exit_price);
   const exitReason =
@@ -123,7 +142,7 @@ export async function PATCH(
 
   const existingRes = await sb
     .from<TradeRow>("swing_trades")
-    .select("entry_price,entry_date,shares,initial_risk_dollars,status")
+    .select("id,user_id,entry_date,initial_risk_dollars,open_shares,broker")
     .eq("id", id)
     .eq("user_id", userId)
     .maybeSingle();
@@ -131,38 +150,35 @@ export async function PATCH(
     return NextResponse.json({ error: existingRes.error.message }, { status: 400 });
   }
   const existing = existingRes.data as
-    | { entry_price: number; entry_date: string; shares: number; initial_risk_dollars: number; status: string }
+    | {
+        id: string;
+        user_id: string;
+        entry_date: string;
+        initial_risk_dollars: number;
+        open_shares: number;
+        broker: string | null;
+      }
     | null;
   if (!existing) return NextResponse.json({ error: "Trade not found" }, { status: 404 });
-  if (existing.status === "closed") {
-    return NextResponse.json({ error: "Trade is already closed" }, { status: 400 });
+
+  // shares defaults to the full (cached) open amount when omitted —
+  // recordExitFill re-derives true capacity from the fills themselves
+  // before allocating, so a stale cache here just means the default
+  // guess might be off; it can't cause an over-sell.
+  const sharesToSell = body.shares !== undefined ? num(body.shares) : existing.open_shares;
+  if (sharesToSell === null || sharesToSell <= 0) {
+    return NextResponse.json({ error: "shares must be > 0" }, { status: 400 });
   }
 
-  const realizedPnl = (exitPrice - existing.entry_price) * existing.shares;
-  const rMultiple =
-    existing.initial_risk_dollars > 0 ? realizedPnl / existing.initial_risk_dollars : null;
-  const returnPct = existing.entry_price > 0 ? (exitPrice - existing.entry_price) / existing.entry_price : null;
-  const daysHeld = daysBetween(existing.entry_date, exitDate);
-
-  const res = await sb
-    .from<TradeRow>("swing_trades")
-    .update({
-      exit_date: exitDate,
-      exit_price: exitPrice,
-      exit_reason: exitReason,
-      realized_pnl: realizedPnl,
-      r_multiple: rMultiple,
-      return_pct: returnPct,
-      days_held: daysHeld,
-      status: "closed",
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", id)
-    .eq("user_id", userId)
-    .select()
-    .single();
-  if (res.error) return NextResponse.json({ error: res.error.message }, { status: 400 });
-  return NextResponse.json({ trade: res.data });
+  const result = await recordExitFill(
+    sb,
+    { id: existing.id, user_id: existing.user_id, entry_date: existing.entry_date, initial_risk_dollars: existing.initial_risk_dollars },
+    { shares: sharesToSell, price: exitPrice, date: exitDate, exitReason, broker: existing.broker },
+  );
+  if (!result.ok) {
+    return NextResponse.json({ error: result.error }, { status: 400 });
+  }
+  return NextResponse.json({ trade: result.trade, fill: result.fill });
 }
 
 // Deleting a trade can leave a kanban card in a trade-driven stage

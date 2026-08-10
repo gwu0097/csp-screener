@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { Camera, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { Camera, ChevronDown, ChevronRight, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
@@ -16,8 +16,10 @@ import {
 import {
   SwingTradeDialog,
   type SwingTrade,
+  type SwingTradeFill,
 } from "@/components/swing-trade-dialog";
 import { SwingTradeExitDialog, EXIT_REASONS } from "@/components/swing-trade-exit-dialog";
+import { SwingTradeTrailStopDialog } from "@/components/swing-trade-trail-stop-dialog";
 import { ImportStockScreenshotModal } from "@/components/import-stock-screenshot-modal";
 
 function fmtMoney(n: number | null, signed = false): string {
@@ -146,6 +148,124 @@ function FollowUpPanel({ onDone }: { onDone: () => void }) {
   );
 }
 
+// Expanded detail row showing every fill for a position — entry plus
+// each exit, in order. A position exited in three tranches shows three
+// exit rows here, each with its own price/date/shares/P&L/R, plus the
+// blended totals live in the parent row already.
+function FillsRow({ fills, colSpan }: { fills: SwingTradeFill[]; colSpan: number }) {
+  const sorted = [...fills].sort((a, b) => (a.fill_date < b.fill_date ? -1 : a.fill_date > b.fill_date ? 1 : 0));
+  return (
+    <TableRow className="bg-background/20 hover:bg-background/20">
+      <TableCell colSpan={colSpan} className="p-0">
+        <div className="px-4 py-2">
+          <table className="w-full text-xs">
+            <thead className="text-[10px] uppercase tracking-wide text-muted-foreground">
+              <tr>
+                <th className="px-2 py-1 text-left">Type</th>
+                <th className="px-2 py-1 text-left">Date</th>
+                <th className="px-2 py-1 text-right">Shares</th>
+                <th className="px-2 py-1 text-right">Price</th>
+                <th className="px-2 py-1 text-right">P&amp;L</th>
+                <th className="px-2 py-1 text-right">R</th>
+                <th className="px-2 py-1 text-left">Reason</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sorted.map((f) => (
+                <tr key={f.id} className="border-t border-border/30">
+                  <td className="px-2 py-1 capitalize">{f.fill_type}</td>
+                  <td className="px-2 py-1">{f.fill_date}</td>
+                  <td className="px-2 py-1 text-right font-mono">{f.shares}</td>
+                  <td className="px-2 py-1 text-right font-mono">{fmtMoney(f.price)}</td>
+                  <td className="px-2 py-1 text-right font-mono">
+                    {f.realized_pnl !== null ? fmtMoney(f.realized_pnl, true) : "—"}
+                  </td>
+                  <td className="px-2 py-1 text-right font-mono">{fmtR(f.r_multiple)}</td>
+                  <td className="px-2 py-1">{exitReasonLabel(f.exit_reason)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </TableCell>
+    </TableRow>
+  );
+}
+
+type OrphanSellRow = {
+  id: string;
+  symbol: string;
+  fill_date: string;
+  price: number;
+  shares: number;
+  exit_reason: string | null;
+  broker: string | null;
+  reviewed: boolean;
+};
+
+function OrphanSellsPanel({ refreshKey }: { refreshKey: number }) {
+  const [rows, setRows] = useState<OrphanSellRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState<string | null>(null);
+
+  async function load() {
+    setLoading(true);
+    try {
+      const res = await fetch("/api/swings/trades/orphan-sells", { cache: "no-store" });
+      const json = (await res.json()) as { orphan_sells?: OrphanSellRow[] };
+      setRows((json.orphan_sells ?? []).filter((r) => !r.reviewed));
+    } catch {
+      setRows([]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshKey]);
+
+  async function markReviewed(id: string) {
+    setBusy(id);
+    try {
+      await fetch(`/api/swings/trades/orphan-sells/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reviewed: true }),
+      });
+      setRows((prev) => prev.filter((r) => r.id !== id));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  if (loading || rows.length === 0) return null;
+
+  return (
+    <div className="rounded border border-amber-500/40 bg-amber-500/5 p-3">
+      <div className="mb-2 text-sm font-medium text-amber-200">
+        {rows.length} unmatched {rows.length === 1 ? "sell" : "sells"} — no open position covered
+        {rows.length === 1 ? " it" : " them"} at import time.
+      </div>
+      <div className="space-y-1">
+        {rows.map((r) => (
+          <div key={r.id} className="flex flex-wrap items-center gap-2 text-sm">
+            <span className="font-mono font-medium">{r.symbol}</span>
+            <span className="text-xs text-muted-foreground">
+              sold {r.shares} @ {fmtMoney(r.price)} on {r.fill_date}
+              {r.exit_reason ? ` (${exitReasonLabel(r.exit_reason)})` : ""}
+            </span>
+            <Button size="sm" variant="outline" onClick={() => void markReviewed(r.id)} disabled={busy === r.id}>
+              {busy === r.id ? "Saving…" : "Mark reviewed"}
+            </Button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function SwingTradesView() {
   const searchParams = useSearchParams();
   // swing-ideas-board.tsx links here with ?symbol=..., not ?prefill= — the
@@ -162,8 +282,11 @@ export function SwingTradesView() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [exitTrade, setExitTrade] = useState<SwingTrade | null>(null);
+  const [trailTrade, setTrailTrade] = useState<SwingTrade | null>(null);
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
   const [toast, setToast] = useState<string | null>(null);
   const [refreshingExcursion, setRefreshingExcursion] = useState(false);
+  const [loadKey, setLoadKey] = useState(0);
 
   const [search, setSearch] = useState("");
   const [deleting, setDeleting] = useState(false);
@@ -182,7 +305,17 @@ export function SwingTradesView() {
       setError(e instanceof Error ? e.message : "Failed to load");
     } finally {
       setLoading(false);
+      setLoadKey((k) => k + 1);
     }
+  }
+
+  function toggleExpanded(id: string) {
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   }
 
   useEffect(() => {
@@ -293,6 +426,7 @@ export function SwingTradesView() {
       </div>
 
       <FollowUpPanel onDone={load} />
+      <OrphanSellsPanel refreshKey={loadKey} />
 
       {toast && (
         <div className="rounded border border-emerald-500/40 bg-emerald-500/10 p-2 text-sm text-emerald-200">
@@ -337,69 +471,106 @@ export function SwingTradesView() {
                 <Table>
                   <TableHeader>
                     <TableRow>
+                      <TableHead className="w-6" />
                       <TableHead>Symbol</TableHead>
                       <TableHead className="text-right">Entry</TableHead>
+                      <TableHead className="text-right">Initial stop</TableHead>
                       <TableHead className="text-right">Stop</TableHead>
                       <TableHead className="text-right">Target</TableHead>
                       <TableHead className="text-right">Current</TableHead>
                       <TableHead className="text-right">Current R</TableHead>
                       <TableHead className="text-right">Dist to stop</TableHead>
+                      <TableHead className="text-right">Open/Total</TableHead>
                       <TableHead className="text-right">Days held</TableHead>
-                      <TableHead className="w-20" />
+                      <TableHead className="w-28" />
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {filteredOpen.map((t) => {
                       const current = livePrices[t.symbol] ?? null;
-                      const riskPerShare = t.entry_price - t.planned_stop;
+                      // Current R is always against the FIXED initial
+                      // stop, matching how realized R is computed —
+                      // trailing the stop changes distance-to-stop, not
+                      // this.
+                      const riskPerShare = t.entry_price - t.initial_stop;
                       const currentR =
                         current !== null && riskPerShare > 0
                           ? (current - t.entry_price) / riskPerShare
                           : null;
                       const distToStop =
-                        current !== null && current > 0 ? ((current - t.planned_stop) / current) * 100 : null;
+                        current !== null && current > 0 ? ((current - t.current_stop) / current) * 100 : null;
                       const daysHeld = Math.round(
                         (Date.now() - new Date(t.entry_date + "T00:00:00Z").getTime()) / 86_400_000,
                       );
+                      const isExpanded = expandedIds.has(t.id);
+                      const hasFills = t.fills.some((f) => f.fill_type === "exit");
                       return (
-                        <TableRow key={t.id}>
-                          <TableCell className="font-mono">{t.symbol}</TableCell>
-                          <TableCell className="text-right">{fmtMoney(t.entry_price)}</TableCell>
-                          <TableCell className="text-right text-rose-300">{fmtMoney(t.planned_stop)}</TableCell>
-                          <TableCell className="text-right text-emerald-300">
-                            {t.planned_target !== null ? fmtMoney(t.planned_target) : "—"}
-                          </TableCell>
-                          <TableCell className="text-right">{fmtMoney(current)}</TableCell>
-                          <TableCell
-                            className={`text-right font-mono ${
-                              currentR === null ? "" : currentR >= 0 ? "text-emerald-300" : "text-rose-300"
-                            }`}
-                          >
-                            {fmtR(currentR)}
-                          </TableCell>
-                          <TableCell className="text-right">{fmtPct(distToStop)}</TableCell>
-                          <TableCell className="text-right">{daysHeld}</TableCell>
-                          <TableCell className="w-20 text-right">
-                            <div className="flex justify-end gap-2">
-                              <button
-                                type="button"
-                                onClick={() => setExitTrade(t)}
-                                className="text-xs text-muted-foreground hover:text-foreground"
-                              >
-                                Close
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => onDeleteRow(t)}
-                                disabled={deleting}
-                                className="text-muted-foreground hover:text-rose-300 disabled:opacity-50"
-                                aria-label={`Delete ${t.symbol} trade`}
-                              >
-                                <Trash2 className="h-3.5 w-3.5" />
-                              </button>
-                            </div>
-                          </TableCell>
-                        </TableRow>
+                        <Fragment key={t.id}>
+                          <TableRow>
+                            <TableCell className="w-6">
+                              {hasFills && (
+                                <button
+                                  type="button"
+                                  onClick={() => toggleExpanded(t.id)}
+                                  className="text-muted-foreground hover:text-foreground"
+                                  aria-label={isExpanded ? "Collapse fills" : "Expand fills"}
+                                >
+                                  {isExpanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                                </button>
+                              )}
+                            </TableCell>
+                            <TableCell className="font-mono">{t.symbol}</TableCell>
+                            <TableCell className="text-right">{fmtMoney(t.entry_price)}</TableCell>
+                            <TableCell className="text-right text-rose-300">{fmtMoney(t.initial_stop)}</TableCell>
+                            <TableCell className="text-right text-rose-300">{fmtMoney(t.current_stop)}</TableCell>
+                            <TableCell className="text-right text-emerald-300">
+                              {t.planned_target !== null ? fmtMoney(t.planned_target) : "—"}
+                            </TableCell>
+                            <TableCell className="text-right">{fmtMoney(current)}</TableCell>
+                            <TableCell
+                              className={`text-right font-mono ${
+                                currentR === null ? "" : currentR >= 0 ? "text-emerald-300" : "text-rose-300"
+                              }`}
+                            >
+                              {fmtR(currentR)}
+                            </TableCell>
+                            <TableCell className="text-right">{fmtPct(distToStop)}</TableCell>
+                            <TableCell className="text-right font-mono">
+                              {t.open_shares}/{t.shares}
+                            </TableCell>
+                            <TableCell className="text-right">{daysHeld}</TableCell>
+                            <TableCell className="w-28 text-right">
+                              <div className="flex justify-end gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => setTrailTrade(t)}
+                                  className="text-muted-foreground hover:text-foreground"
+                                  aria-label={`Trail stop for ${t.symbol}`}
+                                  title="Trail stop"
+                                >
+                                  <Pencil className="h-3.5 w-3.5" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setExitTrade(t)}
+                                  className="text-xs text-muted-foreground hover:text-foreground"
+                                >
+                                  Sell
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => onDeleteRow(t)}
+                                  disabled={deleting}
+                                  className="text-muted-foreground hover:text-rose-300 disabled:opacity-50"
+                                  aria-label={`Delete ${t.symbol} trade`}
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                </button>
+                              </div>
+                            </TableCell>
+                          </TableRow>
+                          {isExpanded && hasFills && <FillsRow fills={t.fills} colSpan={12} />}
+                        </Fragment>
                       );
                     })}
                   </TableBody>
@@ -421,17 +592,20 @@ export function SwingTradesView() {
                 <Table>
                   <TableHeader>
                     <TableRow>
+                      <TableHead className="w-6" />
                       <TableHead>Symbol</TableHead>
                       <TableHead>Setup</TableHead>
                       <TableHead>Entry date</TableHead>
-                      <TableHead>Exit date</TableHead>
+                      <TableHead>Last exit</TableHead>
+                      <TableHead className="text-right">Shares</TableHead>
+                      <TableHead className="text-right">Realized P&amp;L</TableHead>
                       <TableHead
                         className="cursor-pointer text-right select-none"
                         onClick={() => setClosedSort((s) => (s === "asc" ? "desc" : "asc"))}
                       >
-                        R multiple {closedSort === "asc" ? "▲" : "▼"}
+                        Blended R {closedSort === "asc" ? "▲" : "▼"}
                       </TableHead>
-                      <TableHead>Exit reason</TableHead>
+                      <TableHead>Last exit reason</TableHead>
                       <TableHead className="text-right">Days held</TableHead>
                       <TableHead className="w-8" />
                     </TableRow>
@@ -440,27 +614,53 @@ export function SwingTradesView() {
                     {filteredClosed.map((t) => {
                       const rColor =
                         t.r_multiple === null ? "" : t.r_multiple >= 0 ? "text-emerald-300" : "text-rose-300";
+                      const isExpanded = expandedIds.has(t.id);
+                      const exitFillCount = t.fills.filter((f) => f.fill_type === "exit").length;
                       return (
-                        <TableRow key={t.id}>
-                          <TableCell className="font-mono">{t.symbol}</TableCell>
-                          <TableCell className="text-sm">{t.setup_name ?? "—"}</TableCell>
-                          <TableCell className="text-sm">{t.entry_date}</TableCell>
-                          <TableCell className="text-sm">{t.exit_date ?? "—"}</TableCell>
-                          <TableCell className={`text-right font-mono ${rColor}`}>{fmtR(t.r_multiple)}</TableCell>
-                          <TableCell className="text-sm">{exitReasonLabel(t.exit_reason)}</TableCell>
-                          <TableCell className="text-right">{t.days_held ?? "—"}</TableCell>
-                          <TableCell className="w-8 text-right">
-                            <button
-                              type="button"
-                              onClick={() => onDeleteRow(t)}
-                              disabled={deleting}
-                              className="text-muted-foreground hover:text-rose-300 disabled:opacity-50"
-                              aria-label={`Delete ${t.symbol} trade`}
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </button>
-                          </TableCell>
-                        </TableRow>
+                        <Fragment key={t.id}>
+                          <TableRow>
+                            <TableCell className="w-6">
+                              {exitFillCount > 0 && (
+                                <button
+                                  type="button"
+                                  onClick={() => toggleExpanded(t.id)}
+                                  className="text-muted-foreground hover:text-foreground"
+                                  aria-label={isExpanded ? "Collapse fills" : "Expand fills"}
+                                >
+                                  {isExpanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                                </button>
+                              )}
+                            </TableCell>
+                            <TableCell className="font-mono">
+                              {t.symbol}
+                              {exitFillCount > 1 && (
+                                <span className="ml-1 text-[10px] text-muted-foreground">
+                                  ({exitFillCount} exits)
+                                </span>
+                              )}
+                            </TableCell>
+                            <TableCell className="text-sm">{t.setup_name ?? "—"}</TableCell>
+                            <TableCell className="text-sm">{t.entry_date}</TableCell>
+                            <TableCell className="text-sm">{t.exit_date ?? "—"}</TableCell>
+                            <TableCell className="text-right font-mono">{t.shares}</TableCell>
+                            <TableCell className="text-right font-mono">{fmtMoney(t.realized_pnl, true)}</TableCell>
+                            <TableCell className={`text-right font-mono ${rColor}`}>{fmtR(t.r_multiple)}</TableCell>
+                            <TableCell className="text-sm">{exitReasonLabel(t.exit_reason)}</TableCell>
+                            <TableCell className="text-right">{t.days_held ?? "—"}</TableCell>
+                            <TableCell className="w-8 text-right">
+                              <button
+                                type="button"
+                                onClick={() => onDeleteRow(t)}
+                                disabled={deleting}
+                                className="text-muted-foreground hover:text-rose-300 disabled:opacity-50"
+                                aria-label={`Delete ${t.symbol} trade`}
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            </TableCell>
+                          </TableRow>
+                          {isExpanded && exitFillCount > 0 && <FillsRow fills={t.fills} colSpan={11} />}
+                        </Fragment>
                       );
                     })}
                   </TableBody>
@@ -484,6 +684,12 @@ export function SwingTradesView() {
         open={exitTrade !== null}
         onOpenChange={(v) => !v && setExitTrade(null)}
         trade={exitTrade}
+        onSaved={load}
+      />
+      <SwingTradeTrailStopDialog
+        open={trailTrade !== null}
+        onOpenChange={(v) => !v && setTrailTrade(null)}
+        trade={trailTrade}
         onSaved={load}
       />
       <ImportStockScreenshotModal

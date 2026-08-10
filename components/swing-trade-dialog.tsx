@@ -10,6 +10,22 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 
+export type SwingTradeFill = {
+  id: string;
+  trade_id: string;
+  fill_type: "entry" | "exit";
+  fill_date: string;
+  price: number;
+  shares: number;
+  broker: string | null;
+  exit_reason: string | null;
+  realized_pnl: number | null;
+  r_multiple: number | null;
+  return_pct: number | null;
+  cost_basis: number | null;
+  created_at: string;
+};
+
 export type SwingTrade = {
   id: string;
   swing_idea_id: string | null;
@@ -22,7 +38,11 @@ export type SwingTrade = {
   entry_date: string;
   entry_price: number;
   shares: number;
-  planned_stop: number;
+  open_shares: number;
+  // IMMUTABLE — the fixed R denominator. current_stop is the live/
+  // trailing stop, shown separately; never used for R math.
+  initial_stop: number;
+  current_stop: number;
   planned_target: number | null;
   initial_risk_dollars: number;
   risk_pct_of_portfolio: number | null;
@@ -32,9 +52,11 @@ export type SwingTrade = {
   adr_pct_at_entry: number | null;
   conviction: number | null;
   market_regime: string | null;
+  // Last-fill caches, not blended — see swing_trades column comments.
   exit_date: string | null;
   exit_price: number | null;
   exit_reason: string | null;
+  // Blended across every exit fill so far.
   realized_pnl: number | null;
   r_multiple: number | null;
   return_pct: number | null;
@@ -44,6 +66,7 @@ export type SwingTrade = {
   price_two_weeks_after_exit: number | null;
   exit_quality_note: string | null;
   status: "open" | "closed";
+  fills: SwingTradeFill[];
 };
 
 type Prefill = {

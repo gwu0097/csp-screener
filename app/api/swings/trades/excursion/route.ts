@@ -10,7 +10,7 @@ type OpenTrade = {
   symbol: string;
   entry_date: string;
   entry_price: number;
-  planned_stop: number;
+  initial_stop: number;
   max_favorable_excursion_r: number | null;
   max_adverse_excursion_r: number | null;
 };
@@ -40,7 +40,7 @@ export async function POST(req: NextRequest) {
   const sb = createServerClient();
   let q = sb
     .from<OpenTrade>("swing_trades")
-    .select("id,symbol,entry_date,entry_price,planned_stop,max_favorable_excursion_r,max_adverse_excursion_r")
+    .select("id,symbol,entry_date,entry_price,initial_stop,max_favorable_excursion_r,max_adverse_excursion_r")
     .eq("user_id", userId)
     .eq("status", "open");
   if (onlyId) q = q.eq("id", onlyId);
@@ -62,8 +62,8 @@ export async function POST(req: NextRequest) {
   let updated = 0;
 
   for (const trade of trades) {
-    const riskPerShare = trade.entry_price - trade.planned_stop;
-    if (!(riskPerShare > 0)) continue; // shouldn't happen — planned_stop is required < entry_price
+    const riskPerShare = trade.entry_price - trade.initial_stop;
+    if (!(riskPerShare > 0)) continue; // shouldn't happen — initial_stop is required < entry_price
 
     const bars = await getOrFetchDailyBars(trade.symbol).catch(() => []);
     const windowBars = bars.filter((b) => b.date >= trade.entry_date);

@@ -32,6 +32,7 @@ export function SwingTradeExitDialog({
 }) {
   const todayIso = new Date().toISOString().slice(0, 10);
 
+  const [sharesToSell, setSharesToSell] = useState("");
   const [exitDate, setExitDate] = useState(todayIso);
   const [exitPrice, setExitPrice] = useState("");
   // Intentionally no default — exit_reason is the highest-value field in
@@ -42,21 +43,27 @@ export function SwingTradeExitDialog({
 
   useEffect(() => {
     if (!open) return;
+    setSharesToSell(trade ? String(trade.open_shares) : "");
     setExitDate(todayIso);
     setExitPrice("");
     setExitReason("");
     setError(null);
-  }, [open, todayIso]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, todayIso, trade?.id]);
 
   if (!trade) return null;
 
+  const sharesNum = Number(sharesToSell);
   const exitPriceNum = Number(exitPrice);
+  const validShares = Number.isFinite(sharesNum) && sharesNum > 0 && sharesNum <= trade.open_shares;
   const disabled =
     submitting ||
     !exitDate ||
+    !validShares ||
     !Number.isFinite(exitPriceNum) ||
     exitPriceNum <= 0 ||
     exitReason === "";
+  const isFullClose = validShares && sharesNum >= trade.open_shares;
 
   async function submit() {
     if (!trade) return;
@@ -67,6 +74,7 @@ export function SwingTradeExitDialog({
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          shares: sharesNum,
           exit_date: exitDate,
           exit_price: exitPriceNum,
           exit_reason: exitReason,
@@ -77,16 +85,20 @@ export function SwingTradeExitDialog({
       onSaved();
       onOpenChange(false);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to close trade");
+      setError(e instanceof Error ? e.message : "Failed to record exit");
     } finally {
       setSubmitting(false);
     }
   }
 
-  const riskPerShare = trade.entry_price - trade.planned_stop;
+  const riskPerShare = trade.entry_price - trade.initial_stop;
+  // Approximation — assumes the shares being sold cost the position's
+  // single entry_price. Exactly right for every position today (this
+  // app has no scale-in feature, so there's only ever one entry lot);
+  // the server computes the true FIFO-matched figure regardless.
   const previewPnl =
-    Number.isFinite(exitPriceNum) && exitPriceNum > 0
-      ? (exitPriceNum - trade.entry_price) * trade.shares
+    Number.isFinite(exitPriceNum) && exitPriceNum > 0 && validShares
+      ? (exitPriceNum - trade.entry_price) * sharesNum
       : null;
   const previewR =
     previewPnl !== null && trade.initial_risk_dollars > 0
@@ -97,7 +109,7 @@ export function SwingTradeExitDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle>Close {trade.symbol}</DialogTitle>
+          <DialogTitle>Sell {trade.symbol}</DialogTitle>
         </DialogHeader>
 
         <div className="grid gap-3 py-2 text-sm">
@@ -107,14 +119,32 @@ export function SwingTradeExitDialog({
               <div className="font-mono">${trade.entry_price.toFixed(2)}</div>
             </div>
             <div>
-              <div className="text-muted-foreground">Stop</div>
-              <div className="font-mono">${trade.planned_stop.toFixed(2)}</div>
+              <div className="text-muted-foreground">Initial stop</div>
+              <div className="font-mono">${trade.initial_stop.toFixed(2)}</div>
             </div>
             <div>
               <div className="text-muted-foreground">Risk/share</div>
               <div className="font-mono">${riskPerShare.toFixed(2)}</div>
             </div>
           </div>
+
+          <label className="grid gap-1">
+            <span className="text-muted-foreground">
+              Shares to sell — {trade.open_shares} open
+            </span>
+            <input
+              type="number"
+              step="0.01"
+              value={sharesToSell}
+              onChange={(e) => setSharesToSell(e.target.value)}
+              max={trade.open_shares}
+              className="rounded border border-border bg-background px-2 py-1.5 text-base"
+              autoFocus
+            />
+            {!validShares && sharesToSell !== "" && (
+              <span className="text-xs text-rose-300">Must be &gt; 0 and ≤ {trade.open_shares} open</span>
+            )}
+          </label>
 
           <div className="grid grid-cols-2 gap-3">
             <label className="grid gap-1">
@@ -134,7 +164,6 @@ export function SwingTradeExitDialog({
                 value={exitPrice}
                 onChange={(e) => setExitPrice(e.target.value)}
                 className="rounded border border-border bg-background px-2 py-1.5 text-base"
-                autoFocus
               />
             </label>
           </div>
@@ -159,7 +188,7 @@ export function SwingTradeExitDialog({
 
           {previewPnl !== null && (
             <div className="text-xs text-muted-foreground">
-              Preview: {previewPnl >= 0 ? "+" : ""}
+              Preview (est.): {previewPnl >= 0 ? "+" : ""}
               ${previewPnl.toFixed(2)}
               {previewR !== null ? ` · ${previewR >= 0 ? "+" : ""}${previewR.toFixed(2)}R` : ""}
             </div>
@@ -177,7 +206,7 @@ export function SwingTradeExitDialog({
             Cancel
           </Button>
           <Button onClick={() => void submit()} disabled={disabled}>
-            {submitting ? "Closing…" : "Close trade"}
+            {submitting ? "Saving…" : isFullClose ? "Close position" : "Sell partial"}
           </Button>
         </DialogFooter>
       </DialogContent>
