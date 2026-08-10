@@ -27,6 +27,16 @@ const MIN_PRICE = 5;
 const MIN_MARKET_CAP = 500_000_000;
 const MIN_AVG_DOLLAR_VOLUME_20D = 10_000_000;
 
+// $ formatter for the OPTIONAL per-theme ceiling only (themes.
+// market_cap_ceiling, null = no ceiling = today's behavior) -- kept
+// separate from the floor's existing "$500M"-style inline formatting
+// above so that change never touches the floor/ADV/price messages, and
+// so a multi-billion ceiling reads as "$20.0B" rather than "$20000M".
+function fmtCeilingDollars(n: number): string {
+  if (n >= 1_000_000_000) return `$${(n / 1_000_000_000).toFixed(1)}B`;
+  return `$${(n / 1_000_000).toFixed(0)}M`;
+}
+
 // Only these four get a real prompt — 'custom' has no structured
 // relationship to expand from (see THEME_TYPES in
 // components/swing-universe-view.tsx), so the caller must disable the
@@ -138,19 +148,31 @@ function buildFullPrompt(
   anchors: Array<{ symbol: string; companyName: string | null }>,
   description: string | null,
   existingSymbols: string[],
+  // Optional per-theme market cap ceiling (themes.market_cap_ceiling) --
+  // stated here as well as enforced in filterAndQueueSuggestions below.
+  // Perplexity does not reliably comply with prompt-only qualifiers (see
+  // this feature's motivating case: "focus on second- and third-tier
+  // suppliers" still returned AMAT/LRCX/MSFT), so this sentence is a
+  // cheap nudge, not the enforcement mechanism -- the hard filter is what
+  // actually guarantees it.
+  marketCapCeiling?: number | null,
 ): string {
   const anchorText =
     anchors.length > 0
       ? anchors.map((a) => `${a.symbol}${a.companyName ? ` (${a.companyName})` : ""}`).join(", ")
       : "the theme's members";
   const filled = template.replace(/\[anchors\]/g, anchorText);
+  const ceilingLine =
+    marketCapCeiling !== null && marketCapCeiling !== undefined && marketCapCeiling > 0
+      ? `\n\nDo NOT suggest any company with a market capitalization above ${fmtCeilingDollars(marketCapCeiling)} -- focus on smaller names below this size, not obvious mega-caps.`
+      : "";
   return `${filled}
 
 Theme description: ${description ?? "(none provided)"}
 
 Do NOT suggest any of these — they are already members of this theme: ${
     existingSymbols.length > 0 ? existingSymbols.join(", ") : "(none yet)"
-  }.
+  }.${ceilingLine}
 
 Suggest up to ${MAX_SUGGESTIONS} publicly-traded, US-listed common stocks. For each, give the ticker, company name, and a one-sentence rationale tying it to the anchors above.
 
@@ -177,6 +199,11 @@ export async function runExpansionSuggest(opts: {
   anchors: Array<{ symbol: string; companyName: string | null }>;
   description: string | null;
   existingSymbols: string[];
+  // themes.market_cap_ceiling -- stated to Perplexity as context (see
+  // buildFullPrompt); the hard enforcement happens separately in
+  // filterAndQueueSuggestions. Omitted/null = no ceiling, unchanged from
+  // today's behavior.
+  marketCapCeiling?: number | null;
 }): Promise<SuggestResult> {
   const template = effectiveExpansionPrompt(opts.themeType, opts.promptOverride);
   if (!template) {
@@ -185,7 +212,7 @@ export async function runExpansionSuggest(opts: {
       error: "This theme type has no expansion prompt — expansion is manual only for 'custom' themes.",
     };
   }
-  const prompt = buildFullPrompt(template, opts.anchors, opts.description, opts.existingSymbols);
+  const prompt = buildFullPrompt(template, opts.anchors, opts.description, opts.existingSymbols, opts.marketCapCeiling);
   const raw = await askPerplexityRaw(prompt, { label: "theme-expand", maxTokens: 4000, timeoutMs: 45_000 });
   if (!raw) {
     return { ok: false, error: "Perplexity request failed or timed out." };
@@ -245,6 +272,11 @@ export async function filterAndQueueSuggestions(opts: {
   // the safe failure direction (under-suppress, not over-suppress).
   themeType?: string | null;
   expansionPromptOverride?: string | null;
+  // themes.market_cap_ceiling -- optional, null/undefined = no ceiling
+  // (today's behavior, unchanged). Enforced right after the existing
+  // $500M floor check below; never applied retroactively to existing
+  // theme_members rows, only to suggestions passing through THIS run.
+  marketCapCeiling?: number | null;
 }): Promise<{ verdicts: FilterVerdict[] }> {
   const sb = createServerClient();
   const dedupedBySymbol = new Map<string, ExpansionSuggestion>();
@@ -327,6 +359,20 @@ export async function filterAndQueueSuggestions(opts: {
         reject(
           s,
           `market cap ${profile.marketCap === null ? "unknown" : `$${(profile.marketCap / 1e6).toFixed(0)}M`} below $${MIN_MARKET_CAP / 1e6}M floor`,
+        ),
+      );
+      continue;
+    }
+    if (
+      opts.marketCapCeiling !== null &&
+      opts.marketCapCeiling !== undefined &&
+      opts.marketCapCeiling > 0 &&
+      profile.marketCap > opts.marketCapCeiling
+    ) {
+      verdicts.push(
+        reject(
+          s,
+          `market cap ${fmtCeilingDollars(profile.marketCap)} above ${fmtCeilingDollars(opts.marketCapCeiling)} ceiling`,
         ),
       );
       continue;

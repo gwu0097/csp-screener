@@ -16,6 +16,7 @@ type ThemeRow = {
   description: string | null;
   theme_type: string | null;
   expansion_prompt: string | null;
+  market_cap_ceiling: number | null;
 };
 type AnchorRow = { symbol: string };
 type MemberSymbolRow = { symbol: string };
@@ -46,7 +47,7 @@ export async function POST(
   const sb = createServerClient();
   const themeRes = await sb
     .from<ThemeRow>("themes")
-    .select("id,name,description,theme_type,expansion_prompt")
+    .select("id,name,description,theme_type,expansion_prompt,market_cap_ceiling")
     .eq("id", themeId)
     .eq("user_id", userId)
     .maybeSingle();
@@ -88,6 +89,7 @@ export async function POST(
     anchors: anchorSymbols.map((symbol) => ({ symbol, companyName: null })),
     description: theme.description,
     existingSymbols,
+    marketCapCeiling: theme.market_cap_ceiling,
   });
 
   if (!result.ok) {

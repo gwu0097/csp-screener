@@ -12,6 +12,10 @@ type ThemeRow = {
   description: string | null;
   theme_type: string | null;
   expansion_prompt: string | null;
+  // Optional per-theme expansion ceiling -- null means no ceiling (every
+  // existing theme, and the default for new ones). See
+  // migrations/2026-08-17-add-theme-market-cap-ceiling.sql.
+  market_cap_ceiling: number | null;
   is_active: boolean;
   created_at: string;
   updated_at: string;
@@ -107,6 +111,7 @@ type PatchBody = {
   theme_type?: unknown;
   is_active?: unknown;
   expansion_prompt?: unknown;
+  market_cap_ceiling?: unknown;
 };
 
 export async function PATCH(
@@ -147,6 +152,18 @@ export async function PATCH(
   }
   if (body.expansion_prompt !== undefined) {
     patch.expansion_prompt = typeof body.expansion_prompt === "string" ? body.expansion_prompt.trim() || null : null;
+  }
+  if (body.market_cap_ceiling !== undefined) {
+    if (body.market_cap_ceiling === null) {
+      patch.market_cap_ceiling = null;
+    } else if (typeof body.market_cap_ceiling === "number" && Number.isFinite(body.market_cap_ceiling)) {
+      if (body.market_cap_ceiling <= 0) {
+        return NextResponse.json({ error: "market_cap_ceiling must be a positive number or null" }, { status: 400 });
+      }
+      patch.market_cap_ceiling = body.market_cap_ceiling;
+    } else {
+      return NextResponse.json({ error: "market_cap_ceiling must be a positive number or null" }, { status: 400 });
+    }
   }
 
   const sb = createServerClient();

@@ -54,8 +54,10 @@ export async function POST(
 
   const sb = createServerClient();
   const themeRes = await sb
-    .from<{ id: string; theme_type: string | null; expansion_prompt: string | null }>("themes")
-    .select("id,theme_type,expansion_prompt")
+    .from<{ id: string; theme_type: string | null; expansion_prompt: string | null; market_cap_ceiling: number | null }>(
+      "themes",
+    )
+    .select("id,theme_type,expansion_prompt,market_cap_ceiling")
     .eq("id", themeId)
     .eq("user_id", userId)
     .maybeSingle();
@@ -73,6 +75,7 @@ export async function POST(
     suggestions,
     themeType: themeRes.data.theme_type,
     expansionPromptOverride: themeRes.data.expansion_prompt,
+    marketCapCeiling: themeRes.data.market_cap_ceiling,
   });
   return NextResponse.json({ verdicts });
 }

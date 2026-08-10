@@ -11,6 +11,10 @@ type Theme = {
   description: string | null;
   theme_type: string | null;
   expansion_prompt: string | null;
+  // Optional per-theme expansion ceiling -- null = no ceiling (every
+  // existing theme, today's unchanged behavior). Applies to future
+  // expansion runs only; never retroactively removes existing members.
+  market_cap_ceiling: number | null;
   is_active: boolean;
 };
 
@@ -72,6 +76,10 @@ function bucketReason(reason: string): string {
   if (reason.includes("not a common stock")) return "Not a common stock (ETF/fund)";
   if (reason.includes("foreign-primary-listing")) return "Foreign-listing heuristic";
   if (reason.includes("price") && reason.includes("floor")) return "Price below $5";
+  // Checked before the floor bucket below -- both reasons contain
+  // "market cap", distinguished by "ceiling" (only the new, optional
+  // per-theme check produces that word; the floor's message never does).
+  if (reason.includes("market cap") && reason.includes("ceiling")) return "Market cap above ceiling";
   if (reason.includes("market cap")) return "Market cap below $500M";
   if (reason.includes("$ volume")) return "20d $ volume below $10M";
   return "Other";
@@ -198,6 +206,14 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
   // ---- Phase C: expansion ----
   const [promptDraft, setPromptDraft] = useState("");
   const [promptTouched, setPromptTouched] = useState(false);
+  // Market cap ceiling editor -- string so an empty input cleanly means
+  // "no ceiling" (null) rather than 0. Same touched-flag pattern as
+  // promptDraft, so a background reload doesn't clobber an in-progress
+  // edit.
+  const [ceilingDraft, setCeilingDraft] = useState("");
+  const [ceilingTouched, setCeilingTouched] = useState(false);
+  const [ceilingSaving, setCeilingSaving] = useState(false);
+  const [ceilingError, setCeilingError] = useState<string | null>(null);
   const [expanding, setExpanding] = useState<"suggest" | "filter" | null>(null);
   const [expandProgress, setExpandProgress] = useState<string | null>(null);
   const [expandError, setExpandError] = useState<string | null>(null);
@@ -248,6 +264,7 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
       setMembers(json.members as Member[]);
       setRejections((json.rejections as Rejection[]) ?? []);
       if (!promptTouched) setPromptDraft(t.expansion_prompt ?? "");
+      if (!ceilingTouched) setCeilingDraft(t.market_cap_ceiling !== null ? String(t.market_cap_ceiling) : "");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load");
     } finally {
@@ -495,6 +512,40 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
     }
   }
 
+  // Parses ceilingDraft ("" -> null/no ceiling) and PATCHes the theme.
+  // Future expansion runs only -- this never touches theme_members.
+  async function saveCeiling() {
+    const trimmed = ceilingDraft.trim();
+    let value: number | null;
+    if (trimmed === "") {
+      value = null;
+    } else {
+      const n = Number(trimmed);
+      if (!Number.isFinite(n) || n <= 0) {
+        setCeilingError("Ceiling must be a positive number, or blank for no ceiling");
+        return;
+      }
+      value = n;
+    }
+    setCeilingSaving(true);
+    setCeilingError(null);
+    try {
+      const res = await fetch(`/api/swings/universe/themes/${themeId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ market_cap_ceiling: value }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+      setTheme(json.theme as Theme);
+      setCeilingTouched(false);
+    } catch (e) {
+      setCeilingError(e instanceof Error ? e.message : "Failed to save");
+    } finally {
+      setCeilingSaving(false);
+    }
+  }
+
   async function addMembers() {
     const symbols = Array.from(
       new Set(
@@ -622,6 +673,50 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
           <div className="text-sm font-semibold text-foreground">Perplexity expansion</div>
           {expandProgress && <span className="text-[11px] text-muted-foreground">{expandProgress}</span>}
         </div>
+
+        <div className="mb-3 flex flex-wrap items-end gap-x-4 gap-y-2 border-b border-border/60 pb-3">
+          <div>
+            <div className="text-[11px] text-muted-foreground">Market cap floor</div>
+            <div className="text-sm text-foreground">$500M (fixed)</div>
+          </div>
+          <div>
+            <label className="block text-[11px] text-muted-foreground" htmlFor="ceiling-input">
+              Market cap ceiling
+            </label>
+            <div className="flex items-center gap-1.5">
+              <span className="text-sm text-muted-foreground">$</span>
+              <input
+                id="ceiling-input"
+                type="number"
+                min="0"
+                step="any"
+                value={ceilingDraft}
+                onChange={(e) => {
+                  setCeilingDraft(e.target.value);
+                  setCeilingTouched(true);
+                }}
+                placeholder="No ceiling"
+                className="w-32 rounded border border-border bg-background px-2 py-1 text-sm"
+              />
+              <Button
+                onClick={saveCeiling}
+                disabled={
+                  ceilingSaving ||
+                  (!ceilingTouched &&
+                    ceilingDraft === (theme.market_cap_ceiling !== null ? String(theme.market_cap_ceiling) : ""))
+                }
+              >
+                {ceilingSaving ? "Saving…" : "Save"}
+              </Button>
+            </div>
+          </div>
+          <span className="text-[11px] text-muted-foreground">
+            Blank = no ceiling (today&apos;s behavior for every existing theme). Applies to future expansion runs
+            only — changing it never removes existing members.
+          </span>
+        </div>
+        {ceilingError && <p className="mb-2 text-xs text-rose-300">{ceilingError}</p>}
+
         {!canExpand ? (
           <p className="text-xs text-muted-foreground">
             {theme.theme_type === "custom" || !theme.theme_type

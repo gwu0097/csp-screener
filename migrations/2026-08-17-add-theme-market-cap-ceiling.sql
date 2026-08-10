@@ -1,0 +1,14 @@
+-- Universe & Themes, Phase C follow-up: optional per-theme market cap
+-- ceiling, alongside the existing (global, hardcoded) $500M floor in
+-- lib/theme-expansion.ts.
+--
+-- Perplexity ignores prompt-only qualifiers like "focus on second- and
+-- third-tier suppliers" -- it keeps reaching for mega-caps (AMAT, LRCX,
+-- MSFT, ...) regardless of how the prompt is worded. Only a hard filter
+-- actually constrains the suggestion set, so this adds a per-theme ceiling
+-- enforced in filterAndQueueSuggestions the same way the floor already is.
+--
+-- Null means no ceiling -- the current, unbounded-above behavior -- and is
+-- the default for every existing theme. Setting a ceiling only affects
+-- FUTURE expansion runs; it never touches existing theme_members rows.
+alter table themes add column if not exists market_cap_ceiling numeric;
