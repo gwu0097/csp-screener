@@ -308,6 +308,25 @@ export type SwingCandidate = {
   // than silently absorbed, per the 2026-08 throttling incident.
   dataQualityDegraded?: boolean;
   dataQualityIssues?: string[];
+  // ---- RS Pullback row-detail fields — the underlying values behind
+  // extensionAdrDays/rs20/rs60/the 50MA-rising gate, exposed so they're
+  // checkable rather than assertions. All bars-derived except where
+  // noted; null/undefined for every other tab's candidates. ----
+  sma20?: number | null;
+  // Bars-derived SMA50 as of today and as of sma50RisingLookbackSessions
+  // sessions ago — the same two numbers extensionAdrDays and the
+  // 50MA-rising gate are computed from. Deliberately not "ma50" (that's
+  // Yahoo's separate point-in-time quote value, used elsewhere).
+  sma50AtEntry?: number | null;
+  sma50TwentySessionsAgo?: number | null;
+  sma50RisingPct?: number | null;
+  // Raw N-session returns (bars-only, both endpoints — see
+  // nSessionReturn) for the stock and for SPY, before the rs20/rs60
+  // diff is taken.
+  stockReturn20?: number | null;
+  stockReturn60?: number | null;
+  spyReturn20?: number | null;
+  spyReturn60?: number | null;
 };
 
 export type RsPullbackList = "ready" | "leading_extended" | "in_zone_lagging";
@@ -1018,8 +1037,11 @@ async function getOrFetchSector(symbol: string): Promise<{ sector: string | null
 
 export type RsPullbackThresholds = {
   minAdrPct: number;
+  // Boundary for BOTH "Ready" (inside) and "Leading, extended" (outside)
+  // — there is no separate extended threshold above this one. See the
+  // list-partition comment in the enrichment loop for why a second
+  // threshold used to exist and was removed.
   entryZoneAdrDays: number;
-  extendedAdrDaysThreshold: number;
   sma50RisingMinPct: number;
   sma50RisingLookbackSessions: number;
   ma50BelowTolerancePct: number;
@@ -1028,7 +1050,6 @@ export type RsPullbackThresholds = {
 export const DEFAULT_RS_PULLBACK_THRESHOLDS: RsPullbackThresholds = {
   minAdrPct: 3.0,
   entryZoneAdrDays: 1.0,
-  extendedAdrDaysThreshold: 2.0,
   sma50RisingMinPct: 3.0,
   sma50RisingLookbackSessions: 20,
   ma50BelowTolerancePct: 3.0,
@@ -1372,6 +1393,7 @@ export async function computeRsPullbackCandidates(
     if (adr20Pct === null || adr20Pct < thresholds.minAdrPct) return null;
 
     const extensionAdrDays = (((q.currentPrice - sma50Now) / sma50Now) * 100) / adr20Pct;
+    const sma20 = computeSMA(closes, 20);
 
     const stockReturn20 = nSessionReturn(closes, 20);
     const stockReturn60 = nSessionReturn(closes, 60);
@@ -1391,20 +1413,22 @@ export async function computeRsPullbackCandidates(
 
     const passesRs = rs20 > 0 && rs60 > 0;
     const inEntryZone = Math.abs(extensionAdrDays) <= thresholds.entryZoneAdrDays;
-    const isExtended = extensionAdrDays > thresholds.extendedAdrDaysThreshold;
 
-    // Ready takes priority over In-zone/lagging when both technically
-    // apply (they can't — inEntryZone+passesRs is Ready, inEntryZone
-    // without passesRs is lagging — but written this way so the
-    // precedence is explicit, matching the spec's list order). A
-    // candidate that passes RS but sits in the dead zone between the
-    // entry-zone and extended thresholds (entryZoneAdrDays < |ext| <=
-    // extendedAdrDaysThreshold) matches none of the three defined lists
-    // and is simply not shown — see the validation report for how often
-    // that happens.
+    // Leading-extended is "passes RS and isn't in the entry zone" — full
+    // stop, not a second threshold above the entry zone. An earlier
+    // version gated this on extensionAdrDays > extendedAdrDaysThreshold
+    // (2.0), which left a dead band between the entry zone (1.0) and
+    // that threshold: a candidate passing RS with, say, ext=1.5 matched
+    // neither "in entry zone" nor "past 2.0" and was evaluated, then
+    // silently dropped from all three lists. Confirmed live: 11 of 68
+    // fully-evaluated candidates fell in that band on 2026-08-10. Every
+    // passesRs candidate now lands in exactly one of Ready/
+    // Leading-extended; only "fails RS and not in the entry zone" is
+    // still unshown, which is intentional — In-zone/lagging is
+    // explicitly the entry-zone control group, not a catch-all.
     let list: RsPullbackList | null = null;
     if (passesRs && inEntryZone) list = "ready";
-    else if (passesRs && isExtended) list = "leading_extended";
+    else if (passesRs && !inEntryZone) list = "leading_extended";
     else if (inEntryZone && !passesRs) list = "in_zone_lagging";
     if (list === null) return null;
 
@@ -1482,6 +1506,22 @@ export async function computeRsPullbackCandidates(
       rs60,
       higherLowVsSpy,
       rsPullbackList: list,
+      // Row-detail fields — the underlying values behind extensionAdrDays/
+      // rs20/rs60/the trend gate, so they're checkable rather than
+      // assertions. sma20/sma50AtEntry/sma50TwentySessionsAgo/
+      // sma50RisingPct are all bars-derived (same closes array as
+      // extensionAdrDays — one consistent SMA50 throughout, see above).
+      // No sma200: the 150-day bars window doesn't reach back far enough
+      // for a 200-bar SMA — ma200 (Yahoo's point quote) is the only
+      // 200-day figure available here, already on the candidate.
+      sma20,
+      sma50AtEntry: sma50Now,
+      sma50TwentySessionsAgo: sma50Ago,
+      sma50RisingPct,
+      stockReturn20,
+      stockReturn60,
+      spyReturn20,
+      spyReturn60,
       dataQualityDegraded: sectorFailed || earningsFailed,
       dataQualityIssues: [
         ...(sectorFailed ? ["sector_check_failed"] : []),

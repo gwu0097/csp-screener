@@ -175,6 +175,17 @@ type SwingCandidate = {
   // includes it, but it hasn't actually been confirmed clean.
   dataQualityDegraded?: boolean;
   dataQualityIssues?: string[];
+  // RS Pullback row-detail fields — the underlying values behind
+  // extensionAdrDays/rs20/rs60. See lib/swing-screener.ts SwingCandidate
+  // for the full explanation of each.
+  sma20?: number | null;
+  sma50AtEntry?: number | null;
+  sma50TwentySessionsAgo?: number | null;
+  sma50RisingPct?: number | null;
+  stockReturn20?: number | null;
+  stockReturn60?: number | null;
+  spyReturn20?: number | null;
+  spyReturn60?: number | null;
 };
 
 // Mirror of lib/swing-screener.ts ScoreComponent — the score IS the sum
@@ -311,8 +322,9 @@ const DEFAULT_MIN_ADR_PCT = 3.0;
 // via localStorage, same convention as minAdrPct above.
 type RsPullbackThresholds = {
   minAdrPct: number;
+  // Boundary for BOTH Ready (inside) and Leading-extended (outside) — no
+  // separate "extended" threshold exists above this one anymore.
   entryZoneAdrDays: number;
-  extendedAdrDaysThreshold: number;
   sma50RisingMinPct: number;
   sma50RisingLookbackSessions: number;
   ma50BelowTolerancePct: number;
@@ -321,7 +333,6 @@ type RsPullbackThresholds = {
 const DEFAULT_RS_PULLBACK_THRESHOLDS: RsPullbackThresholds = {
   minAdrPct: 3.0,
   entryZoneAdrDays: 1.0,
-  extendedAdrDaysThreshold: 2.0,
   sma50RisingMinPct: 3.0,
   sma50RisingLookbackSessions: 20,
   ma50BelowTolerancePct: 3.0,
@@ -835,6 +846,11 @@ export function SwingScreenView() {
   // freshly-refreshed field sitting next to stale trade geometry is a
   // worse, misleading state than just re-running everything.
   const [forceFresh, setForceFresh] = useState(false);
+  // Which tab(s) "Run Screen" recomputes — RS Pullback and the four
+  // legacy tabs have different enrichment costs and different Finnhub
+  // exposure, so running only what's needed cuts throttling and
+  // turnaround time. Not persisted — defaults back to "all" every visit.
+  const [runTarget, setRunTarget] = useState<"all" | "legacy" | "rs_pullback">("all");
   // Minimum ADR%% filter — restored from localStorage on mount (same
   // persistence convention screener-view.tsx uses for its own controls),
   // defaulting to 3.0 for a first-ever visit. Lazy initializer so SSR/first
@@ -923,11 +939,28 @@ export function SwingScreenView() {
     loadCached();
   }, []);
 
-  async function runScreen() {
+  // "all" = current full-pipeline behavior. "legacy" recomputes only the
+  // four original tabs (skips RS Pullback entirely — no chunked
+  // enrichment, no pass 3 change) and keeps whatever RS Pullback data is
+  // already on screen. "rs_pullback" recomputes only RS Pullback (skips
+  // pass 2 and pass 3 — catalysts don't apply to that tab anyway) and
+  // keeps the existing legacy-tab data. Pass 1 always runs regardless —
+  // both sides' survivor/prefilter data comes from the same call, so
+  // neither target can skip it. The two tabs' candidates are always
+  // structurally separate objects (never merged into one multi-tab
+  // record), so splitting "legacy portion" / "rs_pullback portion" of
+  // data.candidates by setupTabs is exact, not a heuristic.
+  async function runScreen(target: "all" | "legacy" | "rs_pullback" = "all") {
     setRunError(null);
     setRunWarning(null);
     setPass1Count(null);
     const started = Date.now();
+    const existingLegacyPortion = (data?.candidates ?? []).filter(
+      (c) => !(c.setupTabs ?? []).includes("rs_pullback"),
+    );
+    const existingRsPullbackPortion = (data?.candidates ?? []).filter((c) =>
+      (c.setupTabs ?? []).includes("rs_pullback"),
+    );
     try {
       // Pass 1 — Yahoo technical filter + tab qualification on the
       // full universe (~20-40s). A failure here aborts the run.
@@ -946,170 +979,173 @@ export function SwingScreenView() {
       );
       setPass1Count(p1.survivors.length);
 
-      // Pass 2 — Finnhub insider + earnings + Schwab options on
-      // survivors. Fatal — no candidates exist for the four legacy tabs
-      // without it. Deliberately NOT run in parallel with RS Pullback's
-      // enrichment below: both hit Finnhub, and running them concurrently
-      // doubled the effective request rate against its rate limit — the
-      // 2026-08 run that tried this saw sustained 429s and silently lost
-      // legacy-tab candidates to degraded (empty) insider/earnings data.
-      // Sequencing costs wall-clock time but is what keeps every result
-      // — on either side — actually representing real data.
-      setPhase("pass2");
-      const p2 = await fetchPassJson<{ candidates?: SwingCandidate[] }>(
-        "Pass 2 (insider/options enrichment)",
-        "/api/swings/screen/pass2",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ...p1, forceFresh }),
-        },
-      );
-      const enriched = p2.candidates ?? [];
+      let legacyCandidates: SwingCandidate[] = existingLegacyPortion;
+      if (target === "all" || target === "legacy") {
+        // Pass 2 — Finnhub insider + earnings + Schwab options on
+        // survivors. Fatal — no candidates exist for the four legacy
+        // tabs without it. Deliberately NOT run in parallel with RS
+        // Pullback's enrichment below: both hit Finnhub, and running
+        // them concurrently doubled the effective request rate against
+        // its rate limit — the 2026-08 run that tried this saw sustained
+        // 429s and silently lost legacy-tab candidates to degraded
+        // (empty) insider/earnings data. Sequencing costs wall-clock
+        // time but is what keeps every result actually representing
+        // real data.
+        setPhase("pass2");
+        const p2 = await fetchPassJson<{ candidates?: SwingCandidate[] }>(
+          "Pass 2 (insider/options enrichment)",
+          "/api/swings/screen/pass2",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ...p1, forceFresh }),
+          },
+        );
+        const enriched = p2.candidates ?? [];
 
-      // RS Pullback enrichment — chunked, sequential calls over
-      // pass1's rsPullback.needsEnrichment (already narrowed by the free
-      // cache-only pre-filter in pass1Filter). Every symbol in that list
-      // gets a chunk call; a chunk that reports deadlineSkipped symbols
-      // gets those re-queued into the NEXT chunk rather than dropped, so
-      // coverage is a mechanical guarantee, not a best-effort. NON-FATAL
-      // as a whole (matches pass 3's treatment) — a chunk failure is
-      // logged and surfaced as a warning, not an aborted run.
-      setPhase("rs_pullback");
-      const needsEnrichment = p1.rsPullback?.needsEnrichment ?? [];
-      const RS_PULLBACK_CHUNK_SIZE = 100;
-      let rsPullbackCandidates: SwingCandidate[] = [];
-      let excludedBySma50RisingEnrichment = 0;
-      let insufficientData = 0;
-      let degradedCount = 0;
-      let rsPullbackChunkFailed = false;
-      let queue = [...needsEnrichment];
-      let chunksDone = 0;
-      // chunksTotal is an estimate for the progress banner — it grows if
-      // a chunk re-queues deadlineSkipped symbols, so "chunk 3 of 3" can
-      // become "chunk 3 of 4" rather than silently going over.
-      let chunksTotalEstimate = Math.ceil(queue.length / RS_PULLBACK_CHUNK_SIZE);
-      setRsPullbackDiagnostics({
-        pregatedCount: p1.rsPullback?.pregatedCount ?? 0,
-        needsEnrichmentCount: needsEnrichment.length,
-        excludedBySectorPrefilter: p1.rsPullback?.excludedBySectorPrefilter ?? 0,
-        excludedBySma50RisingPrefilter: p1.rsPullback?.excludedBySma50RisingPrefilter ?? 0,
-        excludedBySma50RisingEnrichment: 0,
-        insufficientData: 0,
-        degradedCount: 0,
-        chunksDone: 0,
-        chunksTotal: chunksTotalEstimate,
-      });
-      while (queue.length > 0) {
-        const chunk = queue.slice(0, RS_PULLBACK_CHUNK_SIZE);
-        queue = queue.slice(RS_PULLBACK_CHUNK_SIZE);
+        // Pass 3 — Perplexity catalyst discovery. NON-FATAL: if it
+        // fails, the run continues with pass-2 candidates (tabs intact,
+        // catalysts empty) and the banner explains the degradation.
+        setPhase("pass3");
+        // Carry forward catalysts from the prior run when it's < 24h
+        // old — Perplexity enrichment is expensive and a catalyst found
+        // this morning is still the catalyst this afternoon. forceFresh
+        // skips this entirely (empty knownCatalysts) so every candidate
+        // gets a fresh Perplexity pull, subject to the same per-run cap.
+        const knownCatalysts: Record<string, unknown> = {};
+        if (
+          !forceFresh &&
+          data?.screenedAt &&
+          Date.now() - new Date(data.screenedAt).getTime() < 24 * 3600_000
+        ) {
+          for (const prev of existingLegacyPortion) {
+            if (prev.catalystRawResponse === null && !prev.catalystFound) continue;
+            knownCatalysts[prev.symbol.toUpperCase()] = {
+              catalystFound: prev.catalystFound,
+              catalystType: prev.catalystType,
+              catalystDate: prev.catalystDate,
+              catalystDescription: prev.catalystDescription,
+              catalystConfidence: prev.catalystConfidence,
+              catalystInsiderAngle: prev.catalystInsiderAngle,
+              catalystRawResponse: prev.catalystRawResponse,
+            };
+          }
+        }
         try {
-          const res = await fetchPassJson<{
-            candidates?: SwingCandidate[];
-            excludedBySma50Rising?: number;
-            insufficientData?: number;
-            degradedCount?: number;
-            deadlineSkipped?: string[];
-          }>(
-            `RS Pullback enrichment (chunk ${chunksDone + 1})`,
-            "/api/swings/screen/pass2-rs-pullback",
+          const p3 = await fetchPassJson<{ candidates?: SwingCandidate[] }>(
+            "Pass 3 (catalyst research)",
+            "/api/swings/screen/pass3",
             {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ ...p1, symbols: chunk, forceFresh, rsPullbackThresholds }),
+              body: JSON.stringify({ candidates: enriched, knownCatalysts }),
             },
           );
-          rsPullbackCandidates = [...rsPullbackCandidates, ...(res.candidates ?? [])];
-          excludedBySma50RisingEnrichment += res.excludedBySma50Rising ?? 0;
-          insufficientData += res.insufficientData ?? 0;
-          degradedCount += res.degradedCount ?? 0;
-          if (res.deadlineSkipped && res.deadlineSkipped.length > 0) {
-            queue = [...queue, ...res.deadlineSkipped];
-            chunksTotalEstimate = chunksDone + 1 + Math.ceil(queue.length / RS_PULLBACK_CHUNK_SIZE);
-          }
+          legacyCandidates = (p3.candidates ?? enriched).map(normalizeCandidate);
         } catch (e) {
-          console.warn(`[swing-screen] RS Pullback chunk ${chunksDone + 1} failed:`, e);
-          rsPullbackChunkFailed = true;
-          // Don't re-queue on a hard failure (network/500) — retrying the
-          // same chunk immediately would likely just fail again; the
-          // warning below tells the user this run's RS Pullback coverage
-          // is incomplete rather than silently under-reporting it.
+          legacyCandidates = enriched.map(normalizeCandidate);
+          setRunWarning(
+            `${e instanceof Error ? e.message : "Pass 3 failed"}. Showing the screen without catalyst enrichment — all four tabs are still populated.`,
+          );
         }
-        chunksDone += 1;
+      }
+
+      let rsPullbackCandidates: SwingCandidate[] = existingRsPullbackPortion;
+      if (target === "all" || target === "rs_pullback") {
+        // RS Pullback enrichment — chunked, sequential calls over
+        // pass1's rsPullback.needsEnrichment (already narrowed by the
+        // free cache-only pre-filter in pass1Filter). Every symbol in
+        // that list gets a chunk call; a chunk that reports
+        // deadlineSkipped symbols gets those re-queued into the NEXT
+        // chunk rather than dropped, so coverage is a mechanical
+        // guarantee, not a best-effort. NON-FATAL as a whole (matches
+        // pass 3's treatment) — a chunk failure is logged and surfaced
+        // as a warning, not an aborted run.
+        setPhase("rs_pullback");
+        const needsEnrichment = p1.rsPullback?.needsEnrichment ?? [];
+        const RS_PULLBACK_CHUNK_SIZE = 100;
+        let freshRsPullbackCandidates: SwingCandidate[] = [];
+        let excludedBySma50RisingEnrichment = 0;
+        let insufficientData = 0;
+        let degradedCount = 0;
+        let rsPullbackChunkFailed = false;
+        let queue = [...needsEnrichment];
+        let chunksDone = 0;
+        // chunksTotal is an estimate for the progress banner — it grows
+        // if a chunk re-queues deadlineSkipped symbols, so "chunk 3 of
+        // 3" can become "chunk 3 of 4" rather than silently going over.
+        let chunksTotalEstimate = Math.ceil(queue.length / RS_PULLBACK_CHUNK_SIZE);
         setRsPullbackDiagnostics({
           pregatedCount: p1.rsPullback?.pregatedCount ?? 0,
           needsEnrichmentCount: needsEnrichment.length,
           excludedBySectorPrefilter: p1.rsPullback?.excludedBySectorPrefilter ?? 0,
           excludedBySma50RisingPrefilter: p1.rsPullback?.excludedBySma50RisingPrefilter ?? 0,
-          excludedBySma50RisingEnrichment,
-          insufficientData,
-          degradedCount,
-          chunksDone,
+          excludedBySma50RisingEnrichment: 0,
+          insufficientData: 0,
+          degradedCount: 0,
+          chunksDone: 0,
           chunksTotal: chunksTotalEstimate,
         });
-      }
-      if (rsPullbackChunkFailed) {
-        setRunWarning(
-          (prev) =>
-            prev ??
-            "RS Pullback enrichment failed partway through — its lists may be incomplete for this run. The other four tabs are unaffected.",
-        );
-      }
-
-      // Pass 3 — Perplexity catalyst discovery. NON-FATAL: if it
-      // fails, the run continues with pass-2 candidates (tabs intact,
-      // catalysts empty) and the banner explains the degradation.
-      setPhase("pass3");
-      // Carry forward catalysts from the prior run when it's < 24h
-      // old — Perplexity enrichment is expensive and a catalyst found
-      // this morning is still the catalyst this afternoon. forceFresh
-      // skips this entirely (empty knownCatalysts) so every candidate
-      // gets a fresh Perplexity pull, subject to the same per-run cap.
-      const knownCatalysts: Record<string, unknown> = {};
-      if (
-        !forceFresh &&
-        data?.screenedAt &&
-        Date.now() - new Date(data.screenedAt).getTime() < 24 * 3600_000
-      ) {
-        for (const prev of data.candidates) {
-          if (prev.catalystRawResponse === null && !prev.catalystFound) continue;
-          knownCatalysts[prev.symbol.toUpperCase()] = {
-            catalystFound: prev.catalystFound,
-            catalystType: prev.catalystType,
-            catalystDate: prev.catalystDate,
-            catalystDescription: prev.catalystDescription,
-            catalystConfidence: prev.catalystConfidence,
-            catalystInsiderAngle: prev.catalystInsiderAngle,
-            catalystRawResponse: prev.catalystRawResponse,
-          };
+        while (queue.length > 0) {
+          const chunk = queue.slice(0, RS_PULLBACK_CHUNK_SIZE);
+          queue = queue.slice(RS_PULLBACK_CHUNK_SIZE);
+          try {
+            const res = await fetchPassJson<{
+              candidates?: SwingCandidate[];
+              excludedBySma50Rising?: number;
+              insufficientData?: number;
+              degradedCount?: number;
+              deadlineSkipped?: string[];
+            }>(
+              `RS Pullback enrichment (chunk ${chunksDone + 1})`,
+              "/api/swings/screen/pass2-rs-pullback",
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ ...p1, symbols: chunk, forceFresh, rsPullbackThresholds }),
+              },
+            );
+            freshRsPullbackCandidates = [...freshRsPullbackCandidates, ...(res.candidates ?? [])];
+            excludedBySma50RisingEnrichment += res.excludedBySma50Rising ?? 0;
+            insufficientData += res.insufficientData ?? 0;
+            degradedCount += res.degradedCount ?? 0;
+            if (res.deadlineSkipped && res.deadlineSkipped.length > 0) {
+              queue = [...queue, ...res.deadlineSkipped];
+              chunksTotalEstimate = chunksDone + 1 + Math.ceil(queue.length / RS_PULLBACK_CHUNK_SIZE);
+            }
+          } catch (e) {
+            console.warn(`[swing-screen] RS Pullback chunk ${chunksDone + 1} failed:`, e);
+            rsPullbackChunkFailed = true;
+            // Don't re-queue on a hard failure (network/500) — retrying
+            // the same chunk immediately would likely just fail again;
+            // the warning below tells the user this run's RS Pullback
+            // coverage is incomplete rather than silently under-reporting
+            // it.
+          }
+          chunksDone += 1;
+          setRsPullbackDiagnostics({
+            pregatedCount: p1.rsPullback?.pregatedCount ?? 0,
+            needsEnrichmentCount: needsEnrichment.length,
+            excludedBySectorPrefilter: p1.rsPullback?.excludedBySectorPrefilter ?? 0,
+            excludedBySma50RisingPrefilter: p1.rsPullback?.excludedBySma50RisingPrefilter ?? 0,
+            excludedBySma50RisingEnrichment,
+            insufficientData,
+            degradedCount,
+            chunksDone,
+            chunksTotal: chunksTotalEstimate,
+          });
         }
-      }
-      let candidates: SwingCandidate[];
-      try {
-        const p3 = await fetchPassJson<{ candidates?: SwingCandidate[] }>(
-          "Pass 3 (catalyst research)",
-          "/api/swings/screen/pass3",
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ candidates: enriched, knownCatalysts }),
-          },
-        );
-        candidates = (p3.candidates ?? enriched).map(normalizeCandidate);
-      } catch (e) {
-        candidates = enriched.map(normalizeCandidate);
-        setRunWarning(
-          `${e instanceof Error ? e.message : "Pass 3 failed"}. Showing the screen without catalyst enrichment — all four tabs are still populated.`,
-        );
+        if (rsPullbackChunkFailed) {
+          setRunWarning(
+            (prev) =>
+              prev ??
+              "RS Pullback enrichment failed partway through — its lists may be incomplete for this run. The other four tabs are unaffected.",
+          );
+        }
+        rsPullbackCandidates = freshRsPullbackCandidates.map(normalizeCandidate);
       }
 
-      // RS Pullback candidates are appended AFTER pass 3, not before —
-      // they carry setupScore 0 by design, and pass 3's Perplexity
-      // budget is spent highest-score-first, so merging them in earlier
-      // risks wasting fresh catalyst calls on a tab that doesn't use
-      // catalysts at all (never displayed) if the other tabs produce
-      // fewer than the per-run cap.
-      candidates = [...candidates, ...rsPullbackCandidates.map(normalizeCandidate)];
+      const candidates = [...legacyCandidates, ...rsPullbackCandidates];
 
       const result: CachedResult = {
         candidates,
@@ -1122,7 +1158,10 @@ export function SwingScreenView() {
       };
 
       // Save — fast (<1s). NON-FATAL: failure keeps the visible
-      // result, it just won't survive a reload.
+      // result, it just won't survive a reload. mode scopes the write to
+      // what was actually recomputed this run — see the save route's own
+      // comment for why a partial run must not touch the other side's
+      // persisted data.
       setPhase("saving");
       try {
         await fetchPassJson<{ ok?: boolean }>(
@@ -1137,6 +1176,7 @@ export function SwingScreenView() {
               pass1Survivors: result.pass1Survivors,
               pass2Results: result.pass2Results,
               durationMs: result.durationMs,
+              mode: target,
             }),
           },
         );
@@ -1298,7 +1338,9 @@ export function SwingScreenView() {
         data={data}
         loading={loading}
         running={running}
-        onRun={runScreen}
+        onRun={() => runScreen(runTarget)}
+        runTarget={runTarget}
+        onRunTargetChange={setRunTarget}
         forceFresh={forceFresh}
         onForceFreshChange={setForceFresh}
         minAdrPct={minAdrPct}
@@ -1401,6 +1443,8 @@ function ControlsBar({
   loading,
   running,
   onRun,
+  runTarget,
+  onRunTargetChange,
   forceFresh,
   onForceFreshChange,
   minAdrPct,
@@ -1410,11 +1454,15 @@ function ControlsBar({
   loading: boolean;
   running: boolean;
   onRun: () => void;
+  runTarget: "all" | "legacy" | "rs_pullback";
+  onRunTargetChange: (v: "all" | "legacy" | "rs_pullback") => void;
   forceFresh: boolean;
   onForceFreshChange: (v: boolean) => void;
   minAdrPct: number;
   onMinAdrPctChange: (v: number) => void;
 }) {
+  const runLabel =
+    runTarget === "legacy" ? "Run Legacy Tabs" : runTarget === "rs_pullback" ? "Run RS Pullback" : "Run Screen";
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border bg-background/40 p-3">
       <div className="flex flex-col gap-0.5">
@@ -1433,6 +1481,22 @@ function ControlsBar({
         )}
       </div>
       <div className="flex items-center gap-3">
+        <label
+          className="flex items-center gap-1.5 text-sm text-muted-foreground"
+          title="Runs only the selected tab(s) — the four legacy tabs (Finnhub insider/earnings + Schwab options) and RS Pullback (Finnhub earnings only) have different costs and different Finnhub exposure, so running only what's needed cuts throttling and turnaround time."
+        >
+          Run:
+          <select
+            value={runTarget}
+            onChange={(e) => onRunTargetChange(e.target.value as "all" | "legacy" | "rs_pullback")}
+            disabled={running}
+            className="rounded border border-border bg-background px-2 py-1 text-sm"
+          >
+            <option value="all">All tabs</option>
+            <option value="legacy">Legacy tabs only</option>
+            <option value="rs_pullback">RS Pullback only</option>
+          </select>
+        </label>
         <label
           className="flex items-center gap-1.5 text-sm text-muted-foreground"
           title="Hides candidates whose 20-day Average Daily Range is below this — a 3R target needs enough daily movement to be reachable in a multi-week hold. Display/filter only; doesn't change any tab's score."
@@ -1479,7 +1543,7 @@ function ControlsBar({
           ) : (
             <Zap className="h-4 w-4" />
           )}
-          {running ? "Running…" : forceFresh ? "Run Screen (fresh)" : "Run Screen"}
+          {running ? "Running…" : forceFresh ? `${runLabel} (fresh)` : runLabel}
         </button>
       </div>
     </div>
@@ -1857,10 +1921,9 @@ function RsPullbackSettingsPanel({
     );
   }
   return (
-    <div className="grid grid-cols-2 gap-3 rounded-md border border-border bg-background/40 p-3 sm:grid-cols-3 md:grid-cols-6">
+    <div className="grid grid-cols-2 gap-3 rounded-md border border-border bg-background/40 p-3 sm:grid-cols-3 md:grid-cols-5">
       {field("minAdrPct", "Min ADR%")}
       {field("entryZoneAdrDays", "Entry zone (ADR-days)")}
-      {field("extendedAdrDaysThreshold", "Extended threshold (ADR-days)")}
       {field("sma50RisingMinPct", "50MA rising min %")}
       {field("sma50RisingLookbackSessions", "50MA rising lookback (sessions)", 1)}
       {field("ma50BelowTolerancePct", "Max % below 50MA")}
@@ -2056,6 +2119,81 @@ function RsPullbackTabContent({
   );
 }
 
+// Column keys the three RS Pullback lists can sort on. "extensionAbs" is
+// synthetic (not a real field) — it's the default so all three lists open
+// sorted closest-to-entry first; clicking the "Ext" header switches to
+// the signed value like any other column.
+type RsPullbackSortKey =
+  | "symbol"
+  | "sector"
+  | "price"
+  | "vsMA50"
+  | "adr"
+  | "extension"
+  | "extensionAbs"
+  | "rs20"
+  | "rs60"
+  | "rr";
+
+const RS_PULLBACK_SORT_VALUE: Record<
+  RsPullbackSortKey,
+  { get: (c: SwingCandidate) => number | string | null; defaultDir: "asc" | "desc" }
+> = {
+  symbol: { get: (c) => c.symbol, defaultDir: "asc" },
+  sector: { get: (c) => c.sector ?? "", defaultDir: "asc" },
+  price: { get: (c) => c.currentPrice, defaultDir: "desc" },
+  vsMA50: { get: (c) => c.vsMA50, defaultDir: "asc" },
+  adr: { get: (c) => c.adr20Pct ?? null, defaultDir: "desc" },
+  extension: { get: (c) => c.extensionAdrDays ?? null, defaultDir: "asc" },
+  extensionAbs: { get: (c) => (c.extensionAdrDays !== null && c.extensionAdrDays !== undefined ? Math.abs(c.extensionAdrDays) : null), defaultDir: "asc" },
+  rs20: { get: (c) => c.rs20 ?? null, defaultDir: "desc" },
+  rs60: { get: (c) => c.rs60 ?? null, defaultDir: "desc" },
+  rr: { get: (c) => c.rr, defaultDir: "desc" },
+};
+
+function sortRsPullbackCandidates(
+  candidates: SwingCandidate[],
+  sort: { key: RsPullbackSortKey; dir: "asc" | "desc" },
+): SwingCandidate[] {
+  const desc = RS_PULLBACK_SORT_VALUE[sort.key];
+  return [...candidates].sort((a, b) => {
+    const av = desc.get(a);
+    const bv = desc.get(b);
+    const primary = compareSortValues(av, bv, sort.dir);
+    if (primary !== 0) return primary;
+    return a.symbol.localeCompare(b.symbol);
+  });
+}
+
+function RsPullbackSortTh({
+  label,
+  sortKey,
+  sort,
+  onSort,
+  align = "right",
+}: {
+  label: string;
+  sortKey: RsPullbackSortKey;
+  sort: { key: RsPullbackSortKey; dir: "asc" | "desc" };
+  onSort: (k: RsPullbackSortKey) => void;
+  align?: "left" | "right" | "center";
+}) {
+  const isActive = sort.key === sortKey;
+  const justify = align === "right" ? "justify-end" : align === "center" ? "justify-center" : "justify-start";
+  return (
+    <th className={`px-2 py-1.5 text-${align}`}>
+      <button
+        type="button"
+        onClick={() => onSort(sortKey)}
+        className={`flex w-full items-center gap-1 ${justify} ${isActive ? "text-foreground" : "hover:text-foreground"}`}
+      >
+        {label}
+        {isActive && <span className="text-[9px]">{sort.dir === "asc" ? "▲" : "▼"}</span>}
+      </button>
+    </th>
+  );
+}
+
 function RsPullbackListSection({
   title,
   subtitle,
@@ -2075,6 +2213,18 @@ function RsPullbackListSection({
   trackedSymbols: Set<string>;
   trackingSymbol: string | null;
 }) {
+  const [sort, setSort] = useState<{ key: RsPullbackSortKey; dir: "asc" | "desc" }>({
+    key: "extensionAbs",
+    dir: "asc",
+  });
+  function onSort(key: RsPullbackSortKey) {
+    setSort((cur) => {
+      if (cur.key !== key) return { key, dir: RS_PULLBACK_SORT_VALUE[key].defaultDir };
+      return { key, dir: cur.dir === "asc" ? "desc" : "asc" };
+    });
+  }
+  const sorted = useMemo(() => sortRsPullbackCandidates(candidates, sort), [candidates, sort]);
+
   return (
     <div className="space-y-2">
       <div>
@@ -2093,110 +2243,283 @@ function RsPullbackListSection({
           <table className="w-full min-w-[900px] text-sm">
             <thead className="border-b border-border/60 text-left text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
               <tr>
-                <th className="px-2 py-1.5">Symbol</th>
-                <th className="px-2 py-1.5 text-left">Sector</th>
-                <th className="px-2 py-1.5 text-right">Price</th>
-                <th className="px-2 py-1.5 text-right">vs 50MA</th>
-                <th className="px-2 py-1.5 text-right">ADR%</th>
-                <th className="px-2 py-1.5 text-right">Ext (ADR-days)</th>
-                <th className="px-2 py-1.5 text-right">RS20</th>
-                <th className="px-2 py-1.5 text-right">RS60</th>
+                <RsPullbackSortTh label="Symbol" sortKey="symbol" sort={sort} onSort={onSort} align="left" />
+                <RsPullbackSortTh label="Sector" sortKey="sector" sort={sort} onSort={onSort} align="left" />
+                <RsPullbackSortTh label="Price" sortKey="price" sort={sort} onSort={onSort} />
+                <RsPullbackSortTh label="vs 50MA" sortKey="vsMA50" sort={sort} onSort={onSort} />
+                <RsPullbackSortTh label="ADR%" sortKey="adr" sort={sort} onSort={onSort} />
+                <RsPullbackSortTh label="Ext (ADR-days)" sortKey="extension" sort={sort} onSort={onSort} />
+                <RsPullbackSortTh label="RS20" sortKey="rs20" sort={sort} onSort={onSort} />
+                <RsPullbackSortTh label="RS60" sortKey="rs60" sort={sort} onSort={onSort} />
                 <th className="px-2 py-1.5 text-center">Higher low</th>
                 <th className="px-2 py-1.5 text-right">Entry</th>
                 <th className="px-2 py-1.5 text-right">Target</th>
                 <th className="px-2 py-1.5 text-right">Stop</th>
-                <th className="px-2 py-1.5 text-right">R:R</th>
+                <RsPullbackSortTh label="R:R" sortKey="rr" sort={sort} onSort={onSort} />
                 <th className="px-2 py-1.5 text-right">Actions</th>
               </tr>
             </thead>
             <tbody>
-              {candidates.map((c) => {
-                const rr = fmtRr(c.rr);
-                const tracked = trackedSymbols.has(c.symbol);
-                return (
-                  <tr key={c.symbol} className="border-b border-border/40 last:border-0">
-                    <td className="px-2 py-1.5 font-mono font-medium text-foreground">
-                      <span className="inline-flex items-center gap-1">
-                        {c.symbol}
-                        {c.dataQualityDegraded && (
-                          <span
-                            title={`Enriched with incomplete data: ${(c.dataQualityIssues ?? []).join(", ") || "unknown issue"} — this candidate's sector or earnings check failed rather than returning a real answer.`}
-                            className="cursor-help text-amber-400"
-                          >
-                            ⚠
-                          </span>
-                        )}
-                      </span>
-                    </td>
-                    <td className="px-2 py-1.5 text-xs text-muted-foreground">{c.sector ?? "—"}</td>
-                    <td className="px-2 py-1.5 text-right font-mono">{fmtMoney(c.currentPrice)}</td>
-                    <td
-                      className={`px-2 py-1.5 text-right ${c.vsMA50 < 0 ? "text-rose-300" : "text-foreground"}`}
-                    >
-                      {fmtPct(c.vsMA50, 1)}
-                    </td>
-                    <td className="px-2 py-1.5 text-right">
-                      {c.adr20Pct !== null && c.adr20Pct !== undefined ? `${c.adr20Pct.toFixed(1)}%` : "—"}
-                    </td>
-                    <td className="px-2 py-1.5 text-right font-mono">
-                      {fmtSigned(c.extensionAdrDays, 2)}
-                    </td>
-                    <td
-                      className={`px-2 py-1.5 text-right ${
-                        (c.rs20 ?? 0) > 0 ? "text-emerald-300" : "text-rose-300"
-                      }`}
-                    >
-                      {fmtSigned(c.rs20, 1)}
-                    </td>
-                    <td
-                      className={`px-2 py-1.5 text-right ${
-                        (c.rs60 ?? 0) > 0 ? "text-emerald-300" : "text-rose-300"
-                      }`}
-                    >
-                      {fmtSigned(c.rs60, 1)}
-                    </td>
-                    <td className="px-2 py-1.5 text-center text-xs">
-                      {c.higherLowVsSpy === null || c.higherLowVsSpy === undefined
-                        ? "—"
-                        : c.higherLowVsSpy
-                          ? "Yes"
-                          : "No"}
-                    </td>
-                    <td className="px-2 py-1.5 text-right">{fmtMoney(c.entryPrice)}</td>
-                    <td className="px-2 py-1.5 text-right text-emerald-300">{fmtMoney(c.targetPrice)}</td>
-                    <td className="px-2 py-1.5 text-right text-rose-300">{fmtMoney(c.stopPrice)}</td>
-                    <td className={`px-2 py-1.5 text-right ${rr.cls}`}>{rr.text}</td>
-                    <td className="px-2 py-1.5">
-                      <div className="flex items-center justify-end gap-1">
-                        <button
-                          type="button"
-                          onClick={() => onEnterTrade(c.symbol)}
-                          className="rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-white/5 hover:text-foreground"
-                        >
-                          Enter
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => onTrack(c)}
-                          disabled={tracked || trackingSymbol === c.symbol}
-                          className={`rounded border px-1.5 py-0.5 text-[10px] font-medium ${
-                            tracked
-                              ? "cursor-default border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
-                              : "border-border text-muted-foreground hover:bg-white/5 hover:text-foreground"
-                          }`}
-                        >
-                          {tracked ? "Tracked" : "Track"}
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
+              {sorted.map((c) => (
+                <RsPullbackRow
+                  key={c.symbol}
+                  candidate={c}
+                  onEnterTrade={() => onEnterTrade(c.symbol)}
+                  onTrack={() => onTrack(c)}
+                  tracked={trackedSymbols.has(c.symbol)}
+                  tracking={trackingSymbol === c.symbol}
+                />
+              ))}
             </tbody>
           </table>
         </div>
       )}
     </div>
+  );
+}
+
+function DetailStat({ label, value, sub }: { label: string; value: string; sub?: string }) {
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</div>
+      <div className="font-mono text-sm text-foreground">{value}</div>
+      {sub && <div className="text-[10px] text-muted-foreground">{sub}</div>}
+    </div>
+  );
+}
+
+function RsPullbackRow({
+  candidate: c,
+  onEnterTrade,
+  onTrack,
+  tracked,
+  tracking,
+}: {
+  candidate: SwingCandidate;
+  onEnterTrade: () => void;
+  onTrack: () => void;
+  tracked: boolean;
+  tracking: boolean;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [chartData, setChartData] = useState<ChartPoint[] | null>(null);
+  const [chartLoading, setChartLoading] = useState(false);
+  const [chartError, setChartError] = useState<string | null>(null);
+  const fetchedSymbolRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!expanded) return;
+    if (fetchedSymbolRef.current === c.symbol) return;
+    fetchedSymbolRef.current = c.symbol;
+    let cancelled = false;
+    setChartLoading(true);
+    setChartError(null);
+    setChartData(null);
+    (async () => {
+      try {
+        const res = await fetch(`/api/swings/screen/chart?symbol=${encodeURIComponent(c.symbol)}`, {
+          cache: "no-store",
+        });
+        const json = (await res.json().catch(() => ({}))) as { data?: ChartPoint[]; error?: string };
+        if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+        if (!cancelled) setChartData(json.data ?? []);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : "Chart load failed";
+        if (!cancelled) setChartError(msg);
+        fetchedSymbolRef.current = null;
+      } finally {
+        setChartLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [expanded, c.symbol]);
+
+  const rr = fmtRr(c.rr);
+  const riskPerShare = c.entryPrice - c.stopPrice;
+  const rewardPerShare = c.targetPrice - c.entryPrice;
+  const atrMultiple = c.atr14 && c.atr14 > 0 ? riskPerShare / c.atr14 : null;
+
+  return (
+    <>
+      <tr
+        className="cursor-pointer border-b border-border/40 last:border-0 hover:bg-white/[0.02]"
+        onClick={() => setExpanded((v) => !v)}
+      >
+        <td className="px-2 py-1.5 font-mono font-medium text-foreground">
+          <span className="inline-flex items-center gap-1">
+            <ChevronRight
+              className={`h-3 w-3 shrink-0 text-muted-foreground transition-transform ${expanded ? "rotate-90" : ""}`}
+            />
+            {c.symbol}
+            {c.dataQualityDegraded && (
+              <span
+                title={`Enriched with incomplete data: ${(c.dataQualityIssues ?? []).join(", ") || "unknown issue"} — this candidate's sector or earnings check failed rather than returning a real answer.`}
+                className="cursor-help text-amber-400"
+              >
+                ⚠
+              </span>
+            )}
+          </span>
+        </td>
+        <td className="px-2 py-1.5 text-xs text-muted-foreground">{c.sector ?? "—"}</td>
+        <td className="px-2 py-1.5 text-right font-mono">{fmtMoney(c.currentPrice)}</td>
+        <td className={`px-2 py-1.5 text-right ${c.vsMA50 < 0 ? "text-rose-300" : "text-foreground"}`}>
+          {fmtPct(c.vsMA50, 1)}
+        </td>
+        <td className="px-2 py-1.5 text-right">
+          {c.adr20Pct !== null && c.adr20Pct !== undefined ? `${c.adr20Pct.toFixed(1)}%` : "—"}
+        </td>
+        <td className="px-2 py-1.5 text-right font-mono">{fmtSigned(c.extensionAdrDays, 2)}</td>
+        <td className={`px-2 py-1.5 text-right ${(c.rs20 ?? 0) > 0 ? "text-emerald-300" : "text-rose-300"}`}>
+          {fmtSigned(c.rs20, 1)}
+        </td>
+        <td className={`px-2 py-1.5 text-right ${(c.rs60 ?? 0) > 0 ? "text-emerald-300" : "text-rose-300"}`}>
+          {fmtSigned(c.rs60, 1)}
+        </td>
+        <td className="px-2 py-1.5 text-center text-xs">
+          {c.higherLowVsSpy === null || c.higherLowVsSpy === undefined ? "—" : c.higherLowVsSpy ? "Yes" : "No"}
+        </td>
+        <td className="px-2 py-1.5 text-right">{fmtMoney(c.entryPrice)}</td>
+        <td className="px-2 py-1.5 text-right text-emerald-300">{fmtMoney(c.targetPrice)}</td>
+        <td className="px-2 py-1.5 text-right text-rose-300">{fmtMoney(c.stopPrice)}</td>
+        <td className={`px-2 py-1.5 text-right ${rr.cls}`}>{rr.text}</td>
+        <td className="px-2 py-1.5" onClick={(e) => e.stopPropagation()}>
+          <div className="flex items-center justify-end gap-1">
+            <button
+              type="button"
+              onClick={onEnterTrade}
+              className="rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-white/5 hover:text-foreground"
+            >
+              Enter
+            </button>
+            <button
+              type="button"
+              onClick={onTrack}
+              disabled={tracked || tracking}
+              className={`rounded border px-1.5 py-0.5 text-[10px] font-medium ${
+                tracked
+                  ? "cursor-default border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
+                  : "border-border text-muted-foreground hover:bg-white/5 hover:text-foreground"
+              }`}
+            >
+              {tracked ? "Tracked" : "Track"}
+            </button>
+          </div>
+        </td>
+      </tr>
+      {expanded && (
+        <tr className="border-b border-border/40 bg-background/40 last:border-0">
+          <td colSpan={14} className="px-3 py-3">
+            <div className="grid gap-4 lg:grid-cols-[1fr_260px]">
+              <div className="space-y-3">
+                <div>
+                  <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                    Trend (underlying values behind the gates)
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                    <DetailStat label="SMA20 (bars)" value={fmtMoney(c.sma20 ?? null)} />
+                    <DetailStat
+                      label="SMA50 (bars, used in calc)"
+                      value={fmtMoney(c.sma50AtEntry ?? null)}
+                      sub="Not the same as ma50 below — this is the number extensionAdrDays and the rising check both use."
+                    />
+                    <DetailStat label="SMA200 (Yahoo quote)" value={fmtMoney(c.ma200)} sub="Bars window doesn't reach 200 sessions back." />
+                    <DetailStat label="ATR14 (bars)" value={fmtMoney(c.atr14 ?? null)} />
+                  </div>
+                </div>
+                <div>
+                  <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                    50MA slope (20-session rising check)
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+                    <DetailStat label="SMA50, 20 sessions ago" value={fmtMoney(c.sma50TwentySessionsAgo ?? null)} />
+                    <DetailStat label="SMA50, today" value={fmtMoney(c.sma50AtEntry ?? null)} />
+                    <DetailStat
+                      label="Rising %"
+                      value={fmtSigned(c.sma50RisingPct, 2) + "%"}
+                      sub={
+                        c.sma50AtEntry != null && c.sma50TwentySessionsAgo != null
+                          ? `(${c.sma50AtEntry.toFixed(2)} − ${c.sma50TwentySessionsAgo.toFixed(2)}) / ${c.sma50TwentySessionsAgo.toFixed(2)} × 100`
+                          : undefined
+                      }
+                    />
+                  </div>
+                </div>
+                <div>
+                  <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                    Relative strength (raw returns behind RS20 / RS60)
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                    <DetailStat label={`${c.symbol} 20d return`} value={fmtSigned(c.stockReturn20, 2) + "%"} />
+                    <DetailStat label="SPY 20d return" value={fmtSigned(c.spyReturn20, 2) + "%"} />
+                    <DetailStat
+                      label="RS20 = diff"
+                      value={fmtSigned(c.rs20, 2)}
+                      sub={
+                        c.stockReturn20 != null && c.spyReturn20 != null
+                          ? `${c.stockReturn20.toFixed(2)}% − ${c.spyReturn20.toFixed(2)}%`
+                          : undefined
+                      }
+                    />
+                    <DetailStat
+                      label="Higher low vs SPY (30d)"
+                      value={c.higherLowVsSpy === null || c.higherLowVsSpy === undefined ? "—" : c.higherLowVsSpy ? "Yes" : "No"}
+                    />
+                    <DetailStat label={`${c.symbol} 60d return`} value={fmtSigned(c.stockReturn60, 2) + "%"} />
+                    <DetailStat label="SPY 60d return" value={fmtSigned(c.spyReturn60, 2) + "%"} />
+                    <DetailStat
+                      label="RS60 = diff"
+                      value={fmtSigned(c.rs60, 2)}
+                      sub={
+                        c.stockReturn60 != null && c.spyReturn60 != null
+                          ? `${c.stockReturn60.toFixed(2)}% − ${c.spyReturn60.toFixed(2)}%`
+                          : undefined
+                      }
+                    />
+                  </div>
+                </div>
+                <div>
+                  <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                    Trade levels
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                    <DetailStat label="Entry" value={fmtMoney(c.entryPrice)} />
+                    <DetailStat
+                      label="Target"
+                      value={fmtMoney(c.targetPrice)}
+                      sub={`reward ${fmtMoney(rewardPerShare)}/sh`}
+                    />
+                    <DetailStat
+                      label="Stop"
+                      value={fmtMoney(c.stopPrice)}
+                      sub={`risk ${fmtMoney(riskPerShare)}/sh${atrMultiple !== null ? ` (${atrMultiple.toFixed(2)}× ATR14)` : ""}`}
+                    />
+                    <DetailStat
+                      label="R:R"
+                      value={rr.text}
+                      sub={`${fmtMoney(rewardPerShare)} / ${fmtMoney(riskPerShare)}`}
+                    />
+                    <DetailStat
+                      label="Earnings"
+                      value={c.nextEarningsDate ?? "unknown"}
+                      sub={c.daysToEarnings !== null ? `${c.daysToEarnings}d away` : undefined}
+                    />
+                  </div>
+                </div>
+              </div>
+              <div>
+                <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  6-month chart
+                </div>
+                <PriceChart candidate={c} data={chartData} loading={chartLoading} error={chartError} />
+              </div>
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
   );
 }
 
