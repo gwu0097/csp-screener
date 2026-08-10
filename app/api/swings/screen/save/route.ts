@@ -30,6 +30,12 @@ type SaveBody = {
   pass2Results: number;
   durationMs: number;
   mode?: "all" | "legacy" | "rs_pullback";
+  // Universe & Themes, Phase B — which universe this run was screened
+  // against (see app/api/swings/universe/resolve's response shape).
+  // Stamped on whichever row(s) this call actually writes so a saved run
+  // records what it was run against; comparing runs across different
+  // universes is otherwise meaningless.
+  universe?: unknown;
 };
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
@@ -52,6 +58,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     );
   }
   const mode = body.mode ?? "all";
+  const universe =
+    body.universe && typeof body.universe === "object" ? body.universe : null;
 
   try {
   const sb = createServerClient();
@@ -77,6 +85,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       pass2_results: body.pass2Results,
       duration_ms: body.durationMs,
       candidates: body.candidates,
+      universe,
     });
     if (ins.error) {
       return NextResponse.json({ error: ins.error.message }, { status: 500 });
@@ -100,6 +109,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         pass2_results: body.pass2Results,
         duration_ms: body.durationMs,
         candidates: rsPullbackCandidates,
+        universe,
       });
       if (rsIns.error) {
         console.warn(`[swings/screen/save] rs_pullback append failed: ${rsIns.error.message}`);

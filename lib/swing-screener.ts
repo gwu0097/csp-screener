@@ -1215,6 +1215,126 @@ export async function applyRsPullbackPrefilter(
   return { needsEnrichment, excludedBySectorPrefilter, excludedBySma50RisingPrefilter };
 }
 
+// Same shape as bulkFreshBars but deliberately ignores DAILY_BARS_STALE_MS
+// — the backfill pre-check below asks "is there enough bar HISTORY cached"
+// (a coverage question), not "is the cache fresh enough to trust for
+// today's read" (bulkFreshBars' question). Bars go stale every ~30h, so
+// gating the backfill check on freshness would turn it into an eager
+// full-universe live-refetch every morning instead of a one-time warm of
+// symbols that were never fetched at all (recently-added theme members).
+// Staleness is still handled correctly downstream — getOrFetchDailyBars
+// unconditionally live-refetches a >30h-old row the moment enrichment
+// actually reads it, exactly as it does today.
+async function bulkAnyBars(symbols: string[]): Promise<Map<string, DailyBar[]>> {
+  const sb = createServerClient();
+  const out = new Map<string, DailyBar[]>();
+  for (let i = 0; i < symbols.length; i += PREFILTER_CHUNK) {
+    const chunk = symbols.slice(i, i + PREFILTER_CHUNK);
+    try {
+      const res = await sb
+        .from("daily_bars_cache")
+        .select("symbol,bars")
+        .in("symbol", chunk)
+        .order("trading_day", { ascending: false })
+        .limit(chunk.length * 5);
+      if (res.error || !res.data) continue;
+      for (const row of res.data as Array<{ symbol: string; bars: DailyBar[] }>) {
+        if (out.has(row.symbol)) continue;
+        out.set(row.symbol, row.bars);
+      }
+    } catch {
+      // best-effort — falls through to a live fetch for this chunk
+    }
+  }
+  return out;
+}
+
+export type BackfillBarsResult = {
+  // Cached bar history already meets the floor below — no fetch needed.
+  alreadyCached: string[];
+  // Had insufficient (or no) cached history; a live fetch now brought it
+  // up to the floor and wrote it back to daily_bars_cache.
+  fetched: string[];
+  // Live fetch succeeded but the symbol simply doesn't have enough trading
+  // history yet (a recent IPO, typically) — reported explicitly rather
+  // than silently dropped, so "couldn't be screened" is distinguishable
+  // from "screened and didn't qualify".
+  insufficientHistory: string[];
+  // The live fetch itself failed (Yahoo error/network) — distinct from
+  // insufficientHistory, which is a real, confirmed answer.
+  fetchFailed: string[];
+  // Not reached before the internal deadline — caller must re-queue these
+  // into a follow-up chunk to keep coverage a mechanical guarantee, same
+  // pattern as computeRsPullbackCandidates' deadlineSkipped.
+  deadlineSkipped: string[];
+};
+
+// Minimum bar count treated as "sufficient" — matches RS Pullback's own
+// floor (sma50RisingLookbackSessions + 50, at least 61; 70 at the default
+// 20-session lookback), the strictest of every daily-bars consumer in this
+// file. Legacy tabs' ATR14/ADR%20 need far less (14 and 20 respectively),
+// so clearing this floor covers both. Note this does NOT reach the 200
+// bars a literal SMA200 would need — ma200 comes from Yahoo's point quote
+// (twoHundredDayAverage) everywhere in this file, not from cached bars;
+// nothing here computes a bars-derived SMA200.
+const BACKFILL_MIN_BARS = 70;
+const BACKFILL_DEADLINE_MS = 45_000;
+
+// Pre-flight bar backfill — call this over a selected universe BEFORE
+// pass1/pass2/RS Pullback enrichment start (never concurrently with them,
+// same discipline as keeping pass2 and RS Pullback enrichment sequential).
+// Symbols the index universe already covers are essentially always
+// already sufficient (nightly runs keep them warm); this only does real
+// work for symbols new to the cache — typically theme members outside the
+// index. Processes exactly the `symbols` it's given; the caller chunks a
+// large universe into sequential calls the same way RS Pullback's
+// enrichment does.
+export async function backfillDailyBars(
+  symbols: string[],
+  opts: { forceFresh?: boolean } = {},
+): Promise<BackfillBarsResult> {
+  const uniq = Array.from(new Set(symbols.map((s) => s.toUpperCase())));
+  const result: BackfillBarsResult = {
+    alreadyCached: [],
+    fetched: [],
+    insufficientHistory: [],
+    fetchFailed: [],
+    deadlineSkipped: [],
+  };
+  if (uniq.length === 0) return result;
+
+  const cached = await bulkAnyBars(uniq);
+  const needsFetch: string[] = [];
+  for (const symbol of uniq) {
+    const bars = cached.get(symbol);
+    if (bars && bars.length >= BACKFILL_MIN_BARS) {
+      result.alreadyCached.push(symbol);
+    } else {
+      needsFetch.push(symbol);
+    }
+  }
+
+  const started = Date.now();
+  await mapWithConcurrency(needsFetch, 5, async (symbol) => {
+    if (Date.now() - started > BACKFILL_DEADLINE_MS) {
+      result.deadlineSkipped.push(symbol);
+      return;
+    }
+    try {
+      const bars = await getOrFetchDailyBars(symbol, opts);
+      if (bars.length >= BACKFILL_MIN_BARS) {
+        result.fetched.push(symbol);
+      } else {
+        result.insufficientHistory.push(symbol);
+      }
+    } catch {
+      result.fetchFailed.push(symbol);
+    }
+  });
+
+  return result;
+}
+
 // Bars-derived SMA50 "as of N sessions ago" — drop the most recent N
 // closes, then take the 50-bar SMA of what's left. Same computeSMA
 // semantics as everywhere else in this file ("last `period` of the given

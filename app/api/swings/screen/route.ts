@@ -8,7 +8,7 @@ export const dynamic = "force-dynamic";
 // scan now runs through the split pair /pass1 + /pass2 and persists via
 // /save, so this route stays well under the default 60s ceiling.
 
-type Cached = ScreenerResult & { screenedAt: string | null };
+type Cached = ScreenerResult & { screenedAt: string | null; universe: unknown };
 
 const EMPTY_CACHED: Cached = {
   candidates: [],
@@ -18,6 +18,7 @@ const EMPTY_CACHED: Cached = {
   durationMs: 0,
   errors: [],
   screenedAt: null,
+  universe: null,
 };
 
 export async function GET(): Promise<NextResponse> {
@@ -49,6 +50,7 @@ export async function GET(): Promise<NextResponse> {
         pass2_results: number | null;
         duration_ms: number | null;
         candidates: unknown;
+        universe: unknown;
       }
     | undefined;
   if (!row) {
@@ -62,5 +64,6 @@ export async function GET(): Promise<NextResponse> {
     durationMs: row.duration_ms ?? 0,
     errors: [],
     screenedAt: row.screened_at,
+    universe: row.universe ?? null,
   } satisfies Cached);
 }

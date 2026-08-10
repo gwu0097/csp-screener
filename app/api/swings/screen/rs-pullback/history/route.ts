@@ -13,6 +13,7 @@ const MAX_RUNS = 20;
 type RunRow = {
   screenedAt: string;
   candidates: SwingCandidate[];
+  universe: unknown;
 };
 
 export async function GET(): Promise<NextResponse> {
@@ -25,7 +26,7 @@ export async function GET(): Promise<NextResponse> {
   const sb = createServerClient();
   const res = await sb
     .from("swing_screen_results")
-    .select("screened_at,candidates")
+    .select("screened_at,candidates,universe")
     .eq("user_id", userId)
     .eq("kind", "rs_pullback")
     .order("screened_at", { ascending: false })
@@ -33,11 +34,12 @@ export async function GET(): Promise<NextResponse> {
   if (res.error) {
     return NextResponse.json({ error: res.error.message }, { status: 500 });
   }
-  const runs: RunRow[] = ((res.data ?? []) as Array<{ screened_at: string; candidates: unknown }>).map(
-    (row) => ({
-      screenedAt: row.screened_at,
-      candidates: Array.isArray(row.candidates) ? (row.candidates as SwingCandidate[]) : [],
-    }),
-  );
+  const runs: RunRow[] = (
+    (res.data ?? []) as Array<{ screened_at: string; candidates: unknown; universe: unknown }>
+  ).map((row) => ({
+    screenedAt: row.screened_at,
+    candidates: Array.isArray(row.candidates) ? (row.candidates as SwingCandidate[]) : [],
+    universe: row.universe ?? null,
+  }));
   return NextResponse.json({ runs });
 }

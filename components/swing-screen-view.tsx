@@ -287,6 +287,15 @@ type ChartPoint = {
   ma200: number | null;
 };
 
+type UniverseDescriptor = {
+  includeIndex: boolean;
+  themeIds: string[];
+  allThemes: boolean;
+  themeNames: string[];
+  resolvedCount: number;
+  label: string;
+};
+
 type CachedResult = {
   candidates: SwingCandidate[];
   screened: number;
@@ -295,6 +304,33 @@ type CachedResult = {
   durationMs: number;
   errors: string[];
   screenedAt: string | null;
+  universe?: UniverseDescriptor | null;
+};
+
+// Universe & Themes, Phase B — the selector's own state (what's checked),
+// distinct from UniverseDescriptor (the resolved, persisted record of what
+// a run actually used). Multi-select: index and any number of themes (or
+// "all themes") combine, deduplicated at resolve time.
+type UniverseSelection = {
+  includeIndex: boolean;
+  themeIds: string[];
+  allThemes: boolean;
+};
+
+const DEFAULT_UNIVERSE_SELECTION: UniverseSelection = {
+  includeIndex: true,
+  themeIds: [],
+  allThemes: false,
+};
+const LS_UNIVERSE_SELECTION = "swing-screen-universe-selection";
+
+type ActiveTheme = { id: string; name: string; memberCount: number };
+
+type ResolvedUniverse = {
+  symbols: string[];
+  count: number;
+  themeNames: string[];
+  label: string;
 };
 
 // Column keys are dynamic per tab (see TAB_COLUMNS) plus a fixed set of
@@ -772,7 +808,7 @@ function sortCandidates(
   });
 }
 
-type RunPhase = "idle" | "pass1" | "pass2" | "rs_pullback" | "pass3" | "saving";
+type RunPhase = "idle" | "backfill" | "pass1" | "pass2" | "rs_pullback" | "pass3" | "saving";
 
 // Fetch + parse defensively. Vercel kills a function that exceeds the
 // 60s production ceiling with a PLAIN-TEXT body ("An error occurred…"),
@@ -827,6 +863,34 @@ type Pass1Wire = {
   };
 };
 
+// Universe & Themes, Phase B — resolves a selector's choice to the
+// deduplicated symbol list, via /api/swings/universe/resolve. Called both
+// for the selector's live "N symbols" preview and, again, at the start of
+// a real run (so the run always reflects current theme membership rather
+// than whatever the preview last fetched).
+async function resolveUniverse(selection: UniverseSelection): Promise<ResolvedUniverse> {
+  const res = await fetch("/api/swings/universe/resolve", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    cache: "no-store",
+    body: JSON.stringify(selection),
+  });
+  const json = (await res.json()) as {
+    symbols?: string[];
+    count?: number;
+    themeNames?: string[];
+    label?: string;
+    error?: string;
+  };
+  if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+  return {
+    symbols: json.symbols ?? [],
+    count: json.count ?? 0,
+    themeNames: json.themeNames ?? [],
+    label: json.label ?? "",
+  };
+}
+
 export function SwingScreenView() {
   const [data, setData] = useState<CachedResult | null>(null);
   const [loading, setLoading] = useState(true);
@@ -878,6 +942,82 @@ export function SwingScreenView() {
   useEffect(() => {
     window.localStorage.setItem(LS_RS_PULLBACK_THRESHOLDS, JSON.stringify(rsPullbackThresholds));
   }, [rsPullbackThresholds]);
+  // Universe & Themes, Phase B — which universe the screener runs
+  // against. Persisted the same way minAdrPct/rsPullbackThresholds are;
+  // defaults to the index universe only, matching pre-Phase-B behavior
+  // for a first-ever visit or a cleared localStorage.
+  const [universeSelection, setUniverseSelection] = useState<UniverseSelection>(() => {
+    if (typeof window === "undefined") return DEFAULT_UNIVERSE_SELECTION;
+    try {
+      const raw = window.localStorage.getItem(LS_UNIVERSE_SELECTION);
+      if (!raw) return DEFAULT_UNIVERSE_SELECTION;
+      const parsed = JSON.parse(raw) as Partial<UniverseSelection>;
+      return {
+        includeIndex: typeof parsed.includeIndex === "boolean" ? parsed.includeIndex : true,
+        themeIds: Array.isArray(parsed.themeIds)
+          ? parsed.themeIds.filter((s): s is string => typeof s === "string")
+          : [],
+        allThemes: parsed.allThemes === true,
+      };
+    } catch {
+      return DEFAULT_UNIVERSE_SELECTION;
+    }
+  });
+  useEffect(() => {
+    window.localStorage.setItem(LS_UNIVERSE_SELECTION, JSON.stringify(universeSelection));
+  }, [universeSelection]);
+  // Active themes to offer in the selector — refetched on mount only;
+  // archiving/adding a theme mid-session just needs a page reload to show
+  // up here, same freshness contract the rest of this view uses for its
+  // other once-per-mount fetches (regime, cached result).
+  const [activeThemes, setActiveThemes] = useState<ActiveTheme[]>([]);
+  useEffect(() => {
+    fetch("/api/swings/universe/themes", { cache: "no-store" })
+      .then((r) => r.json())
+      .then(
+        (j: {
+          themes?: Array<{ id: string; name: string; is_active: boolean; memberCount: number }>;
+        }) => {
+          setActiveThemes(
+            (j.themes ?? [])
+              .filter((t) => t.is_active)
+              .map((t) => ({ id: t.id, name: t.name, memberCount: t.memberCount })),
+          );
+        },
+      )
+      .catch(() => {});
+  }, []);
+  const [resolvedUniverse, setResolvedUniverse] = useState<ResolvedUniverse | null>(null);
+  const [resolvingUniverse, setResolvingUniverse] = useState(false);
+  const [resolveError, setResolveError] = useState<string | null>(null);
+  const universeThemeIdsKey = universeSelection.themeIds.join(",");
+  useEffect(() => {
+    let cancelled = false;
+    setResolvingUniverse(true);
+    setResolveError(null);
+    resolveUniverse(universeSelection)
+      .then((r) => {
+        if (!cancelled) setResolvedUniverse(r);
+      })
+      .catch((e) => {
+        if (!cancelled) setResolveError(e instanceof Error ? e.message : "Failed to resolve universe");
+      })
+      .finally(() => {
+        if (!cancelled) setResolvingUniverse(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [universeSelection.includeIndex, universeSelection.allThemes, universeThemeIdsKey]);
+  // Bar-backfill diagnostics from the most recent run's pre-flight phase
+  // — transient (not persisted), same treatment as rsPullbackDiagnostics.
+  const [backfillDiagnostics, setBackfillDiagnostics] = useState<{
+    alreadyCached: number;
+    fetched: number;
+    insufficientHistory: string[];
+    fetchFailed: string[];
+  } | null>(null);
   const [rsPullbackSettingsOpen, setRsPullbackSettingsOpen] = useState(false);
   const [rsPullbackDiagnostics, setRsPullbackDiagnostics] = useState<{
     pregatedCount: number;
@@ -962,11 +1102,86 @@ export function SwingScreenView() {
       (c.setupTabs ?? []).includes("rs_pullback"),
     );
     try {
+      // Universe & Themes, Phase B — resolve the selected universe fresh
+      // (not the selector's possibly-stale preview) so the run always
+      // reflects current theme membership, then backfill daily bars for
+      // anything selected but not yet sufficiently cached. Chunked,
+      // sequential, and always run to completion BEFORE pass1/pass2/RS
+      // Pullback start — never concurrently with them, same discipline
+      // that keeps pass2 and RS Pullback's own enrichment sequential.
+      setPhase("backfill");
+      setBackfillDiagnostics(null);
+      const resolved = await resolveUniverse(universeSelection);
+      setResolvedUniverse(resolved);
+      const universeSymbols = resolved.symbols;
+      if (universeSymbols.length === 0) {
+        throw new Error(
+          "Selected universe resolved to 0 symbols — check at least one universe option.",
+        );
+      }
+      const universeDescriptor: UniverseDescriptor = {
+        includeIndex: universeSelection.includeIndex,
+        themeIds: universeSelection.themeIds,
+        allThemes: universeSelection.allThemes,
+        themeNames: resolved.themeNames,
+        resolvedCount: resolved.count,
+        label: resolved.label,
+      };
+
+      const BACKFILL_CHUNK_SIZE = 100;
+      let backfillQueue = [...universeSymbols];
+      let backfillAlreadyCached = 0;
+      let backfillFetched = 0;
+      const backfillInsufficient: string[] = [];
+      const backfillFailed: string[] = [];
+      let backfillChunkFailed = false;
+      while (backfillQueue.length > 0) {
+        const chunk = backfillQueue.slice(0, BACKFILL_CHUNK_SIZE);
+        backfillQueue = backfillQueue.slice(BACKFILL_CHUNK_SIZE);
+        try {
+          const res = await fetchPassJson<{
+            alreadyCached?: string[];
+            fetched?: string[];
+            insufficientHistory?: string[];
+            fetchFailed?: string[];
+            deadlineSkipped?: string[];
+          }>("Bar backfill", "/api/swings/screen/backfill-bars", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ symbols: chunk, forceFresh }),
+          });
+          backfillAlreadyCached += res.alreadyCached?.length ?? 0;
+          backfillFetched += res.fetched?.length ?? 0;
+          backfillInsufficient.push(...(res.insufficientHistory ?? []));
+          backfillFailed.push(...(res.fetchFailed ?? []));
+          if (res.deadlineSkipped && res.deadlineSkipped.length > 0) {
+            backfillQueue = [...backfillQueue, ...res.deadlineSkipped];
+          }
+        } catch (e) {
+          console.warn("[swing-screen] bar backfill chunk failed:", e);
+          backfillChunkFailed = true;
+          break;
+        }
+      }
+      if (backfillChunkFailed) {
+        setRunWarning(
+          (prev) =>
+            prev ??
+            "Bar backfill failed partway through — some newly-added symbols may show as insufficient data rather than being fully evaluated.",
+        );
+      }
+      setBackfillDiagnostics({
+        alreadyCached: backfillAlreadyCached,
+        fetched: backfillFetched,
+        insufficientHistory: backfillInsufficient,
+        fetchFailed: backfillFailed,
+      });
+
       // Pass 1 — Yahoo technical filter + tab qualification on the
-      // full universe (~20-40s). A failure here aborts the run.
-      // forceFresh bypasses the quote-sweep/Finnhub/ATR caches (but
-      // still writes fresh results back) — Schwab options data is
-      // never cached either way.
+      // resolved universe (~20-40s for the ~580-symbol default). A
+      // failure here aborts the run. forceFresh bypasses the
+      // quote-sweep/Finnhub/ATR caches (but still writes fresh results
+      // back) — Schwab options data is never cached either way.
       setPhase("pass1");
       const p1 = await fetchPassJson<Pass1Wire>(
         "Pass 1 (technical filter)",
@@ -974,7 +1189,7 @@ export function SwingScreenView() {
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ forceFresh, rsPullbackThresholds }),
+          body: JSON.stringify({ symbols: universeSymbols, forceFresh, rsPullbackThresholds }),
         },
       );
       setPass1Count(p1.survivors.length);
@@ -1155,6 +1370,7 @@ export function SwingScreenView() {
         durationMs: Date.now() - started,
         errors: p1.errors ?? [],
         screenedAt: new Date().toISOString(),
+        universe: universeDescriptor,
       };
 
       // Save — fast (<1s). NON-FATAL: failure keeps the visible
@@ -1177,6 +1393,7 @@ export function SwingScreenView() {
               pass2Results: result.pass2Results,
               durationMs: result.durationMs,
               mode: target,
+              universe: universeDescriptor,
             }),
           },
         );
@@ -1334,6 +1551,51 @@ export function SwingScreenView() {
           Regime: <span className="text-foreground">{regime.label}</span>
         </div>
       )}
+      <UniverseSelectorBar
+        selection={universeSelection}
+        onChange={setUniverseSelection}
+        activeThemes={activeThemes}
+        resolved={resolvedUniverse}
+        resolving={resolvingUniverse}
+        resolveError={resolveError}
+        disabled={running}
+      />
+      {backfillDiagnostics &&
+        (backfillDiagnostics.fetched > 0 ||
+          backfillDiagnostics.insufficientHistory.length > 0 ||
+          backfillDiagnostics.fetchFailed.length > 0) && (
+          <div className="rounded-md border border-border/60 bg-background/40 px-3 py-1.5 text-sm text-muted-foreground">
+            Bars: <span className="text-foreground">{backfillDiagnostics.alreadyCached}</span> already
+            cached · <span className="text-foreground">{backfillDiagnostics.fetched}</span> backfilled
+            {backfillDiagnostics.insufficientHistory.length > 0 && (
+              <>
+                {" · "}
+                <span className="text-amber-300">
+                  {backfillDiagnostics.insufficientHistory.length}
+                </span>{" "}
+                could not be evaluated (insufficient history):{" "}
+                <span
+                  title={backfillDiagnostics.insufficientHistory.join(", ")}
+                  className="text-foreground"
+                >
+                  {backfillDiagnostics.insufficientHistory.slice(0, 6).join(", ")}
+                  {backfillDiagnostics.insufficientHistory.length > 6 ? "…" : ""}
+                </span>
+              </>
+            )}
+            {backfillDiagnostics.fetchFailed.length > 0 && (
+              <>
+                {" · "}
+                <span className="text-rose-300">{backfillDiagnostics.fetchFailed.length}</span> fetch
+                failed:{" "}
+                <span title={backfillDiagnostics.fetchFailed.join(", ")} className="text-foreground">
+                  {backfillDiagnostics.fetchFailed.slice(0, 6).join(", ")}
+                  {backfillDiagnostics.fetchFailed.length > 6 ? "…" : ""}
+                </span>
+              </>
+            )}
+          </div>
+        )}
       <ControlsBar
         data={data}
         loading={loading}
@@ -1348,7 +1610,12 @@ export function SwingScreenView() {
       />
 
       {running && (
-        <RunningBanner phase={phase} pass1Count={pass1Count} rsPullbackDiagnostics={rsPullbackDiagnostics} />
+        <RunningBanner
+          phase={phase}
+          pass1Count={pass1Count}
+          rsPullbackDiagnostics={rsPullbackDiagnostics}
+          resolvedUniverse={resolvedUniverse}
+        />
       )}
       {runError && (
         <div className="rounded border border-rose-500/40 bg-rose-500/10 p-3 text-base text-rose-300">
@@ -1438,6 +1705,90 @@ export function SwingScreenView() {
   );
 }
 
+// Universe & Themes, Phase B — multi-select: the index universe, any
+// number of active themes, and/or "All themes" combine (union, deduped
+// server-side). Checking "All themes" disables the individual theme
+// checkboxes since they'd be redundant, but doesn't clear them — a user
+// unchecking "All themes" gets back whatever specific themes were picked
+// before, rather than losing that choice.
+function UniverseSelectorBar({
+  selection,
+  onChange,
+  activeThemes,
+  resolved,
+  resolving,
+  resolveError,
+  disabled,
+}: {
+  selection: UniverseSelection;
+  onChange: (s: UniverseSelection) => void;
+  activeThemes: ActiveTheme[];
+  resolved: ResolvedUniverse | null;
+  resolving: boolean;
+  resolveError: string | null;
+  disabled: boolean;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-md border border-border bg-background/40 p-3 text-sm">
+      <span className="text-muted-foreground">Universe:</span>
+      <label className="flex items-center gap-1.5 text-muted-foreground">
+        <input
+          type="checkbox"
+          checked={selection.includeIndex}
+          disabled={disabled}
+          onChange={(e) => onChange({ ...selection, includeIndex: e.target.checked })}
+        />
+        S&amp;P 500 + Nasdaq 100
+      </label>
+      <label className="flex items-center gap-1.5 text-muted-foreground">
+        <input
+          type="checkbox"
+          checked={selection.allThemes}
+          disabled={disabled}
+          onChange={(e) => onChange({ ...selection, allThemes: e.target.checked })}
+        />
+        All themes
+      </label>
+      {activeThemes.map((t) => (
+        <label key={t.id} className="flex items-center gap-1.5 text-muted-foreground">
+          <input
+            type="checkbox"
+            checked={selection.allThemes || selection.themeIds.includes(t.id)}
+            disabled={disabled || selection.allThemes}
+            onChange={(e) =>
+              onChange({
+                ...selection,
+                themeIds: e.target.checked
+                  ? [...selection.themeIds, t.id]
+                  : selection.themeIds.filter((id) => id !== t.id),
+              })
+            }
+          />
+          {t.name} <span className="text-[10px]">({t.memberCount})</span>
+        </label>
+      ))}
+      {activeThemes.length === 0 && (
+        <Link href="/swings/universe" className="text-xs text-muted-foreground underline">
+          No themes yet — create one
+        </Link>
+      )}
+      <span className="ml-auto text-muted-foreground">
+        {resolving ? (
+          "Resolving…"
+        ) : resolveError ? (
+          <span className="text-rose-300">{resolveError}</span>
+        ) : resolved ? (
+          <span title={resolved.symbols.slice(0, 30).join(", ")}>
+            <span className="font-mono text-foreground">{resolved.count}</span> symbols
+          </span>
+        ) : (
+          "—"
+        )}
+      </span>
+    </div>
+  );
+}
+
 function ControlsBar({
   data,
   loading,
@@ -1477,6 +1828,11 @@ function ControlsBar({
             screened ·{" "}
             <span className="text-foreground">{data.pass1Survivors}</span> passed
             technical filter
+          </div>
+        )}
+        {data?.universe?.label && (
+          <div className="text-sm text-muted-foreground">
+            Universe: <span className="text-foreground">{data.universe.label}</span>
           </div>
         )}
       </div>
@@ -1554,17 +1910,28 @@ function RunningBanner({
   phase,
   pass1Count,
   rsPullbackDiagnostics,
+  resolvedUniverse,
 }: {
   phase: RunPhase;
   pass1Count: number | null;
   rsPullbackDiagnostics: { chunksDone: number; chunksTotal: number; needsEnrichmentCount: number } | null;
+  resolvedUniverse: ResolvedUniverse | null;
 }) {
+  const universeLabel = resolvedUniverse
+    ? `${resolvedUniverse.count} stocks (${resolvedUniverse.label})`
+    : "the selected universe";
   const { title, detail } = (() => {
+    if (phase === "backfill") {
+      return {
+        title: `Backfilling daily bars — ${universeLabel}`,
+        detail:
+          "Checking cached bar history for every selected symbol and fetching whatever's missing before screening starts. Sequential, chunked — always completes before Pass 1.",
+      };
+    }
     if (phase === "pass1") {
       return {
         title: "Pass 1 — technical filter",
-        detail:
-          "Scanning ~580 S&P 500 + Nasdaq 100 stocks for setups (price/MA/52w range/R-R). ~15-25 seconds.",
+        detail: `Scanning ${universeLabel} for setups (price/MA/52w range/R-R). ~15-25 seconds.`,
       };
     }
     if (phase === "pass2") {
@@ -1936,9 +2303,11 @@ function RsPullbackHistoryPicker({
 }: {
   onSelect: (candidates: SwingCandidate[] | null) => void;
 }) {
-  const [runs, setRuns] = useState<Array<{ screenedAt: string; candidates: SwingCandidate[] }> | null>(
-    null,
-  );
+  const [runs, setRuns] = useState<Array<{
+    screenedAt: string;
+    candidates: SwingCandidate[];
+    universe: UniverseDescriptor | null;
+  }> | null>(null);
   const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState<string>("live");
 
@@ -1947,7 +2316,11 @@ function RsPullbackHistoryPicker({
     try {
       const res = await fetch("/api/swings/screen/rs-pullback/history", { cache: "no-store" });
       const json = (await res.json()) as {
-        runs?: Array<{ screenedAt: string; candidates: SwingCandidate[] }>;
+        runs?: Array<{
+          screenedAt: string;
+          candidates: SwingCandidate[];
+          universe: UniverseDescriptor | null;
+        }>;
       };
       setRuns(json.runs ?? []);
     } catch {
@@ -1984,6 +2357,7 @@ function RsPullbackHistoryPicker({
         {(runs ?? []).map((r) => (
           <option key={r.screenedAt} value={r.screenedAt}>
             {fmtRelDate(r.screenedAt)}
+            {r.universe?.label ? ` — ${r.universe.label}` : ""}
           </option>
         ))}
       </select>

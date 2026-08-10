@@ -7,6 +7,7 @@ import { createServerClient } from "./supabase";
 import { getOrFetchDailyBars } from "./daily-bars-cache";
 import { computeADRPercent } from "./indicators";
 import { getOrRefreshSnapshot } from "./market-snapshot";
+import { SWING_UNIVERSE } from "./stock-universe";
 
 export type MemberEnrichment = {
   companyName: string | null;
@@ -139,4 +140,83 @@ export async function validateAndWarmSymbol(symbol: string): Promise<boolean> {
   if (!snap || snap.price === null) return false;
   await getOrFetchDailyBars(symbol).catch(() => []);
   return true;
+}
+
+// ---------- Universe & Themes, Phase B — screener universe resolution ----------
+//
+// Turns a selector's choice (the index universe, specific themes, "all
+// themes", or any combination) into the deduplicated symbol list the
+// screener actually runs against. Read-only against themes/theme_members —
+// this never mutates state, so it's safe to call on every selector change
+// for the live resolved-count preview as well as at the start of a real
+// run.
+
+export type UniverseSelection = {
+  includeIndex: boolean;
+  themeIds: string[];
+  allThemes: boolean;
+};
+
+export type ResolvedUniverse = {
+  symbols: string[];
+  themeNames: string[];
+};
+
+type ThemeRow = { id: string; name: string };
+type MemberSymbolRow = { symbol: string };
+
+export async function resolveUniverseSymbols(
+  userId: string,
+  selection: UniverseSelection,
+): Promise<ResolvedUniverse> {
+  const sb = createServerClient();
+  const symbolSet = new Set<string>();
+  if (selection.includeIndex) {
+    for (const s of SWING_UNIVERSE) symbolSet.add(s.toUpperCase());
+  }
+
+  // Only active themes ever contribute — an archived theme's members
+  // don't silently keep feeding the screener after the theme itself was
+  // archived.
+  let themeIds: string[] = [];
+  let themeNames: string[] = [];
+  if (selection.allThemes) {
+    const res = await sb
+      .from("themes")
+      .select("id,name")
+      .eq("user_id", userId)
+      .eq("is_active", true);
+    const rows = (res.data ?? []) as ThemeRow[];
+    themeIds = rows.map((r) => r.id);
+    themeNames = rows.map((r) => r.name);
+  } else if (selection.themeIds.length > 0) {
+    const res = await sb
+      .from("themes")
+      .select("id,name")
+      .eq("user_id", userId)
+      .eq("is_active", true)
+      .in("id", selection.themeIds);
+    const rows = (res.data ?? []) as ThemeRow[];
+    themeIds = rows.map((r) => r.id);
+    themeNames = rows.map((r) => r.name);
+  }
+
+  if (themeIds.length > 0) {
+    // Only is_active members participate — a deactivated member is
+    // excluded from every run until reactivated, same as it's hidden
+    // from the Universe tab's default list view.
+    const res = await sb
+      .from("theme_members")
+      .select("symbol")
+      .eq("user_id", userId)
+      .eq("is_active", true)
+      .in("theme_id", themeIds);
+    const rows = (res.data ?? []) as MemberSymbolRow[];
+    for (const r of rows) symbolSet.add(r.symbol.toUpperCase());
+  }
+
+  return {
+    symbols: Array.from(symbolSet).sort(),
+    themeNames: themeNames.sort((a, b) => a.localeCompare(b)),
+  };
 }
