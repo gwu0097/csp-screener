@@ -1679,13 +1679,23 @@ function evaluateRsPullback(
 // "Improving" means moving toward passing — every in-scope gate is
 // higher-is-better (see evaluateRsPullback), so this is just a
 // comparison, not gate-specific logic.
+// All four near-miss gates (sma50_rising %, adr_floor %, rs20/rs60
+// points) sit on comparable percentage-point scales and are displayed to
+// roughly this precision — a move smaller than this is noise for "is
+// this approaching or receding," not a real signal, and labeling it
+// "deteriorating" next to two values that render identically (e.g.
+// 3.9636 vs 3.9831, both "4.0%" at 1 decimal) reads as a contradiction.
+// Comparison below runs on the raw, unrounded gate values — only the
+// classification boundary uses this tolerance, never the display.
+const NEAR_MISS_TREND_FLAT_TOLERANCE = 0.05;
+
 function rsPullbackGateTrend(
   gate: RsPullbackGateStatus,
 ): "improving" | "deteriorating" | "flat" | null {
   if (gate.value5SessionsAgo === null) return null;
-  if (gate.value > gate.value5SessionsAgo) return "improving";
-  if (gate.value < gate.value5SessionsAgo) return "deteriorating";
-  return "flat";
+  const delta = gate.value - gate.value5SessionsAgo;
+  if (Math.abs(delta) < NEAR_MISS_TREND_FLAT_TOLERANCE) return "flat";
+  return delta > 0 ? "improving" : "deteriorating";
 }
 
 // Shared candidate builder — one place that turns (quote + bars + gate

@@ -1761,6 +1761,7 @@ export function SwingScreenView() {
         onForceFreshChange={setForceFresh}
         minAdrPct={minAdrPct}
         onMinAdrPctChange={setMinAdrPct}
+        activeTab={activeTab}
       />
 
       {running && (
@@ -1956,6 +1957,7 @@ function ControlsBar({
   onForceFreshChange,
   minAdrPct,
   onMinAdrPctChange,
+  activeTab,
 }: {
   data: CachedResult | null;
   loading: boolean;
@@ -1967,6 +1969,7 @@ function ControlsBar({
   onForceFreshChange: (v: boolean) => void;
   minAdrPct: number;
   onMinAdrPctChange: (v: number) => void;
+  activeTab: SetupTab;
 }) {
   const runLabel =
     runTarget === "legacy" ? "Run Legacy Tabs" : runTarget === "rs_pullback" ? "Run RS Pullback" : "Run Screen";
@@ -2009,23 +2012,40 @@ function ControlsBar({
             <option value="rs_pullback">RS Pullback only</option>
           </select>
         </label>
-        <label
-          className="flex items-center gap-1.5 text-sm text-muted-foreground"
-          title="Hides candidates whose 20-day Average Daily Range is below this — a 3R target needs enough daily movement to be reachable in a multi-week hold. Display/filter only; doesn't change any tab's score."
-        >
-          Min ADR%
-          <input
-            type="number"
-            step="0.5"
-            min="0"
-            value={minAdrPct}
-            onChange={(e) => {
-              const n = Number(e.target.value);
-              if (Number.isFinite(n) && n >= 0) onMinAdrPctChange(n);
-            }}
-            className="w-16 rounded border border-border bg-background px-1.5 py-1 text-right text-sm"
-          />
-        </label>
+        {activeTab === "rs_pullback" ? (
+          // RS Pullback bypasses this generic filter entirely — its ADR%
+          // floor is a hard gate in rsPullbackThresholds.minAdrPct, edited
+          // via "Edit thresholds" below, not this control. Showing both
+          // under the same "Min ADR%" label produced two different numbers
+          // claiming to be the same gate (see the near-miss row fix this
+          // note accompanies) — hidden here rather than synced, since
+          // syncing would make this input silently start controlling a
+          // gate threshold it was never meant to.
+          <span
+            className="text-sm text-muted-foreground"
+            title="This tab's ADR% floor is set in the RS Pullback tab's own 'Edit thresholds' panel, not here — this control only filters the four legacy tabs."
+          >
+            Min ADR% set per-tab below
+          </span>
+        ) : (
+          <label
+            className="flex items-center gap-1.5 text-sm text-muted-foreground"
+            title="Hides candidates whose 20-day Average Daily Range is below this — a 3R target needs enough daily movement to be reachable in a multi-week hold. Display/filter only; doesn't change any tab's score."
+          >
+            Min ADR%
+            <input
+              type="number"
+              step="0.5"
+              min="0"
+              value={minAdrPct}
+              onChange={(e) => {
+                const n = Number(e.target.value);
+                if (Number.isFinite(n) && n >= 0) onMinAdrPctChange(n);
+              }}
+              className="w-16 rounded border border-border bg-background px-1.5 py-1 text-right text-sm"
+            />
+          </label>
+        )}
         <label
           className="flex cursor-pointer items-center gap-1.5 text-sm text-muted-foreground"
           title={
@@ -3325,6 +3345,22 @@ function nearMissUnit(gate: NonNullable<SwingCandidate["nearMissGate"]>): string
   return gate === "sma50_rising" || gate === "adr_floor" ? "%" : "";
 }
 
+// A near-miss row is, by definition, failing — gap is always > 0. At 1
+// decimal a real gap as small as 0.036 rounds to "0.0", which reads as
+// "value equals threshold, but classified as failing" (the exact bug
+// this accompanies). 2 decimals covers every gap seen in practice; the
+// loop is a guarantee, not a guess — it escalates precision until a
+// nonzero digit actually shows, so "0.0" (or "0.00") can never be
+// printed next to a row this function is only ever called for.
+function fmtGap(gap: number | null | undefined): string {
+  if (gap === null || gap === undefined || !Number.isFinite(gap)) return "—";
+  for (let digits = 2; digits <= 6; digits += 1) {
+    const s = gap.toFixed(digits);
+    if (Number(s) > 0) return s;
+  }
+  return gap.toFixed(6);
+}
+
 function nearMissTrendGlyph(trend: SwingCandidate["nearMissTrend"]): string {
   if (trend === "improving") return "▲ improving";
   if (trend === "deteriorating") return "▼ deteriorating";
@@ -3393,16 +3429,16 @@ function RsPullbackNearMissRow({
         <td className="px-2 py-1.5 text-right font-mono">{fmtMoney(c.currentPrice)}</td>
         <td className="px-2 py-1.5 text-left text-xs text-muted-foreground">{gateLabel}</td>
         <td className="px-2 py-1.5 text-right font-mono text-rose-300">
-          {fmtSigned(c.nearMissValue, 1)}
+          {fmtSigned(c.nearMissValue, 2)}
           {unit}
           <div className="text-[10px] font-sans text-muted-foreground">
-            needs {op} {c.nearMissThreshold?.toFixed(1)}
-            {unit}, gap {c.nearMissGap?.toFixed(1)} pts
+            needs {op} {c.nearMissThreshold?.toFixed(2)}
+            {unit}, gap {fmtGap(c.nearMissGap)} pts
           </div>
         </td>
         <td className="px-2 py-1.5 text-right font-mono text-muted-foreground">
           {c.nearMissValue5SessionsAgo !== null && c.nearMissValue5SessionsAgo !== undefined
-            ? `${fmtSigned(c.nearMissValue5SessionsAgo, 1)}${unit}`
+            ? `${fmtSigned(c.nearMissValue5SessionsAgo, 2)}${unit}`
             : "n/a"}
         </td>
         <td className={`px-2 py-1.5 text-center text-xs ${nearMissTrendCls(c.nearMissTrend)}`}>
