@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, Star, StarOff, Trash2, Undo2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -216,6 +216,13 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
     dir: "desc",
   });
   const [lastClickedPendingIndex, setLastClickedPendingIndex] = useState<number | null>(null);
+  // Captured on mousedown over the row's enlarged label (not the input
+  // itself — a click landing on the label re-dispatches a synthetic
+  // click to the wrapped input, and that forwarded click isn't
+  // guaranteed to carry modifier keys). Read once in onChange, then
+  // cleared, so shift-click range selection works from anywhere in the
+  // hit target, not just the 13px input.
+  const pendingShiftRef = useRef(false);
   const [thresholdColumn, setThresholdColumn] = useState<ThresholdColumn>("adr20Pct");
   const [thresholdOp, setThresholdOp] = useState<"lt" | "gt">("lt");
   const [thresholdValue, setThresholdValue] = useState("");
@@ -354,20 +361,21 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
     }
   }
 
-  function togglePendingSelection(id: string) {
-    setSelectedPending((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }
-
+  // Fires from the checkbox's onChange, never onClick+preventDefault (see
+  // the checkbox JSX for why: forcing a native checkbox to skip its own
+  // toggle and re-drive it from onClick desyncs React's internal DOM
+  // tracker from the actual screen state on some clicks — the row LOOKS
+  // unchecked while selectedPending already has it, and the next
+  // unrelated write can also get skipped, which is what made both plain
+  // clicks and threshold-select intermittently leave rows visually
+  // unchecked). `checked` here is the browser's own completed toggle,
+  // read from e.target.checked — never re-derived by us.
+  //
   // Shift-click extends the selection over the range between the last
   // clicked row and this one, in the CURRENT sort order — sortedPending
   // is recomputed on every sort change, so a shift-click range always
   // matches what's on screen right now, not a stale pre-sort order.
-  function handlePendingCheckboxClick(id: string, index: number, shiftKey: boolean) {
+  function handlePendingCheckboxChange(id: string, index: number, checked: boolean, shiftKey: boolean) {
     if (shiftKey && lastClickedPendingIndex !== null) {
       const lo = Math.min(index, lastClickedPendingIndex);
       const hi = Math.max(index, lastClickedPendingIndex);
@@ -378,7 +386,12 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
         return next;
       });
     } else {
-      togglePendingSelection(id);
+      setSelectedPending((prev) => {
+        const next = new Set(prev);
+        if (checked) next.add(id);
+        else next.delete(id);
+        return next;
+      });
     }
     setLastClickedPendingIndex(index);
   }
@@ -763,14 +776,23 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
       {pending.length > 0 && (
         <div className="rounded border border-amber-500/40 bg-amber-500/5 p-3">
           <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-            <button
-              type="button"
-              onClick={() => setPendingOpen((o) => !o)}
-              className="flex items-center gap-1.5 text-sm font-semibold text-foreground"
-            >
-              <span className="text-[10px] text-muted-foreground">{pendingOpen ? "▼" : "▶"}</span>
-              Pending review ({pending.length})
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setPendingOpen((o) => !o)}
+                className="flex items-center gap-1.5 text-sm font-semibold text-foreground"
+              >
+                <span className="text-[10px] text-muted-foreground">{pendingOpen ? "▼" : "▶"}</span>
+                Pending review ({pending.length})
+              </button>
+              {/* Always visible, even collapsed — a partial selection
+                  shouldn't require opening the section to notice. */}
+              {selectedPending.size > 0 && (
+                <span className="rounded-full border border-amber-400/50 bg-amber-400/10 px-2 py-0.5 text-[11px] font-medium text-amber-200">
+                  {selectedPending.size} selected
+                </span>
+              )}
+            </div>
             {pendingOpen && (
               <div className="flex items-center gap-2">
                 <input
@@ -845,14 +867,19 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
                 <table className="w-full min-w-[900px] text-sm">
                   <thead className="border-b border-border/60 text-left text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
                     <tr>
-                      <th className="px-2 py-1.5">
-                        <input
-                          type="checkbox"
-                          checked={selectedPending.size > 0 && selectedPending.size === sortedPending.length}
-                          onChange={(e) =>
-                            setSelectedPending(e.target.checked ? new Set(sortedPending.map((m) => m.id)) : new Set())
-                          }
-                        />
+                      <th className="p-0">
+                        <label className="flex w-full cursor-pointer items-center justify-center px-2 py-1.5 hover:bg-white/5">
+                          <input
+                            type="checkbox"
+                            className="h-3.5 w-3.5 cursor-pointer"
+                            checked={selectedPending.size > 0 && selectedPending.size === sortedPending.length}
+                            onChange={(e) =>
+                              setSelectedPending(
+                                e.target.checked ? new Set(sortedPending.map((m) => m.id)) : new Set(),
+                              )
+                            }
+                          />
+                        </label>
                       </th>
                       <SortTh label="Symbol" sortKey="symbol" sort={pendingSort} onSort={onPendingSort} />
                       <th className="px-2 py-1.5">Company</th>
@@ -874,16 +901,24 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
                   <tbody>
                     {sortedPending.map((m, idx) => (
                       <tr key={m.id} className="border-b border-border/40 last:border-0 hover:bg-white/[0.02]">
-                        <td className="px-2 py-1.5">
-                          <input
-                            type="checkbox"
-                            checked={selectedPending.has(m.id)}
-                            onClick={(e) => {
-                              e.preventDefault();
-                              handlePendingCheckboxClick(m.id, idx, e.shiftKey);
+                        <td className="p-0">
+                          <label
+                            className="flex h-full w-full cursor-pointer select-none items-center justify-center px-2 py-2 hover:bg-white/5"
+                            onMouseDown={(e) => {
+                              pendingShiftRef.current = e.shiftKey;
                             }}
-                            onChange={() => {}}
-                          />
+                          >
+                            <input
+                              type="checkbox"
+                              className="h-3.5 w-3.5 cursor-pointer"
+                              checked={selectedPending.has(m.id)}
+                              onChange={(e) => {
+                                const shiftKey = pendingShiftRef.current || (e.nativeEvent as MouseEvent).shiftKey;
+                                pendingShiftRef.current = false;
+                                handlePendingCheckboxChange(m.id, idx, e.target.checked, shiftKey);
+                              }}
+                            />
+                          </label>
                         </td>
                         <td className="px-2 py-1.5 font-mono font-semibold text-foreground">{m.symbol}</td>
                         <td className="px-2 py-1.5 text-muted-foreground">{m.companyName ?? "—"}</td>
