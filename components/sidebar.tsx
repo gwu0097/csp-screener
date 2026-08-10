@@ -23,6 +23,7 @@ import {
   Search,
   Settings,
   Star,
+  Tags,
   Telescope,
   TrendingUp,
   LogOut,
@@ -110,6 +111,11 @@ const SWINGS_IDEAS: NavItem = {
   href: "/swings/ideas",
   label: "Ideas",
   icon: Layers,
+};
+const SWINGS_UNIVERSE: NavItem = {
+  href: "/swings/universe",
+  label: "Universe",
+  icon: Tags,
 };
 
 const SWINGS_JOURNAL_GROUP: NavGroup = {
@@ -364,6 +370,7 @@ export function Sidebar() {
           <SectionHeader label="Swings" mode={mode} />
           <SidebarLink item={SWINGS_DISCOVER} pathname={pathname} mode={mode} />
           <SidebarLink item={SWINGS_IDEAS} pathname={pathname} mode={mode} />
+          <SidebarLink item={SWINGS_UNIVERSE} pathname={pathname} mode={mode} />
           <CollapsibleGroup
             group={SWINGS_JOURNAL_GROUP}
             pathname={pathname}
