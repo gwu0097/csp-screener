@@ -23,6 +23,42 @@ type Theme = {
   anchorCount: number;
 };
 
+// theme_type stays a plain text column so future types can be added here
+// without a migration — but the UI only offers a deliberate, guided choice
+// since Phase C's expansion logic branches on this value.
+const THEME_TYPES: Array<{ value: string; label: string; description: string }> = [
+  {
+    value: "supply_chain",
+    label: "Supply chain",
+    description:
+      "Members feed each other through a value chain. Expansion asks who supplies these companies and who supplies those suppliers. Example: AI Infrastructure (chips → memory → networking → power).",
+  },
+  {
+    value: "sector_comparable",
+    label: "Sector comparable",
+    description:
+      "Members share a customer or end market rather than supplying each other. Expansion asks who else competes for the same spend. Example: consumer retail (NKE, TGT, ELF).",
+  },
+  {
+    value: "policy_driven",
+    label: "Policy driven",
+    description:
+      "Members benefit or suffer from the same regulatory or government spending change. Expansion asks who else is exposed to that policy. Example: defense, infrastructure spending, tariffs.",
+  },
+  {
+    value: "macro_sensitive",
+    label: "Macro sensitive",
+    description:
+      "Members respond to the same macro variable — rates, oil, the dollar, housing starts. Expansion asks what else moves on that variable.",
+  },
+  {
+    value: "custom",
+    label: "Custom",
+    description: "No structured relationship; a list I maintain by hand. Expansion is manual only.",
+  },
+];
+const DEFAULT_THEME_TYPE = "custom";
+
 export function SwingUniverseView() {
   const [themes, setThemes] = useState<Theme[]>([]);
   const [loading, setLoading] = useState(true);
@@ -179,7 +215,7 @@ function ThemeDialog({
 }) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [themeType, setThemeType] = useState("");
+  const [themeType, setThemeType] = useState(DEFAULT_THEME_TYPE);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -187,9 +223,18 @@ function ThemeDialog({
     if (!open) return;
     setName(theme?.name ?? "");
     setDescription(theme?.description ?? "");
-    setThemeType(theme?.theme_type ?? "");
+    setThemeType(theme?.theme_type ?? DEFAULT_THEME_TYPE);
     setError(null);
   }, [open, theme]);
+
+  // A theme edited outside this dialog (direct SQL, a future migration)
+  // could carry a theme_type not in THEME_TYPES — surface it as its own
+  // option instead of silently swapping it for "custom" on save.
+  const selectOptions =
+    theme?.theme_type && !THEME_TYPES.some((t) => t.value === theme.theme_type)
+      ? [{ value: theme.theme_type, label: `${theme.theme_type} (existing)`, description: "" }, ...THEME_TYPES]
+      : THEME_TYPES;
+  const selectedType = selectOptions.find((t) => t.value === themeType) ?? null;
 
   async function submit() {
     if (name.trim().length === 0) {
@@ -257,13 +302,20 @@ function ThemeDialog({
 
           <label className="grid gap-1 text-sm">
             <span className="text-muted-foreground">Type</span>
-            <input
-              type="text"
+            <select
               value={themeType}
               onChange={(e) => setThemeType(e.target.value)}
               className="rounded border border-border bg-background px-2 py-1.5 text-base"
-              placeholder="supply_chain"
-            />
+            >
+              {selectOptions.map((t) => (
+                <option key={t.value} value={t.value}>
+                  {t.label}
+                </option>
+              ))}
+            </select>
+            {selectedType?.description && (
+              <p className="text-[11px] text-muted-foreground">{selectedType.description}</p>
+            )}
           </label>
         </div>
 
