@@ -327,9 +327,49 @@ export type SwingCandidate = {
   stockReturn60?: number | null;
   spyReturn20?: number | null;
   spyReturn60?: number | null;
+  // ---- Near-miss watch tier only — set iff rsPullbackList === "near_miss".
+  // Null/undefined for every other candidate. See RsPullbackGateStatus. ----
+  nearMissGate?: RsPullbackGateKey | null;
+  nearMissValue?: number | null;
+  nearMissThreshold?: number | null;
+  nearMissGap?: number | null;
+  nearMissValue5SessionsAgo?: number | null;
+  nearMissTrend?: "improving" | "deteriorating" | "flat" | null;
 };
 
-export type RsPullbackList = "ready" | "leading_extended" | "in_zone_lagging";
+// "near_miss" — see computeRsPullbackCandidates/evaluateRsPullback below.
+// Carved from the discard pile only: a symbol only ever gets "near_miss"
+// after already failing to qualify for one of the other three under the
+// unchanged qualification logic, and only when it fails EXACTLY ONE of
+// the four evaluable gates (sma50_rising/adr_floor/rs20/rs60). Never
+// changes what qualifies or which of the other three lists a passing
+// name lands in.
+export type RsPullbackList = "ready" | "leading_extended" | "in_zone_lagging" | "near_miss";
+
+// The near-miss watch tier evaluates four of the five gates a candidate
+// must clear: 50MA-rising, RS20, RS60, ADR% floor. above-200d is
+// deliberately excluded — see pregateRsPullbackSymbols's own comment for
+// why a name failing it can't be near-miss-classified without enriching
+// (bars/sector/earnings fetch) symbols that never reach enrichment today.
+export type RsPullbackGateKey = "sma50_rising" | "rs20" | "rs60" | "adr_floor";
+
+export type RsPullbackGateStatus = {
+  gate: RsPullbackGateKey;
+  pass: boolean;
+  // Current value, in the gate's own units (a rising-% or an RS-point
+  // diff or an ADR%) — same numbers already shown elsewhere on the
+  // candidate (sma50RisingPct/rs20/rs60/adr20Pct), duplicated here so a
+  // near-miss row is self-describing without cross-referencing.
+  value: number;
+  threshold: number;
+  // 0 when passing; distance to the threshold, in the gate's own units,
+  // when failing.
+  gap: number;
+  // Same value, computed 5 sessions ago from the same in-memory bars —
+  // null only when there isn't enough bar history for the trimmed
+  // window (rare: bars length is right at the minimum floor).
+  value5SessionsAgo: number | null;
+};
 
 // ---------- Pass 1 helpers ----------
 
@@ -1081,18 +1121,38 @@ const RS_PULLBACK_MIN_MARKET_CAP = 500_000_000;
 export function pregateRsPullbackSymbols(
   quotes: Map<string, Pass1Quote>,
   thresholds: RsPullbackThresholds = DEFAULT_RS_PULLBACK_THRESHOLDS,
-): string[] {
+): {
+  symbols: string[];
+  // Diagnostic only, NOT a near-miss count: how many symbols cleared the
+  // price/market-cap/MA-availability floors but sit at/below their 200d
+  // MA. above-200d is one of the five gates the near-miss watch tier
+  // names in scope, but it can't be near-miss-classified the way the
+  // other four are — a symbol failing it is dropped here, before any
+  // bars/sector/earnings fetch, so we have no way to know whether it
+  // would ALSO fail 50MA-rising/RS20/RS60/ADR% without enriching a whole
+  // class of symbols that reaches enrichment for no other reason today.
+  // That's exactly the fetch-volume increase the spec says to avoid
+  // ("I would rather have the list without direction of travel than a
+  // slower run") — so this count is surfaced as an honest diagnostic
+  // ("N names sit at/below their 200MA, other gates unverified") rather
+  // than silently answered with a guess or silently expanded fetches.
+  excludedByAbove200d: number;
+} {
   const out: string[] = [];
+  let excludedByAbove200d = 0;
   for (const q of Array.from(quotes.values())) {
     if (q.currentPrice < RS_PULLBACK_MIN_PRICE) continue;
     if (q.marketCap < RS_PULLBACK_MIN_MARKET_CAP) continue;
     if (!(q.ma50 > 0) || !(q.ma200 > 0)) continue;
-    if (q.currentPrice <= q.ma200) continue;
+    if (q.currentPrice <= q.ma200) {
+      excludedByAbove200d += 1;
+      continue;
+    }
     const vsMA50 = (q.currentPrice - q.ma50) / q.ma50;
     if (vsMA50 < -thresholds.ma50BelowTolerancePct / 100) continue;
     out.push(q.symbol);
   }
-  return out;
+  return { symbols: out, excludedByAbove200d };
 }
 
 // ---- Bulk (cache-only, no live calls) pre-filter ----
@@ -1171,24 +1231,46 @@ async function bulkFreshBars(symbols: string[]): Promise<Map<string, DailyBar[]>
 
 export async function applyRsPullbackPrefilter(
   pregatedSymbols: string[],
+  quotes: Map<string, Pass1Quote>,
   thresholds: RsPullbackThresholds = DEFAULT_RS_PULLBACK_THRESHOLDS,
 ): Promise<{
   needsEnrichment: string[];
   excludedBySectorPrefilter: number;
   excludedBySma50RisingPrefilter: number;
+  // Fully-built near-miss candidates for symbols excluded here (cached-
+  // bars 50MA-rising failure) that otherwise pass the other three
+  // evaluable gates — computed entirely from data already in hand
+  // (bulkCachedSectors/bulkFreshBars below, plus one more cache-only SPY
+  // read tacked onto the same batch), zero new fetches. Without this,
+  // the near-miss watch tier would be blind to exactly the failure mode
+  // that motivated it: on a typical run nearly all 50MA-rising failures
+  // are caught here, at the cache-only prefilter stage, not at live
+  // enrichment (see the excludedBySma50RisingPrefilter vs
+  // excludedBySma50RisingEnrichment split in a saved run's diagnostics).
+  prefilterNearMiss: SwingCandidate[];
 }> {
   if (pregatedSymbols.length === 0) {
-    return { needsEnrichment: [], excludedBySectorPrefilter: 0, excludedBySma50RisingPrefilter: 0 };
+    return {
+      needsEnrichment: [],
+      excludedBySectorPrefilter: 0,
+      excludedBySma50RisingPrefilter: 0,
+      prefilterNearMiss: [],
+    };
   }
   const [sectors, freshBars] = await Promise.all([
     bulkCachedSectors(pregatedSymbols),
-    bulkFreshBars(pregatedSymbols),
+    // SPY tacked onto the SAME cache-only chunked query — no new fetch
+    // pattern, just one more symbol in an existing batch — so the
+    // near-miss check below can evaluate RS20/RS60 from cache alone too.
+    bulkFreshBars([...pregatedSymbols, "SPY"]),
   ]);
+  const spyBars = freshBars.get("SPY") ?? [];
 
   const minBarsNeeded = Math.max(thresholds.sma50RisingLookbackSessions + 50, 61);
   let excludedBySectorPrefilter = 0;
   let excludedBySma50RisingPrefilter = 0;
   const needsEnrichment: string[] = [];
+  const prefilterNearMiss: SwingCandidate[] = [];
 
   for (const symbol of pregatedSymbols) {
     const sector = sectors.get(symbol);
@@ -1198,21 +1280,69 @@ export async function applyRsPullbackPrefilter(
     }
     const bars = freshBars.get(symbol);
     if (bars && bars.length >= minBarsNeeded) {
-      const closes = bars.map((b) => b.close);
-      const sma50Now = computeSMA(closes, 50);
-      const sma50Ago = smaAsOfSessionsAgo(closes, 50, thresholds.sma50RisingLookbackSessions);
-      if (sma50Now !== null && sma50Ago !== null && sma50Ago > 0) {
-        const risingPct = ((sma50Now - sma50Ago) / sma50Ago) * 100;
-        if (risingPct < thresholds.sma50RisingMinPct) {
+      const q = quotes.get(symbol);
+      // evaluateRsPullback (and therefore the near-miss check) needs a
+      // live quote for currentPrice and fresh SPY bars for RS — both
+      // essentially always available, but when either is missing this
+      // symbol just falls through to needsEnrichment for a real answer
+      // rather than a degraded guess, same as it did before this feature
+      // existed.
+      const evalResult =
+        q && spyBars.length >= minBarsNeeded
+          ? evaluateRsPullback(bars, spyBars, q.currentPrice, thresholds)
+          : null;
+      if (evalResult) {
+        const sma50RisingGate = evalResult.gates.find((g) => g.gate === "sma50_rising")!;
+        if (!sma50RisingGate.pass) {
           excludedBySma50RisingPrefilter += 1;
+          const failed = evalResult.gates.filter((g) => !g.pass);
+          if (failed.length === 1 && q) {
+            const candidate = buildRsPullbackCandidate({
+              q,
+              bars,
+              sector: sector ?? null,
+              eval: evalResult,
+              list: "near_miss",
+              nearMiss: failed[0],
+              // No live Finnhub call at this cache-only stage — near-miss
+              // rows are track-only (no Enter button), so an unconfirmed
+              // earnings date is an acceptable, honestly-flagged gap
+              // rather than a reason to add a fetch here.
+              nextEarningsDate: null,
+              daysToEarnings: null,
+              dataQualityDegraded: true,
+              dataQualityIssues: ["prefilter_near_miss_no_earnings_check"],
+            });
+            if (candidate) prefilterNearMiss.push(candidate);
+          }
           continue;
+        }
+      } else {
+        // Fallback: same rising-check-only cached-bars math this
+        // function always ran, for the (rare) case a live quote or fresh
+        // SPY bars aren't in hand — unchanged behavior from before this
+        // feature existed, just without a near-miss candidate.
+        const closes = bars.map((b) => b.close);
+        const sma50Now = computeSMA(closes, 50);
+        const sma50Ago = smaAsOfSessionsAgo(closes, 50, thresholds.sma50RisingLookbackSessions);
+        if (sma50Now !== null && sma50Ago !== null && sma50Ago > 0) {
+          const risingPct = ((sma50Now - sma50Ago) / sma50Ago) * 100;
+          if (risingPct < thresholds.sma50RisingMinPct) {
+            excludedBySma50RisingPrefilter += 1;
+            continue;
+          }
         }
       }
     }
     needsEnrichment.push(symbol);
   }
 
-  return { needsEnrichment, excludedBySectorPrefilter, excludedBySma50RisingPrefilter };
+  return {
+    needsEnrichment,
+    excludedBySectorPrefilter,
+    excludedBySma50RisingPrefilter,
+    prefilterNearMiss,
+  };
 }
 
 // Same shape as bulkFreshBars but deliberately ignores DAILY_BARS_STALE_MS
@@ -1385,6 +1515,301 @@ function nSessionReturn(closes: number[], n: number): number | null {
   return ((now - then) / then) * 100;
 }
 
+// How many sessions back the near-miss watch tier looks to judge
+// direction of travel ("50MA rising -4.0% -> -1.2%" reads as approaching).
+// Independent of sma50RisingLookbackSessions (which anchors the rising
+// check itself, not the trend-of-the-check).
+const NEAR_MISS_TREND_SESSIONS_AGO = 5;
+
+export type RsPullbackEvaluation = {
+  sma50Now: number;
+  sma50Ago: number;
+  sma50RisingPct: number;
+  adr20Pct: number;
+  extensionAdrDays: number;
+  sma20: number | null;
+  stockReturn20: number;
+  stockReturn60: number;
+  spyReturn20: number;
+  spyReturn60: number;
+  rs20: number;
+  rs60: number;
+  higherLowVsSpy: boolean | null;
+  // Always exactly 4 entries (sma50_rising, adr_floor, rs20, rs60) —
+  // computed unconditionally, never early-exited, so a caller can count
+  // failures to determine "fails exactly one gate" for near-miss.
+  gates: RsPullbackGateStatus[];
+};
+
+// Everything computeRsPullbackCandidates needs to classify a symbol,
+// computed all at once from bars already resident in memory (no fetch of
+// any kind here — bars/spyBars/currentPrice are all passed in). Returns
+// null only when there isn't enough bar history to evaluate every gate
+// reliably ("insufficient data", not a gate failure — see the caller).
+// Shared between full (live-bars) enrichment and the prefilter's cached-
+// bars near-miss check (see applyRsPullbackPrefilter) so both paths use
+// identical gate math and can never quietly disagree.
+function evaluateRsPullback(
+  bars: DailyBar[],
+  spyBars: DailyBar[],
+  currentPrice: number,
+  thresholds: RsPullbackThresholds,
+): RsPullbackEvaluation | null {
+  const closes = bars.map((b) => b.close);
+  const spyCloses = spyBars.map((b) => b.close);
+  const minBarsNeeded = Math.max(thresholds.sma50RisingLookbackSessions + 50, 61);
+  if (closes.length < minBarsNeeded || spyCloses.length < minBarsNeeded) return null;
+
+  const sma50Now = computeSMA(closes, 50);
+  const sma50Ago = smaAsOfSessionsAgo(closes, 50, thresholds.sma50RisingLookbackSessions);
+  if (sma50Now === null || sma50Ago === null || !(sma50Ago > 0)) return null;
+  const sma50RisingPct = ((sma50Now - sma50Ago) / sma50Ago) * 100;
+
+  const adr20Pct = computeADRPercent(bars, 20);
+  const sma20 = computeSMA(closes, 20);
+  const stockReturn20 = nSessionReturn(closes, 20);
+  const stockReturn60 = nSessionReturn(closes, 60);
+  const spyReturn20 = nSessionReturn(spyCloses, 20);
+  const spyReturn60 = nSessionReturn(spyCloses, 60);
+  if (
+    adr20Pct === null ||
+    stockReturn20 === null ||
+    stockReturn60 === null ||
+    spyReturn20 === null ||
+    spyReturn60 === null
+  ) {
+    return null;
+  }
+  const rs20 = stockReturn20 - spyReturn20;
+  const rs60 = stockReturn60 - spyReturn60;
+  const extensionAdrDays =
+    adr20Pct !== 0 ? (((currentPrice - sma50Now) / sma50Now) * 100) / adr20Pct : 0;
+  const higherLowVsSpy = computeHigherLowVsSpy(bars, spyBars, 30);
+
+  // Direction-of-travel: same formulas, re-run on bars trimmed by
+  // NEAR_MISS_TREND_SESSIONS_AGO — "what would today's numbers have read
+  // 5 sessions ago." Nulls out gracefully (rather than throwing) when a
+  // symbol's bar history sits right at the minimum floor; that's a
+  // per-row degradation, not a reason to fail the whole evaluation.
+  const trimmedCloses = closes.slice(0, closes.length - NEAR_MISS_TREND_SESSIONS_AGO);
+  const trimmedSpyCloses = spyCloses.slice(0, spyCloses.length - NEAR_MISS_TREND_SESSIONS_AGO);
+  const sma50Now5Ago = smaAsOfSessionsAgo(closes, 50, NEAR_MISS_TREND_SESSIONS_AGO);
+  const sma50Ago5Ago = smaAsOfSessionsAgo(
+    closes,
+    50,
+    thresholds.sma50RisingLookbackSessions + NEAR_MISS_TREND_SESSIONS_AGO,
+  );
+  const sma50RisingPct5SessionsAgo =
+    sma50Now5Ago !== null && sma50Ago5Ago !== null && sma50Ago5Ago > 0
+      ? ((sma50Now5Ago - sma50Ago5Ago) / sma50Ago5Ago) * 100
+      : null;
+  const adr20Pct5SessionsAgo =
+    bars.length > NEAR_MISS_TREND_SESSIONS_AGO
+      ? computeADRPercent(bars.slice(0, bars.length - NEAR_MISS_TREND_SESSIONS_AGO), 20)
+      : null;
+  const stockReturn20_5Ago = nSessionReturn(trimmedCloses, 20);
+  const spyReturn20_5Ago = nSessionReturn(trimmedSpyCloses, 20);
+  const rs20_5Ago =
+    stockReturn20_5Ago !== null && spyReturn20_5Ago !== null
+      ? stockReturn20_5Ago - spyReturn20_5Ago
+      : null;
+  const stockReturn60_5Ago = nSessionReturn(trimmedCloses, 60);
+  const spyReturn60_5Ago = nSessionReturn(trimmedSpyCloses, 60);
+  const rs60_5Ago =
+    stockReturn60_5Ago !== null && spyReturn60_5Ago !== null
+      ? stockReturn60_5Ago - spyReturn60_5Ago
+      : null;
+
+  // Every gate here is "higher is closer to passing" (rising% must climb,
+  // ADR% must climb, RS diffs must climb toward/past 0) — gap is always
+  // threshold-minus-value, floored at 0 for a passing gate.
+  const gates: RsPullbackGateStatus[] = [
+    {
+      gate: "sma50_rising",
+      pass: sma50RisingPct >= thresholds.sma50RisingMinPct,
+      value: sma50RisingPct,
+      threshold: thresholds.sma50RisingMinPct,
+      gap: Math.max(0, thresholds.sma50RisingMinPct - sma50RisingPct),
+      value5SessionsAgo: sma50RisingPct5SessionsAgo,
+    },
+    {
+      gate: "adr_floor",
+      pass: adr20Pct >= thresholds.minAdrPct,
+      value: adr20Pct,
+      threshold: thresholds.minAdrPct,
+      gap: Math.max(0, thresholds.minAdrPct - adr20Pct),
+      value5SessionsAgo: adr20Pct5SessionsAgo,
+    },
+    {
+      gate: "rs20",
+      pass: rs20 > 0,
+      value: rs20,
+      threshold: 0,
+      gap: Math.max(0, 0 - rs20),
+      value5SessionsAgo: rs20_5Ago,
+    },
+    {
+      gate: "rs60",
+      pass: rs60 > 0,
+      value: rs60,
+      threshold: 0,
+      gap: Math.max(0, 0 - rs60),
+      value5SessionsAgo: rs60_5Ago,
+    },
+  ];
+
+  return {
+    sma50Now,
+    sma50Ago,
+    sma50RisingPct,
+    adr20Pct,
+    extensionAdrDays,
+    sma20,
+    stockReturn20,
+    stockReturn60,
+    spyReturn20,
+    spyReturn60,
+    rs20,
+    rs60,
+    higherLowVsSpy,
+    gates,
+  };
+}
+
+// "Improving" means moving toward passing — every in-scope gate is
+// higher-is-better (see evaluateRsPullback), so this is just a
+// comparison, not gate-specific logic.
+function rsPullbackGateTrend(
+  gate: RsPullbackGateStatus,
+): "improving" | "deteriorating" | "flat" | null {
+  if (gate.value5SessionsAgo === null) return null;
+  if (gate.value > gate.value5SessionsAgo) return "improving";
+  if (gate.value < gate.value5SessionsAgo) return "deteriorating";
+  return "flat";
+}
+
+// Shared candidate builder — one place that turns (quote + bars + gate
+// evaluation + classification) into the SwingCandidate shape, used by
+// both full enrichment (computeRsPullbackCandidates, live bars) and the
+// prefilter's cached-bars near-miss path (applyRsPullbackPrefilter), so
+// the two can never quietly compute this shape differently. Returns null
+// when the geometry is degenerate (computeStructuralLevels), exactly as
+// each call site handled it inline before this was factored out.
+function buildRsPullbackCandidate(params: {
+  q: Pass1Quote;
+  bars: DailyBar[];
+  sector: string | null;
+  eval: RsPullbackEvaluation;
+  list: RsPullbackList;
+  nearMiss: RsPullbackGateStatus | null;
+  nextEarningsDate: string | null;
+  daysToEarnings: number | null;
+  dataQualityDegraded: boolean;
+  dataQualityIssues: string[];
+}): SwingCandidate | null {
+  const { q, bars, sector, eval: ev, list, nearMiss, nextEarningsDate, daysToEarnings, dataQualityDegraded, dataQualityIssues } = params;
+  const atr14 = computeATR(bars, 14);
+  const structural = computeStructuralLevels(q, atr14);
+  if (!structural) return null;
+
+  const pctFromHigh = (q.currentPrice - q.week52High) / q.week52High;
+  const pctFrom52wLow = (q.currentPrice - q.week52Low) / q.week52Low;
+  const vsMA200 = (q.currentPrice - q.ma200) / q.ma200;
+  const volumeRatio = q.avgVolume10d > 0 ? q.todayVolume / q.avgVolume10d : 0;
+  const vsMA50Bars = (q.currentPrice - ev.sma50Now) / ev.sma50Now;
+
+  return {
+    symbol: q.symbol,
+    companyName: q.companyName,
+    currentPrice: q.currentPrice,
+    priceChange1d: q.priceChange1d,
+    ma50: q.ma50,
+    ma200: q.ma200,
+    week52Low: q.week52Low,
+    week52High: q.week52High,
+    analystTarget: q.analystTarget,
+    numAnalysts: q.numAnalysts,
+    avgVolume10d: q.avgVolume10d,
+    todayVolume: q.todayVolume,
+    marketCap: q.marketCap,
+    shortPercentFloat: q.shortPercentFloat,
+    revenueGrowth: q.revenueGrowth,
+    pctFromHigh,
+    pctFrom52wLow,
+    vsMA50: vsMA50Bars,
+    vsMA200,
+    volumeRatio,
+    rr: structural.rr,
+    entryPrice: structural.entryPrice,
+    targetPrice: structural.targetPrice,
+    stopPrice: structural.stopPrice,
+    nextEarningsDate,
+    daysToEarnings,
+    insiderTransactions: [],
+    insiderSignal: "neutral",
+    executiveBuys: [],
+    insiderBuyDollars: 0,
+    insiderBuyerCount: 0,
+    insiderLastBuyDaysAgo: null,
+    unusualOptionsActivity: false,
+    callVolumeOiRatio: null,
+    optionsSignal: "neutral",
+    topOptionsStrike: null,
+    topOptionsExpiry: null,
+    catalystFound: false,
+    catalystType: "none",
+    catalystDate: null,
+    catalystDescription: null,
+    catalystConfidence: "none",
+    catalystInsiderAngle: null,
+    catalystRawResponse: null,
+    tier1Signals: [],
+    tier2Signals: [],
+    redFlags: [],
+    signalCount: 0,
+    setupScore: 0,
+    setupTabs: ["rs_pullback"],
+    tabScores: {},
+    tabScoreComponents: {},
+    tabNarrative: {},
+    tabStats: null,
+    capitulationStats: null,
+    pullbackStats: null,
+    atr14,
+    adr20Pct: ev.adr20Pct,
+    sector,
+    extensionAdrDays: ev.extensionAdrDays,
+    rs20: ev.rs20,
+    rs60: ev.rs60,
+    higherLowVsSpy: ev.higherLowVsSpy,
+    rsPullbackList: list,
+    nearMissGate: nearMiss?.gate ?? null,
+    nearMissValue: nearMiss?.value ?? null,
+    nearMissThreshold: nearMiss?.threshold ?? null,
+    nearMissGap: nearMiss?.gap ?? null,
+    nearMissValue5SessionsAgo: nearMiss?.value5SessionsAgo ?? null,
+    nearMissTrend: nearMiss ? rsPullbackGateTrend(nearMiss) : null,
+    // Row-detail fields — the underlying values behind extensionAdrDays/
+    // rs20/rs60/the trend gate, so they're checkable rather than
+    // assertions. sma20/sma50AtEntry/sma50TwentySessionsAgo/
+    // sma50RisingPct are all bars-derived (same closes array as
+    // extensionAdrDays — one consistent SMA50 throughout, see above).
+    // No sma200: the 150-day bars window doesn't reach back far enough
+    // for a 200-bar SMA — ma200 (Yahoo's point quote) is the only
+    // 200-day figure available here, already on the candidate.
+    sma20: ev.sma20,
+    sma50AtEntry: ev.sma50Now,
+    sma50TwentySessionsAgo: ev.sma50Ago,
+    sma50RisingPct: ev.sma50RisingPct,
+    stockReturn20: ev.stockReturn20,
+    stockReturn60: ev.stockReturn60,
+    spyReturn20: ev.spyReturn20,
+    spyReturn60: ev.spyReturn60,
+    dataQualityDegraded,
+    dataQualityIssues,
+  };
+}
+
 export async function computeRsPullbackCandidates(
   symbols: string[],
   pass1Data: Map<string, Pass1Quote>,
@@ -1420,13 +1845,9 @@ export async function computeRsPullbackCandidates(
     };
   }
 
+  // Minimum-history math now lives inside evaluateRsPullback, shared with
+  // the prefilter's near-miss path — see its own comment.
   const spyBars = await getOrFetchDailyBars("SPY", { forceFresh }).catch(() => [] as DailyBar[]);
-  const spyCloses = spyBars.map((b) => b.close);
-
-  // Minimum history: 50-bar SMA anchored `sma50RisingLookbackSessions`
-  // sessions back (default 70 bars) and a 60-session return (61 bars) —
-  // whichever is larger.
-  const minBarsNeeded = Math.max(thresholds.sma50RisingLookbackSessions + 50, 61);
 
   const candidates: SwingCandidate[] = [];
   let excludedBySma50Rising = 0;
@@ -1479,175 +1900,87 @@ export async function computeRsPullbackCandidates(
 
     if (sector !== null && RS_PULLBACK_DISQUALIFIED_SECTORS.has(sector)) return null;
 
-    const closes = bars.map((b) => b.close);
-    if (closes.length < minBarsNeeded || spyCloses.length < minBarsNeeded) {
+    // Compute-all-then-classify: every gate is evaluated regardless of
+    // whether an earlier one failed (evaluateRsPullback never early-
+    // exits) — required so a symbol failing exactly one gate can be
+    // told apart from one failing two-plus, for the near-miss watch tier
+    // below. bars are already fetched above either way, so this costs
+    // nothing extra — same insight the original early-exit chain already
+    // relied on for the fields it computed downstream of the first check.
+    const evalResult = evaluateRsPullback(bars, spyBars, q.currentPrice, thresholds);
+    if (evalResult === null) {
       insufficientData += 1;
       return null;
     }
-
-    const sma50Now = computeSMA(closes, 50);
-    const sma50Ago = smaAsOfSessionsAgo(
-      closes,
-      50,
-      thresholds.sma50RisingLookbackSessions,
-    );
-    if (sma50Now === null || sma50Ago === null || !(sma50Ago > 0)) {
-      insufficientData += 1;
-      return null;
-    }
-
-    const sma50RisingPct = ((sma50Now - sma50Ago) / sma50Ago) * 100;
-    if (sma50RisingPct < thresholds.sma50RisingMinPct) {
-      excludedBySma50Rising += 1;
-      return null;
-    }
+    const { sma50Now, extensionAdrDays, gates } = evalResult;
+    const sma50RisingGate = gates.find((g) => g.gate === "sma50_rising")!;
+    const adrGate = gates.find((g) => g.gate === "adr_floor")!;
+    const rs20Gate = gates.find((g) => g.gate === "rs20")!;
+    const rs60Gate = gates.find((g) => g.gate === "rs60")!;
+    // Diagnostic meaning unchanged from the old early-exit counter: how
+    // many enrichment-reaching candidates failed 50MA-rising, regardless
+    // of whether they end up near-miss or fully excluded below.
+    if (!sma50RisingGate.pass) excludedBySma50Rising += 1;
 
     // Re-derive price-vs-50MA from the SAME bars-based SMA50 used for the
-    // rising check and the extension calc below, rather than Yahoo's
+    // rising check and the extension calc above, rather than Yahoo's
     // separately-sourced point quote — one consistent SMA50 throughout,
-    // not two numbers that could quietly disagree.
+    // not two numbers that could quietly disagree. Not one of the five
+    // near-miss gates (a liquidity/proximity floor, not part of the
+    // trend+RS classification) — still a hard, unconditional exclusion,
+    // exactly as before this change.
     const vsMA50Bars = (q.currentPrice - sma50Now) / sma50Now;
     if (vsMA50Bars < -thresholds.ma50BelowTolerancePct / 100) return null;
 
-    const adr20Pct = computeADRPercent(bars, 20);
-    if (adr20Pct === null || adr20Pct < thresholds.minAdrPct) return null;
-
-    const extensionAdrDays = (((q.currentPrice - sma50Now) / sma50Now) * 100) / adr20Pct;
-    const sma20 = computeSMA(closes, 20);
-
-    const stockReturn20 = nSessionReturn(closes, 20);
-    const stockReturn60 = nSessionReturn(closes, 60);
-    const spyReturn20 = nSessionReturn(spyCloses, 20);
-    const spyReturn60 = nSessionReturn(spyCloses, 60);
-    if (
-      stockReturn20 === null ||
-      stockReturn60 === null ||
-      spyReturn20 === null ||
-      spyReturn60 === null
-    ) {
-      return null;
-    }
-    const rs20 = stockReturn20 - spyReturn20;
-    const rs60 = stockReturn60 - spyReturn60;
-    const higherLowVsSpy = computeHigherLowVsSpy(bars, spyBars, 30);
-
-    const passesRs = rs20 > 0 && rs60 > 0;
-    const inEntryZone = Math.abs(extensionAdrDays) <= thresholds.entryZoneAdrDays;
-
-    // Leading-extended is "passes RS and isn't in the entry zone" — full
-    // stop, not a second threshold above the entry zone. An earlier
-    // version gated this on extensionAdrDays > extendedAdrDaysThreshold
-    // (2.0), which left a dead band between the entry zone (1.0) and
-    // that threshold: a candidate passing RS with, say, ext=1.5 matched
-    // neither "in entry zone" nor "past 2.0" and was evaluated, then
-    // silently dropped from all three lists. Confirmed live: 11 of 68
-    // fully-evaluated candidates fell in that band on 2026-08-10. Every
-    // passesRs candidate now lands in exactly one of Ready/
-    // Leading-extended; only "fails RS and not in the entry zone" is
-    // still unshown, which is intentional — In-zone/lagging is
-    // explicitly the entry-zone control group, not a catch-all.
+    // Qualifying-list logic is IDENTICAL to the original early-exit
+    // version — passesRs/inEntryZone/the three-way list assignment are
+    // unchanged — just made explicit now that sma50_rising/adr_floor no
+    // longer early-return: a candidate only ever lands in a real list
+    // after passing BOTH gates, exactly as it always structurally did.
     let list: RsPullbackList | null = null;
-    if (passesRs && inEntryZone) list = "ready";
-    else if (passesRs && !inEntryZone) list = "leading_extended";
-    else if (inEntryZone && !passesRs) list = "in_zone_lagging";
-    if (list === null) return null;
+    if (sma50RisingGate.pass && adrGate.pass) {
+      const passesRs = rs20Gate.pass && rs60Gate.pass;
+      const inEntryZone = Math.abs(extensionAdrDays) <= thresholds.entryZoneAdrDays;
+      // Leading-extended is "passes RS and isn't in the entry zone" —
+      // full stop, not a second threshold above the entry zone. See the
+      // 2026-08-10 dead-band fix note in git history for why this is a
+      // 3-way partition rather than a second numeric threshold.
+      if (passesRs && inEntryZone) list = "ready";
+      else if (passesRs && !inEntryZone) list = "leading_extended";
+      else if (inEntryZone && !passesRs) list = "in_zone_lagging";
+    }
 
-    const atr14 = computeATR(bars, 14);
-    const structural = computeStructuralLevels(q, atr14);
-    if (!structural) return null;
+    // Near-miss watch tier — carved from the discard pile only (list is
+    // still null here), and only when EXACTLY one of the four gates
+    // failed. Two or more failures is "a different stock," per spec:
+    // fully excluded, same outcome as before this feature existed.
+    let nearMiss: RsPullbackGateStatus | null = null;
+    if (list === null) {
+      const failed = gates.filter((g) => !g.pass);
+      if (failed.length === 1) {
+        nearMiss = failed[0];
+      } else {
+        return null;
+      }
+    }
 
-    const pctFromHigh = (q.currentPrice - q.week52High) / q.week52High;
-    const pctFrom52wLow = (q.currentPrice - q.week52Low) / q.week52Low;
-    const vsMA200 = (q.currentPrice - q.ma200) / q.ma200;
-    const volumeRatio = q.avgVolume10d > 0 ? q.todayVolume / q.avgVolume10d : 0;
-
-    candidates.push({
-      symbol: q.symbol,
-      companyName: q.companyName,
-      currentPrice: q.currentPrice,
-      priceChange1d: q.priceChange1d,
-      ma50: q.ma50,
-      ma200: q.ma200,
-      week52Low: q.week52Low,
-      week52High: q.week52High,
-      analystTarget: q.analystTarget,
-      numAnalysts: q.numAnalysts,
-      avgVolume10d: q.avgVolume10d,
-      todayVolume: q.todayVolume,
-      marketCap: q.marketCap,
-      shortPercentFloat: q.shortPercentFloat,
-      revenueGrowth: q.revenueGrowth,
-      pctFromHigh,
-      pctFrom52wLow,
-      vsMA50: vsMA50Bars,
-      vsMA200,
-      volumeRatio,
-      rr: structural.rr,
-      entryPrice: structural.entryPrice,
-      targetPrice: structural.targetPrice,
-      stopPrice: structural.stopPrice,
+    const candidate = buildRsPullbackCandidate({
+      q,
+      bars,
+      sector,
+      eval: evalResult,
+      list: list ?? "near_miss",
+      nearMiss,
       nextEarningsDate: nextEarn?.date ?? null,
       daysToEarnings: daysToEarn,
-      insiderTransactions: [],
-      insiderSignal: "neutral",
-      executiveBuys: [],
-      insiderBuyDollars: 0,
-      insiderBuyerCount: 0,
-      insiderLastBuyDaysAgo: null,
-      unusualOptionsActivity: false,
-      callVolumeOiRatio: null,
-      optionsSignal: "neutral",
-      topOptionsStrike: null,
-      topOptionsExpiry: null,
-      catalystFound: false,
-      catalystType: "none",
-      catalystDate: null,
-      catalystDescription: null,
-      catalystConfidence: "none",
-      catalystInsiderAngle: null,
-      catalystRawResponse: null,
-      tier1Signals: [],
-      tier2Signals: [],
-      redFlags: [],
-      signalCount: 0,
-      setupScore: 0,
-      setupTabs: ["rs_pullback"],
-      tabScores: {},
-      tabScoreComponents: {},
-      tabNarrative: {},
-      tabStats: null,
-      capitulationStats: null,
-      pullbackStats: null,
-      atr14,
-      adr20Pct,
-      sector,
-      extensionAdrDays,
-      rs20,
-      rs60,
-      higherLowVsSpy,
-      rsPullbackList: list,
-      // Row-detail fields — the underlying values behind extensionAdrDays/
-      // rs20/rs60/the trend gate, so they're checkable rather than
-      // assertions. sma20/sma50AtEntry/sma50TwentySessionsAgo/
-      // sma50RisingPct are all bars-derived (same closes array as
-      // extensionAdrDays — one consistent SMA50 throughout, see above).
-      // No sma200: the 150-day bars window doesn't reach back far enough
-      // for a 200-bar SMA — ma200 (Yahoo's point quote) is the only
-      // 200-day figure available here, already on the candidate.
-      sma20,
-      sma50AtEntry: sma50Now,
-      sma50TwentySessionsAgo: sma50Ago,
-      sma50RisingPct,
-      stockReturn20,
-      stockReturn60,
-      spyReturn20,
-      spyReturn60,
       dataQualityDegraded: sectorFailed || earningsFailed,
       dataQualityIssues: [
         ...(sectorFailed ? ["sector_check_failed"] : []),
         ...(earningsFailed ? ["earnings_check_failed"] : []),
       ],
     });
+    if (!candidate) return null;
+    candidates.push(candidate);
     if (sectorFailed || earningsFailed) degradedCount += 1;
     return null;
   });
@@ -1815,6 +2148,14 @@ export async function pass1Filter(
     needsEnrichment: string[];
     excludedBySectorPrefilter: number;
     excludedBySma50RisingPrefilter: number;
+    // Diagnostic-only — see pregateRsPullbackSymbols for why above-200d
+    // can't be near-miss-classified the way the other four gates are.
+    excludedByAbove200d: number;
+    // Fully-built near-miss candidates found at the cache-only prefilter
+    // stage (see applyRsPullbackPrefilter) — merged by the client into
+    // the same candidates array the enrichment chunks return, since both
+    // produce identically-shaped SwingCandidate rows.
+    prefilterNearMiss: SwingCandidate[];
   };
 }> {
   const routeStarted = Date.now();
@@ -1917,16 +2258,20 @@ export async function pass1Filter(
   // client that doesn't know about this tab still gets correct survivor
   // data for free.
   const rsPullbackThresholds = opts.rsPullbackThresholds ?? DEFAULT_RS_PULLBACK_THRESHOLDS;
-  const rsPullbackPregated = pregateRsPullbackSymbols(quotes, rsPullbackThresholds);
+  const rsPullbackPregate = pregateRsPullbackSymbols(quotes, rsPullbackThresholds);
+  const rsPullbackPregated = rsPullbackPregate.symbols;
 
   // Cheap, cache-only narrowing (sector + cached-bars 50MA-rising) — runs
   // once here so the client knows exactly which (much smaller) set needs
   // real per-symbol enrichment, and can chunk that set into sequential
   // calls that each safely fit under the 60s ceiling. See
   // applyRsPullbackPrefilter's own comment for why this can only ever
-  // narrow, never wrongly include/exclude beyond what cached data proves.
+  // narrow, never wrongly include/exclude beyond what cached data proves
+  // — except for near-miss rows, which it now also builds directly from
+  // that same cached data (see its own comment).
   const rsPullbackPrefilter = await applyRsPullbackPrefilter(
     rsPullbackPregated,
+    quotes,
     rsPullbackThresholds,
   );
 
@@ -1962,6 +2307,8 @@ export async function pass1Filter(
       needsEnrichment: rsPullbackPrefilter.needsEnrichment,
       excludedBySectorPrefilter: rsPullbackPrefilter.excludedBySectorPrefilter,
       excludedBySma50RisingPrefilter: rsPullbackPrefilter.excludedBySma50RisingPrefilter,
+      excludedByAbove200d: rsPullbackPregate.excludedByAbove200d,
+      prefilterNearMiss: rsPullbackPrefilter.prefilterNearMiss,
     },
   };
 }
@@ -3177,6 +3524,8 @@ export type Pass1Wire = {
     needsEnrichment: string[];
     excludedBySectorPrefilter: number;
     excludedBySma50RisingPrefilter: number;
+    excludedByAbove200d: number;
+    prefilterNearMiss: SwingCandidate[];
   };
 };
 

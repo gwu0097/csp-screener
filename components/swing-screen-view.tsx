@@ -169,7 +169,7 @@ type SwingCandidate = {
   rs20?: number | null;
   rs60?: number | null;
   higherLowVsSpy?: boolean | null;
-  rsPullbackList?: "ready" | "leading_extended" | "in_zone_lagging" | null;
+  rsPullbackList?: "ready" | "leading_extended" | "in_zone_lagging" | "near_miss" | null;
   // True if this candidate's sector/earnings check failed (rate limit,
   // API error) rather than returning a real answer — fail-open still
   // includes it, but it hasn't actually been confirmed clean.
@@ -186,6 +186,14 @@ type SwingCandidate = {
   stockReturn60?: number | null;
   spyReturn20?: number | null;
   spyReturn60?: number | null;
+  // ---- Near-miss watch tier only — set iff rsPullbackList === "near_miss".
+  // See lib/swing-screener.ts RsPullbackGateStatus. ----
+  nearMissGate?: "sma50_rising" | "rs20" | "rs60" | "adr_floor" | null;
+  nearMissValue?: number | null;
+  nearMissThreshold?: number | null;
+  nearMissGap?: number | null;
+  nearMissValue5SessionsAgo?: number | null;
+  nearMissTrend?: "improving" | "deteriorating" | "flat" | null;
 };
 
 // Mirror of lib/swing-screener.ts ScoreComponent — the score IS the sum
@@ -347,6 +355,13 @@ type RsPullbackRunDiagnostics = {
   excludedBySma50RisingEnrichment: number;
   insufficientData: number;
   degradedCount: number;
+  // Diagnostic only — names dropped below their 200MA before any bars
+  // fetch. Not near-miss-classified (see lib/swing-screener.ts
+  // pregateRsPullbackSymbols): we don't know whether these would also
+  // pass the other four gates without enriching a class of symbols that
+  // never reaches enrichment today, which the near-miss spec explicitly
+  // says to avoid rather than slow the run down.
+  excludedByAbove200d: number;
 };
 
 // Column keys are dynamic per tab (see TAB_COLUMNS) plus a fixed set of
@@ -942,6 +957,8 @@ type Pass1Wire = {
     needsEnrichment: string[];
     excludedBySectorPrefilter: number;
     excludedBySma50RisingPrefilter: number;
+    excludedByAbove200d: number;
+    prefilterNearMiss: SwingCandidate[];
   };
 };
 
@@ -1127,6 +1144,7 @@ export function SwingScreenView() {
     excludedBySma50RisingEnrichment: number;
     insufficientData: number;
     degradedCount: number;
+    excludedByAbove200d: number;
     chunksDone: number;
     chunksTotal: number;
   } | null>(null);
@@ -1405,6 +1423,7 @@ export function SwingScreenView() {
           excludedBySma50RisingEnrichment: 0,
           insufficientData: 0,
           degradedCount: 0,
+          excludedByAbove200d: p1.rsPullback?.excludedByAbove200d ?? 0,
           chunksDone: 0,
           chunksTotal: chunksTotalEstimate,
         });
@@ -1453,6 +1472,7 @@ export function SwingScreenView() {
             excludedBySma50RisingEnrichment,
             insufficientData,
             degradedCount,
+            excludedByAbove200d: p1.rsPullback?.excludedByAbove200d ?? 0,
             chunksDone,
             chunksTotal: chunksTotalEstimate,
           });
@@ -1464,7 +1484,14 @@ export function SwingScreenView() {
               "RS Pullback enrichment failed partway through — its lists may be incomplete for this run. The other four tabs are unaffected.",
           );
         }
-        rsPullbackCandidates = freshRsPullbackCandidates.map(normalizeCandidate);
+        // Prefilter-tier near-miss candidates (see pass1Filter's
+        // rsPullback.prefilterNearMiss) are already fully built — computed
+        // synchronously, cache-only, during pass 1 — so they're folded in
+        // directly rather than routed through another enrichment chunk.
+        rsPullbackCandidates = [
+          ...(p1.rsPullback?.prefilterNearMiss ?? []),
+          ...freshRsPullbackCandidates,
+        ].map(normalizeCandidate);
         rsPullbackDiagnosticsForSave = {
           pregatedCount: p1.rsPullback?.pregatedCount ?? 0,
           needsEnrichmentCount: needsEnrichment.length,
@@ -1473,6 +1500,7 @@ export function SwingScreenView() {
           excludedBySma50RisingEnrichment,
           insufficientData,
           degradedCount,
+          excludedByAbove200d: p1.rsPullback?.excludedByAbove200d ?? 0,
         };
       }
 
@@ -1592,7 +1620,13 @@ export function SwingScreenView() {
       rs_pullback: 0,
     };
     for (const c of data?.candidates ?? []) {
-      for (const t of candidateTabs(c)) counts[t] += 1;
+      for (const t of candidateTabs(c)) {
+        // Near-miss watch rows are track-only, not qualifying — excluded
+        // from the tab badge so it keeps reading as a qualifying count,
+        // not a scope/gating change (near-miss is purely additive).
+        if (t === "rs_pullback" && c.rsPullbackList === "near_miss") continue;
+        counts[t] += 1;
+      }
     }
     return counts;
   }, [data]);
@@ -1634,7 +1668,10 @@ export function SwingScreenView() {
       .filter((c) => c.rsPullbackList === "leading_extended")
       .sort((a, b) => (a.extensionAdrDays ?? Infinity) - (b.extensionAdrDays ?? Infinity));
     const inZoneLagging = all.filter((c) => c.rsPullbackList === "in_zone_lagging");
-    return { ready, leadingExtended, inZoneLagging };
+    const nearMiss = all
+      .filter((c) => c.rsPullbackList === "near_miss")
+      .sort((a, b) => (a.nearMissGap ?? Infinity) - (b.nearMissGap ?? Infinity));
+    return { ready, leadingExtended, inZoneLagging, nearMiss };
   }, [rsPullbackHistoryView, data]);
 
   function handleHeaderClick(key: SortKey) {
@@ -2544,6 +2581,7 @@ function RsPullbackTabContent({
     ready: SwingCandidate[];
     leadingExtended: SwingCandidate[];
     inZoneLagging: SwingCandidate[];
+    nearMiss: SwingCandidate[];
   };
   diagnostics: {
     pregatedCount: number;
@@ -2553,6 +2591,7 @@ function RsPullbackTabContent({
     excludedBySma50RisingEnrichment: number;
     insufficientData: number;
     degradedCount: number;
+    excludedByAbove200d: number;
     chunksDone: number;
     chunksTotal: number;
   } | null;
@@ -2595,6 +2634,12 @@ function RsPullbackTabContent({
                 <span className="text-amber-300">
                   · {diagnostics.degradedCount} enriched with incomplete data (sector/earnings check
                   failed)
+                </span>
+              )}
+              {diagnostics.excludedByAbove200d > 0 && (
+                <span title="Dropped before any bars fetch — can't confirm these would also pass 50MA-rising/RS20/RS60/ADR% without enriching a class of symbols that never reaches enrichment today, so they aren't near-miss rows.">
+                  · {diagnostics.excludedByAbove200d} more sit at/below their 200MA (other gates
+                  unverified — not shown in Watch, near miss)
                 </span>
               )}
             </>
@@ -2655,6 +2700,13 @@ function RsPullbackTabContent({
         candidates={lists.inZoneLagging}
         emptyText="Nothing in the entry zone is currently lagging SPY."
         onEnterTrade={onEnterTrade}
+        onTrack={onTrack}
+        trackedSymbols={trackedSymbols}
+        trackingSymbol={trackingSymbol}
+        colorBands={colorBands}
+      />
+      <RsPullbackNearMissSection
+        candidates={lists.nearMiss}
         onTrack={onTrack}
         trackedSymbols={trackedSymbols}
         trackingSymbol={trackingSymbol}
@@ -2877,22 +2929,13 @@ function GateMark({ pass, label }: { pass: boolean; label: string }) {
   );
 }
 
-function RsPullbackRow({
-  candidate: c,
-  onEnterTrade,
-  onTrack,
-  tracked,
-  tracking,
-  colorBands,
-}: {
-  candidate: SwingCandidate;
-  onEnterTrade: () => void;
-  onTrack: () => void;
-  tracked: boolean;
-  tracking: boolean;
-  colorBands: RsPullbackColorBands;
-}) {
-  const [expanded, setExpanded] = useState(false);
+// Shared by RsPullbackRow and RsPullbackNearMissRow — same chart-fetch
+// behavior for both, so a near-miss row's expanded panel is identical to
+// a qualifying row's, not a lookalike reimplementation.
+function useRsPullbackChart(
+  symbol: string,
+  expanded: boolean,
+): { chartData: ChartPoint[] | null; chartLoading: boolean; chartError: string | null } {
   const [chartData, setChartData] = useState<ChartPoint[] | null>(null);
   const [chartLoading, setChartLoading] = useState(false);
   const [chartError, setChartError] = useState<string | null>(null);
@@ -2900,15 +2943,15 @@ function RsPullbackRow({
 
   useEffect(() => {
     if (!expanded) return;
-    if (fetchedSymbolRef.current === c.symbol) return;
-    fetchedSymbolRef.current = c.symbol;
+    if (fetchedSymbolRef.current === symbol) return;
+    fetchedSymbolRef.current = symbol;
     let cancelled = false;
     setChartLoading(true);
     setChartError(null);
     setChartData(null);
     (async () => {
       try {
-        const res = await fetch(`/api/swings/screen/chart?symbol=${encodeURIComponent(c.symbol)}`, {
+        const res = await fetch(`/api/swings/screen/chart?symbol=${encodeURIComponent(symbol)}`, {
           cache: "no-store",
         });
         const json = (await res.json().catch(() => ({}))) as { data?: ChartPoint[]; error?: string };
@@ -2925,7 +2968,28 @@ function RsPullbackRow({
     return () => {
       cancelled = true;
     };
-  }, [expanded, c.symbol]);
+  }, [expanded, symbol]);
+
+  return { chartData, chartLoading, chartError };
+}
+
+function RsPullbackRow({
+  candidate: c,
+  onEnterTrade,
+  onTrack,
+  tracked,
+  tracking,
+  colorBands,
+}: {
+  candidate: SwingCandidate;
+  onEnterTrade: () => void;
+  onTrack: () => void;
+  tracked: boolean;
+  tracking: boolean;
+  colorBands: RsPullbackColorBands;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const { chartData, chartLoading, chartError } = useRsPullbackChart(c.symbol, expanded);
 
   // rr.text stays from fmtRr (just formatting, "X.X:1") — the color
   // comes from rrBandCls/colorBands instead of fmtRr's own 3-tier cls,
@@ -2935,9 +2999,6 @@ function RsPullbackRow({
   const extCls = extensionBandCls(c.extensionAdrDays, colorBands);
   const rs20Pass = (c.rs20 ?? 0) > 0;
   const rs60Pass = (c.rs60 ?? 0) > 0;
-  const riskPerShare = c.entryPrice - c.stopPrice;
-  const rewardPerShare = c.targetPrice - c.entryPrice;
-  const atrMultiple = c.atr14 && c.atr14 > 0 ? riskPerShare / c.atr14 : null;
 
   return (
     <>
@@ -3012,189 +3073,440 @@ function RsPullbackRow({
         </td>
       </tr>
       {expanded && (
-        <tr className="border-b border-border/40 bg-background/40 last:border-0">
-          <td colSpan={14} className="px-3 py-3">
-            <div className="grid gap-4 lg:grid-cols-[1fr_260px]">
-              <div className="space-y-3">
-                <div>
-                  <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                    Trend (underlying values behind the gates)
-                  </div>
-                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                    <DetailStat
-                      label="SMA20 (bars)"
-                      value={fmtMoney(c.sma20 ?? null)}
-                      helper="Short-term trend reference only — not part of any gate here."
-                    />
-                    <DetailStat
-                      label="SMA50 (bars, used in calc)"
-                      value={fmtMoney(c.sma50AtEntry ?? null)}
-                      sub="Not the same as ma50 below — this is the number extensionAdrDays and the rising check both use."
-                      helper="The line this setup pulls back to. Extension and the rising check are both measured off this number."
-                    />
-                    <DetailStat
-                      label="SMA200 (Yahoo quote)"
-                      value={fmtMoney(c.ma200)}
-                      sub="Bars window doesn't reach 200 sessions back."
-                      helper="Long-term trend context only — not part of any RS Pullback gate."
-                    />
-                    <DetailStat
-                      label="ATR14 (bars)"
-                      value={fmtMoney(c.atr14 ?? null)}
-                      helper="Average daily dollar range — sizes the stop wide enough for this stock's normal noise instead of a flat percentage."
-                    />
-                    <DetailStat
-                      label="Extension (ADR-days)"
-                      value={fmtSigned(c.extensionAdrDays, 2)}
-                      valueCls={extCls}
-                      sub={extensionBandCaption(colorBands)}
-                      helper="How far above the 50-day in units of this stock's own daily range. Buying a pullback means buying near the average, not far above it — and below the floor there's no room left for a stop above the trend line."
-                    />
-                  </div>
-                </div>
-                <div>
-                  <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                    50MA slope (20-session rising check)
-                  </div>
-                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-                    <DetailStat
-                      label="SMA50, 20 sessions ago"
-                      value={fmtMoney(c.sma50TwentySessionsAgo ?? null)}
-                      helper="The baseline the rising check compares against."
-                    />
-                    <DetailStat
-                      label="SMA50, today"
-                      value={fmtMoney(c.sma50AtEntry ?? null)}
-                      helper="Compared to 20 sessions ago to confirm the average is actually climbing."
-                    />
-                    <DetailStat
-                      label={
-                        <span className="inline-flex items-center">
-                          Rising %
-                          <GateMark pass label="50MA rising" />
-                        </span>
-                      }
-                      value={fmtSigned(c.sma50RisingPct, 2) + "%"}
-                      sub={
-                        c.sma50AtEntry != null && c.sma50TwentySessionsAgo != null
-                          ? `(${c.sma50AtEntry.toFixed(2)} − ${c.sma50TwentySessionsAgo.toFixed(2)}) / ${c.sma50TwentySessionsAgo.toFixed(2)} × 100`
-                          : undefined
-                      }
-                      helper="The average itself must be rising, not just price above it. A bounce inside a downtrend has price above a falling 50-day. Hard gate — every candidate here already cleared it, so this isn't colored."
-                    />
-                  </div>
-                </div>
-                <div>
-                  <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                    Relative strength (raw returns behind RS20 / RS60)
-                  </div>
-                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                    <DetailStat
-                      label={`${c.symbol} 20d return`}
-                      value={fmtSigned(c.stockReturn20, 2) + "%"}
-                      helper="This stock's own 20-session return — only meaningful compared to SPY's below."
-                    />
-                    <DetailStat
-                      label="SPY 20d return"
-                      value={fmtSigned(c.spyReturn20, 2) + "%"}
-                      helper="The benchmark this stock has to beat to count as relative strength."
-                    />
-                    <DetailStat
-                      label={
-                        <span className="inline-flex items-center">
-                          RS20 = diff
-                          <GateMark pass={rs20Pass} label="RS20 (beat SPY, 20 sessions)" />
-                        </span>
-                      }
-                      value={fmtSigned(c.rs20, 2)}
-                      sub={
-                        c.stockReturn20 != null && c.spyReturn20 != null
-                          ? `${c.stockReturn20.toFixed(2)}% − ${c.spyReturn20.toFixed(2)}%`
-                          : undefined
-                      }
-                      helper="Beating SPY over both windows means leadership that has persisted, not one hot month. Hard gate — not colored; the mark shows whether this window passed."
-                    />
-                    <DetailStat
-                      label="Higher low vs SPY (30d)"
-                      value={c.higherLowVsSpy === null || c.higherLowVsSpy === undefined ? "—" : c.higherLowVsSpy ? "Yes" : "No"}
-                      helper="On days SPY fell, did this stock's pullback lows keep rising? Holding up on down days is harder to fake than outperforming on up days — shown for context, it never gates list membership."
-                    />
-                    <DetailStat
-                      label={`${c.symbol} 60d return`}
-                      value={fmtSigned(c.stockReturn60, 2) + "%"}
-                      helper="This stock's own 60-session return — the longer window RS60 is built from."
-                    />
-                    <DetailStat
-                      label="SPY 60d return"
-                      value={fmtSigned(c.spyReturn60, 2) + "%"}
-                      helper="The benchmark for the 60-session window."
-                    />
-                    <DetailStat
-                      label={
-                        <span className="inline-flex items-center">
-                          RS60 = diff
-                          <GateMark pass={rs60Pass} label="RS60 (beat SPY, 60 sessions)" />
-                        </span>
-                      }
-                      value={fmtSigned(c.rs60, 2)}
-                      sub={
-                        c.stockReturn60 != null && c.spyReturn60 != null
-                          ? `${c.stockReturn60.toFixed(2)}% − ${c.spyReturn60.toFixed(2)}%`
-                          : undefined
-                      }
-                      helper="Beating SPY over the quarter too — paired with RS20, confirms the outperformance isn't a one-month blip. Hard gate — not colored."
-                    />
-                  </div>
-                </div>
-                <div>
-                  <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                    Trade levels
-                  </div>
-                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                    <DetailStat
-                      label="Entry"
-                      value={fmtMoney(c.entryPrice)}
-                      helper="Where the order would go in — today's reference price for the plan below."
-                    />
-                    <DetailStat
-                      label="Target"
-                      value={fmtMoney(c.targetPrice)}
-                      sub={`reward ${fmtMoney(rewardPerShare)}/sh`}
-                      helper="Where the trade closes for a win — defines the reward half of R:R."
-                    />
-                    <DetailStat
-                      label="Stop"
-                      value={fmtMoney(c.stopPrice)}
-                      sub={`risk ${fmtMoney(riskPerShare)}/sh${atrMultiple !== null ? ` (${atrMultiple.toFixed(2)}× ATR14)` : ""}`}
-                      helper="Where the trade closes for a loss — defines the risk half of R:R, and the level that failing means the pullback thesis was wrong."
-                    />
-                    <DetailStat
-                      label="R:R"
-                      value={rr.text}
-                      valueCls={rrCls}
-                      sub={rrBandCaption(colorBands)}
-                      helper="Reward divided by risk. Below 1:1 you are risking more than the trade can pay."
-                    />
-                    <DetailStat
-                      label="Earnings"
-                      value={c.nextEarningsDate ?? "unknown"}
-                      sub={c.daysToEarnings !== null ? `${c.daysToEarnings}d away` : undefined}
-                      helper="An earnings date inside the hold period adds event risk this setup isn't designed to price in."
-                    />
-                  </div>
-                </div>
-              </div>
-              <div>
-                <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                  6-month chart
-                </div>
-                <PriceChart candidate={c} data={chartData} loading={chartLoading} error={chartError} />
-              </div>
-            </div>
-          </td>
-        </tr>
+        <RsPullbackExpandedPanel
+          c={c}
+          colorBands={colorBands}
+          chartData={chartData}
+          chartLoading={chartLoading}
+          chartError={chartError}
+          colSpan={14}
+        />
       )}
     </>
+  );
+}
+
+// Shared by RsPullbackRow and RsPullbackNearMissRow — literally the same
+// component, not a lookalike, so a near-miss row's expanded detail is
+// identical to a qualifying row's, per spec ("the expanded panel and
+// helper text should render the same as elsewhere"). colSpan differs
+// between the two callers' column counts.
+function RsPullbackExpandedPanel({
+  c,
+  colorBands,
+  chartData,
+  chartLoading,
+  chartError,
+  colSpan,
+}: {
+  c: SwingCandidate;
+  colorBands: RsPullbackColorBands;
+  chartData: ChartPoint[] | null;
+  chartLoading: boolean;
+  chartError: string | null;
+  colSpan: number;
+}) {
+  const rr = fmtRr(c.rr);
+  const rrCls = rrBandCls(c.rr, colorBands);
+  const extCls = extensionBandCls(c.extensionAdrDays, colorBands);
+  const rs20Pass = (c.rs20 ?? 0) > 0;
+  const rs60Pass = (c.rs60 ?? 0) > 0;
+  // Was hardcoded true — valid only while every row reaching this panel
+  // had already cleared 50MA-rising as a universal pregate. A near-miss
+  // row can fail exactly this gate, so it's derived instead: true unless
+  // THIS row is the near-miss row failing THIS gate.
+  const sma50RisingPass = c.rsPullbackList !== "near_miss" || c.nearMissGate !== "sma50_rising";
+  const riskPerShare = c.entryPrice - c.stopPrice;
+  const rewardPerShare = c.targetPrice - c.entryPrice;
+  const atrMultiple = c.atr14 && c.atr14 > 0 ? riskPerShare / c.atr14 : null;
+
+  return (
+    <tr className="border-b border-border/40 bg-background/40 last:border-0">
+      <td colSpan={colSpan} className="px-3 py-3">
+        <div className="grid gap-4 lg:grid-cols-[1fr_260px]">
+          <div className="space-y-3">
+            <div>
+              <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                Trend (underlying values behind the gates)
+              </div>
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                <DetailStat
+                  label="SMA20 (bars)"
+                  value={fmtMoney(c.sma20 ?? null)}
+                  helper="Short-term trend reference only — not part of any gate here."
+                />
+                <DetailStat
+                  label="SMA50 (bars, used in calc)"
+                  value={fmtMoney(c.sma50AtEntry ?? null)}
+                  sub="Not the same as ma50 below — this is the number extensionAdrDays and the rising check both use."
+                  helper="The line this setup pulls back to. Extension and the rising check are both measured off this number."
+                />
+                <DetailStat
+                  label="SMA200 (Yahoo quote)"
+                  value={fmtMoney(c.ma200)}
+                  sub="Bars window doesn't reach 200 sessions back."
+                  helper="Long-term trend context only — not part of any RS Pullback gate."
+                />
+                <DetailStat
+                  label="ATR14 (bars)"
+                  value={fmtMoney(c.atr14 ?? null)}
+                  helper="Average daily dollar range — sizes the stop wide enough for this stock's normal noise instead of a flat percentage."
+                />
+                <DetailStat
+                  label="Extension (ADR-days)"
+                  value={fmtSigned(c.extensionAdrDays, 2)}
+                  valueCls={extCls}
+                  sub={extensionBandCaption(colorBands)}
+                  helper="How far above the 50-day in units of this stock's own daily range. Buying a pullback means buying near the average, not far above it — and below the floor there's no room left for a stop above the trend line."
+                />
+              </div>
+            </div>
+            <div>
+              <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                50MA slope (20-session rising check)
+              </div>
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+                <DetailStat
+                  label="SMA50, 20 sessions ago"
+                  value={fmtMoney(c.sma50TwentySessionsAgo ?? null)}
+                  helper="The baseline the rising check compares against."
+                />
+                <DetailStat
+                  label="SMA50, today"
+                  value={fmtMoney(c.sma50AtEntry ?? null)}
+                  helper="Compared to 20 sessions ago to confirm the average is actually climbing."
+                />
+                <DetailStat
+                  label={
+                    <span className="inline-flex items-center">
+                      Rising %
+                      <GateMark pass={sma50RisingPass} label="50MA rising" />
+                    </span>
+                  }
+                  value={fmtSigned(c.sma50RisingPct, 2) + "%"}
+                  sub={
+                    c.sma50AtEntry != null && c.sma50TwentySessionsAgo != null
+                      ? `(${c.sma50AtEntry.toFixed(2)} − ${c.sma50TwentySessionsAgo.toFixed(2)}) / ${c.sma50TwentySessionsAgo.toFixed(2)} × 100`
+                      : undefined
+                  }
+                  helper="The average itself must be rising, not just price above it. A bounce inside a downtrend has price above a falling 50-day. Hard gate — colored only when this is the row's near-miss reason."
+                />
+              </div>
+            </div>
+            <div>
+              <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                Relative strength (raw returns behind RS20 / RS60)
+              </div>
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                <DetailStat
+                  label={`${c.symbol} 20d return`}
+                  value={fmtSigned(c.stockReturn20, 2) + "%"}
+                  helper="This stock's own 20-session return — only meaningful compared to SPY's below."
+                />
+                <DetailStat
+                  label="SPY 20d return"
+                  value={fmtSigned(c.spyReturn20, 2) + "%"}
+                  helper="The benchmark this stock has to beat to count as relative strength."
+                />
+                <DetailStat
+                  label={
+                    <span className="inline-flex items-center">
+                      RS20 = diff
+                      <GateMark pass={rs20Pass} label="RS20 (beat SPY, 20 sessions)" />
+                    </span>
+                  }
+                  value={fmtSigned(c.rs20, 2)}
+                  sub={
+                    c.stockReturn20 != null && c.spyReturn20 != null
+                      ? `${c.stockReturn20.toFixed(2)}% − ${c.spyReturn20.toFixed(2)}%`
+                      : undefined
+                  }
+                  helper="Beating SPY over both windows means leadership that has persisted, not one hot month. Hard gate — not colored; the mark shows whether this window passed."
+                />
+                <DetailStat
+                  label="Higher low vs SPY (30d)"
+                  value={c.higherLowVsSpy === null || c.higherLowVsSpy === undefined ? "—" : c.higherLowVsSpy ? "Yes" : "No"}
+                  helper="On days SPY fell, did this stock's pullback lows keep rising? Holding up on down days is harder to fake than outperforming on up days — shown for context, it never gates list membership."
+                />
+                <DetailStat
+                  label={`${c.symbol} 60d return`}
+                  value={fmtSigned(c.stockReturn60, 2) + "%"}
+                  helper="This stock's own 60-session return — the longer window RS60 is built from."
+                />
+                <DetailStat
+                  label="SPY 60d return"
+                  value={fmtSigned(c.spyReturn60, 2) + "%"}
+                  helper="The benchmark for the 60-session window."
+                />
+                <DetailStat
+                  label={
+                    <span className="inline-flex items-center">
+                      RS60 = diff
+                      <GateMark pass={rs60Pass} label="RS60 (beat SPY, 60 sessions)" />
+                    </span>
+                  }
+                  value={fmtSigned(c.rs60, 2)}
+                  sub={
+                    c.stockReturn60 != null && c.spyReturn60 != null
+                      ? `${c.stockReturn60.toFixed(2)}% − ${c.spyReturn60.toFixed(2)}%`
+                      : undefined
+                  }
+                  helper="Beating SPY over the quarter too — paired with RS20, confirms the outperformance isn't a one-month blip. Hard gate — not colored."
+                />
+              </div>
+            </div>
+            <div>
+              <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                Trade levels
+              </div>
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                <DetailStat
+                  label="Entry"
+                  value={fmtMoney(c.entryPrice)}
+                  helper="Where the order would go in — today's reference price for the plan below."
+                />
+                <DetailStat
+                  label="Target"
+                  value={fmtMoney(c.targetPrice)}
+                  sub={`reward ${fmtMoney(rewardPerShare)}/sh`}
+                  helper="Where the trade closes for a win — defines the reward half of R:R."
+                />
+                <DetailStat
+                  label="Stop"
+                  value={fmtMoney(c.stopPrice)}
+                  sub={`risk ${fmtMoney(riskPerShare)}/sh${atrMultiple !== null ? ` (${atrMultiple.toFixed(2)}× ATR14)` : ""}`}
+                  helper="Where the trade closes for a loss — defines the risk half of R:R, and the level that failing means the pullback thesis was wrong."
+                />
+                <DetailStat
+                  label="R:R"
+                  value={rr.text}
+                  valueCls={rrCls}
+                  sub={rrBandCaption(colorBands)}
+                  helper="Reward divided by risk. Below 1:1 you are risking more than the trade can pay."
+                />
+                <DetailStat
+                  label="Earnings"
+                  value={c.nextEarningsDate ?? "unknown"}
+                  sub={c.daysToEarnings !== null ? `${c.daysToEarnings}d away` : undefined}
+                  helper="An earnings date inside the hold period adds event risk this setup isn't designed to price in."
+                />
+              </div>
+            </div>
+          </div>
+          <div>
+            <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+              6-month chart
+            </div>
+            <PriceChart candidate={c} data={chartData} loading={chartLoading} error={chartError} />
+          </div>
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+const NEAR_MISS_GATE_LABEL: Record<
+  NonNullable<SwingCandidate["nearMissGate"]>,
+  string
+> = {
+  sma50_rising: "50MA rising",
+  rs20: "RS20",
+  rs60: "RS60",
+  adr_floor: "ADR% floor",
+};
+
+// sma50_rising/adr_floor pass at value >= threshold; rs20/rs60 pass at
+// value > 0 (strict) — see lib/swing-screener.ts evaluateRsPullback.
+function nearMissOperator(gate: NonNullable<SwingCandidate["nearMissGate"]>): string {
+  return gate === "rs20" || gate === "rs60" ? ">" : "≥";
+}
+
+function nearMissUnit(gate: NonNullable<SwingCandidate["nearMissGate"]>): string {
+  return gate === "sma50_rising" || gate === "adr_floor" ? "%" : "";
+}
+
+function nearMissTrendGlyph(trend: SwingCandidate["nearMissTrend"]): string {
+  if (trend === "improving") return "▲ improving";
+  if (trend === "deteriorating") return "▼ deteriorating";
+  if (trend === "flat") return "flat";
+  return "n/a";
+}
+
+function nearMissTrendCls(trend: SwingCandidate["nearMissTrend"]): string {
+  if (trend === "improving") return "text-emerald-300";
+  if (trend === "deteriorating") return "text-rose-300";
+  return "text-muted-foreground";
+}
+
+// Near-miss watch tier — same expand/collapse + chart + expanded-panel
+// treatment as RsPullbackRow (see useRsPullbackChart/RsPullbackExpandedPanel),
+// but a different collapsed row: which gate failed, the gap to passing in
+// that gate's own units, and 5-session direction of travel — no Enter
+// button, since these are track-only per spec.
+function RsPullbackNearMissRow({
+  candidate: c,
+  onTrack,
+  tracked,
+  tracking,
+  colorBands,
+}: {
+  candidate: SwingCandidate;
+  onTrack: () => void;
+  tracked: boolean;
+  tracking: boolean;
+  colorBands: RsPullbackColorBands;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const { chartData, chartLoading, chartError } = useRsPullbackChart(c.symbol, expanded);
+
+  const gate = c.nearMissGate ?? null;
+  const gateLabel = gate ? NEAR_MISS_GATE_LABEL[gate] : "—";
+  const unit = gate ? nearMissUnit(gate) : "";
+  const op = gate ? nearMissOperator(gate) : "";
+  const rrCls = rrBandCls(c.rr, colorBands);
+  const extCls = extensionBandCls(c.extensionAdrDays, colorBands);
+  const rr = fmtRr(c.rr);
+
+  return (
+    <>
+      <tr
+        className="cursor-pointer border-b border-border/40 last:border-0 hover:bg-white/[0.02]"
+        onClick={() => setExpanded((v) => !v)}
+      >
+        <td className="px-2 py-1.5 font-mono font-medium text-foreground">
+          <span className="inline-flex items-center gap-1">
+            <ChevronRight
+              className={`h-3 w-3 shrink-0 text-muted-foreground transition-transform ${expanded ? "rotate-90" : ""}`}
+            />
+            {c.symbol}
+            {c.dataQualityDegraded && (
+              <span
+                title={`Built at the cache-only prefilter stage: ${(c.dataQualityIssues ?? []).join(", ") || "unknown issue"} — no live sector/earnings check for this track-only row.`}
+                className="cursor-help text-amber-400"
+              >
+                ⚠
+              </span>
+            )}
+          </span>
+        </td>
+        <td className="px-2 py-1.5 text-xs text-muted-foreground">{c.sector ?? "—"}</td>
+        <td className="px-2 py-1.5 text-right font-mono">{fmtMoney(c.currentPrice)}</td>
+        <td className="px-2 py-1.5 text-left text-xs text-muted-foreground">{gateLabel}</td>
+        <td className="px-2 py-1.5 text-right font-mono text-rose-300">
+          {fmtSigned(c.nearMissValue, 1)}
+          {unit}
+          <div className="text-[10px] font-sans text-muted-foreground">
+            needs {op} {c.nearMissThreshold?.toFixed(1)}
+            {unit}, gap {c.nearMissGap?.toFixed(1)} pts
+          </div>
+        </td>
+        <td className="px-2 py-1.5 text-right font-mono text-muted-foreground">
+          {c.nearMissValue5SessionsAgo !== null && c.nearMissValue5SessionsAgo !== undefined
+            ? `${fmtSigned(c.nearMissValue5SessionsAgo, 1)}${unit}`
+            : "n/a"}
+        </td>
+        <td className={`px-2 py-1.5 text-center text-xs ${nearMissTrendCls(c.nearMissTrend)}`}>
+          {nearMissTrendGlyph(c.nearMissTrend)}
+        </td>
+        <td className={`px-2 py-1.5 text-right font-mono ${extCls}`}>
+          {fmtSigned(c.extensionAdrDays, 2)}
+        </td>
+        <td className={`px-2 py-1.5 text-right font-semibold ${rrCls}`}>{rr.text}</td>
+        <td className="px-2 py-1.5" onClick={(e) => e.stopPropagation()}>
+          <div className="flex items-center justify-end gap-1">
+            <button
+              type="button"
+              onClick={onTrack}
+              disabled={tracked || tracking}
+              className={`rounded border px-1.5 py-0.5 text-[10px] font-medium ${
+                tracked
+                  ? "cursor-default border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
+                  : "border-border text-muted-foreground hover:bg-white/5 hover:text-foreground"
+              }`}
+            >
+              {tracked ? "Tracked" : "Track"}
+            </button>
+          </div>
+        </td>
+      </tr>
+      {expanded && (
+        <RsPullbackExpandedPanel
+          c={c}
+          colorBands={colorBands}
+          chartData={chartData}
+          chartLoading={chartLoading}
+          chartError={chartError}
+          colSpan={10}
+        />
+      )}
+    </>
+  );
+}
+
+function RsPullbackNearMissSection({
+  candidates,
+  onTrack,
+  trackedSymbols,
+  trackingSymbol,
+  colorBands,
+}: {
+  candidates: SwingCandidate[];
+  onTrack: (c: SwingCandidate) => void;
+  trackedSymbols: Set<string>;
+  trackingSymbol: string | null;
+  colorBands: RsPullbackColorBands;
+}) {
+  // Already sorted ascending by gap in the rsPullbackLists useMemo — no
+  // interactive re-sort here, per spec ("sort the list by smallest gap
+  // first"), unlike the other three lists' click-to-sort headers.
+  return (
+    <div className="space-y-2">
+      <div>
+        <div className="flex items-baseline gap-2">
+          <h3 className="text-sm font-semibold text-foreground">Watch, near miss</h3>
+          <span className="text-xs text-muted-foreground">({candidates.length})</span>
+        </div>
+        <div className="text-xs text-muted-foreground">
+          Fails exactly one gate — sorted closest-to-passing first. Track only, not actionable.
+        </div>
+      </div>
+      {candidates.length === 0 ? (
+        <div className="rounded border border-border/60 bg-background/30 px-3 py-2 text-xs text-muted-foreground">
+          Nothing is currently one gate away from qualifying.
+        </div>
+      ) : (
+        <div className="overflow-x-auto rounded border border-border">
+          <table className="w-full min-w-[860px] text-sm">
+            <thead className="border-b border-border/60 text-left text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+              <tr>
+                <th className="px-2 py-1.5 text-left">Symbol</th>
+                <th className="px-2 py-1.5 text-left">Sector</th>
+                <th className="px-2 py-1.5 text-right">Price</th>
+                <th className="px-2 py-1.5 text-left">Failed gate</th>
+                <th className="px-2 py-1.5 text-right">Value (gap)</th>
+                <th className="px-2 py-1.5 text-right">5 sessions ago</th>
+                <th className="px-2 py-1.5 text-center">Trend</th>
+                <th className="px-2 py-1.5 text-right">Ext (ADR-days)</th>
+                <th className="px-2 py-1.5 text-right">R:R</th>
+                <th className="px-2 py-1.5 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {candidates.map((c) => (
+                <RsPullbackNearMissRow
+                  key={c.symbol}
+                  candidate={c}
+                  onTrack={() => onTrack(c)}
+                  tracked={trackedSymbols.has(c.symbol)}
+                  tracking={trackingSymbol === c.symbol}
+                  colorBands={colorBands}
+                />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
   );
 }
 
