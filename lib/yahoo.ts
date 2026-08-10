@@ -48,7 +48,7 @@ type HistoricalRow = {
 
 type QuoteSummaryResult = {
   earningsHistory?: { history?: Array<{ quarter?: string | number | Date }> };
-  assetProfile?: { sector?: string; industry?: string };
+  assetProfile?: { sector?: string; industry?: string; country?: string };
   summaryProfile?: { sector?: string; industry?: string };
   summaryDetail?: { marketCap?: number };
   price?: { marketCap?: number };
@@ -545,6 +545,59 @@ export async function getCompanyProfile(symbol: string): Promise<YahooProfile | 
     logYahooFailure(`getCompanyProfile(${symbol})`, e);
     return null;
   }
+}
+
+// ---------- Theme expansion hard filters (Universe & Themes, Phase C) ----------
+
+export type ExpansionProfile = {
+  companyName: string | null;
+  price: number | null;
+  marketCap: number | null;
+  sector: string | null;
+  industry: string | null;
+  // Yahoo's quoteType — "EQUITY" for common stock; "ETF", "MUTUALFUND",
+  // "CURRENCY" etc. for the categories the hard filter needs to exclude.
+  quoteType: string | null;
+  // assetProfile.country reflects country of INCORPORATION, not listing
+  // venue — a best-effort foreign-primary-listing proxy, not a precise
+  // one. Confirmed false-positive case: NBIS (Netherlands-incorporated,
+  // Nasdaq-primary-listed). Used anyway because a false exclusion here is
+  // cheaply recoverable via the existing manual-add path (validateAndWarmSymbol),
+  // while a false inclusion would let a low-liquidity foreign listing
+  // straight into a theme built specifically to avoid the index
+  // universe's low-volatility problem.
+  country: string | null;
+};
+
+// One quote() call (fast, no extra latency budget) plus one quoteSummary
+// call for assetProfile (sector/industry/country aren't on the plain
+// quote payload). Returns null only when the symbol doesn't resolve at
+// all — a real but sparsely-covered ticker still returns partial fields.
+export async function getSymbolExpansionProfile(
+  symbol: string,
+): Promise<ExpansionProfile | null> {
+  const record = await quoteRaw(symbol);
+  if (!record) return null;
+  let sector: string | null = null;
+  let industry: string | null = null;
+  let country: string | null = null;
+  try {
+    const summary = await quoteSummary(symbol, ["assetProfile"]);
+    sector = summary?.assetProfile?.sector ?? null;
+    industry = summary?.assetProfile?.industry ?? null;
+    country = summary?.assetProfile?.country ?? null;
+  } catch (e) {
+    logYahooFailure(`getSymbolExpansionProfile(${symbol}) assetProfile`, e);
+  }
+  return {
+    companyName: pickString(record, "shortName") ?? pickString(record, "longName"),
+    price: pickNumber(record, "regularMarketPrice"),
+    marketCap: pickNumber(record, "marketCap"),
+    sector,
+    industry,
+    quoteType: pickString(record, "quoteType"),
+    country,
+  };
 }
 
 // yahoo-finance2 sometimes unwraps { raw, fmt } objects into the raw value,

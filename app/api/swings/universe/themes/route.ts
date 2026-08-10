@@ -12,12 +12,18 @@ type ThemeRow = {
   name: string;
   description: string | null;
   theme_type: string | null;
+  expansion_prompt: string | null;
   is_active: boolean;
   created_at: string;
   updated_at: string;
 };
 
-type MemberCountRow = { theme_id: string; is_anchor: boolean; is_active: boolean };
+type MemberCountRow = {
+  theme_id: string;
+  is_anchor: boolean;
+  is_active: boolean;
+  review_status: string;
+};
 
 export async function GET() {
   let userId: string;
@@ -37,23 +43,30 @@ export async function GET() {
   }
   const themes = (themesRes.data ?? []) as ThemeRow[];
 
-  // Member/anchor counts — one bulk query across every theme rather than
-  // N+1. The wrapper has no aggregate/count support, so counts are
-  // computed here from the raw rows.
+  // Member/anchor/pending counts — one bulk query across every theme
+  // rather than N+1. The wrapper has no aggregate/count support, so
+  // counts are computed here from the raw rows. memberCount only counts
+  // review_status='approved' rows — a pending Perplexity suggestion
+  // (Phase C) isn't a member of the theme yet, and must not inflate this
+  // count to look like the resolver's (Phase B) output would be bigger
+  // than it actually is.
   const themeIds = themes.map((t) => t.id);
-  const counts = new Map<string, { members: number; anchors: number }>();
+  const counts = new Map<string, { members: number; anchors: number; pending: number }>();
   if (themeIds.length > 0) {
     const membersRes = await sb
       .from<MemberCountRow>("theme_members")
-      .select("theme_id,is_anchor,is_active")
+      .select("theme_id,is_anchor,is_active,review_status")
       .eq("user_id", userId)
       .in("theme_id", themeIds);
     if (!membersRes.error) {
       for (const row of (membersRes.data ?? []) as MemberCountRow[]) {
-        if (!row.is_active) continue;
-        const cur = counts.get(row.theme_id) ?? { members: 0, anchors: 0 };
-        cur.members += 1;
-        if (row.is_anchor) cur.anchors += 1;
+        const cur = counts.get(row.theme_id) ?? { members: 0, anchors: 0, pending: 0 };
+        if (row.review_status === "pending") {
+          cur.pending += 1;
+        } else if (row.is_active) {
+          cur.members += 1;
+          if (row.is_anchor) cur.anchors += 1;
+        }
         counts.set(row.theme_id, cur);
       }
     }
@@ -64,6 +77,7 @@ export async function GET() {
       ...t,
       memberCount: counts.get(t.id)?.members ?? 0,
       anchorCount: counts.get(t.id)?.anchors ?? 0,
+      pendingCount: counts.get(t.id)?.pending ?? 0,
     })),
   });
 }

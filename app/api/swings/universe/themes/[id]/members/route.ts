@@ -70,26 +70,48 @@ export async function POST(
 
   const existingRes = await sb
     .from<MemberRow>("theme_members")
-    .select("id,symbol,is_active")
+    .select("id,symbol,is_active,review_status")
     .eq("theme_id", themeId)
     .eq("user_id", userId)
     .in("symbol", requested);
   if (existingRes.error) {
     return NextResponse.json({ error: existingRes.error.message }, { status: 500 });
   }
-  const existingBySymbol = new Map<string, { id: string; is_active: boolean }>();
-  for (const row of (existingRes.data ?? []) as Array<{ id: string; symbol: string; is_active: boolean }>) {
-    existingBySymbol.set(row.symbol, { id: row.id, is_active: row.is_active });
+  const existingBySymbol = new Map<string, { id: string; is_active: boolean; review_status: string }>();
+  for (const row of (existingRes.data ?? []) as Array<{
+    id: string;
+    symbol: string;
+    is_active: boolean;
+    review_status: string;
+  }>) {
+    existingBySymbol.set(row.symbol, { id: row.id, is_active: row.is_active, review_status: row.review_status });
   }
 
   const added: string[] = [];
   const reactivated: string[] = [];
+  // A manual add is a stronger, deliberate signal than a Perplexity
+  // suggestion awaiting review — promote it straight to an approved
+  // member instead of leaving it stuck in the pending queue.
+  const promoted: string[] = [];
   const alreadyActive: string[] = [];
   const invalid: string[] = [];
 
   for (const symbol of requested) {
     const existing = existingBySymbol.get(symbol);
     if (existing) {
+      if (existing.review_status === "pending") {
+        const upd = await sb
+          .from("theme_members")
+          .update({ review_status: "approved", is_active: true })
+          .eq("id", existing.id)
+          .eq("user_id", userId);
+        if (upd.error) {
+          invalid.push(symbol);
+          continue;
+        }
+        promoted.push(symbol);
+        continue;
+      }
       if (existing.is_active) {
         alreadyActive.push(symbol);
         continue;
@@ -126,5 +148,5 @@ export async function POST(
     added.push(symbol);
   }
 
-  return NextResponse.json({ added, reactivated, alreadyActive, invalid });
+  return NextResponse.json({ added, reactivated, promoted, alreadyActive, invalid });
 }

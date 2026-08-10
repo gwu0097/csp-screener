@@ -152,6 +152,29 @@ export function computeADRPercent(
   return n > 0 ? sum / n : null;
 }
 
+// Mean daily dollar volume (close × volume) over the trailing `period`
+// bars — a liquidity floor independent of price level, so a $8 stock
+// trading 5M shares/day and a $400 stock trading 100K shares/day can be
+// compared on the same $10M-style threshold.
+//   bars: daily OHLCV, OLDEST FIRST. Needs >= period bars.
+export function computeAvgDollarVolume(
+  bars: Array<{ close: number; volume: number }>,
+  period = 20,
+): number | null {
+  if (!Array.isArray(bars) || bars.length < period) return null;
+  const window = bars.slice(-period);
+  let sum = 0;
+  let n = 0;
+  for (const b of window) {
+    if (!Number.isFinite(b.close) || b.close <= 0 || !Number.isFinite(b.volume) || b.volume < 0) {
+      continue;
+    }
+    sum += b.close * b.volume;
+    n += 1;
+  }
+  return n > 0 ? sum / n : null;
+}
+
 export type MACDPoint = { macd: number; signal: number; histogram: number };
 
 // Standard 12/26/9 MACD: fast EMA - slow EMA = MACD line, signal = EMA

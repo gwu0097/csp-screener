@@ -10,6 +10,7 @@ type ThemeRow = {
   name: string;
   description: string | null;
   theme_type: string | null;
+  expansion_prompt: string | null;
   is_active: boolean;
   created_at: string;
   updated_at: string;
@@ -23,6 +24,7 @@ type MemberRow = {
   added_at: string;
   is_active: boolean;
   notes: string | null;
+  review_status: string;
 };
 
 export async function GET(
@@ -90,6 +92,7 @@ type PatchBody = {
   description?: unknown;
   theme_type?: unknown;
   is_active?: unknown;
+  expansion_prompt?: unknown;
 };
 
 export async function PATCH(
@@ -127,6 +130,9 @@ export async function PATCH(
   }
   if (typeof body.is_active === "boolean") {
     patch.is_active = body.is_active;
+  }
+  if (body.expansion_prompt !== undefined) {
+    patch.expansion_prompt = typeof body.expansion_prompt === "string" ? body.expansion_prompt.trim() || null : null;
   }
 
   const sb = createServerClient();

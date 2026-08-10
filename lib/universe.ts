@@ -5,7 +5,7 @@
 // app/api/swings/universe/themes/[id]/members/route.ts).
 import { createServerClient } from "./supabase";
 import { getOrFetchDailyBars } from "./daily-bars-cache";
-import { computeADRPercent } from "./indicators";
+import { computeADRPercent, computeAvgDollarVolume } from "./indicators";
 import { getOrRefreshSnapshot } from "./market-snapshot";
 import { SWING_UNIVERSE } from "./stock-universe";
 
@@ -15,6 +15,11 @@ export type MemberEnrichment = {
   marketCap: number | null;
   sector: string | null;
   adr20Pct: number | null;
+  // Phase C — same $10M/20-session floor the expansion hard filter
+  // checks at suggestion time (see lib/theme-expansion.ts). Computed
+  // here too so a pending suggestion still shows it on page reload,
+  // after the one-time filter-run response is gone.
+  avgDollarVolume20d: number | null;
 };
 
 const EMPTY_ENRICHMENT: MemberEnrichment = {
@@ -23,6 +28,7 @@ const EMPTY_ENRICHMENT: MemberEnrichment = {
   marketCap: null,
   sector: null,
   adr20Pct: null,
+  avgDollarVolume20d: null,
 };
 
 // Chunked to stay well under the PostgREST wrapper's read cap and keep
@@ -75,13 +81,16 @@ async function bulkCachedSectors(symbols: string[]): Promise<Map<string, string>
   return out;
 }
 
-// ADR% has no bulk "latest per symbol" query available through this
-// wrapper (see lib/swing-screener.ts's own bulk pre-filter for the same
-// constraint) — sorted desc by trading_day, first occurrence per symbol
-// wins.
-async function bulkAdrPercent(symbols: string[]): Promise<Map<string, number>> {
+// ADR% and 20d avg dollar volume both derive from the same cached bars,
+// so one bulk read serves both — no bulk "latest per symbol" query is
+// available through this wrapper (see lib/swing-screener.ts's own bulk
+// pre-filter for the same constraint), so this is sorted desc by
+// trading_day with first-occurrence-per-symbol winning.
+async function bulkBarsDerived(
+  symbols: string[],
+): Promise<Map<string, { adr20Pct: number | null; avgDollarVolume20d: number | null }>> {
   const sb = createServerClient();
-  const out = new Map<string, number>();
+  const out = new Map<string, { adr20Pct: number | null; avgDollarVolume20d: number | null }>();
   for (let i = 0; i < symbols.length; i += CHUNK) {
     const chunk = symbols.slice(i, i + CHUNK);
     try {
@@ -93,11 +102,16 @@ async function bulkAdrPercent(symbols: string[]): Promise<Map<string, number>> {
         .limit(chunk.length * 5);
       if (res.error || !res.data) continue;
       const seen = new Set<string>();
-      for (const row of res.data as Array<{ symbol: string; bars: Array<{ high: number; low: number; close: number }> }>) {
+      for (const row of res.data as Array<{
+        symbol: string;
+        bars: Array<{ high: number; low: number; close: number; volume: number }>;
+      }>) {
         if (seen.has(row.symbol)) continue;
         seen.add(row.symbol);
-        const adr = computeADRPercent(row.bars, 20);
-        if (adr !== null) out.set(row.symbol, adr);
+        out.set(row.symbol, {
+          adr20Pct: computeADRPercent(row.bars, 20),
+          avgDollarVolume20d: computeAvgDollarVolume(row.bars, 20),
+        });
       }
     } catch {
       // best-effort
@@ -110,19 +124,21 @@ export async function enrichSymbols(symbols: string[]): Promise<Map<string, Memb
   const uniq = Array.from(new Set(symbols.map((s) => s.toUpperCase())));
   const out = new Map<string, MemberEnrichment>();
   if (uniq.length === 0) return out;
-  const [snapshots, sectors, adrs] = await Promise.all([
+  const [snapshots, sectors, barsDerived] = await Promise.all([
     bulkSnapshotFields(uniq),
     bulkCachedSectors(uniq),
-    bulkAdrPercent(uniq),
+    bulkBarsDerived(uniq),
   ]);
   for (const symbol of uniq) {
     const snap = snapshots.get(symbol);
+    const derived = barsDerived.get(symbol);
     out.set(symbol, {
       companyName: snap?.companyName ?? EMPTY_ENRICHMENT.companyName,
       price: snap?.price ?? EMPTY_ENRICHMENT.price,
       marketCap: snap?.marketCap ?? EMPTY_ENRICHMENT.marketCap,
       sector: sectors.get(symbol) ?? EMPTY_ENRICHMENT.sector,
-      adr20Pct: adrs.get(symbol) ?? EMPTY_ENRICHMENT.adr20Pct,
+      adr20Pct: derived?.adr20Pct ?? EMPTY_ENRICHMENT.adr20Pct,
+      avgDollarVolume20d: derived?.avgDollarVolume20d ?? EMPTY_ENRICHMENT.avgDollarVolume20d,
     });
   }
   return out;
@@ -202,14 +218,17 @@ export async function resolveUniverseSymbols(
   }
 
   if (themeIds.length > 0) {
-    // Only is_active members participate — a deactivated member is
-    // excluded from every run until reactivated, same as it's hidden
-    // from the Universe tab's default list view.
+    // Only is_active AND review_status='approved' members participate —
+    // is_active gates a deactivated member (Phase A); review_status
+    // gates a Perplexity suggestion still awaiting human review (Phase
+    // C, see migrations/2026-08-15-add-theme-expansion.sql). A pending
+    // suggestion must never reach the screener.
     const res = await sb
       .from("theme_members")
       .select("symbol")
       .eq("user_id", userId)
       .eq("is_active", true)
+      .eq("review_status", "approved")
       .in("theme_id", themeIds);
     const rows = (res.data ?? []) as MemberSymbolRow[];
     for (const r of rows) symbolSet.add(r.symbol.toUpperCase());

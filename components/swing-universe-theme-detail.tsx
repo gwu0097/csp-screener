@@ -10,6 +10,7 @@ type Theme = {
   name: string;
   description: string | null;
   theme_type: string | null;
+  expansion_prompt: string | null;
   is_active: boolean;
 };
 
@@ -21,12 +22,51 @@ type Member = {
   added_at: string;
   is_active: boolean;
   notes: string | null;
+  review_status: string;
   companyName: string | null;
   price: number | null;
   marketCap: number | null;
   sector: string | null;
   adr20Pct: number | null;
+  avgDollarVolume20d: number | null;
 };
+
+// Only these theme_types have an expansion prompt (see
+// lib/theme-expansion.ts's PROMPT_TEMPLATES) — 'custom' and any
+// unrecognized value have no structured relationship to expand from.
+const EXPANDABLE_THEME_TYPES = ["supply_chain", "sector_comparable", "policy_driven", "macro_sensitive"];
+
+// Client-chunked so /expand/filter never has to hard-filter more than a
+// handful of suggestions per call (each does a live Yahoo profile fetch
+// plus a bar backfill per survivor) — same sequential-chunking
+// discipline as the RS Pullback enrichment pipeline.
+const FILTER_CHUNK_SIZE = 8;
+
+type Suggestion = { symbol: string; companyName: string; rationale: string };
+type FilterVerdict = {
+  symbol: string;
+  companyName: string;
+  rationale: string;
+  status: "pending" | "rejected";
+  rejectReason: string | null;
+  price: number | null;
+  marketCap: number | null;
+  sector: string | null;
+  avgDollarVolume20d: number | null;
+  adr20Pct: number | null;
+};
+
+function bucketReason(reason: string): string {
+  if (reason.includes("already a member")) return "Already a member";
+  if (reason.includes("previously rejected")) return "Previously rejected on this theme";
+  if (reason.includes("did not resolve")) return "Symbol did not resolve";
+  if (reason.includes("not a common stock")) return "Not a common stock (ETF/fund)";
+  if (reason.includes("foreign-primary-listing")) return "Foreign-listing heuristic";
+  if (reason.includes("price") && reason.includes("floor")) return "Price below $5";
+  if (reason.includes("market cap")) return "Market cap below $500M";
+  if (reason.includes("$ volume")) return "20d $ volume below $10M";
+  return "Other";
+}
 
 type SortKey =
   | "symbol"
@@ -129,9 +169,27 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
   const [addResult, setAddResult] = useState<{
     added: string[];
     reactivated: string[];
+    promoted: string[];
     alreadyActive: string[];
     invalid: string[];
   } | null>(null);
+
+  // ---- Phase C: expansion ----
+  const [promptDraft, setPromptDraft] = useState("");
+  const [promptTouched, setPromptTouched] = useState(false);
+  const [expanding, setExpanding] = useState<"suggest" | "filter" | null>(null);
+  const [expandProgress, setExpandProgress] = useState<string | null>(null);
+  const [expandError, setExpandError] = useState<string | null>(null);
+  const [lastRun, setLastRun] = useState<{
+    rawCount: number;
+    truncated: boolean;
+    verdicts: FilterVerdict[];
+  } | null>(null);
+
+  // ---- Phase C: pending review ----
+  const [selectedPending, setSelectedPending] = useState<Set<string>>(new Set());
+  const [reviewBusy, setReviewBusy] = useState(false);
+  const [rejectReason, setRejectReason] = useState("");
 
   async function load() {
     setLoading(true);
@@ -140,8 +198,10 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
       const res = await fetch(`/api/swings/universe/themes/${themeId}`, { cache: "no-store" });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
-      setTheme(json.theme as Theme);
+      const t = json.theme as Theme;
+      setTheme(t);
       setMembers(json.members as Member[]);
+      if (!promptTouched) setPromptDraft(t.expansion_prompt ?? "");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load");
     } finally {
@@ -161,7 +221,14 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
     });
   }
 
-  const visible = useMemo(() => members.filter((m) => showInactive || m.is_active), [members, showInactive]);
+  // The member table only ever shows approved members — a pending
+  // Perplexity suggestion isn't a member of the theme yet (see the
+  // pending review queue below) and must not be mixed into this list or
+  // its count.
+  const visible = useMemo(
+    () => members.filter((m) => m.review_status === "approved" && (showInactive || m.is_active)),
+    [members, showInactive],
+  );
   const sorted = useMemo(() => {
     const desc = SORT_VALUE[sort.key];
     return [...visible].sort((a, b) => {
@@ -170,6 +237,118 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
       return a.symbol.localeCompare(b.symbol);
     });
   }, [visible, sort]);
+
+  const pending = useMemo(
+    () => members.filter((m) => m.review_status === "pending").sort((a, b) => (b.adr20Pct ?? 0) - (a.adr20Pct ?? 0)),
+    [members],
+  );
+
+  const canExpand = !!theme?.theme_type && EXPANDABLE_THEME_TYPES.includes(theme.theme_type);
+
+  async function runExpansion() {
+    if (!theme) return;
+    setExpandError(null);
+    setLastRun(null);
+    setExpanding("suggest");
+    setExpandProgress("Asking Perplexity for suggestions…");
+    try {
+      const suggestRes = await fetch(`/api/swings/universe/themes/${themeId}/expand/suggest`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ promptOverride: promptDraft }),
+      });
+      const suggestJson = await suggestRes.json();
+      if (!suggestRes.ok) throw new Error(suggestJson.error ?? `HTTP ${suggestRes.status}`);
+      const suggestions = suggestJson.suggestions as Suggestion[];
+      const rawCount = suggestJson.rawCount as number;
+      const truncated = suggestJson.truncated as boolean;
+      setPromptTouched(false);
+
+      if (suggestions.length === 0) {
+        setLastRun({ rawCount, truncated, verdicts: [] });
+        return;
+      }
+
+      setExpanding("filter");
+      const verdicts: FilterVerdict[] = [];
+      for (let i = 0; i < suggestions.length; i += FILTER_CHUNK_SIZE) {
+        const chunk = suggestions.slice(i, i + FILTER_CHUNK_SIZE);
+        setExpandProgress(
+          `Filtering ${Math.min(i + FILTER_CHUNK_SIZE, suggestions.length)}/${suggestions.length}…`,
+        );
+        const filterRes = await fetch(`/api/swings/universe/themes/${themeId}/expand/filter`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ suggestions: chunk }),
+        });
+        const filterJson = await filterRes.json();
+        if (!filterRes.ok) throw new Error(filterJson.error ?? `HTTP ${filterRes.status}`);
+        verdicts.push(...(filterJson.verdicts as FilterVerdict[]));
+      }
+      setLastRun({ rawCount, truncated, verdicts });
+      await load();
+    } catch (e) {
+      setExpandError(e instanceof Error ? e.message : "Expansion failed");
+    } finally {
+      setExpanding(null);
+      setExpandProgress(null);
+    }
+  }
+
+  function togglePendingSelection(id: string) {
+    setSelectedPending((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  async function acceptSelected(ids: string[]) {
+    if (ids.length === 0) return;
+    setReviewBusy(true);
+    setActionError(null);
+    try {
+      const res = await fetch(`/api/swings/universe/themes/${themeId}/pending/review`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "accept", memberIds: ids }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+      setSelectedPending(new Set());
+      await load();
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : "Accept failed");
+    } finally {
+      setReviewBusy(false);
+    }
+  }
+
+  async function rejectSelected(ids: string[]) {
+    if (ids.length === 0) return;
+    setReviewBusy(true);
+    setActionError(null);
+    try {
+      const res = await fetch(`/api/swings/universe/themes/${themeId}/pending/review`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "reject",
+          items: ids.map((memberId) => ({ memberId, reason: rejectReason.trim() || undefined })),
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+      setSelectedPending(new Set());
+      setRejectReason("");
+      await load();
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : "Reject failed");
+    } finally {
+      setReviewBusy(false);
+    }
+  }
 
   async function patchMember(member: Member, patch: Partial<Pick<Member, "is_anchor" | "is_active">>) {
     setActionError(null);
@@ -282,6 +461,9 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
             {addResult.reactivated.length > 0 && (
               <span className="text-sky-300">Reactivated: {addResult.reactivated.join(", ")}</span>
             )}
+            {addResult.promoted.length > 0 && (
+              <span className="text-sky-300">Promoted from pending: {addResult.promoted.join(", ")}</span>
+            )}
             {addResult.alreadyActive.length > 0 && (
               <span>Already active: {addResult.alreadyActive.join(", ")}</span>
             )}
@@ -291,6 +473,166 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
           </div>
         )}
       </div>
+
+      <div className="rounded border border-border bg-background/40 p-3">
+        <div className="mb-2 flex items-center justify-between">
+          <div className="text-sm font-semibold text-foreground">Perplexity expansion</div>
+          {expandProgress && <span className="text-[11px] text-muted-foreground">{expandProgress}</span>}
+        </div>
+        {!canExpand ? (
+          <p className="text-xs text-muted-foreground">
+            {theme.theme_type === "custom" || !theme.theme_type
+              ? "This theme has no structured relationship to expand from — 'custom' themes are maintained by hand. Expansion is disabled."
+              : `No expansion prompt is defined for theme_type "${theme.theme_type}". Expansion is disabled.`}
+          </p>
+        ) : (
+          <>
+            <textarea
+              value={promptDraft}
+              onChange={(e) => {
+                setPromptDraft(e.target.value);
+                setPromptTouched(true);
+              }}
+              placeholder="Using this theme type's default prompt — edit to refine it for this theme."
+              rows={3}
+              className="w-full rounded border border-border bg-background px-2 py-1.5 text-xs"
+            />
+            <div className="mt-2 flex items-center gap-2">
+              <Button onClick={runExpansion} disabled={expanding !== null}>
+                {expanding ? "Running…" : "Run expansion"}
+              </Button>
+              <span className="text-[11px] text-muted-foreground">
+                Anchors, description, and existing members are sent as context — one manual run, up to {40} suggestions.
+              </span>
+            </div>
+          </>
+        )}
+        {expandError && <p className="mt-2 text-xs text-rose-300">{expandError}</p>}
+        {lastRun && (
+          <div className="mt-3 space-y-1 border-t border-border/60 pt-2 text-[11px]">
+            <div className="text-muted-foreground">
+              Perplexity returned {lastRun.rawCount} suggestion{lastRun.rawCount === 1 ? "" : "s"}
+              {lastRun.truncated ? ` (truncated to 40)` : ""}. {lastRun.verdicts.filter((v) => v.status === "pending").length}{" "}
+              queued for review.
+            </div>
+            {Object.entries(
+              lastRun.verdicts
+                .filter((v) => v.status === "rejected")
+                .reduce<Record<string, FilterVerdict[]>>((acc, v) => {
+                  const bucket = bucketReason(v.rejectReason ?? "");
+                  (acc[bucket] ??= []).push(v);
+                  return acc;
+                }, {}),
+            ).map(([bucket, items]) => (
+              <div key={bucket} className="text-muted-foreground">
+                <span className="text-rose-300">{bucket}</span> ({items.length}):{" "}
+                {items.map((it) => it.symbol).join(", ")}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {pending.length > 0 && (
+        <div className="rounded border border-amber-500/40 bg-amber-500/5 p-3">
+          <div className="mb-2 flex items-center justify-between">
+            <div className="text-sm font-semibold text-foreground">
+              Pending review ({pending.length})
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={rejectReason}
+                onChange={(e) => setRejectReason(e.target.value)}
+                placeholder="Reject reason (optional)"
+                className="rounded border border-border bg-background px-2 py-1 text-[11px]"
+              />
+              <Button
+                variant="outline"
+                disabled={reviewBusy || selectedPending.size === 0}
+                onClick={() => rejectSelected(Array.from(selectedPending))}
+              >
+                Reject selected ({selectedPending.size})
+              </Button>
+              <Button
+                disabled={reviewBusy || selectedPending.size === 0}
+                onClick={() => acceptSelected(Array.from(selectedPending))}
+              >
+                Accept selected ({selectedPending.size})
+              </Button>
+            </div>
+          </div>
+          <div className="overflow-x-auto rounded border border-border/60">
+            <table className="w-full min-w-[900px] text-sm">
+              <thead className="border-b border-border/60 text-left text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                <tr>
+                  <th className="px-2 py-1.5">
+                    <input
+                      type="checkbox"
+                      checked={selectedPending.size === pending.length}
+                      onChange={(e) =>
+                        setSelectedPending(e.target.checked ? new Set(pending.map((m) => m.id)) : new Set())
+                      }
+                    />
+                  </th>
+                  <th className="px-2 py-1.5">Symbol</th>
+                  <th className="px-2 py-1.5">Company</th>
+                  <th className="px-2 py-1.5">Sector</th>
+                  <th className="px-2 py-1.5 text-right">Mkt Cap</th>
+                  <th className="px-2 py-1.5 text-right">Price</th>
+                  <th className="px-2 py-1.5 text-right">ADR%</th>
+                  <th className="px-2 py-1.5 text-right">20d $ Vol</th>
+                  <th className="px-2 py-1.5">Rationale</th>
+                  <th className="px-2 py-1.5 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pending.map((m) => (
+                  <tr key={m.id} className="border-b border-border/40 last:border-0 hover:bg-white/[0.02]">
+                    <td className="px-2 py-1.5">
+                      <input
+                        type="checkbox"
+                        checked={selectedPending.has(m.id)}
+                        onChange={() => togglePendingSelection(m.id)}
+                      />
+                    </td>
+                    <td className="px-2 py-1.5 font-mono font-semibold text-foreground">{m.symbol}</td>
+                    <td className="px-2 py-1.5 text-muted-foreground">{m.companyName ?? "—"}</td>
+                    <td className="px-2 py-1.5 text-muted-foreground">{m.sector ?? "—"}</td>
+                    <td className="px-2 py-1.5 text-right font-mono">{fmtMarketCap(m.marketCap)}</td>
+                    <td className="px-2 py-1.5 text-right font-mono">{fmtMoney(m.price)}</td>
+                    <td className="px-2 py-1.5 text-right font-mono font-semibold text-amber-300">
+                      {fmtPct(m.adr20Pct)}
+                    </td>
+                    <td className="px-2 py-1.5 text-right font-mono">{fmtMarketCap(m.avgDollarVolume20d)}</td>
+                    <td className="max-w-[280px] px-2 py-1.5 text-muted-foreground">{m.notes ?? "—"}</td>
+                    <td className="px-2 py-1.5">
+                      <div className="flex justify-end gap-1">
+                        <button
+                          type="button"
+                          disabled={reviewBusy}
+                          onClick={() => acceptSelected([m.id])}
+                          className="rounded border border-emerald-500/40 px-2 py-1 text-[10px] text-emerald-300 hover:bg-emerald-500/10"
+                        >
+                          Accept
+                        </button>
+                        <button
+                          type="button"
+                          disabled={reviewBusy}
+                          onClick={() => rejectSelected([m.id])}
+                          className="rounded border border-rose-500/40 px-2 py-1 text-[10px] text-rose-300 hover:bg-rose-500/10"
+                        >
+                          Reject
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       <div className="flex items-center justify-between">
         <div className="text-sm text-muted-foreground">
