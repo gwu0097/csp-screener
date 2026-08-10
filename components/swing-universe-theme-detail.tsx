@@ -84,9 +84,20 @@ type SortKey =
   | "marketCap"
   | "adr20Pct"
   | "price"
+  | "avgDollarVolume20d"
   | "is_anchor"
   | "source"
   | "added_at";
+
+// Columns a threshold select can act on — always numeric (or null), never
+// the string columns, so "ADR% < 4.0" is a plain numeric comparison.
+type ThresholdColumn = "marketCap" | "price" | "adr20Pct" | "avgDollarVolume20d";
+const THRESHOLD_COLUMNS: Array<{ key: ThresholdColumn; label: string }> = [
+  { key: "adr20Pct", label: "ADR%" },
+  { key: "marketCap", label: "Mkt Cap" },
+  { key: "price", label: "Price" },
+  { key: "avgDollarVolume20d", label: "20d $ Vol" },
+];
 
 const SORT_VALUE: Record<SortKey, { get: (m: Member) => number | string | null; defaultDir: "asc" | "desc" }> = {
   symbol: { get: (m) => m.symbol, defaultDir: "asc" },
@@ -95,6 +106,7 @@ const SORT_VALUE: Record<SortKey, { get: (m: Member) => number | string | null; 
   marketCap: { get: (m) => m.marketCap, defaultDir: "desc" },
   adr20Pct: { get: (m) => m.adr20Pct, defaultDir: "desc" },
   price: { get: (m) => m.price, defaultDir: "desc" },
+  avgDollarVolume20d: { get: (m) => m.avgDollarVolume20d, defaultDir: "desc" },
   is_anchor: { get: (m) => (m.is_anchor ? 1 : 0), defaultDir: "desc" },
   source: { get: (m) => m.source, defaultDir: "asc" },
   added_at: { get: (m) => m.added_at, defaultDir: "desc" },
@@ -199,10 +211,23 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
   const [selectedPending, setSelectedPending] = useState<Set<string>>(new Set());
   const [reviewBusy, setReviewBusy] = useState(false);
   const [rejectReason, setRejectReason] = useState("");
+  const [pendingSort, setPendingSort] = useState<{ key: SortKey; dir: "asc" | "desc" }>({
+    key: "adr20Pct",
+    dir: "desc",
+  });
+  const [lastClickedPendingIndex, setLastClickedPendingIndex] = useState<number | null>(null);
+  const [thresholdColumn, setThresholdColumn] = useState<ThresholdColumn>("adr20Pct");
+  const [thresholdOp, setThresholdOp] = useState<"lt" | "gt">("lt");
+  const [thresholdValue, setThresholdValue] = useState("");
 
   // ---- Rejection scoping: visible + reversible history ----
   const [rejections, setRejections] = useState<Rejection[]>([]);
   const [undoingId, setUndoingId] = useState<string | null>(null);
+
+  // ---- Section collapse state ----
+  const [membersOpen, setMembersOpen] = useState(true);
+  const [pendingOpen, setPendingOpen] = useState(true);
+  const [rejectedOpen, setRejectedOpen] = useState(false);
 
   async function load() {
     setLoading(true);
@@ -235,6 +260,13 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
     });
   }
 
+  function onPendingSort(key: SortKey) {
+    setPendingSort((cur) => {
+      if (cur.key !== key) return { key, dir: SORT_VALUE[key].defaultDir };
+      return { key, dir: cur.dir === "asc" ? "desc" : "asc" };
+    });
+  }
+
   // The member table only ever shows approved members — a pending
   // Perplexity suggestion isn't a member of the theme yet (see the
   // pending review queue below) and must not be mixed into this list or
@@ -252,10 +284,15 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
     });
   }, [visible, sort]);
 
-  const pending = useMemo(
-    () => members.filter((m) => m.review_status === "pending").sort((a, b) => (b.adr20Pct ?? 0) - (a.adr20Pct ?? 0)),
-    [members],
-  );
+  const pending = useMemo(() => members.filter((m) => m.review_status === "pending"), [members]);
+  const sortedPending = useMemo(() => {
+    const desc = SORT_VALUE[pendingSort.key];
+    return [...pending].sort((a, b) => {
+      const primary = compareValues(desc.get(a), desc.get(b), pendingSort.dir);
+      if (primary !== 0) return primary;
+      return a.symbol.localeCompare(b.symbol);
+    });
+  }, [pending, pendingSort]);
 
   const canExpand = !!theme?.theme_type && EXPANDABLE_THEME_TYPES.includes(theme.theme_type);
 
@@ -324,6 +361,42 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
       else next.add(id);
       return next;
     });
+  }
+
+  // Shift-click extends the selection over the range between the last
+  // clicked row and this one, in the CURRENT sort order — sortedPending
+  // is recomputed on every sort change, so a shift-click range always
+  // matches what's on screen right now, not a stale pre-sort order.
+  function handlePendingCheckboxClick(id: string, index: number, shiftKey: boolean) {
+    if (shiftKey && lastClickedPendingIndex !== null) {
+      const lo = Math.min(index, lastClickedPendingIndex);
+      const hi = Math.max(index, lastClickedPendingIndex);
+      const rangeIds = sortedPending.slice(lo, hi + 1).map((m) => m.id);
+      setSelectedPending((prev) => {
+        const next = new Set(prev);
+        rangeIds.forEach((rid) => next.add(rid));
+        return next;
+      });
+    } else {
+      togglePendingSelection(id);
+    }
+    setLastClickedPendingIndex(index);
+  }
+
+  // Selects every pending row where the chosen numeric column is below
+  // (or above) the entered value — replaces the current selection rather
+  // than adding to it, so "select where ADR% < 4" always means exactly
+  // those rows, not those rows plus whatever was ticked before.
+  function selectByThreshold() {
+    const val = Number(thresholdValue);
+    if (!Number.isFinite(val)) return;
+    const getter = SORT_VALUE[thresholdColumn].get;
+    const matches = sortedPending.filter((m) => {
+      const v = getter(m);
+      if (typeof v !== "number") return false;
+      return thresholdOp === "lt" ? v < val : v > val;
+    });
+    setSelectedPending(new Set(matches.map((m) => m.id)));
   }
 
   async function acceptSelected(ids: string[]) {
@@ -590,246 +663,332 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
         )}
       </div>
 
-      {pending.length > 0 && (
-        <div className="rounded border border-amber-500/40 bg-amber-500/5 p-3">
-          <div className="mb-2 flex items-center justify-between">
-            <div className="text-sm font-semibold text-foreground">
-              Pending review ({pending.length})
-            </div>
-            <div className="flex items-center gap-2">
-              <input
-                type="text"
-                value={rejectReason}
-                onChange={(e) => setRejectReason(e.target.value)}
-                placeholder="Reject reason (optional)"
-                className="rounded border border-border bg-background px-2 py-1 text-[11px]"
-              />
-              <Button
-                variant="outline"
-                disabled={reviewBusy || selectedPending.size === 0}
-                onClick={() => rejectSelected(Array.from(selectedPending))}
-              >
-                Reject selected ({selectedPending.size})
-              </Button>
-              <Button
-                disabled={reviewBusy || selectedPending.size === 0}
-                onClick={() => acceptSelected(Array.from(selectedPending))}
-              >
-                Accept selected ({selectedPending.size})
-              </Button>
-            </div>
-          </div>
-          <div className="overflow-x-auto rounded border border-border/60">
-            <table className="w-full min-w-[900px] text-sm">
-              <thead className="border-b border-border/60 text-left text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-                <tr>
-                  <th className="px-2 py-1.5">
-                    <input
-                      type="checkbox"
-                      checked={selectedPending.size === pending.length}
-                      onChange={(e) =>
-                        setSelectedPending(e.target.checked ? new Set(pending.map((m) => m.id)) : new Set())
-                      }
-                    />
-                  </th>
-                  <th className="px-2 py-1.5">Symbol</th>
-                  <th className="px-2 py-1.5">Company</th>
-                  <th className="px-2 py-1.5">Sector</th>
-                  <th className="px-2 py-1.5 text-right">Mkt Cap</th>
-                  <th className="px-2 py-1.5 text-right">Price</th>
-                  <th className="px-2 py-1.5 text-right">ADR%</th>
-                  <th className="px-2 py-1.5 text-right">20d $ Vol</th>
-                  <th className="px-2 py-1.5">Rationale</th>
-                  <th className="px-2 py-1.5 text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {pending.map((m) => (
-                  <tr key={m.id} className="border-b border-border/40 last:border-0 hover:bg-white/[0.02]">
-                    <td className="px-2 py-1.5">
-                      <input
-                        type="checkbox"
-                        checked={selectedPending.has(m.id)}
-                        onChange={() => togglePendingSelection(m.id)}
-                      />
-                    </td>
-                    <td className="px-2 py-1.5 font-mono font-semibold text-foreground">{m.symbol}</td>
-                    <td className="px-2 py-1.5 text-muted-foreground">{m.companyName ?? "—"}</td>
-                    <td className="px-2 py-1.5 text-muted-foreground">{m.sector ?? "—"}</td>
-                    <td className="px-2 py-1.5 text-right font-mono">{fmtMarketCap(m.marketCap)}</td>
-                    <td className="px-2 py-1.5 text-right font-mono">{fmtMoney(m.price)}</td>
-                    <td className="px-2 py-1.5 text-right font-mono font-semibold text-amber-300">
-                      {fmtPct(m.adr20Pct)}
-                    </td>
-                    <td className="px-2 py-1.5 text-right font-mono">{fmtMarketCap(m.avgDollarVolume20d)}</td>
-                    <td className="max-w-[280px] px-2 py-1.5 text-muted-foreground">{m.notes ?? "—"}</td>
-                    <td className="px-2 py-1.5">
-                      <div className="flex justify-end gap-1">
-                        <button
-                          type="button"
-                          disabled={reviewBusy}
-                          onClick={() => acceptSelected([m.id])}
-                          className="rounded border border-emerald-500/40 px-2 py-1 text-[10px] text-emerald-300 hover:bg-emerald-500/10"
-                        >
-                          Accept
-                        </button>
-                        <button
-                          type="button"
-                          disabled={reviewBusy}
-                          onClick={() => rejectSelected([m.id])}
-                          className="rounded border border-rose-500/40 px-2 py-1 text-[10px] text-rose-300 hover:bg-rose-500/10"
-                        >
-                          Reject
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+      {/* Members — the permanent artifact the screener resolves against;
+          shown first, directly under the header and expansion controls. */}
+      <div className="rounded border border-border bg-background/40 p-3">
+        <div className="mb-2 flex items-center justify-between">
+          <button
+            type="button"
+            onClick={() => setMembersOpen((o) => !o)}
+            className="flex items-center gap-1.5 text-sm font-semibold text-foreground"
+          >
+            <span className="text-[10px] text-muted-foreground">{membersOpen ? "▼" : "▶"}</span>
+            Members ({visible.length})
+          </button>
+          <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <input type="checkbox" checked={showInactive} onChange={(e) => setShowInactive(e.target.checked)} />
+            Show inactive
+          </label>
         </div>
-      )}
 
-      {rejections.length > 0 && (
-        <div className="rounded border border-border bg-background/40 p-3">
-          <div className="mb-2 text-sm font-semibold text-foreground">
-            Rejected ({rejections.length})
-          </div>
-          <div className="overflow-x-auto rounded border border-border/60">
-            <table className="w-full min-w-[820px] text-sm">
-              <thead className="border-b border-border/60 text-left text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-                <tr>
-                  <th className="px-2 py-1.5">Symbol</th>
-                  <th className="px-2 py-1.5">Reason</th>
-                  <th className="px-2 py-1.5">Rejected</th>
-                  <th className="px-2 py-1.5">Rejected under</th>
-                  <th className="px-2 py-1.5">Scope</th>
-                  <th className="px-2 py-1.5 text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rejections.map((r) => (
-                  <tr key={r.id} className="border-b border-border/40 last:border-0 hover:bg-white/[0.02]">
-                    <td className="px-2 py-1.5 font-mono font-semibold text-foreground">{r.symbol}</td>
-                    <td className="max-w-[280px] px-2 py-1.5 text-muted-foreground">{r.reason ?? "—"}</td>
-                    <td className="px-2 py-1.5 text-muted-foreground">{fmtDate(r.rejected_at)}</td>
-                    <td className="px-2 py-1.5 text-muted-foreground">{r.theme_type ?? "—"}</td>
-                    <td className="px-2 py-1.5">
-                      {r.is_current_scope ? (
-                        <span className="rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                          Current question — suppresses
-                        </span>
-                      ) : (
-                        <span
-                          className="rounded border border-sky-500/40 bg-sky-500/10 px-1.5 py-0.5 text-[10px] text-sky-200"
-                          title="Rejected under a different theme_type or expansion prompt — retained for the record, but does not suppress this symbol on the next expansion run."
-                        >
-                          Different question — inactive
-                        </span>
-                      )}
-                    </td>
-                    <td className="px-2 py-1.5">
-                      <div className="flex justify-end">
-                        <button
-                          type="button"
-                          disabled={undoingId === r.id}
-                          onClick={() => undoOneRejection(r)}
-                          className="rounded border border-border px-2 py-1 text-[10px] text-muted-foreground hover:bg-white/5 hover:text-foreground"
-                          title="Remove this rejection — the symbol can be suggested again"
-                        >
-                          {undoingId === r.id ? "Undoing…" : "Undo"}
-                        </button>
-                      </div>
-                    </td>
+        {membersOpen &&
+          (sorted.length === 0 ? (
+            <div className="rounded border border-border/60 bg-background/30 px-3 py-6 text-center text-sm text-muted-foreground">
+              No members yet.
+            </div>
+          ) : (
+            <div className="overflow-x-auto rounded border border-border/60">
+              <table className="w-full min-w-[960px] text-sm">
+                <thead className="border-b border-border/60 text-left text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  <tr>
+                    <SortTh label="Symbol" sortKey="symbol" sort={sort} onSort={onSort} />
+                    <SortTh label="Company" sortKey="companyName" sort={sort} onSort={onSort} />
+                    <SortTh label="Sector" sortKey="sector" sort={sort} onSort={onSort} />
+                    <SortTh label="Mkt Cap" sortKey="marketCap" sort={sort} onSort={onSort} align="right" />
+                    <SortTh label="ADR%" sortKey="adr20Pct" sort={sort} onSort={onSort} align="right" />
+                    <SortTh label="Price" sortKey="price" sort={sort} onSort={onSort} align="right" />
+                    <SortTh label="20d $ Vol" sortKey="avgDollarVolume20d" sort={sort} onSort={onSort} align="right" />
+                    <SortTh label="Anchor" sortKey="is_anchor" sort={sort} onSort={onSort} align="center" />
+                    <SortTh label="Source" sortKey="source" sort={sort} onSort={onSort} />
+                    <SortTh label="Added" sortKey="added_at" sort={sort} onSort={onSort} />
+                    <th className="px-2 py-1.5 text-right">Actions</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      <div className="flex items-center justify-between">
-        <div className="text-sm text-muted-foreground">
-          {visible.length} member{visible.length === 1 ? "" : "s"}
-        </div>
-        <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
-          <input type="checkbox" checked={showInactive} onChange={(e) => setShowInactive(e.target.checked)} />
-          Show inactive
-        </label>
+                </thead>
+                <tbody>
+                  {sorted.map((m) => (
+                    <tr
+                      key={m.id}
+                      className={`border-b border-border/40 last:border-0 hover:bg-white/[0.02] ${
+                        !m.is_active ? "opacity-50" : ""
+                      }`}
+                    >
+                      <td className="px-2 py-1.5 font-mono font-semibold text-foreground">{m.symbol}</td>
+                      <td className="px-2 py-1.5 text-muted-foreground">{m.companyName ?? "—"}</td>
+                      <td className="px-2 py-1.5 text-muted-foreground">{m.sector ?? "—"}</td>
+                      <td className="px-2 py-1.5 text-right font-mono">{fmtMarketCap(m.marketCap)}</td>
+                      <td className="px-2 py-1.5 text-right font-mono">{fmtPct(m.adr20Pct)}</td>
+                      <td className="px-2 py-1.5 text-right font-mono">{fmtMoney(m.price)}</td>
+                      <td className="px-2 py-1.5 text-right font-mono">{fmtMarketCap(m.avgDollarVolume20d)}</td>
+                      <td className="px-2 py-1.5 text-center">
+                        {m.is_anchor && (
+                          <span className="rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-300">
+                            Anchor
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-2 py-1.5 text-muted-foreground">{m.source}</td>
+                      <td className="px-2 py-1.5 text-muted-foreground">{fmtDate(m.added_at)}</td>
+                      <td className="px-2 py-1.5">
+                        <div className="flex justify-end gap-1">
+                          <button
+                            type="button"
+                            onClick={() => patchMember(m, { is_anchor: !m.is_anchor })}
+                            className="flex items-center justify-center rounded border border-border px-2 py-1 text-muted-foreground hover:bg-white/5 hover:text-foreground"
+                            title={m.is_anchor ? "Unset anchor" : "Set anchor"}
+                            aria-label={m.is_anchor ? "Unset anchor" : "Set anchor"}
+                          >
+                            {m.is_anchor ? <StarOff className="h-3 w-3" /> : <Star className="h-3 w-3" />}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => patchMember(m, { is_active: !m.is_active })}
+                            className="flex items-center justify-center rounded border border-border px-2 py-1 text-muted-foreground hover:bg-white/5 hover:text-foreground"
+                            title={m.is_active ? "Deactivate" : "Reactivate"}
+                            aria-label={m.is_active ? "Deactivate member" : "Reactivate member"}
+                          >
+                            {m.is_active ? <Trash2 className="h-3 w-3" /> : <Undo2 className="h-3 w-3" />}
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ))}
       </div>
 
-      {sorted.length === 0 ? (
-        <div className="rounded border border-border/60 bg-background/30 px-3 py-6 text-center text-sm text-muted-foreground">
-          No members yet.
-        </div>
-      ) : (
-        <div className="overflow-x-auto rounded border border-border">
-          <table className="w-full min-w-[900px] text-sm">
-            <thead className="border-b border-border/60 text-left text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-              <tr>
-                <SortTh label="Symbol" sortKey="symbol" sort={sort} onSort={onSort} />
-                <SortTh label="Company" sortKey="companyName" sort={sort} onSort={onSort} />
-                <SortTh label="Sector" sortKey="sector" sort={sort} onSort={onSort} />
-                <SortTh label="Mkt Cap" sortKey="marketCap" sort={sort} onSort={onSort} align="right" />
-                <SortTh label="ADR%" sortKey="adr20Pct" sort={sort} onSort={onSort} align="right" />
-                <SortTh label="Price" sortKey="price" sort={sort} onSort={onSort} align="right" />
-                <SortTh label="Anchor" sortKey="is_anchor" sort={sort} onSort={onSort} align="center" />
-                <SortTh label="Source" sortKey="source" sort={sort} onSort={onSort} />
-                <SortTh label="Added" sortKey="added_at" sort={sort} onSort={onSort} />
-                <th className="px-2 py-1.5 text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {sorted.map((m) => (
-                <tr
-                  key={m.id}
-                  className={`border-b border-border/40 last:border-0 hover:bg-white/[0.02] ${
-                    !m.is_active ? "opacity-50" : ""
-                  }`}
+      {/* Pending review — transient work: everything Perplexity suggested
+          that hasn't been accepted or rejected yet. */}
+      {pending.length > 0 && (
+        <div className="rounded border border-amber-500/40 bg-amber-500/5 p-3">
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+            <button
+              type="button"
+              onClick={() => setPendingOpen((o) => !o)}
+              className="flex items-center gap-1.5 text-sm font-semibold text-foreground"
+            >
+              <span className="text-[10px] text-muted-foreground">{pendingOpen ? "▼" : "▶"}</span>
+              Pending review ({pending.length})
+            </button>
+            {pendingOpen && (
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={rejectReason}
+                  onChange={(e) => setRejectReason(e.target.value)}
+                  placeholder="Reject reason (optional)"
+                  className="rounded border border-border bg-background px-2 py-1 text-[11px]"
+                />
+                <Button
+                  variant="outline"
+                  disabled={reviewBusy || selectedPending.size === 0}
+                  onClick={() => rejectSelected(Array.from(selectedPending))}
                 >
-                  <td className="px-2 py-1.5 font-mono font-semibold text-foreground">{m.symbol}</td>
-                  <td className="px-2 py-1.5 text-muted-foreground">{m.companyName ?? "—"}</td>
-                  <td className="px-2 py-1.5 text-muted-foreground">{m.sector ?? "—"}</td>
-                  <td className="px-2 py-1.5 text-right font-mono">{fmtMarketCap(m.marketCap)}</td>
-                  <td className="px-2 py-1.5 text-right font-mono">{fmtPct(m.adr20Pct)}</td>
-                  <td className="px-2 py-1.5 text-right font-mono">{fmtMoney(m.price)}</td>
-                  <td className="px-2 py-1.5 text-center">
-                    {m.is_anchor && (
-                      <span className="rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-300">
-                        Anchor
-                      </span>
-                    )}
-                  </td>
-                  <td className="px-2 py-1.5 text-muted-foreground">{m.source}</td>
-                  <td className="px-2 py-1.5 text-muted-foreground">{fmtDate(m.added_at)}</td>
-                  <td className="px-2 py-1.5">
-                    <div className="flex justify-end gap-1">
-                      <button
-                        type="button"
-                        onClick={() => patchMember(m, { is_anchor: !m.is_anchor })}
-                        className="flex items-center justify-center rounded border border-border px-2 py-1 text-muted-foreground hover:bg-white/5 hover:text-foreground"
-                        title={m.is_anchor ? "Unset anchor" : "Set anchor"}
-                        aria-label={m.is_anchor ? "Unset anchor" : "Set anchor"}
-                      >
-                        {m.is_anchor ? <StarOff className="h-3 w-3" /> : <Star className="h-3 w-3" />}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => patchMember(m, { is_active: !m.is_active })}
-                        className="flex items-center justify-center rounded border border-border px-2 py-1 text-muted-foreground hover:bg-white/5 hover:text-foreground"
-                        title={m.is_active ? "Deactivate" : "Reactivate"}
-                        aria-label={m.is_active ? "Deactivate member" : "Reactivate member"}
-                      >
-                        {m.is_active ? <Trash2 className="h-3 w-3" /> : <Undo2 className="h-3 w-3" />}
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+                  Reject selected ({selectedPending.size})
+                </Button>
+                <Button
+                  disabled={reviewBusy || selectedPending.size === 0}
+                  onClick={() => acceptSelected(Array.from(selectedPending))}
+                >
+                  Accept selected ({selectedPending.size})
+                </Button>
+              </div>
+            )}
+          </div>
+
+          {pendingOpen && (
+            <>
+              <div className="mb-2 flex flex-wrap items-center gap-2 border-t border-border/60 pt-2 text-[11px] text-muted-foreground">
+                <span>Select where</span>
+                <select
+                  value={thresholdColumn}
+                  onChange={(e) => setThresholdColumn(e.target.value as ThresholdColumn)}
+                  className="rounded border border-border bg-background px-1.5 py-1"
+                >
+                  {THRESHOLD_COLUMNS.map((c) => (
+                    <option key={c.key} value={c.key}>
+                      {c.label}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={thresholdOp}
+                  onChange={(e) => setThresholdOp(e.target.value as "lt" | "gt")}
+                  className="rounded border border-border bg-background px-1.5 py-1"
+                >
+                  <option value="lt">&lt;</option>
+                  <option value="gt">&gt;</option>
+                </select>
+                <input
+                  type="number"
+                  value={thresholdValue}
+                  onChange={(e) => setThresholdValue(e.target.value)}
+                  placeholder="value"
+                  className="w-20 rounded border border-border bg-background px-1.5 py-1"
+                />
+                <Button variant="outline" onClick={selectByThreshold} disabled={thresholdValue.trim() === ""}>
+                  Select matching
+                </Button>
+                {selectedPending.size > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setSelectedPending(new Set())}
+                    className="text-muted-foreground underline hover:text-foreground"
+                  >
+                    Clear selection ({selectedPending.size})
+                  </button>
+                )}
+                <span>Shift-click a checkbox to select a range.</span>
+              </div>
+              <div className="overflow-x-auto rounded border border-border/60">
+                <table className="w-full min-w-[900px] text-sm">
+                  <thead className="border-b border-border/60 text-left text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                    <tr>
+                      <th className="px-2 py-1.5">
+                        <input
+                          type="checkbox"
+                          checked={selectedPending.size > 0 && selectedPending.size === sortedPending.length}
+                          onChange={(e) =>
+                            setSelectedPending(e.target.checked ? new Set(sortedPending.map((m) => m.id)) : new Set())
+                          }
+                        />
+                      </th>
+                      <SortTh label="Symbol" sortKey="symbol" sort={pendingSort} onSort={onPendingSort} />
+                      <th className="px-2 py-1.5">Company</th>
+                      <th className="px-2 py-1.5">Sector</th>
+                      <SortTh label="Mkt Cap" sortKey="marketCap" sort={pendingSort} onSort={onPendingSort} align="right" />
+                      <SortTh label="Price" sortKey="price" sort={pendingSort} onSort={onPendingSort} align="right" />
+                      <SortTh label="ADR%" sortKey="adr20Pct" sort={pendingSort} onSort={onPendingSort} align="right" />
+                      <SortTh
+                        label="20d $ Vol"
+                        sortKey="avgDollarVolume20d"
+                        sort={pendingSort}
+                        onSort={onPendingSort}
+                        align="right"
+                      />
+                      <th className="px-2 py-1.5">Rationale</th>
+                      <th className="px-2 py-1.5 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sortedPending.map((m, idx) => (
+                      <tr key={m.id} className="border-b border-border/40 last:border-0 hover:bg-white/[0.02]">
+                        <td className="px-2 py-1.5">
+                          <input
+                            type="checkbox"
+                            checked={selectedPending.has(m.id)}
+                            onClick={(e) => {
+                              e.preventDefault();
+                              handlePendingCheckboxClick(m.id, idx, e.shiftKey);
+                            }}
+                            onChange={() => {}}
+                          />
+                        </td>
+                        <td className="px-2 py-1.5 font-mono font-semibold text-foreground">{m.symbol}</td>
+                        <td className="px-2 py-1.5 text-muted-foreground">{m.companyName ?? "—"}</td>
+                        <td className="px-2 py-1.5 text-muted-foreground">{m.sector ?? "—"}</td>
+                        <td className="px-2 py-1.5 text-right font-mono">{fmtMarketCap(m.marketCap)}</td>
+                        <td className="px-2 py-1.5 text-right font-mono">{fmtMoney(m.price)}</td>
+                        <td className="px-2 py-1.5 text-right font-mono font-semibold text-amber-300">
+                          {fmtPct(m.adr20Pct)}
+                        </td>
+                        <td className="px-2 py-1.5 text-right font-mono">{fmtMarketCap(m.avgDollarVolume20d)}</td>
+                        <td className="max-w-[280px] px-2 py-1.5 text-muted-foreground">{m.notes ?? "—"}</td>
+                        <td className="px-2 py-1.5">
+                          <div className="flex justify-end gap-1">
+                            <button
+                              type="button"
+                              disabled={reviewBusy}
+                              onClick={() => acceptSelected([m.id])}
+                              className="rounded border border-emerald-500/40 px-2 py-1 text-[10px] text-emerald-300 hover:bg-emerald-500/10"
+                            >
+                              Accept
+                            </button>
+                            <button
+                              type="button"
+                              disabled={reviewBusy}
+                              onClick={() => rejectSelected([m.id])}
+                              className="rounded border border-rose-500/40 px-2 py-1 text-[10px] text-rose-300 hover:bg-rose-500/10"
+                            >
+                              Reject
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Rejected — transient history, collapsed by default. */}
+      {rejections.length > 0 && (
+        <div className="rounded border border-border bg-background/40 p-3">
+          <button
+            type="button"
+            onClick={() => setRejectedOpen((o) => !o)}
+            className={`flex items-center gap-1.5 text-sm font-semibold text-foreground ${rejectedOpen ? "mb-2" : ""}`}
+          >
+            <span className="text-[10px] text-muted-foreground">{rejectedOpen ? "▼" : "▶"}</span>
+            Rejected ({rejections.length})
+          </button>
+          {rejectedOpen && (
+            <div className="overflow-x-auto rounded border border-border/60">
+              <table className="w-full min-w-[820px] text-sm">
+                <thead className="border-b border-border/60 text-left text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  <tr>
+                    <th className="px-2 py-1.5">Symbol</th>
+                    <th className="px-2 py-1.5">Reason</th>
+                    <th className="px-2 py-1.5">Rejected</th>
+                    <th className="px-2 py-1.5">Rejected under</th>
+                    <th className="px-2 py-1.5">Scope</th>
+                    <th className="px-2 py-1.5 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rejections.map((r) => (
+                    <tr key={r.id} className="border-b border-border/40 last:border-0 hover:bg-white/[0.02]">
+                      <td className="px-2 py-1.5 font-mono font-semibold text-foreground">{r.symbol}</td>
+                      <td className="max-w-[280px] px-2 py-1.5 text-muted-foreground">{r.reason ?? "—"}</td>
+                      <td className="px-2 py-1.5 text-muted-foreground">{fmtDate(r.rejected_at)}</td>
+                      <td className="px-2 py-1.5 text-muted-foreground">{r.theme_type ?? "—"}</td>
+                      <td className="px-2 py-1.5">
+                        {r.is_current_scope ? (
+                          <span className="rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                            Current question — suppresses
+                          </span>
+                        ) : (
+                          <span
+                            className="rounded border border-sky-500/40 bg-sky-500/10 px-1.5 py-0.5 text-[10px] text-sky-200"
+                            title="Rejected under a different theme_type or expansion prompt — retained for the record, but does not suppress this symbol on the next expansion run."
+                          >
+                            Different question — inactive
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-2 py-1.5">
+                        <div className="flex justify-end">
+                          <button
+                            type="button"
+                            disabled={undoingId === r.id}
+                            onClick={() => undoOneRejection(r)}
+                            className="rounded border border-border px-2 py-1 text-[10px] text-muted-foreground hover:bg-white/5 hover:text-foreground"
+                            title="Remove this rejection — the symbol can be suggested again"
+                          >
+                            {undoingId === r.id ? "Undoing…" : "Undo"}
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       )}
     </div>
