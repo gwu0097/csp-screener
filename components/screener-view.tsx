@@ -5934,7 +5934,29 @@ type ChainCampaign = {
   peak_capital: number | null;
   notes: string;
   still_open: boolean;
+  strike: number | null;
+  rolled_strikes: number[] | null;
+  entry_spot: number | null;
+  pct_below_spot: number | null;
+  x_em_entry: number | null;
+  implied_move_pct: number | null;
+  actual_move_pct: number | null;
+  move_ratio: number | null;
+  closest_approach_pct: number | null;
 };
+
+function fmtStrike(c: ChainCampaign): string {
+  if (c.rolled_strikes && c.rolled_strikes.length > 1) {
+    return c.rolled_strikes.map((s) => `$${s}`).join(" → ");
+  }
+  return c.strike !== null ? `$${c.strike}` : "—";
+}
+
+function fmtPct1(n: number | null, signed = false): string {
+  if (n === null || !Number.isFinite(n)) return "—";
+  const sign = signed && n > 0 ? "+" : "";
+  return `${sign}${n.toFixed(1)}%`;
+}
 
 function tradeTypeBadge(t: string): { label: string; cls: string } {
   if (t === "recovery_play")
@@ -6014,6 +6036,12 @@ function TickerTradeHistory({
               <tr>
                 <th className="px-2 py-1.5">Dates</th>
                 <th className="px-2 py-1.5">Type</th>
+                <th className="px-2 py-1.5 text-right">Strike</th>
+                <th className="px-2 py-1.5 text-right">Spot @ Entry</th>
+                <th className="px-2 py-1.5 text-right">% Below Spot</th>
+                <th className="px-2 py-1.5 text-right">x EM @ Entry</th>
+                <th className="px-2 py-1.5 text-right">Actual / EM</th>
+                <th className="px-2 py-1.5 text-right">Closest Approach (lowest daily low)</th>
                 <th className="px-2 py-1.5 text-right">Contracts</th>
                 <th className="px-2 py-1.5 text-right">P&L</th>
                 <th className="px-2 py-1.5 text-right">Chain ROC</th>
@@ -6038,6 +6066,48 @@ function TickerTradeHistory({
                         {badge.label}
                       </span>
                     </td>
+                    <td className="px-2 py-1.5 text-right font-mono">{fmtStrike(c)}</td>
+                    <td className="px-2 py-1.5 text-right font-mono">
+                      {c.entry_spot !== null ? `$${c.entry_spot.toFixed(2)}` : "—"}
+                    </td>
+                    <td className="px-2 py-1.5 text-right font-mono">
+                      {fmtPct1(c.pct_below_spot)}
+                    </td>
+                    <td className="px-2 py-1.5 text-right font-mono">
+                      {c.x_em_entry !== null ? `${c.x_em_entry.toFixed(2)}x` : "—"}
+                    </td>
+                    <td className="px-2 py-1.5 text-right font-mono">
+                      {c.actual_move_pct !== null && c.implied_move_pct !== null ? (
+                        <>
+                          {fmtPct1(c.actual_move_pct * 100, true)}
+                          {c.move_ratio !== null && (
+                            <span
+                              className={cn(
+                                "ml-1",
+                                c.move_ratio > 1 ? "text-rose-300" : "text-emerald-300",
+                              )}
+                            >
+                              ({c.move_ratio.toFixed(2)}x EM)
+                            </span>
+                          )}
+                        </>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
+                    <td className="px-2 py-1.5 text-right font-mono">
+                      {c.closest_approach_pct !== null ? (
+                        <span
+                          className={
+                            c.closest_approach_pct < 0 ? "text-rose-300" : "text-emerald-300"
+                          }
+                        >
+                          {fmtPct1(c.closest_approach_pct, true)}
+                        </span>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
                     <td className="px-2 py-1.5 text-right font-mono">{c.contracts}</td>
                     <td
                       className={cn(
@@ -6060,7 +6130,11 @@ function TickerTradeHistory({
       )}
       <div className="text-[11px] text-muted-foreground">
         Campaign-level view — rolled and recovery chains include their
-        assignment stock lots in P&L.
+        assignment stock lots in P&L. Strike/EM/entry columns are
+        anchored to the first-opened leg. Closest approach uses the
+        lowest daily low during the hold (no intraday price series is
+        stored), so a wick through the strike intraday that closed back
+        above it won&apos;t show as a breach here.
       </div>
     </div>
   );
