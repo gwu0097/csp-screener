@@ -28,6 +28,7 @@ import {
   type SchwabOptionsChain,
 } from "@/lib/schwab";
 import { isT1SessionEligible } from "@/lib/session-eligibility";
+import { T1_RETRY_CUTOFF_DAYS, recordCaptureAttempt } from "@/lib/earnings-capture-attempts";
 import YahooFinance from "yahoo-finance2";
 
 const FINNHUB_RATE_DELAY_MS = 200;
@@ -2320,6 +2321,7 @@ export async function selectT0Candidates(): Promise<T0Candidate[]> {
 }
 
 export type T1Candidate = {
+  id: string;
   symbol: string;
   earnings_date: string;
   iv_before: number | null;
@@ -2330,15 +2332,25 @@ export type T1Candidate = {
 // Pure selection — no Schwab calls. Does NOT filter by relevant/active
 // symbols — callers that need that scope (runEncyclopediaMaintenance)
 // filter the result themselves.
+//
+// Window widened from a fixed 4 days to T1_RETRY_CUTOFF_DAYS (10) as
+// part of the retry backstop (see lib/earnings-capture-attempts.ts) —
+// the 4-day window had no retry at all, so one Schwab failure inside it
+// (chain_fetch_failed / schwab_disconnected / timeout) orphaned the row
+// permanently. t1_unrecoverable=false excludes rows already aged past
+// the (now 10-day) cutoff and explicitly marked dead by
+// markT1RowsUnrecoverable — a row is either still a candidate or
+// explicitly marked unrecoverable, never silently neither.
 export async function selectT1Candidates(): Promise<T1Candidate[]> {
   const todayEt = todayEasternIso();
   const sb = createServerClient();
   const raw = await sb
     .from("earnings_history")
-    .select("symbol,earnings_date,iv_before,implied_move_pct,timing")
-    .gte("earnings_date", addDaysIso(todayEt, -4))
+    .select("id,symbol,earnings_date,iv_before,implied_move_pct,timing")
+    .gte("earnings_date", addDaysIso(todayEt, -T1_RETRY_CUTOFF_DAYS))
     .lte("earnings_date", todayEt)
-    .is("iv_after", null);
+    .is("iv_after", null)
+    .eq("t1_unrecoverable", false);
   if (raw.error) return [];
   return ((raw.data ?? []) as T1Candidate[])
     .filter((r) => r.iv_before !== null && r.implied_move_pct !== null)
@@ -2466,6 +2478,13 @@ export async function runEncyclopediaMaintenance(): Promise<MaintenanceReport> {
     if (overBudget("t0-capture")) break;
     try {
       const r = await captureEarningsT0(a.symbol, a.earnings_date, { timing: a.timing });
+      await recordCaptureAttempt({
+        earningsHistoryId: null,
+        symbol: a.symbol,
+        earningsDate: a.earnings_date,
+        phase: "t0",
+        outcome: r.captured ? "captured" : (r.reason ?? "unknown"),
+      });
       if (r.captured) report.t0Captured.push({ symbol: a.symbol, earnings_date: a.earnings_date });
       else if (
         r.reason &&
@@ -2483,11 +2502,20 @@ export async function runEncyclopediaMaintenance(): Promise<MaintenanceReport> {
         });
       }
     } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      await recordCaptureAttempt({
+        earningsHistoryId: null,
+        symbol: a.symbol,
+        earningsDate: a.earnings_date,
+        phase: "t0",
+        outcome: message,
+        errorMessage: message,
+      }).catch(() => {});
       report.errors.push({
         symbol: a.symbol,
         earnings_date: a.earnings_date,
         stage: "T0",
-        reason: e instanceof Error ? e.message : String(e),
+        reason: message,
       });
     }
   }
@@ -2507,6 +2535,13 @@ export async function runEncyclopediaMaintenance(): Promise<MaintenanceReport> {
     if (overBudget("t1-capture")) break;
     try {
       const r = await captureEarningsT1(c.symbol, c.earnings_date);
+      await recordCaptureAttempt({
+        earningsHistoryId: c.id,
+        symbol: c.symbol,
+        earningsDate: c.earnings_date,
+        phase: "t1",
+        outcome: r.captured ? "captured" : (r.reason ?? "unknown"),
+      });
       if (r.captured) report.t1Captured.push({ symbol: c.symbol, earnings_date: c.earnings_date });
       else if (
         r.reason &&
@@ -2522,6 +2557,15 @@ export async function runEncyclopediaMaintenance(): Promise<MaintenanceReport> {
         });
       }
     } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      await recordCaptureAttempt({
+        earningsHistoryId: c.id,
+        symbol: c.symbol,
+        earningsDate: c.earnings_date,
+        phase: "t1",
+        outcome: message,
+        errorMessage: message,
+      }).catch(() => {});
       report.errors.push({
         symbol: c.symbol,
         earnings_date: c.earnings_date,

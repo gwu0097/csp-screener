@@ -23,6 +23,52 @@ import {
 import { analyzePositionPostEarnings } from "@/lib/post-earnings";
 import type { PositionRow } from "@/lib/positions";
 import { isT1SessionEligible } from "@/lib/session-eligibility";
+import { recordCaptureAttempt, markT1RowsUnrecoverable, T1_RETRY_CUTOFF_DAYS } from "@/lib/earnings-capture-attempts";
+import { upsertHealthRollup } from "@/lib/capture-health";
+
+// Distinct phase labels for capture_health_daily — NOT "t0"/"t1", which
+// scripts/capture-t0-t1-chain-detail.ts already writes for a completely
+// different mechanism (per-strike chain-detail capture around T0/T1,
+// not this file's earnings_history actual-move capture). Reusing those
+// labels would recreate exactly the banner conflation the 2026-08-11
+// audit found — see components/capture-health-panel.tsx's
+// CrushCaptureHealthPanel, which reads these specific labels.
+const CRUSH_T0_PHASE = "crush-t0";
+const CRUSH_T1_PHASE = "crush-t1";
+
+// Benign, expected skip reasons — never real failures, so excluded from
+// the errored/outstanding counts a health rollup reports. Same
+// vocabulary already returned by captureEarningsT0/T1 (see CaptureItem).
+const BENIGN_SKIP_REASONS = new Set(["already_captured", "manual_row", "row_not_found", "no_t0_data"]);
+
+async function writeCrushHealthRollup(
+  phase: typeof CRUSH_T0_PHASE | typeof CRUSH_T1_PHASE,
+  captureDate: string,
+  report: CaptureReport,
+  runStartedAt: string,
+  runFinishedAt: string,
+): Promise<void> {
+  const schwabDisconnected = report.skipped.filter((s) => s.reason === "schwab_disconnected").length;
+  const realFailures = report.skipped.filter(
+    (s) => s.reason !== "schwab_disconnected" && !(s.reason && BENIGN_SKIP_REASONS.has(s.reason)),
+  );
+  await upsertHealthRollup(captureDate, phase, {
+    due: report.candidates,
+    fired: report.captured.length,
+    errored: realFailures.length,
+    suppressed: 0,
+    missed: 0,
+    schwab_disconnected: schwabDisconnected,
+    outstanding: realFailures.map((s) => ({
+      symbol: s.symbol,
+      earnings_history_id: null,
+      earnings_date: s.earnings_date,
+      trading_day_offset: null,
+    })),
+    run_started_at: runStartedAt,
+    run_finished_at: runFinishedAt,
+  });
+}
 
 // Re-exported for existing importers. isT1SessionEligible's canonical
 // definition lives in lib/session-eligibility.ts so lib/encyclopedia.ts
@@ -160,6 +206,8 @@ export async function runT0Capture(opts?: {
   only?: Array<{ symbol: string; earnings_date: string; timing?: "amc" | "bmo" | "unknown" }>;
 }): Promise<CaptureReport> {
   const dryRun = opts?.dryRun === true;
+  const runStartedAt = new Date().toISOString();
+  const captureDate = todayEasternIso();
   const report: CaptureReport = {
     ok: true,
     dryRun,
@@ -174,7 +222,11 @@ export async function runT0Capture(opts?: {
     .catch(() => false);
   if (!connected) {
     console.warn("[earnings-capture:T0] Schwab disconnected — capture skipped");
-    return { ...report, ok: false, skipReason: "schwab_disconnected" };
+    const disconnectedReport = { ...report, ok: false, skipReason: "schwab_disconnected" };
+    if (!dryRun) {
+      await writeCrushHealthRollup(CRUSH_T0_PHASE, captureDate, disconnectedReport, runStartedAt, new Date().toISOString());
+    }
+    return disconnectedReport;
   }
 
   let candidates: T0Candidate[];
@@ -200,6 +252,15 @@ export async function runT0Capture(opts?: {
     }
     try {
       const r = await captureEarningsT0(c.symbol, c.earnings_date, { dryRun, timing: c.timing });
+      if (!dryRun) {
+        await recordCaptureAttempt({
+          earningsHistoryId: null,
+          symbol: c.symbol,
+          earningsDate: c.earnings_date,
+          phase: "t0",
+          outcome: r.captured ? "captured" : (r.reason ?? "unknown"),
+        });
+      }
       if (r.captured) {
         const linked = await linkOpenPositions(c.symbol, c.earnings_date, dryRun);
         report.captured.push({
@@ -228,13 +289,27 @@ export async function runT0Capture(opts?: {
         });
       }
     } catch (e) {
+      const message = e instanceof Error ? e.message : "threw";
+      if (!dryRun) {
+        await recordCaptureAttempt({
+          earningsHistoryId: null,
+          symbol: c.symbol,
+          earningsDate: c.earnings_date,
+          phase: "t0",
+          outcome: message,
+          errorMessage: message,
+        });
+      }
       report.skipped.push({
         symbol: c.symbol,
         earnings_date: c.earnings_date,
         captured: false,
-        reason: e instanceof Error ? e.message : "threw",
+        reason: message,
       });
     }
+  }
+  if (!dryRun) {
+    await writeCrushHealthRollup(CRUSH_T0_PHASE, captureDate, report, runStartedAt, new Date().toISOString());
   }
   return report;
 }
@@ -304,14 +379,21 @@ async function generatePostEarningsRecs(
 }
 
 // T1 candidates: earnings_history rows with a T0 capture (iv_before
-// set) and no T1 yet, dated within the last 4 days — the window
-// tolerates weekends and a missed cron without ever scanning the
-// whole table. Self-pairing: only events we actually T0'd are eligible,
-// which is exactly the set a crush number is computable for.
+// set) and no T1 yet, dated within the trailing T1_RETRY_CUTOFF_DAYS
+// (10) — retried every eligible run until captured or the cutoff is
+// reached, at which point markT1RowsUnrecoverable (below) explicitly
+// marks the row dead rather than leaving it silently incomplete. Was a
+// fixed 4-day window with no retry — see
+// lib/earnings-capture-attempts.ts's header for the audit that found
+// this orphaning rows permanently. Self-pairing: only events we
+// actually T0'd are eligible, which is exactly the set a crush number
+// is computable for.
 export async function runT1Capture(opts?: {
   dryRun?: boolean;
 }): Promise<CaptureReport> {
   const dryRun = opts?.dryRun === true;
+  const runStartedAt = new Date().toISOString();
+  const captureDate = todayEasternIso();
   const report: CaptureReport = {
     ok: true,
     dryRun,
@@ -326,7 +408,21 @@ export async function runT1Capture(opts?: {
     .catch(() => false);
   if (!connected) {
     console.warn("[earnings-capture:T1] Schwab disconnected — capture skipped");
-    return { ...report, ok: false, skipReason: "schwab_disconnected" };
+    const disconnectedReport = { ...report, ok: false, skipReason: "schwab_disconnected" };
+    if (!dryRun) {
+      await writeCrushHealthRollup(CRUSH_T1_PHASE, captureDate, disconnectedReport, runStartedAt, new Date().toISOString());
+    }
+    return disconnectedReport;
+  }
+
+  if (!dryRun) {
+    const aged = await markT1RowsUnrecoverable(captureDate);
+    if (aged.length > 0) {
+      console.warn(
+        `[earnings-capture:T1] ${aged.length} row(s) aged past the ${T1_RETRY_CUTOFF_DAYS}-day cutoff, marked unrecoverable: ` +
+          aged.map((a) => `${a.symbol}@${a.earnings_date} (${a.reason})`).join(", "),
+      );
+    }
   }
 
   const candidates = await selectT1Candidates();
@@ -338,12 +434,21 @@ export async function runT1Capture(opts?: {
     if (Date.now() - startedAt > CAPTURE_BUDGET_MS) {
       report.budget_exhausted = true;
       console.warn(
-        `[earnings-capture:T1] budget exhausted with ${report.captured.length}/${candidates.length} captured — rest defers to tomorrow's run (4-day window)`,
+        `[earnings-capture:T1] budget exhausted with ${report.captured.length}/${candidates.length} captured — rest defers to the next eligible run (${T1_RETRY_CUTOFF_DAYS}-day window)`,
       );
       break;
     }
     try {
       const r = await captureEarningsT1(c.symbol, c.earnings_date, { dryRun });
+      if (!dryRun) {
+        await recordCaptureAttempt({
+          earningsHistoryId: c.id,
+          symbol: c.symbol,
+          earningsDate: c.earnings_date,
+          phase: "t1",
+          outcome: r.captured ? "captured" : (r.reason ?? "unknown"),
+        });
+      }
       if (r.captured) {
         recalcSymbols.add(c.symbol.toUpperCase());
         // Post-earnings recommendation engine: every position linked to
@@ -373,11 +478,22 @@ export async function runT1Capture(opts?: {
         });
       }
     } catch (e) {
+      const message = e instanceof Error ? e.message : "threw";
+      if (!dryRun) {
+        await recordCaptureAttempt({
+          earningsHistoryId: c.id,
+          symbol: c.symbol,
+          earningsDate: c.earnings_date,
+          phase: "t1",
+          outcome: message,
+          errorMessage: message,
+        });
+      }
       report.skipped.push({
         symbol: c.symbol,
         earnings_date: c.earnings_date,
         captured: false,
-        reason: e instanceof Error ? e.message : "threw",
+        reason: message,
       });
     }
   }
@@ -394,6 +510,7 @@ export async function runT1Capture(opts?: {
         );
       }
     }
+    await writeCrushHealthRollup(CRUSH_T1_PHASE, captureDate, report, runStartedAt, new Date().toISOString());
   }
   return report;
 }

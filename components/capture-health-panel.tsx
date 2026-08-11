@@ -166,6 +166,178 @@ export function CaptureHealthPanel() {
   );
 }
 
+// Reads /api/capture-health/crush — the T0/T1 earnings_history
+// actual-move pipeline (captureEarningsT0/T1). Separate endpoint and
+// separate panel from CaptureHealthPanel above on purpose: that one
+// watches a different mechanism entirely (capture_phase='daily', the
+// local full-chain Parquet capture). The 2026-08-11 audit found the
+// banner above claiming DEGRADED/healthy for this pipeline while never
+// actually reading its data — this panel is what closes that gap.
+type CrushHealthDay = { date: string; state: "no_run" | "ran_nothing_due" | "ran_ok" | "ran_failed"; due: number; fired: number; failed: number };
+type CrushHealthResp = {
+  todayEt: string;
+  t0: {
+    last: { capture_date: string; due: number; fired: number; errored: number; schwab_disconnected: number; run_finished_at: string | null } | null;
+    days: CrushHealthDay[];
+  };
+  t1: {
+    last: { capture_date: string; due: number; fired: number; errored: number; schwab_disconnected: number; run_finished_at: string | null } | null;
+    days: CrushHealthDay[];
+  };
+  incomplete: Array<{ symbol: string; earningsDate: string; attempts: number; lastAttemptAt: string | null; lastFailureReason: string | null }>;
+  unrecoverable: Array<{ symbol: string; earningsDate: string; reason: string | null }>;
+};
+
+function dayStateLabel(s: CrushHealthDay["state"]): string {
+  switch (s) {
+    case "no_run":
+      return "did not run";
+    case "ran_nothing_due":
+      return "ran, nothing due";
+    case "ran_failed":
+      return "ran, failed";
+    case "ran_ok":
+      return "ran ok";
+  }
+}
+
+function dayStateColor(s: CrushHealthDay["state"]): string {
+  switch (s) {
+    case "no_run":
+      return "text-rose-300";
+    case "ran_failed":
+      return "text-amber-300";
+    case "ran_nothing_due":
+      return "text-muted-foreground";
+    case "ran_ok":
+      return "text-emerald-300";
+  }
+}
+
+export function CrushCaptureHealthPanel() {
+  const [resp, setResp] = useState<CrushHealthResp | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/capture-health/crush", { cache: "no-store" })
+      .then(async (r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json() as Promise<CrushHealthResp>;
+      })
+      .then((j) => {
+        if (!cancelled) setResp(j);
+      })
+      .catch((e) => {
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (loading) {
+    return (
+      <div className="flex items-center gap-2 rounded-md border border-border bg-muted/30 p-2 text-sm text-muted-foreground">
+        <Loader2 className="h-4 w-4 animate-spin" />
+        Checking T0/T1 crush-capture health...
+      </div>
+    );
+  }
+  if (error || !resp) {
+    return (
+      <div className="flex items-center gap-2 rounded-md border border-rose-500/40 bg-rose-500/10 p-3 text-sm text-rose-200">
+        <AlertOctagon className="h-4 w-4 shrink-0" />
+        Crush-capture health check failed: {error ?? "no data"}
+      </div>
+    );
+  }
+
+  const { t0, t1, incomplete, unrecoverable } = resp;
+  const degraded = incomplete.length > 0 || unrecoverable.length > 0 || t0.days.some((d) => d.state === "no_run" || d.state === "ran_failed") || t1.days.some((d) => d.state === "no_run" || d.state === "ran_failed");
+
+  return (
+    <div
+      className={
+        degraded
+          ? "rounded-lg border-2 border-amber-500 bg-amber-500/10 p-4 shadow-[0_0_0_1px_rgba(245,158,11,0.3)]"
+          : "rounded-lg border border-border bg-muted/20 p-3"
+      }
+    >
+      <div className="flex items-center gap-2">
+        {degraded ? (
+          <AlertTriangle className="h-5 w-5 shrink-0 text-amber-400" />
+        ) : (
+          <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
+        )}
+        <span className={degraded ? "text-base font-bold text-amber-200" : "text-sm font-medium text-foreground/80"}>
+          {degraded ? "T0/T1 crush capture: attention needed" : "T0/T1 crush capture healthy"}
+        </span>
+      </div>
+
+      <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div>
+          <div className="text-xs font-semibold text-foreground/70">T0 (last 7 weekdays)</div>
+          <ul className="mt-1 space-y-0.5 text-xs">
+            {t0.days.map((d) => (
+              <li key={d.date} className={dayStateColor(d.state)}>
+                {d.date}: {dayStateLabel(d.state)}
+                {d.state === "ran_failed" ? ` (${d.failed}/${d.due} failed)` : ""}
+              </li>
+            ))}
+          </ul>
+        </div>
+        <div>
+          <div className="text-xs font-semibold text-foreground/70">T1 (last 7 weekdays)</div>
+          <ul className="mt-1 space-y-0.5 text-xs">
+            {t1.days.map((d) => (
+              <li key={d.date} className={dayStateColor(d.state)}>
+                {d.date}: {dayStateLabel(d.state)}
+                {d.state === "ran_failed" ? ` (${d.failed}/${d.due} failed)` : ""}
+              </li>
+            ))}
+          </ul>
+        </div>
+      </div>
+
+      {incomplete.length > 0 && (
+        <div className="mt-3">
+          <div className="text-xs font-semibold text-amber-200">
+            Incomplete T1 ({incomplete.length}) — still within retry window
+          </div>
+          <ul className="mt-1 space-y-1 text-xs text-amber-100/90">
+            {incomplete.map((r) => (
+              <li key={`${r.symbol}|${r.earningsDate}`} className="font-mono">
+                {r.symbol} ({r.earningsDate}): {r.attempts} attempt{r.attempts === 1 ? "" : "s"}
+                {r.lastFailureReason ? ` — last failure: ${r.lastFailureReason}` : " — never attempted"}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {unrecoverable.length > 0 && (
+        <div className="mt-3">
+          <div className="text-xs font-semibold text-rose-200">
+            Aged out permanently ({unrecoverable.length})
+          </div>
+          <ul className="mt-1 space-y-1 text-xs text-rose-100/90">
+            {unrecoverable.map((r) => (
+              <li key={`${r.symbol}|${r.earningsDate}`} className="font-mono">
+                {r.symbol} ({r.earningsDate}): {r.reason ?? "unknown"}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Warn-only price-date-mismatch findings from the weekly scan
 // (scripts/detect-price-date-mismatch.ts). Never auto-repaired —
 // this panel is where a human sees them and decides whether to act.
