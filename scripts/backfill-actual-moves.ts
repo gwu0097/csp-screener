@@ -6,16 +6,21 @@
 // IS NULL. Rows within the last 3 days are deferred (the post-earnings
 // close may not be final yet); the T1 capture or a rerun picks them up.
 //
-// Never touches implied_move_source='manual' rows. fetchYahooPriceAction's
-// report-window gap scan (for legacy quarter-end-keyed dates) can pick a
-// larger, unrelated price move from 2-6 weeks after a real announcement
-// date when the true near-date reaction is small — safe for auto-seeded
-// rows (fetch-em-history and updateEncyclopedia both carry the same
-// guard), but a manual row's earnings_date is already the confirmed real
-// announcement date, so this scan should never run against it. This
-// guard closes the exact hole that corrupted CDNS 2026-04-27, GLW
-// 2026-04-28, and DUOL 2026-05-04 (see repair on 2026-08-05).
-// Usage: npx tsx scripts/backfill-actual-moves.ts
+// Runs on manual rows too (implied_move_source='manual'). The
+// 2026-08-05 CDNS/GLW/DUOL corruption (fetchYahooPriceAction's
+// report-window gap scan picking a larger unrelated move weeks out
+// when the true reaction was small) was fixed at the source in commit
+// a0dfb13: a confirmed real announcement date now uses the near-window
+// only and returns null on a data gap instead of guessing from a wider
+// window. That protects every caller, including this one, so excluding
+// manual rows here was redundant with the .is("actual_move_pct", null)
+// filter above — the only guard actually needed against overwriting a
+// populated value (audit: 2026-08-11). Rows whose earnings_date is a
+// literal quarter-end (isQuarterEndDate) still take the wide
+// report-window path; flagged below for visibility, not excluded.
+//
+// Defaults to a dry run — reports what it WOULD write without writing.
+// Usage: npx tsx scripts/backfill-actual-moves.ts [--write] [--symbol=SMCI]
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
@@ -40,39 +45,52 @@ function addDaysIso(iso: string, days: number): string {
 async function main() {
   loadEnvLocal();
   const { createServerClient } = await import("../lib/supabase");
-  const { fetchYahooPriceAction } = await import("../lib/encyclopedia");
+  const { fetchYahooPriceAction, isQuarterEndDate } = await import("../lib/encyclopedia");
   const sb = createServerClient();
+
+  const WRITE = process.argv.includes("--write");
+  const symbolArg = process.argv.find((a) => a.startsWith("--symbol="));
+  const symbolFilter = symbolArg ? symbolArg.slice("--symbol=".length).toUpperCase() : null;
 
   const todayIso = new Date().toISOString().slice(0, 10);
   const cutoff = addDaysIso(todayIso, -3);
 
-  const res = await sb
+  let query = sb
     .from("earnings_history")
     .select("symbol,earnings_date,implied_move_pct,implied_move_source")
     .is("actual_move_pct", null)
     .lte("earnings_date", todayIso)
     .order("earnings_date", { ascending: true });
+  if (symbolFilter) query = query.eq("symbol", symbolFilter);
+  const res = await query;
   if (res.error) {
     console.error("candidate read failed:", res.error.message);
     process.exit(1);
   }
-  const fetched = (res.data ?? []) as Array<{
+  const all = (res.data ?? []) as Array<{
     symbol: string;
     earnings_date: string;
     implied_move_pct: number | null;
     implied_move_source: string | null;
   }>;
-  const manualSkipped = fetched.filter((r) => r.implied_move_source === "manual");
-  const all = fetched.filter((r) => r.implied_move_source !== "manual");
   const deferred = all.filter((r) => r.earnings_date > cutoff);
   const rows = all.filter((r) => r.earnings_date <= cutoff);
+  const manualRows = rows.filter((r) => r.implied_move_source === "manual");
+  const quarterEndRows = rows.filter((r) => isQuarterEndDate(r.earnings_date));
   console.log(
-    `candidates=${all.length} runnable=${rows.length} deferred(too recent, > ${cutoff})=${deferred.length} manualSkipped=${manualSkipped.length}`,
+    `${WRITE ? "WRITE" : "DRY RUN"} candidates=${all.length} runnable=${rows.length} deferred(too recent, > ${cutoff})=${deferred.length}` +
+      (symbolFilter ? ` symbol=${symbolFilter}` : ""),
   );
-  if (manualSkipped.length > 0) {
+  if (manualRows.length > 0) {
     console.log(
-      "manual rows never touched by this backfill: " +
-        manualSkipped.map((r) => `${r.symbol}@${r.earnings_date}`).join(", "),
+      `manual rows now eligible (${manualRows.length}): ` +
+        manualRows.map((r) => `${r.symbol}@${r.earnings_date}`).join(", "),
+    );
+  }
+  if (quarterEndRows.length > 0) {
+    console.log(
+      `⚠ quarter-end earnings_date, still takes the wide report-window path (${quarterEndRows.length}): ` +
+        quarterEndRows.map((r) => `${r.symbol}@${r.earnings_date}`).join(", "),
     );
   }
 
@@ -90,21 +108,29 @@ async function main() {
         noData += 1;
         failures.push(`${sym}@${row.earnings_date}: no usable Yahoo bars`);
       } else {
-        const upd = await sb
-          .from("earnings_history")
-          .update({
-            price_before: price.price_before,
-            price_after: price.price_after,
-            price_at_expiry: price.price_at_expiry,
-            actual_move_pct: price.actual_move_pct,
-            is_complete:
-              price.price_before !== null && price.price_after !== null,
-          })
-          .eq("symbol", row.symbol)
-          .eq("earnings_date", row.earnings_date);
-        if (upd.error) {
-          updateErrors += 1;
-          failures.push(`${sym}@${row.earnings_date}: db ${upd.error.message}`);
+        console.log(
+          `  ${sym}@${row.earnings_date} (${row.implied_move_source ?? "unknown"}${isQuarterEndDate(row.earnings_date) ? ", quarter-end" : ""}): ` +
+            `actual=${(price.actual_move_pct * 100).toFixed(2)}% before=${price.price_before} after=${price.price_after}`,
+        );
+        if (WRITE) {
+          const upd = await sb
+            .from("earnings_history")
+            .update({
+              price_before: price.price_before,
+              price_after: price.price_after,
+              price_at_expiry: price.price_at_expiry,
+              actual_move_pct: price.actual_move_pct,
+              is_complete:
+                price.price_before !== null && price.price_after !== null,
+            })
+            .eq("symbol", row.symbol)
+            .eq("earnings_date", row.earnings_date);
+          if (upd.error) {
+            updateErrors += 1;
+            failures.push(`${sym}@${row.earnings_date}: db ${upd.error.message}`);
+          } else {
+            filled += 1;
+          }
         } else {
           filled += 1;
         }
@@ -123,7 +149,7 @@ async function main() {
     await sleep(350);
   }
 
-  console.log("\n==== actual-move backfill done ====");
+  console.log(`\n==== actual-move backfill done (${WRITE ? "WRITE" : "DRY RUN — pass --write to apply"}) ====`);
   console.log(
     `runnable=${rows.length} filled=${filled} noData=${noData} dbErrors=${updateErrors} deferred=${deferred.length}`,
   );
