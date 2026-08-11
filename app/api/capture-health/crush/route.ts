@@ -141,12 +141,19 @@ export async function GET(): Promise<NextResponse> {
   // "no_run" — the crons only fire weekdays, and PASS 1 of this same
   // audit flagged "are weekends in the denominator" as exactly the
   // phantom-alarm bug to not recreate here.
-  // Starts at yesterday, not today — today's run (if any) is surfaced
-  // separately via t0.last/t1.last, and a same-day "not yet run" isn't
-  // a failure worth counting toward the trailing window.
+  //
+  // Walks from today backward, but today only appears once a rollup
+  // row actually exists for it — otherwise it's skipped (not counted
+  // "no_run", and not counted toward bdaysWanted either) so a same-day
+  // "hasn't run yet" isn't misread as a failure. Once today's real run
+  // lands it shows up immediately rather than waiting until tomorrow's
+  // page load walks past it — a 2026-08-11 post-deploy check found the
+  // panel reporting "did not run" for a T1 run that actually completed
+  // and wrote its rollup that same morning, purely because the old
+  // version of this loop always started at yesterday.
   function dailyStates(byDate: Map<string, HealthRow>, bdaysWanted: number) {
     const out: Array<{ date: string; state: "no_run" | "ran_nothing_due" | "ran_ok" | "ran_failed"; due: number; fired: number; failed: number }> = [];
-    let i = 1;
+    let i = 0;
     // Generous ceiling so a long holiday run can't spin this forever.
     while (out.length < bdaysWanted && i < bdaysWanted * 3 + 10) {
       const d = addCalDays(todayEt, -i);
@@ -154,6 +161,7 @@ export async function GET(): Promise<NextResponse> {
       if (!isBday(d)) continue;
       const row = byDate.get(d);
       if (!row) {
+        if (d === todayEt) continue; // today just hasn't run yet — not a failure
         out.push({ date: d, state: "no_run", due: 0, fired: 0, failed: 0 });
         continue;
       }

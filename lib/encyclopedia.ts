@@ -1660,9 +1660,20 @@ export async function captureEarningsT0(
   // the same-week Friday. Monthly-only symbols: the next monthly. A
   // 16-day range window covers both without assuming weeklies exist.
   const minExpiryIso = nextWeekdayOnOrAfterIso(addDaysIso(earningsDate, 1));
+  // Schwab's chains endpoint 400s ("Invalid Paramter/Value") when
+  // fromDate is in the past, even though toDate is still current/future
+  // and the endpoint would happily return those listed expiries on
+  // their own. minExpiryIso falls behind "today" whenever this capture
+  // runs more than a day or two after earningsDate — confirmed live
+  // 2026-08-11: identical requests with fromDate clamped to today
+  // succeeded for symbols that 400'd with fromDate=minExpiryIso.
+  // earliestChainExpiryOnOrAfter() below still floors the *selected*
+  // expiry at the true minExpiryIso, so clamping only the request
+  // window can't select an earlier contract than intended.
+  const fromDateIso = minExpiryIso > todayEasternIso() ? minExpiryIso : todayEasternIso();
   let chain: SchwabOptionsChain;
   try {
-    chain = await getOptionsChainRange(sym, minExpiryIso, addDaysIso(minExpiryIso, 15), "ALL");
+    chain = await getOptionsChainRange(sym, fromDateIso, addDaysIso(fromDateIso, 15), "ALL");
   } catch (e) {
     console.warn(
       `[encyclopedia:T0] chain(${sym}, ≥${minExpiryIso}) failed: ${e instanceof Error ? e.message : e}`,
@@ -1823,9 +1834,20 @@ export async function captureEarningsT1(
   // Same deterministic expiry rule as T0 (earliest listed expiry on or
   // after earningsDate+1) so the crush compares the same contract.
   const minExpiryIso = nextWeekdayOnOrAfterIso(addDaysIso(earningsDate, 1));
+  // Same fromDate-in-the-past 400 as T0 (see comment there) — T1 hits
+  // this far more often in practice: the retry backstop's whole point
+  // is capturing rows days after earningsDate, by which point
+  // minExpiryIso is routinely in the past. This was the actual cause
+  // of "chain_fetch_failed" on every retry for the 9 rows stuck since
+  // 2026-08-06 — confirmed live, not a Schwab connectivity or
+  // symbol-specific issue (RKLB/HIMS/ASTS/SPG succeeded same morning
+  // on the identical connection because their minExpiryIso was still
+  // current). Retrying alone could never have fixed this; the request
+  // itself was malformed.
+  const fromDateIso = minExpiryIso > todayEasternIso() ? minExpiryIso : todayEasternIso();
   let chain: SchwabOptionsChain;
   try {
-    chain = await getOptionsChainRange(sym, minExpiryIso, addDaysIso(minExpiryIso, 15), "ALL");
+    chain = await getOptionsChainRange(sym, fromDateIso, addDaysIso(fromDateIso, 15), "ALL");
   } catch (e) {
     console.warn(
       `[encyclopedia:T1] chain(${sym}, ≥${minExpiryIso}) failed: ${e instanceof Error ? e.message : e}`,

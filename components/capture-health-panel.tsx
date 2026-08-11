@@ -214,6 +214,23 @@ function dayStateColor(s: CrushHealthDay["state"]): string {
   }
 }
 
+// Aged-out rows tend to share one root cause (e.g. every legacy
+// phantom-capture row carries the identical explanation) — printing
+// the same paragraph 9 times is noise. Group by exact reason text so
+// it's stated once with the affected symbols listed under it.
+function groupByReason(
+  rows: CrushHealthResp["unrecoverable"],
+): Array<[string, CrushHealthResp["unrecoverable"]]> {
+  const byReason = new Map<string, CrushHealthResp["unrecoverable"]>();
+  for (const r of rows) {
+    const key = r.reason ?? "unknown";
+    const bucket = byReason.get(key);
+    if (bucket) bucket.push(r);
+    else byReason.set(key, [r]);
+  }
+  return Array.from(byReason.entries()).sort((a, b) => b[1].length - a[1].length);
+}
+
 export function CrushCaptureHealthPanel() {
   const [resp, setResp] = useState<CrushHealthResp | null>(null);
   const [loading, setLoading] = useState(true);
@@ -325,13 +342,16 @@ export function CrushCaptureHealthPanel() {
           <div className="text-xs font-semibold text-rose-200">
             Aged out permanently ({unrecoverable.length})
           </div>
-          <ul className="mt-1 space-y-1 text-xs text-rose-100/90">
-            {unrecoverable.map((r) => (
-              <li key={`${r.symbol}|${r.earningsDate}`} className="font-mono">
-                {r.symbol} ({r.earningsDate}): {r.reason ?? "unknown"}
-              </li>
+          <div className="mt-1 space-y-2">
+            {groupByReason(unrecoverable).map(([reason, rows]) => (
+              <div key={reason}>
+                <div className="text-xs text-rose-100/90">{reason}</div>
+                <div className="mt-0.5 font-mono text-xs text-rose-200/80">
+                  {rows.map((r) => `${r.symbol} (${r.earningsDate})`).join(", ")}
+                </div>
+              </div>
             ))}
-          </ul>
+          </div>
         </div>
       )}
     </div>
