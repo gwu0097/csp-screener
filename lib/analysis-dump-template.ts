@@ -17,6 +17,16 @@
 // numeric grade, never vetoes a trade, and the two are never merged or
 // averaged. See lib/research-analysis-parser.ts for how a pasted
 // response gets parsed back into structured fields.
+//
+// 2026-08-11: added RECOMMENDATION / RECOMMENDED_STRIKE / DOWN_CATALYST /
+// DOWN_CATALYST_PLAUSIBILITY to the metadata block (audit found PART 2's
+// and PART 6's answers were prose-only and couldn't be scored — see
+// research_analyses migration 2026-08-11-add-research-analyses-scoring-
+// fields.sql). Not a version bump: Part 1's checklist vocabulary is
+// unchanged, and these fields follow the same optional-field precedent
+// as FLAGS_NA/CANDIDATE_OBSERVATIONS — a pre-2026-08-11 paste simply
+// won't have them, which the parser treats as expected absence, not a
+// defect.
 export const ANALYSIS_TEMPLATE_VERSION = "v5";
 
 export const ANALYSIS_TEMPLATE = `=== RESEARCH ANALYSIS REQUEST ===
@@ -81,7 +91,10 @@ next lesson comes from. Answer freely:
   - What is genuinely dangerous about THIS setup that the checklist does not
     ask about?
   - What single event or disclosure on this call would cause the largest
-    down move, and how plausible is it?
+    down move, and how plausible is it? State the catalyst in one line and
+    rate its plausibility low / moderate / high — both go in the metadata
+    block below (DOWN_CATALYST, DOWN_CATALYST_PLAUSIBILITY) so this answer
+    can be checked against what actually happens.
   - What would have to be true for the reference strike to be breached, and
     is there a credible path to it?
   - What is the market apparently NOT worried about that it should be?
@@ -115,6 +128,13 @@ Given everything above, state plainly:
 This is advisory. It does not override the numeric grade and it does not
 veto anything.
 
+Your recommendation must reduce to exactly one take / take_smaller / pass
+call and exactly one strike it's about — even if your prose above is
+conditional ("take at $X, pass at the reference strike"). Put that single
+resolved answer in RECOMMENDATION and RECOMMENDED_STRIKE below.
+RECOMMENDED_STRIKE is whichever strike your final call is actually about; it
+is often NOT the reference strike above.
+
 === RESPONSE FORMAT ===
 Begin your response with exactly this block, then prose:
 
@@ -125,6 +145,13 @@ FLAGS_FIRED: <comma-separated from the vocabulary above, or \`none\`>
 FLAGS_NA: <comma-separated, or \`none\`>
 FLAGS_UNKNOWN: <comma-separated, or \`none\`>
 CHECKLIST_VERSION: v5
+RECOMMENDATION: <take | take_smaller | pass — your PART 6 answer, resolved
+  to exactly one value>
+RECOMMENDED_STRIKE: <the strike that recommendation is actually about —
+  may differ from the reference strike>
+DOWN_CATALYST: <one line — the single disclosure from PART 2 that would
+  cause the largest down move>
+DOWN_CATALYST_PLAUSIBILITY: <low | moderate | high>
 === END METADATA ===
 
 DICTIONARY USE

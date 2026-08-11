@@ -105,6 +105,17 @@ type Body = {
   numericGrade?: unknown;
   crushGrade?: unknown;
   maxDownsideRatio?: unknown;
+  // Added 2026-08-11 (audit: prose-only recommendation/catalyst
+  // couldn't be scored). All optional/nullable — a save from a paste
+  // written against a pre-2026-08-11 template simply omits these.
+  recommendation?: unknown;
+  recommendedStrike?: unknown;
+  downCatalyst?: unknown;
+  downCatalystPlausibility?: unknown;
+  // Nullable link to the position this analysis preceded. Most
+  // analyses are passes with no position — omitted/null is the common
+  // case, not an error.
+  positionId?: unknown;
 };
 
 function asStringArray(v: unknown, field: string): { ok: true; value: string[] } | { ok: false; error: string } {
@@ -119,6 +130,28 @@ function asNullableNumber(v: unknown, field: string): { ok: true; value: number 
   if (v === undefined || v === null) return { ok: true, value: null };
   if (typeof v !== "number" || !Number.isFinite(v)) {
     return { ok: false, error: `${field} must be a finite number or null` };
+  }
+  return { ok: true, value: v };
+}
+
+function asNullableEnum<T extends string>(
+  v: unknown,
+  field: string,
+  allowed: readonly T[],
+): { ok: true; value: T | null } | { ok: false; error: string } {
+  if (v === undefined || v === null) return { ok: true, value: null };
+  if (typeof v !== "string" || !(allowed as readonly string[]).includes(v)) {
+    return { ok: false, error: `${field} must be one of ${allowed.join(", ")}, or null` };
+  }
+  return { ok: true, value: v as T };
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function asNullableUuid(v: unknown, field: string): { ok: true; value: string | null } | { ok: false; error: string } {
+  if (v === undefined || v === null) return { ok: true, value: null };
+  if (typeof v !== "string" || !UUID_RE.test(v)) {
+    return { ok: false, error: `${field} must be a UUID string or null` };
   }
   return { ok: true, value: v };
 }
@@ -356,6 +389,21 @@ export async function POST(req: NextRequest) {
   const maxDownsideRatio = asNullableNumber(body.maxDownsideRatio, "maxDownsideRatio");
   if (!maxDownsideRatio.ok) return NextResponse.json({ error: maxDownsideRatio.error }, { status: 400 });
 
+  const recommendation = asNullableEnum(body.recommendation, "recommendation", ["take", "take_smaller", "pass"] as const);
+  if (!recommendation.ok) return NextResponse.json({ error: recommendation.error }, { status: 400 });
+  const recommendedStrike = asNullableNumber(body.recommendedStrike, "recommendedStrike");
+  if (!recommendedStrike.ok) return NextResponse.json({ error: recommendedStrike.error }, { status: 400 });
+  const downCatalystPlausibility = asNullableEnum(
+    body.downCatalystPlausibility,
+    "downCatalystPlausibility",
+    ["low", "moderate", "high"] as const,
+  );
+  if (!downCatalystPlausibility.ok) {
+    return NextResponse.json({ error: downCatalystPlausibility.error }, { status: 400 });
+  }
+  const positionId = asNullableUuid(body.positionId, "positionId");
+  if (!positionId.ok) return NextResponse.json({ error: positionId.error }, { status: 400 });
+
   // v4 saves derive candidate_flags from the observation term list
   // server-side rather than trusting the client's flat array, so the
   // History tab / modal / this route's own savedRecord panel — which all
@@ -387,6 +435,11 @@ export async function POST(req: NextRequest) {
         numeric_grade: asNullableString(body.numericGrade),
         crush_grade: asNullableString(body.crushGrade),
         max_downside_ratio: maxDownsideRatio.value,
+        recommendation: recommendation.value,
+        recommended_strike: recommendedStrike.value,
+        down_catalyst: asNullableString(body.downCatalyst),
+        down_catalyst_plausibility: downCatalystPlausibility.value,
+        position_id: positionId.value,
         updated_at: new Date().toISOString(),
       },
       { onConflict: "symbol,earnings_date" },

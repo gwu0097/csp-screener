@@ -70,6 +70,9 @@ export function isKnownFlag(name: string): boolean {
 
 export type ParseStatus = "parsed" | "prose_only" | "partial";
 
+export type Recommendation = "take" | "take_smaller" | "pass";
+export type DownCatalystPlausibility = "low" | "moderate" | "high";
+
 export type ParsedResearchAnalysis = {
   status: ParseStatus;
   ticker: string | null;
@@ -79,6 +82,14 @@ export type ParsedResearchAnalysis = {
   flagsUnknown: string[];
   candidateFlags: string[];
   candidateObservations: ParsedCandidateObservation[];
+  // Added 2026-08-11 (audit: prose-only recommendation/catalyst couldn't
+  // be scored). Absent on any paste written before that date's template
+  // change — treated as expected absence, same as FLAGS_NA on v1/v2,
+  // never a parse error on their own.
+  recommendation: Recommendation | null;
+  recommendedStrike: number | null;
+  downCatalyst: string | null;
+  downCatalystPlausibility: DownCatalystPlausibility | null;
   // Whether a CANDIDATE_OBSERVATIONS: header was found at all — distinct
   // from candidateObservations.length === 0 (a v4 paste can legitimately
   // list zero observations). Callers use this, not the list length, to
@@ -234,6 +245,10 @@ export function parseResearchAnalysisPaste(raw: string): ParsedResearchAnalysis 
       candidateObservations: [],
       observationsBlockFound: false,
       checklistVersion: null,
+      recommendation: null,
+      recommendedStrike: null,
+      downCatalyst: null,
+      downCatalystPlausibility: null,
       prose: raw.trim(),
       proseCharCount: raw.trim().length,
       rawPaste,
@@ -274,6 +289,49 @@ export function parseResearchAnalysisPaste(raw: string): ParsedResearchAnalysis 
   const checklistVersion = extractField(block, "CHECKLIST_VERSION");
   if (checklistVersion === null) notes.push("CHECKLIST_VERSION line missing or empty within the metadata block.");
 
+  // Added 2026-08-11 — absent on any pre-existing paste, same treatment
+  // as FLAGS_NA: no note on absence. A PRESENT-but-malformed value does
+  // get a note and is dropped to null, same as EARNINGS_DATE's format
+  // check above — never guess a value from a shape that doesn't match.
+  const recommendationRaw = extractField(block, "RECOMMENDATION");
+  let recommendation: Recommendation | null = null;
+  if (recommendationRaw !== null) {
+    const normalized = recommendationRaw.trim().toLowerCase();
+    if (normalized === "take" || normalized === "take_smaller" || normalized === "pass") {
+      recommendation = normalized;
+    } else {
+      notes.push(
+        `RECOMMENDATION "${recommendationRaw}" is not one of take/take_smaller/pass — left null.`,
+      );
+    }
+  }
+
+  const recommendedStrikeRaw = extractField(block, "RECOMMENDED_STRIKE");
+  let recommendedStrike: number | null = null;
+  if (recommendedStrikeRaw !== null) {
+    const parsedNum = Number(recommendedStrikeRaw.replace(/[$,]/g, ""));
+    if (Number.isFinite(parsedNum)) {
+      recommendedStrike = parsedNum;
+    } else {
+      notes.push(`RECOMMENDED_STRIKE "${recommendedStrikeRaw}" is not a number — left null.`);
+    }
+  }
+
+  const downCatalyst = extractField(block, "DOWN_CATALYST");
+
+  const downCatalystPlausibilityRaw = extractField(block, "DOWN_CATALYST_PLAUSIBILITY");
+  let downCatalystPlausibility: DownCatalystPlausibility | null = null;
+  if (downCatalystPlausibilityRaw !== null) {
+    const normalized = downCatalystPlausibilityRaw.trim().toLowerCase();
+    if (normalized === "low" || normalized === "moderate" || normalized === "high") {
+      downCatalystPlausibility = normalized;
+    } else {
+      notes.push(
+        `DOWN_CATALYST_PLAUSIBILITY "${downCatalystPlausibilityRaw}" is not one of low/moderate/high — left null.`,
+      );
+    }
+  }
+
   const flagsFired = parseFlagList(flagsFiredRaw ?? "");
   const flagsNa = parseFlagList(flagsNaRaw ?? "");
   const flagsUnknown = parseFlagList(flagsUnknownRaw ?? "");
@@ -299,6 +357,10 @@ export function parseResearchAnalysisPaste(raw: string): ParsedResearchAnalysis 
     candidateObservations: obsResult.observations,
     observationsBlockFound: obsResult.found,
     checklistVersion,
+    recommendation,
+    recommendedStrike,
+    downCatalyst,
+    downCatalystPlausibility,
     prose,
     proseCharCount: prose.length,
     rawPaste,
