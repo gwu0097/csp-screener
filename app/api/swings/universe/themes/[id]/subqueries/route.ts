@@ -21,6 +21,22 @@ type SubqueryRow = {
   created_at: string;
 };
 
+type RunRow = {
+  id: string;
+  subquery_name: string;
+  ran_at: string;
+  raw_count: number;
+  truncated: boolean;
+  cross_dup_count: number;
+  queued_count: number;
+  error: string | null;
+};
+
+// How much run history one theme detail page load pulls -- bounded, not
+// "every run ever": enough to see a repeatedly-unproductive angle (the
+// motivating case) without the read growing unbounded as runs pile up.
+const RUN_HISTORY_LIMIT = 60;
+
 export async function GET(
   _req: NextRequest,
   { params }: { params: { id: string } },
@@ -35,14 +51,24 @@ export async function GET(
   if (!themeId) return NextResponse.json({ error: "Missing id" }, { status: 400 });
 
   const sb = createServerClient();
-  const res = await sb
-    .from<SubqueryRow>("theme_subqueries")
-    .select("*")
-    .eq("theme_id", themeId)
-    .eq("user_id", userId)
-    .order("sort_order", { ascending: true });
+  const [res, runsRes] = await Promise.all([
+    sb
+      .from<SubqueryRow>("theme_subqueries")
+      .select("*")
+      .eq("theme_id", themeId)
+      .eq("user_id", userId)
+      .order("sort_order", { ascending: true }),
+    sb
+      .from<RunRow>("theme_subquery_runs")
+      .select("id,subquery_name,ran_at,raw_count,truncated,cross_dup_count,queued_count,error")
+      .eq("theme_id", themeId)
+      .eq("user_id", userId)
+      .order("ran_at", { ascending: false })
+      .limit(RUN_HISTORY_LIMIT),
+  ]);
   if (res.error) return NextResponse.json({ error: res.error.message }, { status: 500 });
-  return NextResponse.json({ subqueries: res.data ?? [] });
+  if (runsRes.error) return NextResponse.json({ error: runsRes.error.message }, { status: 500 });
+  return NextResponse.json({ subqueries: res.data ?? [], runs: runsRes.data ?? [] });
 }
 
 type PostBody = { name?: unknown; query_text?: unknown; anchor_symbols?: unknown };

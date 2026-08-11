@@ -47,10 +47,29 @@ type Subquery = {
   created_at: string;
 };
 
+// One persisted row per (sub-query, run) -- see
+// migrations/2026-08-19-add-theme-subquery-runs.sql. Keyed by
+// subquery_name (frozen at write time), not id, so history survives the
+// sub-query definition itself being deleted later.
+type SubqueryRun = {
+  id: string;
+  subquery_name: string;
+  ran_at: string;
+  raw_count: number;
+  truncated: boolean;
+  cross_dup_count: number;
+  queued_count: number;
+  error: string | null;
+};
+
 // Bounds cost/runtime of one "Run expansion" click, which fans out
 // sequentially across every sub-query -- matches the server-side cap in
 // app/api/.../subqueries/route.ts.
 const MAX_SUBQUERIES = 8;
+// How many most-recent runs to show per sub-query in the manager list --
+// enough to see a repeated pattern ("0 raw two runs in a row") without
+// the list growing unbounded.
+const RUN_HISTORY_DISPLAY_COUNT = 5;
 
 // Only these theme_types have an expansion prompt (see
 // lib/theme-expansion.ts's PROMPT_TEMPLATES) — 'custom' and any
@@ -113,9 +132,15 @@ function bucketReason(reason: string): string {
   if (reason.includes("not a common stock")) return "Not a common stock (ETF/fund)";
   if (reason.includes("foreign-primary-listing")) return "Foreign-listing heuristic";
   if (reason.includes("price") && reason.includes("floor")) return "Price below $5";
-  // Checked before the floor bucket below -- both reasons contain
-  // "market cap", distinguished by "ceiling" (only the new, optional
-  // per-theme check produces that word; the floor's message never does).
+  // All three checked before the plain floor bucket below -- every
+  // reason here contains "market cap", distinguished by a more specific
+  // word. "unavailable" MUST be checked first and bucketed separately
+  // from "below $500M": a missing Yahoo field is not the same claim as a
+  // confirmed small market cap, and conflating them silently drops real
+  // names (see lib/theme-expansion.ts's comment -- confirmed live for
+  // ADI/MU/WDC, all real $150B+ names, from an intermittent missing
+  // field, not a units bug).
+  if (reason.includes("market cap unavailable")) return "Market cap unavailable (Yahoo lookup gap)";
   if (reason.includes("market cap") && reason.includes("ceiling")) return "Market cap above ceiling";
   if (reason.includes("market cap")) return "Market cap below $500M";
   if (reason.includes("$ volume")) return "20d $ volume below $10M";
@@ -297,6 +322,16 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
   const [subqAdding, setSubqAdding] = useState(false);
   const [subqError, setSubqError] = useState<string | null>(null);
   const [subqDeletingId, setSubqDeletingId] = useState<string | null>(null);
+  const [subqueryRuns, setSubqueryRuns] = useState<SubqueryRun[]>([]);
+
+  // Live status per sub-query DURING a fan-out run — separate from
+  // lastRun.bySubQuery (which only exists once the whole run finishes).
+  // This is what makes "Running 3 of 6: <name>" and "one failed, keep
+  // going" visible WHILE it's happening, not just in the final report.
+  type FanoutStepStatus = "queued" | "running" | "done" | "failed";
+  const [fanoutSteps, setFanoutSteps] = useState<
+    Array<{ subQueryId: string; name: string; status: FanoutStepStatus; detail: string | null }>
+  >([]);
 
   // ---- Phase C: pending review ----
   const [selectedPending, setSelectedPending] = useState<Set<string>>(new Set());
@@ -339,6 +374,7 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
       setMembers(json.members as Member[]);
       setRejections((json.rejections as Rejection[]) ?? []);
       setSubqueries((json.subqueries as Subquery[]) ?? []);
+      setSubqueryRuns((json.subqueryRuns as SubqueryRun[]) ?? []);
       if (!promptTouched) setPromptDraft(t.expansion_prompt ?? "");
       if (!ceilingTouched) setCeilingDraft(t.market_cap_ceiling !== null ? String(t.market_cap_ceiling) : "");
     } catch (e) {
@@ -439,6 +475,7 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
     // with more than 8 rows still only ever fans out across the first 8
     // in one run.
     const activeSubqueries = subqueries.slice(0, MAX_SUBQUERIES);
+    setFanoutSteps(activeSubqueries.map((sq) => ({ subQueryId: sq.id, name: sq.name, status: "queued", detail: null })));
 
     try {
       if (activeSubqueries.length === 0) {
@@ -480,9 +517,14 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
       const bySubQuery: SubQueryRunResult[] = [];
       const mergedSuggestions: Suggestion[] = [];
 
+      const patchStep = (id: string, patch: Partial<{ status: FanoutStepStatus; detail: string | null }>) => {
+        setFanoutSteps((prev) => prev.map((step) => (step.subQueryId === id ? { ...step, ...patch } : step)));
+      };
+
       for (let i = 0; i < activeSubqueries.length; i += 1) {
         const sq = activeSubqueries[i];
-        setExpandProgress(`Sub-query ${i + 1}/${activeSubqueries.length} (${sq.name}): asking Perplexity…`);
+        setExpandProgress(`Running ${i + 1} of ${activeSubqueries.length}: ${sq.name}`);
+        patchStep(sq.id, { status: "running" });
         try {
           const suggestRes = await fetch(`/api/swings/universe/themes/${themeId}/expand/suggest`, {
             method: "POST",
@@ -513,16 +555,22 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
             error: null,
             verdicts: [], // filled in after the merged filter pass below
           });
+          patchStep(sq.id, {
+            status: "done",
+            detail: `${rawCount} raw${truncated ? " (truncated)" : ""}, ${rawCount - crossDupCount} new`,
+          });
         } catch (e) {
+          const msg = e instanceof Error ? e.message : "Sub-query failed";
           bySubQuery.push({
             subQueryId: sq.id,
             name: sq.name,
             rawCount: 0,
             truncated: false,
             crossDupCount: 0,
-            error: e instanceof Error ? e.message : "Sub-query failed",
+            error: msg,
             verdicts: [],
           });
+          patchStep(sq.id, { status: "failed", detail: msg });
         }
       }
       setPromptTouched(false);
@@ -530,18 +578,48 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
       const totalRaw = bySubQuery.reduce((sum, r) => sum + r.rawCount, 0);
       const anyTruncated = bySubQuery.some((r) => r.truncated);
 
+      const persistRunHistory = async (finished: SubQueryRunResult[]) => {
+        try {
+          await fetch(`/api/swings/universe/themes/${themeId}/subqueries/runs`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              runs: finished.map((r) => ({
+                subQueryId: r.subQueryId,
+                subQueryName: r.name,
+                rawCount: r.rawCount,
+                truncated: r.truncated,
+                crossDupCount: r.crossDupCount,
+                queuedCount: r.verdicts.filter((v) => v.status === "pending").length,
+                error: r.error,
+              })),
+            }),
+          });
+          // Response not otherwise needed — load() right after this call
+          // refetches subqueryRuns from the theme GET route, which is the
+          // single source of truth the UI renders from.
+        } catch {
+          // Best-effort — losing run-history persistence must never mask
+          // the run's real result, which is already in lastRun/state.
+        }
+      };
+
       if (mergedSuggestions.length === 0) {
         setLastRun({ rawCount: totalRaw, truncated: anyTruncated, verdicts: [], bySubQuery });
+        await persistRunHistory(bySubQuery);
+        await load();
         return;
       }
 
       setExpanding("filter");
+      setExpandProgress("Filtering merged suggestions…");
       const verdicts = await filterAll(mergedSuggestions, "");
       const byName = new Map(bySubQuery.map((r) => [r.name, r]));
       for (const v of verdicts) {
         if (v.subQueryName) byName.get(v.subQueryName)?.verdicts.push(v);
       }
       setLastRun({ rawCount: totalRaw, truncated: anyTruncated, verdicts, bySubQuery });
+      await persistRunHistory(bySubQuery);
       await load();
     } catch (e) {
       setExpandError(e instanceof Error ? e.message : "Expansion failed");
@@ -975,6 +1053,22 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
                             Anchors: <span className="font-mono">{sq.anchor_symbols.join(", ")}</span>
                           </div>
                         )}
+                        {(() => {
+                          const recent = subqueryRuns
+                            .filter((r) => r.subquery_name === sq.name)
+                            .slice(0, RUN_HISTORY_DISPLAY_COUNT);
+                          if (recent.length === 0) return null;
+                          const allZero = recent.every((r) => !r.error && r.raw_count === 0);
+                          return (
+                            <div className={allZero ? "text-amber-300" : "text-muted-foreground"}>
+                              Recent runs ({recent.length}):{" "}
+                              {recent
+                                .map((r) => (r.error ? "failed" : `${r.raw_count} raw / ${r.queued_count} new`))
+                                .join(" · ")}
+                              {allZero && recent.length > 1 ? " — repeatedly unproductive" : ""}
+                            </div>
+                          );
+                        })()}
                       </div>
                       <button
                         type="button"
@@ -1036,7 +1130,11 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
             />
             <div className="mt-2 flex items-center gap-2">
               <Button onClick={runExpansion} disabled={expanding !== null}>
-                {expanding ? "Running…" : "Run expansion"}
+                {expanding
+                  ? fanoutSteps.length > 0
+                    ? `Running ${fanoutSteps.filter((s) => s.status === "done" || s.status === "failed").length + 1} of ${fanoutSteps.length}…`
+                    : "Running…"
+                  : "Run expansion"}
               </Button>
               <span className="text-[11px] text-muted-foreground">
                 {subqueries.length > 0
@@ -1044,6 +1142,29 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
                   : `Anchors, description, and existing members are sent as context — one manual run, up to ${40} suggestions.`}
               </span>
             </div>
+            {fanoutSteps.length > 0 && (
+              <ul className="mt-2 space-y-0.5 text-[11px]">
+                {fanoutSteps.map((step) => (
+                  <li key={step.subQueryId} className="flex items-center gap-1.5">
+                    <span
+                      className={
+                        step.status === "done"
+                          ? "text-emerald-300"
+                          : step.status === "failed"
+                            ? "text-rose-300"
+                            : step.status === "running"
+                              ? "text-amber-300"
+                              : "text-muted-foreground"
+                      }
+                    >
+                      {step.status === "done" ? "✓" : step.status === "failed" ? "✗" : step.status === "running" ? "…" : "·"}
+                    </span>
+                    <span className="text-foreground">{step.name}</span>
+                    {step.detail && <span className="text-muted-foreground">— {step.detail}</span>}
+                  </li>
+                ))}
+              </ul>
+            )}
           </>
         )}
         {expandError && <p className="mt-2 text-xs text-rose-300">{expandError}</p>}

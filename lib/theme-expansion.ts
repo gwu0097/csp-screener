@@ -392,13 +392,23 @@ export async function filterAndQueueSuggestions(opts: {
       verdicts.push(reject(s, `price ${profile.price ?? "unknown"} below $${MIN_PRICE} floor`));
       continue;
     }
-    if (profile.marketCap === null || profile.marketCap < MIN_MARKET_CAP) {
-      verdicts.push(
-        reject(
-          s,
-          `market cap ${profile.marketCap === null ? "unknown" : `$${(profile.marketCap / 1e6).toFixed(0)}M`} below $${MIN_MARKET_CAP / 1e6}M floor`,
-        ),
-      );
+    // Distinct from the real below-floor case below: this is a Yahoo
+    // quote() call that resolved (record is non-null, price came back
+    // fine above) but omitted the marketCap field specifically -- a
+    // partial/incomplete response, not a real market cap. Confirmed live
+    // for ADI/MU/WDC (all real $150B+ names) getting bucketed as "below
+    // $500M floor" from exactly this path -- retesting the same lookup
+    // moments later returned correct multi-billion-dollar values, so
+    // it's not a units mismatch or a parsing bug, just an intermittent
+    // missing field that must never be silently treated as "confirmed
+    // small." Recoverable via the manual "Add symbols" path, which does
+    // its own fresh live lookup.
+    if (profile.marketCap === null) {
+      verdicts.push(reject(s, `market cap unavailable — Yahoo lookup succeeded but returned no marketCap value (not a confirmed small cap)`));
+      continue;
+    }
+    if (profile.marketCap < MIN_MARKET_CAP) {
+      verdicts.push(reject(s, `market cap $${(profile.marketCap / 1e6).toFixed(0)}M below $${MIN_MARKET_CAP / 1e6}M floor`));
       continue;
     }
     if (

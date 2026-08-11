@@ -45,6 +45,21 @@ type SubqueryRow = {
   created_at: string;
 };
 
+type SubqueryRunRow = {
+  id: string;
+  subquery_name: string;
+  ran_at: string;
+  raw_count: number;
+  truncated: boolean;
+  cross_dup_count: number;
+  queued_count: number;
+  error: string | null;
+};
+
+// Bounded, not "every run ever" -- see subqueries/route.ts's own copy of
+// this constant for why.
+const RUN_HISTORY_LIMIT = 60;
+
 export async function GET(
   _req: NextRequest,
   { params }: { params: { id: string } },
@@ -102,19 +117,32 @@ export async function GET(
     expansionPromptOverride: themeRes.data.expansion_prompt,
   });
 
-  const subqueriesRes = await sb
-    .from<SubqueryRow>("theme_subqueries")
-    .select("*")
-    .eq("theme_id", id)
-    .eq("user_id", userId)
-    .order("sort_order", { ascending: true });
+  const [subqueriesRes, subqueryRunsRes] = await Promise.all([
+    sb
+      .from<SubqueryRow>("theme_subqueries")
+      .select("*")
+      .eq("theme_id", id)
+      .eq("user_id", userId)
+      .order("sort_order", { ascending: true }),
+    sb
+      .from<SubqueryRunRow>("theme_subquery_runs")
+      .select("id,subquery_name,ran_at,raw_count,truncated,cross_dup_count,queued_count,error")
+      .eq("theme_id", id)
+      .eq("user_id", userId)
+      .order("ran_at", { ascending: false })
+      .limit(RUN_HISTORY_LIMIT),
+  ]);
   if (subqueriesRes.error) {
     return NextResponse.json({ error: subqueriesRes.error.message }, { status: 500 });
+  }
+  if (subqueryRunsRes.error) {
+    return NextResponse.json({ error: subqueryRunsRes.error.message }, { status: 500 });
   }
 
   return NextResponse.json({
     theme: themeRes.data,
     subqueries: subqueriesRes.data ?? [],
+    subqueryRuns: subqueryRunsRes.data ?? [],
     members: members.map((m) => ({
       ...m,
       ...(enrichment.get(m.symbol.toUpperCase()) ?? {
