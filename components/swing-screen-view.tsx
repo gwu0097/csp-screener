@@ -458,12 +458,21 @@ type RsPullbackExitRules = {
   // Below this R:R (or when the target's outside the window above), the
   // row keeps Track but loses Enter — a pre-committed floor.
   rrFloor: number;
+  // Enter also requires |extensionAdrDays| <= this — independent of, and
+  // more lenient by default than, the live entryZoneAdrDays gate (1.0)
+  // that decides Ready vs Leading-extended bucket membership. Without
+  // this, canEnterRsPullback only checked target window + R:R, so a
+  // "Leading, extended" row 20%+ above its 50MA (e.g. 4.76-4.99
+  // ADR-days) could still show Enter purely on a passing R:R — display
+  // only, never changes which list a candidate lands in.
+  maxEntryExtensionAdrDays: number;
 };
 
 const DEFAULT_RS_PULLBACK_EXIT_RULES: RsPullbackExitRules = {
   targetMinAdrDays: 1.5,
   targetMaxAdrDays: 4.0,
   rrFloor: 2.0,
+  maxEntryExtensionAdrDays: 1.5,
 };
 
 const LS_RS_PULLBACK_EXIT_RULES = "swing-screen-rs-pullback-exit-rules";
@@ -617,18 +626,34 @@ function targetWindowMessage(state: TargetWindowState): string {
 }
 
 function rrHelperText(rules: RsPullbackExitRules): string {
-  return `R:R only shows when the target sits ${rules.targetMinAdrDays.toFixed(1)}–${rules.targetMaxAdrDays.toFixed(1)} ADR-days from entry — outside that window the projection is a distant or already-exhausted level, not a validated trade. Enter requires R:R ≥ ${rules.rrFloor.toFixed(1)}:1; below that, or when R:R is suppressed, Track stays but Enter doesn't.`;
+  return `R:R only shows when the target sits ${rules.targetMinAdrDays.toFixed(1)}–${rules.targetMaxAdrDays.toFixed(1)} ADR-days from entry — outside that window the projection is a distant or already-exhausted level, not a validated trade. Enter requires R:R ≥ ${rules.rrFloor.toFixed(1)}:1 AND |Extension| ≤ ${rules.maxEntryExtensionAdrDays.toFixed(1)} ADR-days AND not In zone/lagging (a control-group bucket) — missing any of those, or when R:R is suppressed, Track stays but Enter doesn't.`;
 }
 
 function targetHelperText(rules: RsPullbackExitRules): string {
   return `Nearer of analyst consensus / 52-week high / 3×ATR projection — no floor or ceiling on distance from entry. R:R only shows when this lands ${rules.targetMinAdrDays.toFixed(1)}–${rules.targetMaxAdrDays.toFixed(1)} ADR-days out.`;
 }
 
-// Whether this row is allowed to show an Enter button — a target
-// outside the window is never enterable regardless of the raw R:R
-// number, and a target inside the window still needs to clear the
-// floor.
+// Whether this row is allowed to show an Enter button — display only,
+// never changes gating, bucketing, or which list a candidate lands in
+// (see RsPullbackExitRules above). Three independent requirements, all
+// must hold:
+//   1. In zone/lagging is a control-group bucket by definition (sits in
+//      the entry zone but fails RS) — never enterable regardless of
+//      target/R:R/extension.
+//   2. |extensionAdrDays| within maxEntryExtensionAdrDays — a "Leading,
+//      extended" row far above its 50MA is not a pullback entry no
+//      matter how good its R:R looks.
+//   3. Target inside the window AND R:R clears the floor (pre-existing).
 function canEnterRsPullback(c: SwingCandidate, rules: RsPullbackExitRules): boolean {
+  if (c.rsPullbackList === "in_zone_lagging") return false;
+  if (
+    c.extensionAdrDays === null ||
+    c.extensionAdrDays === undefined ||
+    !Number.isFinite(c.extensionAdrDays) ||
+    Math.abs(c.extensionAdrDays) > rules.maxEntryExtensionAdrDays
+  ) {
+    return false;
+  }
   const window = classifyTargetWindow(c, rules);
   if (window.kind !== "within") return false;
   return c.rr !== null && c.rr !== undefined && Number.isFinite(c.rr) && c.rr >= rules.rrFloor;
@@ -2638,6 +2663,7 @@ function RsPullbackSettingsPanel({
           {exitRuleField("targetMinAdrDays", "Target window min (ADR-days)")}
           {exitRuleField("targetMaxAdrDays", "Target window max (ADR-days)")}
           {exitRuleField("rrFloor", "R:R floor for Enter")}
+          {exitRuleField("maxEntryExtensionAdrDays", "Max extension for Enter (ADR-days)")}
         </div>
       </div>
       <div className="border-t border-border/60 pt-3">
