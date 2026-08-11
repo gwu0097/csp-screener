@@ -35,6 +35,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { minutesAgo, isChainStale } from "@/lib/dump-capture-timing";
 
 // Hoverable text: dotted underline + cursor:help + tooltip with the
 // formula or the actual numbers behind a metric. Used everywhere a value
@@ -194,6 +195,13 @@ type SwingCandidate = {
   nearMissGap?: number | null;
   nearMissValue5SessionsAgo?: number | null;
   nearMissTrend?: "improving" | "deteriorating" | "flat" | null;
+  // Client-only, transient — never sent to or read from the server, never
+  // persisted (see refreshRsPullbackPrices). True when this candidate's
+  // currentPrice/entryPrice/extensionAdrDays/vsMA50/rr/rsPullbackList were
+  // overwritten by a price-only refresh rather than the last full run —
+  // SMA50/ATR14/RS20/RS60/target/stop are still the full run's stale
+  // values, so this row can never show Enter regardless of R:R.
+  priceRefreshed?: boolean;
 };
 
 // Mirror of lib/swing-screener.ts ScoreComponent — the score IS the sum
@@ -635,7 +643,7 @@ function targetHelperText(rules: RsPullbackExitRules): string {
 
 // Whether this row is allowed to show an Enter button — display only,
 // never changes gating, bucketing, or which list a candidate lands in
-// (see RsPullbackExitRules above). Three independent requirements, all
+// (see RsPullbackExitRules above). Four independent requirements, all
 // must hold:
 //   1. In zone/lagging is a control-group bucket by definition (sits in
 //      the entry zone but fails RS) — never enterable regardless of
@@ -644,7 +652,15 @@ function targetHelperText(rules: RsPullbackExitRules): string {
 //      extended" row far above its 50MA is not a pullback entry no
 //      matter how good its R:R looks.
 //   3. Target inside the window AND R:R clears the floor (pre-existing).
-function canEnterRsPullback(c: SwingCandidate, rules: RsPullbackExitRules): boolean {
+//   4. Not price-refreshed (see priceRefreshed on SwingCandidate) — a
+//      refresh only updates price-dependent fields; SMA50/ATR14/target/
+//      stop are still the last full run's values, so nothing refresh-
+//      derived can ever authorize an entry. Split out as
+//      canEnterIgnoringRefresh below so callers can tell "would show
+//      Enter if not for the refresh flag" apart from "never would have
+//      anyway" — that's what decides whether a row needs the "moved on
+//      refresh" explanation or just stays plain Track like always.
+function canEnterIgnoringRefresh(c: SwingCandidate, rules: RsPullbackExitRules): boolean {
   if (c.rsPullbackList === "in_zone_lagging") return false;
   if (
     c.extensionAdrDays === null ||
@@ -657,6 +673,11 @@ function canEnterRsPullback(c: SwingCandidate, rules: RsPullbackExitRules): bool
   const window = classifyTargetWindow(c, rules);
   if (window.kind !== "within") return false;
   return c.rr !== null && c.rr !== undefined && Number.isFinite(c.rr) && c.rr >= rules.rrFloor;
+}
+
+function canEnterRsPullback(c: SwingCandidate, rules: RsPullbackExitRules): boolean {
+  if (c.priceRefreshed) return false;
+  return canEnterIgnoringRefresh(c, rules);
 }
 
 // Insider $ / buyer-count / recency for rows saved before those fields
@@ -967,6 +988,26 @@ function fmtRelDate(iso: string | null): string {
     d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })
   );
 }
+
+// Time-only, for the RS Pullback price-refresh banner's "prices as of
+// HH:MM, gates from run at HH:MM" — fmtRelDate's full date+time is more
+// than that comparison needs.
+function fmtShortTime(iso: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+}
+
+// How old the underlying full run (the gate values a price refresh
+// never touches) can get before the banner flags it — same mechanism as
+// CHAIN_STALENESS_THRESHOLD_MINUTES on the CSP side (lib/dump-capture-
+// timing.ts's isChainStale, reused here), just a longer window: RS
+// Pullback's gates are daily-bar-derived and don't move intraday the way
+// an options chain does, so 60 minutes (vs. the chain's 30) is about
+// "you've been looking at this a while, maybe re-run" rather than "this
+// number is now wrong."
+const RS_PULLBACK_RUN_STALE_THRESHOLD_MINUTES = 60;
 
 function fmtCalendarDate(iso: string | null): string {
   if (!iso) return "—";
@@ -1798,9 +1839,43 @@ export function SwingScreenView() {
   const [rsPullbackHistoryView, setRsPullbackHistoryView] = useState<SwingCandidate[] | null>(
     null,
   );
+
+  // ---- Price-only refresh (see refreshRsPullbackPrices below) ----
+  // Transient overlay, never written to data/candidates or any save
+  // endpoint — a symbol's entry here means "show this row with a fresh
+  // price instead of the last full run's," nothing more. Cleared
+  // whenever a real full run completes (candidates change) or the user
+  // switches to a history view, since a refresh only makes sense against
+  // the live run it was taken from.
+  const [rsPullbackPriceRefresh, setRsPullbackPriceRefresh] = useState<{
+    pricesAsOf: string;
+    bySymbol: Map<
+      string,
+      { currentPrice: number; extensionAdrDays: number | null; vsMA50: number; rr: number | null; rsPullbackList: "ready" | "leading_extended" | "in_zone_lagging" }
+    >;
+  } | null>(null);
+  const [refreshingPrices, setRefreshingPrices] = useState(false);
+  const [refreshPricesError, setRefreshPricesError] = useState<string | null>(null);
+
   const rsPullbackLists = useMemo(() => {
     const source = rsPullbackHistoryView ?? data?.candidates ?? [];
-    const all = source.filter((c) => (c.setupTabs ?? []).includes("rs_pullback"));
+    let all = source.filter((c) => (c.setupTabs ?? []).includes("rs_pullback"));
+    if (!rsPullbackHistoryView && rsPullbackPriceRefresh) {
+      all = all.map((c) => {
+        const r = rsPullbackPriceRefresh.bySymbol.get(c.symbol);
+        if (!r) return c;
+        return {
+          ...c,
+          currentPrice: r.currentPrice,
+          entryPrice: r.currentPrice,
+          extensionAdrDays: r.extensionAdrDays,
+          vsMA50: r.vsMA50,
+          rr: r.rr,
+          rsPullbackList: r.rsPullbackList,
+          priceRefreshed: true,
+        };
+      });
+    }
     const ready = all.filter((c) => c.rsPullbackList === "ready");
     const leadingExtended = all
       .filter((c) => c.rsPullbackList === "leading_extended")
@@ -1810,7 +1885,104 @@ export function SwingScreenView() {
       .filter((c) => c.rsPullbackList === "near_miss")
       .sort((a, b) => (a.nearMissGap ?? Infinity) - (b.nearMissGap ?? Infinity));
     return { ready, leadingExtended, inZoneLagging, nearMiss };
-  }, [rsPullbackHistoryView, data]);
+  }, [rsPullbackHistoryView, data, rsPullbackPriceRefresh]);
+
+  // A real full run (new candidates) makes any in-flight refresh stale
+  // by definition — the "last full run" the refresh was computed against
+  // no longer exists. Same for switching into a history view.
+  useEffect(() => {
+    setRsPullbackPriceRefresh(null);
+  }, [data?.screenedAt]);
+  useEffect(() => {
+    if (rsPullbackHistoryView) setRsPullbackPriceRefresh(null);
+  }, [rsPullbackHistoryView]);
+
+  // Sequential, chunked price-only fetch (see
+  // app/api/swings/screen/rs-pullback/refresh-prices/route.ts — one
+  // Yahoo quote() per symbol, no bars, no DB write) over the LIVE run's
+  // ready/leading-extended/in-zone-lagging symbols (near-miss rows have
+  // no extension-based bucket to move between, so they're left out of
+  // the fetch). Recomputes exactly what price affects — extension
+  // (against the cached sma50AtEntry), R:R and target distance (against
+  // the cached, unmoved targetPrice/stopPrice), and bucket membership —
+  // everything else (SMA50 itself, ATR14, RS20/RS60, higher-low, gate
+  // pass/fail) carries forward untouched because this never re-reads or
+  // recomputes those fields at all. Never calls /save — see
+  // rsPullbackPriceRefresh's own comment for why this stays transient.
+  const REFRESH_CHUNK_SIZE = 40;
+  async function refreshRsPullbackPrices() {
+    if (!data || rsPullbackHistoryView) return;
+    const live = data.candidates.filter((c) => (c.setupTabs ?? []).includes("rs_pullback"));
+    const refreshable = live.filter(
+      (c) => c.rsPullbackList === "ready" || c.rsPullbackList === "leading_extended" || c.rsPullbackList === "in_zone_lagging",
+    );
+    if (refreshable.length === 0) return;
+    setRefreshingPrices(true);
+    setRefreshPricesError(null);
+    try {
+      const priceBySymbol = new Map<string, number | null>();
+      for (let i = 0; i < refreshable.length; i += REFRESH_CHUNK_SIZE) {
+        const chunk = refreshable.slice(i, i + REFRESH_CHUNK_SIZE);
+        const params = new URLSearchParams({ symbols: chunk.map((c) => c.symbol).join(",") });
+        const res = await fetch(`/api/swings/screen/rs-pullback/refresh-prices?${params.toString()}`, {
+          cache: "no-store",
+        });
+        const json = await res.json();
+        if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+        for (const [symbol, price] of Object.entries(json.prices as Record<string, number | null>)) {
+          priceBySymbol.set(symbol, price);
+        }
+      }
+
+      const bySymbol = new Map<
+        string,
+        { currentPrice: number; extensionAdrDays: number | null; vsMA50: number; rr: number | null; rsPullbackList: "ready" | "leading_extended" | "in_zone_lagging" }
+      >();
+      for (const c of refreshable) {
+        const freshPrice = priceBySymbol.get(c.symbol);
+        if (freshPrice === null || freshPrice === undefined || !Number.isFinite(freshPrice) || freshPrice <= 0) {
+          continue; // couldn't get a fresh price — leave this row as the last full run had it
+        }
+        const sma50 = c.sma50AtEntry;
+        const adr = c.adr20Pct;
+        const extensionAdrDays =
+          sma50 !== null && sma50 !== undefined && sma50 > 0 && adr !== null && adr !== undefined && adr !== 0
+            ? (((freshPrice - sma50) / sma50) * 100) / adr
+            : null;
+        const vsMA50 = sma50 !== null && sma50 !== undefined && sma50 > 0 ? (freshPrice - sma50) / sma50 : c.vsMA50;
+        const risk = freshPrice - c.stopPrice;
+        const reward = c.targetPrice - freshPrice;
+        const rr = risk > 0 ? reward / risk : null;
+
+        // Bucket membership: only the ready<->leading_extended boundary
+        // can move on a price refresh (both require passing RS, frozen
+        // from the last full run — see rs20/rs60 above). In zone/lagging
+        // rows never had passing RS to begin with, so there's no bucket
+        // for "extended AND still failing RS" in the full-run model;
+        // a lagging row's own bucket stays put on refresh (only its
+        // displayed extension/R:R update), matching the one motivating
+        // case this feature exists for: a name moving INTO the entry
+        // zone, not lagging rows leaving it.
+        let rsPullbackList: "ready" | "leading_extended" | "in_zone_lagging" = c.rsPullbackList as
+          | "ready"
+          | "leading_extended"
+          | "in_zone_lagging";
+        if (c.rsPullbackList !== "in_zone_lagging") {
+          const inEntryZone =
+            extensionAdrDays !== null && Math.abs(extensionAdrDays) <= rsPullbackThresholds.entryZoneAdrDays;
+          rsPullbackList = inEntryZone ? "ready" : "leading_extended";
+        }
+
+        bySymbol.set(c.symbol, { currentPrice: freshPrice, extensionAdrDays, vsMA50, rr, rsPullbackList });
+      }
+
+      setRsPullbackPriceRefresh({ pricesAsOf: new Date().toISOString(), bySymbol });
+    } catch (e) {
+      setRefreshPricesError(e instanceof Error ? e.message : "Price refresh failed");
+    } finally {
+      setRefreshingPrices(false);
+    }
+  }
 
   function handleHeaderClick(key: SortKey) {
     setSort((cur) => {
@@ -1960,6 +2132,11 @@ export function SwingScreenView() {
               onTrack={(c) => handleTrack(c, "rs_pullback")}
               trackedSymbols={trackedSymbols}
               trackingSymbol={trackingSymbol}
+              screenedAt={data.screenedAt}
+              priceRefresh={rsPullbackPriceRefresh}
+              refreshingPrices={refreshingPrices}
+              refreshPricesError={refreshPricesError}
+              onRefreshPrices={refreshRsPullbackPrices}
             />
           ) : sortedCandidates.length === 0 ? (
             data.candidates.length === 0 ? (
@@ -2771,6 +2948,11 @@ function RsPullbackTabContent({
   onTrack,
   trackedSymbols,
   trackingSymbol,
+  screenedAt,
+  priceRefresh,
+  refreshingPrices,
+  refreshPricesError,
+  onRefreshPrices,
 }: {
   lists: {
     ready: SwingCandidate[];
@@ -2804,8 +2986,23 @@ function RsPullbackTabContent({
   onTrack: (c: SwingCandidate) => void;
   trackedSymbols: Set<string>;
   trackingSymbol: string | null;
+  // Price-only refresh (see refreshRsPullbackPrices) — screenedAt is the
+  // underlying full run's timestamp (gates), priceRefresh is the
+  // transient price overlay, if any (prices). Both null/undefined means
+  // "nothing to show yet" for the respective half of the banner.
+  screenedAt: string | null;
+  priceRefresh: { pricesAsOf: string } | null;
+  refreshingPrices: boolean;
+  refreshPricesError: string | null;
+  onRefreshPrices: () => void;
 }) {
   const total = lists.ready.length + lists.leadingExtended.length + lists.inZoneLagging.length;
+  const runAge = minutesAgo(screenedAt ? new Date(screenedAt) : null, Date.now());
+  const runStale = isChainStale(
+    screenedAt ? new Date(screenedAt) : null,
+    Date.now(),
+    RS_PULLBACK_RUN_STALE_THRESHOLD_MINUTES,
+  );
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -2844,6 +3041,22 @@ function RsPullbackTabContent({
         </div>
         <div className="flex items-center gap-3">
           <RsPullbackHistoryPicker onSelect={onSelectRun} />
+          {!viewingHistory && (
+            <button
+              type="button"
+              onClick={onRefreshPrices}
+              disabled={refreshingPrices || total === 0}
+              title="Fetch current prices only for symbols already in this run — no bars, no re-enrichment, no new gate evaluation. Recomputes extension/target-distance/R:R/bucket from those fresh prices against the last full run's SMA50/ATR14/target/stop, which stay frozen. Rows that move never show Enter — re-run RS Pullback to authorize entry."
+              className="flex items-center gap-1 text-xs text-muted-foreground underline decoration-dotted hover:text-foreground disabled:opacity-50"
+            >
+              {refreshingPrices ? (
+                <Loader2 className="h-3 w-3 animate-spin" />
+              ) : (
+                <RefreshCw className="h-3 w-3" />
+              )}
+              {refreshingPrices ? "Refreshing prices…" : "Refresh prices"}
+            </button>
+          )}
           <button
             type="button"
             onClick={() => onSettingsOpenChange(!settingsOpen)}
@@ -2853,6 +3066,31 @@ function RsPullbackTabContent({
           </button>
         </div>
       </div>
+
+      {!viewingHistory && screenedAt && (
+        <div
+          className={`flex flex-wrap items-center gap-2 rounded border px-2 py-1.5 text-xs ${
+            runStale
+              ? "border-amber-500/40 bg-amber-500/10 text-amber-200"
+              : "border-border bg-background/40 text-muted-foreground"
+          }`}
+        >
+          {priceRefresh ? (
+            <span>
+              Prices as of <span className="font-medium text-foreground">{fmtShortTime(priceRefresh.pricesAsOf)}</span> · Gates
+              from run at <span className="font-medium text-foreground">{fmtShortTime(screenedAt)}</span>
+              {runAge !== null && ` (${runAge} min ago)`}
+            </span>
+          ) : (
+            <span>
+              Gates from run at <span className="font-medium text-foreground">{fmtShortTime(screenedAt)}</span>
+              {runAge !== null && ` (${runAge} min ago)`} — showing that run&apos;s prices; use Refresh prices for current ones
+            </span>
+          )}
+          {runStale && <span>— this run is getting old, consider re-running RS Pullback</span>}
+          {refreshPricesError && <span className="text-rose-300">Refresh failed: {refreshPricesError}</span>}
+        </div>
+      )}
 
       {settingsOpen && (
         <RsPullbackSettingsPanel
@@ -3219,6 +3457,12 @@ function RsPullbackRow({
   const targetWindow = classifyTargetWindow(c, exitRules);
   const rrSuppressed = targetWindow.kind === "beyond" || targetWindow.kind === "at_resistance";
   const canEnter = canEnterRsPullback(c, exitRules);
+  // Only meaningful when priceRefreshed — would this row show Enter if
+  // not for the refresh flag? Decides whether the row needs the "moved
+  // on refresh" explanation (it would otherwise show Enter) or can just
+  // stay a plain Track like it always has (it wouldn't have shown Enter
+  // either way, refreshed or not).
+  const wouldEnterIfNotRefreshed = c.priceRefreshed && canEnterIgnoringRefresh(c, exitRules);
 
   return (
     <>
@@ -3232,6 +3476,14 @@ function RsPullbackRow({
               className={`h-3 w-3 shrink-0 text-muted-foreground transition-transform ${expanded ? "rotate-90" : ""}`}
             />
             {c.symbol}
+            {c.priceRefreshed && (
+              <span
+                title="Price-only refresh — currentPrice/extension/target-distance/R:R/bucket are fresh, but SMA50/ATR14/target/stop are still from the last full run. Track only; re-run RS Pullback to authorize entry."
+                className="cursor-help text-sky-400"
+              >
+                <RefreshCw className="h-2.5 w-2.5" />
+              </span>
+            )}
             {c.dataQualityDegraded && (
               <span
                 title={`Enriched with incomplete data: ${(c.dataQualityIssues ?? []).join(", ") || "unknown issue"} — this candidate's sector or earnings check failed rather than returning a real answer.`}
@@ -3281,6 +3533,11 @@ function RsPullbackRow({
         </td>
         <td className="px-2 py-1.5" onClick={(e) => e.stopPropagation()}>
           <div className="flex items-center justify-end gap-1">
+            {wouldEnterIfNotRefreshed && (
+              <span className="text-[10px] text-sky-300" title="Extension/target/R:R are from a price refresh, not a full run — SMA50/ATR14/target/stop haven't been re-checked at this price. Re-run RS Pullback to authorize entry.">
+                moved on refresh - re-run to enter
+              </span>
+            )}
             {canEnter && (
               <button
                 type="button"
