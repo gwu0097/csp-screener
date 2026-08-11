@@ -25,6 +25,12 @@ export type CrushHistoryEvent = {
   // date_confidence write path. Not read by any scoring; surfaced for
   // the Analysis Dump export's per-row provenance.
   dateConfidence: "confirmed" | "low" | null;
+  // Phantom too-early T1 capture (see lib/earnings-capture-attempts.ts) —
+  // price_after/actual_move_pct on a flagged row were captured before
+  // the real post-earnings settlement, so ratio/breach math derived
+  // from them is unreliable. Read by buildQuarterlyMoveRatio to exclude
+  // these rows from the live per-symbol grading ratio (audit: 2026-08-11).
+  t1Unrecoverable: boolean;
 };
 
 // Per-event grade from ratio (matches the global crush bands the user
@@ -95,7 +101,7 @@ export async function getCrushHistory(
   const res = await sb
     .from("earnings_history")
     .select(
-      "earnings_date,implied_move_pct,actual_move_pct,move_ratio,implied_move_source,date_confidence,fiscal_quarter,fiscal_year,period_end",
+      "earnings_date,implied_move_pct,actual_move_pct,move_ratio,implied_move_source,date_confidence,fiscal_quarter,fiscal_year,period_end,t1_unrecoverable",
     )
     .eq("symbol", symbol.toUpperCase())
     .order("earnings_date", { ascending: false })
@@ -116,6 +122,7 @@ export async function getCrushHistory(
     fiscal_quarter: number | null;
     fiscal_year: number | null;
     period_end: string | null;
+    t1_unrecoverable: boolean | null;
   };
   const rows = (res.data ?? []) as Row[];
   return rows.map((r) => {
@@ -145,6 +152,7 @@ export async function getCrushHistory(
       grade: gradeFromRatio(ratio),
       impliedMoveSource: r.implied_move_source,
       dateConfidence: r.date_confidence,
+      t1Unrecoverable: r.t1_unrecoverable === true,
     };
   });
 }
@@ -177,7 +185,13 @@ export async function getPopulationMeanMoveRatio(opts?: { forceFresh?: boolean }
     return { mean: populationMeanCache.value, n: populationMeanCache.n };
   }
   const sb = createServerClient();
-  type Row = { id: string; actual_move_pct: number | null; implied_move_pct: number | null; move_ratio: number | null };
+  type Row = {
+    id: string;
+    actual_move_pct: number | null;
+    implied_move_pct: number | null;
+    move_ratio: number | null;
+    t1_unrecoverable: boolean | null;
+  };
   let sum = 0;
   let count = 0;
   let cursor: string | null = null;
@@ -185,7 +199,7 @@ export async function getPopulationMeanMoveRatio(opts?: { forceFresh?: boolean }
   for (;;) {
     let q = sb
       .from("earnings_history")
-      .select("id,actual_move_pct,implied_move_pct,move_ratio")
+      .select("id,actual_move_pct,implied_move_pct,move_ratio,t1_unrecoverable")
       .order("id", { ascending: true })
       .limit(PAGE);
     if (cursor !== null) q = q.gt("id", cursor);
@@ -196,6 +210,11 @@ export async function getPopulationMeanMoveRatio(opts?: { forceFresh?: boolean }
     }
     const rows = (res.data ?? []) as Row[];
     for (const r of rows) {
+      // Phantom too-early T1 capture — same exclusion recalculateStats
+      // and buildQuarterlyMoveRatio apply, needed here too since this
+      // feeds the shrinkage prior for EVERY low-n candidate, not just
+      // the flagged ticker itself (audit: 2026-08-11).
+      if (r.t1_unrecoverable === true) continue;
       const ratio =
         r.move_ratio ??
         (r.actual_move_pct !== null && r.implied_move_pct !== null && r.implied_move_pct > 0
@@ -292,14 +311,26 @@ async function getPoolEvents(): Promise<NormalizedMoveRow[]> {
   const sb = createServerClient();
   const res = await sb
     .from("earnings_history")
-    .select("symbol,implied_move_pct,actual_move_pct")
+    .select("symbol,implied_move_pct,actual_move_pct,t1_unrecoverable")
     .limit(1000); // wrapper's read cap — see supabase-wrapper-limitations memory
   const rows = ((res.data ?? []) as Array<{
     symbol: string;
     implied_move_pct: number | null;
     actual_move_pct: number | null;
+    t1_unrecoverable: boolean | null;
   }>)
-    .filter((r) => r.implied_move_pct !== null && r.actual_move_pct !== null && r.implied_move_pct > 0)
+    // Same t1_unrecoverable exclusion as getPopulationMeanMoveRatio —
+    // actual_move_pct on a phantom too-early capture predates real
+    // settlement, so its normMove would poison the ladder's pooled
+    // overshoot estimate for every ticker, not just the flagged one
+    // (audit: 2026-08-11).
+    .filter(
+      (r) =>
+        r.t1_unrecoverable !== true &&
+        r.implied_move_pct !== null &&
+        r.actual_move_pct !== null &&
+        r.implied_move_pct > 0,
+    )
     .map((r) => ({ symbol: r.symbol, normMove: r.actual_move_pct! / r.implied_move_pct! }));
   poolCache = { rows, fetchedAt: Date.now() };
   return rows;

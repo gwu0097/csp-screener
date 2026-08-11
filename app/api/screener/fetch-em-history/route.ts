@@ -174,7 +174,7 @@ export async function POST(req: NextRequest) {
   const refreshed = await sb
     .from("earnings_history")
     .select(
-      "earnings_date,implied_move_pct,actual_move_pct,move_ratio,implied_move_source,date_confidence,fiscal_quarter,fiscal_year,period_end",
+      "earnings_date,implied_move_pct,actual_move_pct,move_ratio,implied_move_source,date_confidence,fiscal_quarter,fiscal_year,period_end,t1_unrecoverable",
     )
     .eq("symbol", symbol)
     .order("earnings_date", { ascending: false })
@@ -189,6 +189,7 @@ export async function POST(req: NextRequest) {
     fiscal_quarter: number | null;
     fiscal_year: number | null;
     period_end: string | null;
+    t1_unrecoverable: boolean | null;
   }>).map((row) => {
     const ratio =
       row.move_ratio ??
@@ -216,6 +217,7 @@ export async function POST(req: NextRequest) {
       grade: gradeFromRatio(ratio),
       impliedMoveSource: row.implied_move_source,
       dateConfidence: row.date_confidence,
+      t1Unrecoverable: row.t1_unrecoverable === true,
     };
   });
 

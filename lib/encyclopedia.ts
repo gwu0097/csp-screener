@@ -94,6 +94,11 @@ export type EarningsHistory = {
   // this flag is how callers know to exclude them, not a replacement for
   // having them.
   iv_crush_cross_contract: boolean;
+  // True for a phantom too-early T1 capture (see lib/earnings-capture-
+  // attempts.ts) — price_after/actual_move_pct predate the real
+  // post-earnings settlement. Never delete/null the underlying values,
+  // same convention as iv_crush_cross_contract above.
+  t1_unrecoverable: boolean;
   two_x_em_strike: number | null;
   breached_two_x_em: boolean | null;
   recovered_by_expiry: boolean | null;
@@ -520,7 +525,7 @@ export async function recalculateStats(symbol: string): Promise<StockEncyclopedi
   const res = await sb
     .from("earnings_history")
     .select(
-      "iv_crushed,move_ratio,eps_actual,eps_estimate,breached_two_x_em,recovered_by_expiry,iv_crush_magnitude,iv_crush_cross_contract,is_complete",
+      "iv_crushed,move_ratio,eps_actual,eps_estimate,breached_two_x_em,recovered_by_expiry,iv_crush_magnitude,iv_crush_cross_contract,t1_unrecoverable,is_complete",
     )
     .eq("symbol", sym)
     .eq("is_complete", true);
@@ -541,6 +546,7 @@ export async function recalculateStats(symbol: string): Promise<StockEncyclopedi
       | "recovered_by_expiry"
       | "iv_crush_magnitude"
       | "iv_crush_cross_contract"
+      | "t1_unrecoverable"
       | "is_complete"
     >
   >;
@@ -557,6 +563,14 @@ export async function recalculateStats(symbol: string): Promise<StockEncyclopedi
   // every row. See migrations/2026-08-12-add-iv-crush-cross-contract.sql.
   const ivTrustworthy = rows.filter((r) => r.iv_crush_cross_contract !== true);
 
+  // t1_unrecoverable rows are phantom too-early captures — price_after
+  // (and therefore actual_move_pct, move_ratio, breached_two_x_em,
+  // recovered_by_expiry, all derived from it) was taken before the real
+  // post-earnings settlement. EPS beat/miss comes from the earnings
+  // report itself, not the T1 capture, so beat_rate is unaffected and
+  // stays on the full row set (audit: 2026-08-11).
+  const priceTrustworthy = rows.filter((r) => r.t1_unrecoverable !== true);
+
   const crushSamples = ivTrustworthy
     .map((r) => r.iv_crushed)
     .filter((v): v is boolean => v !== null);
@@ -565,7 +579,7 @@ export async function recalculateStats(symbol: string): Promise<StockEncyclopedi
       ? null
       : crushSamples.filter((v) => v === true).length / crushSamples.length;
 
-  const moveRatios = rows
+  const moveRatios = priceTrustworthy
     .map((r) => r.move_ratio)
     .filter((v): v is number => v !== null && Number.isFinite(v));
   const avg_move_ratio = avgOf(moveRatios);
@@ -580,7 +594,7 @@ export async function recalculateStats(symbol: string): Promise<StockEncyclopedi
           (r) => (r.eps_actual as number) > (r.eps_estimate as number),
         ).length / beatSamples.length;
 
-  const breachSamples = rows.filter((r) => r.breached_two_x_em === true);
+  const breachSamples = priceTrustworthy.filter((r) => r.breached_two_x_em === true);
   const recovery_rate_after_breach =
     breachSamples.length === 0
       ? null

@@ -979,6 +979,26 @@ export function buildQuarterlyMoveRatio(
     const dbActual = h.actualMovePct;
     const yahooActual = yahooByDate.get(h.earningsDate) ?? null;
 
+    // Phantom too-early T1 capture — price_after/actual_move_pct were
+    // taken before the real post-earnings settlement, so any ratio
+    // built from them is unreliable regardless of implied/actual being
+    // present (audit: 2026-08-11).
+    if (h.t1Unrecoverable) {
+      quarters.push({
+        earningsDate: h.earningsDate,
+        impliedMovePct: implied,
+        dbActualMovePct: dbActual,
+        yahooActualMovePct: yahooActual,
+        actualUsed: null,
+        actualSource: null,
+        ratio: null,
+        excludedReason: "t1_unrecoverable — phantom too-early capture, actual move unreliable",
+        divergent: false,
+        divergencePct: null,
+      });
+      continue;
+    }
+
     let divergent = false;
     let divergencePct: number | null = null;
     if (dbActual !== null && yahooActual !== null) {

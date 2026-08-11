@@ -110,6 +110,9 @@ export async function POST(req: NextRequest) {
     grade,
     impliedMoveSource: "manual",
     dateConfidence: null,
+    // Unknown here without a re-read (see comment above) — same
+    // fallback rationale as fiscalQuarter/dateConfidence.
+    t1Unrecoverable: false,
   };
   return NextResponse.json({ event });
 }
