@@ -55,6 +55,25 @@ function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+// Trading sessions between two dates, inclusive of both endpoints minus
+// one — a Friday open closed the following Monday is 1, not 3 calendar
+// days. Same weekday-count idiom lib/screener.ts's businessDaysBetween
+// uses for DTE; duplicated locally rather than imported (same
+// established pattern as this file's other small date helpers) to
+// avoid pulling screener.ts's much heavier import graph into this route
+// for one pure function.
+function tradingDaysBetween(fromIso: string, toIso: string): number {
+  let count = 0;
+  const cur = new Date(fromIso + "T00:00:00Z");
+  const end = new Date(toIso + "T00:00:00Z");
+  while (cur <= end) {
+    const day = cur.getUTCDay();
+    if (day !== 0 && day !== 6) count += 1;
+    cur.setUTCDate(cur.getUTCDate() + 1);
+  }
+  return Math.max(0, count - 1);
+}
+
 export async function GET(req: NextRequest) {
   let userId: string;
   try {
@@ -247,9 +266,12 @@ export async function GET(req: NextRequest) {
       closestApproachPct = worst !== null ? (worst / anchorStrike) * 100 : null;
     }
 
+    const daysHeld = tradingDaysBetween(start, end ?? today);
+
     return {
       start,
       end,
+      days_held: daysHeld,
       trade_type: agg.type,
       contracts,
       pnl,

@@ -5927,6 +5927,7 @@ function SandboxTester({ connected }: { connected: boolean }) {
 type ChainCampaign = {
   start: string;
   end: string | null;
+  days_held: number;
   trade_type: string;
   contracts: number;
   pnl: number;
@@ -6035,6 +6036,7 @@ function TickerTradeHistory({
             <thead className="bg-muted/30 text-left text-muted-foreground">
               <tr>
                 <th className="px-2 py-1.5">Dates</th>
+                <th className="px-2 py-1.5 text-right">Days Held</th>
                 <th className="px-2 py-1.5">Type</th>
                 <th className="px-2 py-1.5 text-right">Strike</th>
                 <th className="px-2 py-1.5 text-right">Spot @ Entry</th>
@@ -6056,6 +6058,7 @@ function TickerTradeHistory({
                     <td className="whitespace-nowrap px-2 py-1.5">
                       {fmtCampaignDate(c.start)} – {fmtCampaignDate(c.end)}
                     </td>
+                    <td className="px-2 py-1.5 text-right font-mono">{c.days_held}</td>
                     <td className="px-2 py-1.5">
                       <span
                         className={cn(
