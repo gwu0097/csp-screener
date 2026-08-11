@@ -13,6 +13,13 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { quarterLabel as computeQuarterLabel } from "@/lib/quarter-label";
 
 // Advisory-only research analysis (research_analyses table) — pasted
@@ -451,6 +458,24 @@ export function CrushHistoryTable({
   // doesn't get lost/overwritten by the next Fetch EM History run.
   const [editErrors, setEditErrors] = useState<Record<string, string>>({});
 
+  // Placeholder rows have no real earnings_date yet — saving EM/Actual
+  // against one first needs the real date. Previously resolved via
+  // window.prompt() + a strict YYYY-MM-DD regex: any other format (a
+  // very natural thing to type — "5/15/26", "May 15 2026") silently
+  // discarded the whole edit with no inline feedback, which is what
+  // "typed input does not register" actually was (2026-08-12 audit) —
+  // not an uncontrolled input, a native dialog with no forgiving format
+  // handling and no visible retry state. A controlled <input type="date">
+  // in a real dialog can't produce a malformed value at all.
+  const [pendingResolve, setPendingResolve] = useState<{
+    event: CrushHistoryEvent;
+    field: "em" | "actual";
+    rawPercent: number | null;
+    dateInput: string;
+    error: string | null;
+    saving: boolean;
+  } | null>(null);
+
   // Advisory-only research analyses for this symbol, keyed by
   // earnings_date. null = not yet loaded; {} = loaded, none exist.
   const [researchAnalyses, setResearchAnalyses] = useState<Record<string, ResearchAnalysisRow> | null>(null);
@@ -677,57 +702,37 @@ export function CrushHistoryTable({
     });
   }
 
-  // Saves one field (EM or Actual) for a row, sending BOTH current
-  // values — the API always recomputes Ratio/Grade from the pair, so
-  // there's never a request that changes one without the other being
-  // present. rawPercent is what the user typed (e.g. 4.5 for 4.5%),
-  // null clears the field.
-  // A manual edit on a placeholder row must never write
-  // representativeDate()'s synthetic date as if it were real — that's
-  // exactly the bug that produced 23 wrong-dated rows (repaired
-  // 2026-08-06). Prompting for the real date here (rather than
-  // blocking the edit outright) keeps the routine ThinkorSwim EM
-  // backfill workflow intact: the user is already looking at the real
-  // print date on ToS when they do this, so asking costs one extra
-  // step, not a blocked workflow. No default/pre-fill with the
-  // placeholder value — an empty prompt can't be click-through-saved
-  // with the wrong date by accident.
-  function resolveRealEarningsDate(): string | null {
-    const input = window.prompt(
-      "This quarter has no confirmed earnings date yet — enter the real announcement date (YYYY-MM-DD) from ThinkorSwim before saving:",
-      "",
-    );
-    if (input === null) return null; // cancelled
-    const trimmed = input.trim();
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
-      window.alert(`"${trimmed}" is not a valid date (expected YYYY-MM-DD). Not saved.`);
-      return null;
-    }
-    return trimmed;
-  }
-
-  async function saveField(
-    e: CrushHistoryEvent,
+  // Shared save path for both placeholder and real rows — sends BOTH
+  // current EM/Actual values (the API always recomputes Ratio/Grade
+  // from the pair), targeting whichever earningsDate the caller
+  // resolves (the row's own date for a real row, or the just-picked
+  // date for a placeholder). Errors are keyed by the row's ORIGINAL
+  // earningsDate (placeholder or real) so a failure surfaces on the
+  // row the user was actually editing, not the new date it would have
+  // moved to.
+  // Returns null on success, or the error message on failure — the
+  // caller needs the message synchronously (e.g. to show it inline in
+  // the date-resolve dialog), and reading it back out of editErrors
+  // state right after the setEditErrors call above would see the
+  // pre-update value, since state updates don't apply until the next
+  // render.
+  async function commitSave(
+    targetEarningsDate: string,
+    sourceEvent: CrushHistoryEvent,
     field: "em" | "actual",
     rawPercent: number | null,
-  ) {
-    let earningsDate = e.earningsDate;
-    if (placeholderDates.has(e.earningsDate)) {
-      const real = resolveRealEarningsDate();
-      if (real === null) return; // cancelled or invalid — do not save against the placeholder
-      earningsDate = real;
-    }
+  ): Promise<string | null> {
     const impliedMovePct =
-      field === "em" ? (rawPercent === null ? null : rawPercent / 100) : e.impliedMovePct;
+      field === "em" ? (rawPercent === null ? null : rawPercent / 100) : sourceEvent.impliedMovePct;
     const actualMovePct =
-      field === "actual" ? (rawPercent === null ? null : rawPercent / 100) : e.actualMovePct;
+      field === "actual" ? (rawPercent === null ? null : rawPercent / 100) : sourceEvent.actualMovePct;
     try {
       const res = await fetch("/api/screener/earnings-history/update", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           symbol: todaySymbol,
-          earningsDate,
+          earningsDate: targetEarningsDate,
           impliedMovePct,
           actualMovePct,
         }),
@@ -736,22 +741,72 @@ export function CrushHistoryTable({
       const json = (await res.json()) as { event: CrushHistoryEvent } | { error: string };
       if (!res.ok || !("event" in json)) {
         const msg = "error" in json ? json.error : `HTTP ${res.status}`;
-        setEditErrors((prev) => ({ ...prev, [e.earningsDate]: msg }));
-        return;
+        setEditErrors((prev) => ({ ...prev, [sourceEvent.earningsDate]: msg }));
+        return msg;
       }
       setEditErrors((prev) => {
-        if (!(e.earningsDate in prev)) return prev;
+        if (!(sourceEvent.earningsDate in prev)) return prev;
         const next = { ...prev };
-        delete next[e.earningsDate];
+        delete next[sourceEvent.earningsDate];
         return next;
       });
       applyEditedEvent(json.event);
+      return null;
     } catch (err) {
-      setEditErrors((prev) => ({
-        ...prev,
-        [e.earningsDate]: err instanceof Error ? err.message : "network error",
-      }));
+      const msg = err instanceof Error ? err.message : "network error";
+      setEditErrors((prev) => ({ ...prev, [sourceEvent.earningsDate]: msg }));
+      return msg;
     }
+  }
+
+  // A manual edit on a placeholder row must never write
+  // representativeDate()'s synthetic date as if it were real — that's
+  // exactly the bug that produced 23 wrong-dated rows (repaired
+  // 2026-08-06). Resolving the real date here (rather than blocking the
+  // edit outright) keeps the routine ThinkorSwim EM backfill workflow
+  // intact: the user is already looking at the real print date on ToS
+  // when they do this, so asking costs one extra step, not a blocked
+  // workflow. Opens the dialog and returns immediately — commitSave
+  // runs once the user confirms a date, not from here. Previously this
+  // resolved via window.prompt() + a strict YYYY-MM-DD regex: typing
+  // any other format (very natural — "5/15/26", "May 15 2026") silently
+  // discarded the whole edit with no inline retry, which is what
+  // "typed input does not register" actually was (2026-08-12 audit) —
+  // not an uncontrolled input, a native dialog with no forgiving format
+  // handling. A controlled <input type="date"> can't produce a
+  // malformed value at all.
+  async function saveField(
+    e: CrushHistoryEvent,
+    field: "em" | "actual",
+    rawPercent: number | null,
+  ): Promise<void> {
+    if (placeholderDates.has(e.earningsDate)) {
+      // Opens the dialog and returns immediately, without awaiting a
+      // save — commitSave only runs once the user confirms a date.
+      setPendingResolve({ event: e, field, rawPercent, dateInput: "", error: null, saving: false });
+      return;
+    }
+    await commitSave(e.earningsDate, e, field, rawPercent);
+  }
+
+  async function confirmPendingResolve() {
+    if (!pendingResolve) return;
+    if (!pendingResolve.dateInput) {
+      setPendingResolve((prev) => (prev ? { ...prev, error: "Pick a date first." } : prev));
+      return;
+    }
+    setPendingResolve((prev) => (prev ? { ...prev, saving: true, error: null } : prev));
+    const { event, field, rawPercent, dateInput } = pendingResolve;
+    const errorMsg = await commitSave(dateInput, event, field, rawPercent);
+    if (errorMsg === null) {
+      setPendingResolve(null);
+    } else {
+      setPendingResolve((prev) => (prev ? { ...prev, saving: false, error: errorMsg } : prev));
+    }
+  }
+
+  function cancelPendingResolve() {
+    setPendingResolve(null);
   }
 
   const similar: CrushHistoryEvent[] = [];
@@ -1167,6 +1222,61 @@ export function CrushHistoryTable({
           todayEmPct={todayEmPct ?? null}
         />
       )}
+
+      <Dialog
+        open={pendingResolve !== null}
+        onOpenChange={(open) => {
+          if (!open) cancelPendingResolve();
+        }}
+      >
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Confirm the real earnings date</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            This quarter has no confirmed earnings date yet. Enter the real announcement date from
+            ThinkorSwim before saving {pendingResolve?.field === "em" ? "the implied move" : "the actual move"}.
+          </p>
+          <input
+            autoFocus
+            type="date"
+            value={pendingResolve?.dateInput ?? ""}
+            disabled={pendingResolve?.saving}
+            onChange={(ev) =>
+              setPendingResolve((prev) => (prev ? { ...prev, dateInput: ev.target.value, error: null } : prev))
+            }
+            onKeyDown={(ev) => {
+              if (ev.key === "Enter") void confirmPendingResolve();
+            }}
+            className="w-full rounded border border-border bg-background px-2 py-1.5 text-sm outline-none focus:border-primary"
+          />
+          {pendingResolve?.error && (
+            <div className="flex items-start gap-1 text-xs text-rose-300">
+              <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+              <span>{pendingResolve.error}</span>
+            </div>
+          )}
+          <DialogFooter>
+            <button
+              type="button"
+              onClick={cancelPendingResolve}
+              disabled={pendingResolve?.saving}
+              className="rounded border border-border bg-background/60 px-3 py-1.5 text-sm hover:bg-background disabled:opacity-60"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => void confirmPendingResolve()}
+              disabled={pendingResolve?.saving}
+              className="inline-flex items-center gap-1.5 rounded bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-60"
+            >
+              {pendingResolve?.saving && <Loader2 className="h-3 w-3 animate-spin" />}
+              Save
+            </button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
