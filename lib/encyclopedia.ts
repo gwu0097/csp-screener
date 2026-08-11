@@ -85,6 +85,15 @@ export type EarningsHistory = {
   iv_after: number | null;
   iv_crushed: boolean | null;
   iv_crush_magnitude: number | null;
+  // True when T1 measured a different, later-dated contract than T0 did
+  // (T0's expiry had already rolled off Schwab's chain by T1 time) --
+  // iv_after/iv_crushed/iv_crush_magnitude on a flagged row are a
+  // cross-contract comparison, not a clean before/after. price_after/
+  // actual_move_pct are unaffected (see migrations/2026-08-12-add-iv-
+  // crush-cross-contract.sql). Never delete/null the underlying values --
+  // this flag is how callers know to exclude them, not a replacement for
+  // having them.
+  iv_crush_cross_contract: boolean;
   two_x_em_strike: number | null;
   breached_two_x_em: boolean | null;
   recovered_by_expiry: boolean | null;
@@ -511,7 +520,7 @@ export async function recalculateStats(symbol: string): Promise<StockEncyclopedi
   const res = await sb
     .from("earnings_history")
     .select(
-      "iv_crushed,move_ratio,eps_actual,eps_estimate,breached_two_x_em,recovered_by_expiry,iv_crush_magnitude,is_complete",
+      "iv_crushed,move_ratio,eps_actual,eps_estimate,breached_two_x_em,recovered_by_expiry,iv_crush_magnitude,iv_crush_cross_contract,is_complete",
     )
     .eq("symbol", sym)
     .eq("is_complete", true);
@@ -531,6 +540,7 @@ export async function recalculateStats(symbol: string): Promise<StockEncyclopedi
       | "breached_two_x_em"
       | "recovered_by_expiry"
       | "iv_crush_magnitude"
+      | "iv_crush_cross_contract"
       | "is_complete"
     >
   >;
@@ -539,7 +549,15 @@ export async function recalculateStats(symbol: string): Promise<StockEncyclopedi
   const avgOf = (vals: number[]): number | null =>
     vals.length === 0 ? null : vals.reduce((s, v) => s + v, 0) / vals.length;
 
-  const crushSamples = rows
+  // Cross-contract rows are excluded from both IV-derived aggregates
+  // below (crush_rate, avg_iv_crush_magnitude) — their iv_crushed/
+  // iv_crush_magnitude compare T0's contract against a different one
+  // T1 measured later, not a clean before/after. move_ratio is
+  // price-based (not IV) and unaffected, so avg_move_ratio still uses
+  // every row. See migrations/2026-08-12-add-iv-crush-cross-contract.sql.
+  const ivTrustworthy = rows.filter((r) => r.iv_crush_cross_contract !== true);
+
+  const crushSamples = ivTrustworthy
     .map((r) => r.iv_crushed)
     .filter((v): v is boolean => v !== null);
   const crush_rate =
@@ -569,7 +587,7 @@ export async function recalculateStats(symbol: string): Promise<StockEncyclopedi
       : breachSamples.filter((r) => r.recovered_by_expiry === true).length /
         breachSamples.length;
 
-  const ivCrushMagnitudes = rows
+  const ivCrushMagnitudes = ivTrustworthy
     .map((r) => r.iv_crush_magnitude)
     .filter((v): v is number => v !== null && Number.isFinite(v));
   const avg_iv_crush_magnitude = avgOf(ivCrushMagnitudes);
@@ -1575,8 +1593,12 @@ function atmLegs(
 // nextFridayOnOrAfterIso computation assumed); monthly-only symbols
 // (e.g. GWRE) resolve to the next listed monthly instead of skipping on
 // a nonexistent weekly. Chain keys look like "2026-07-10:4". Both T0
-// and T1 apply this same deterministic rule over the same minIso, so
-// the crush comparison always measures the same contract.
+// and T1 apply this same deterministic rule over the same minIso, but
+// that does NOT guarantee the same contract — corrected 2026-08-12:
+// if T1 runs late enough that the expiry T0 selected has since expired
+// and rolled off the chain, this returns a later one instead. Price
+// data is unaffected either way; see iv_crush_cross_contract on the
+// T1 write path for how that case is flagged.
 // Schwab's chains endpoint 400s on weekend fromDate values (see the
 // debug-schwab-400 incident scripts). Expiries never land on weekends,
 // so rolling Sat/Sun forward to Monday is semantics-preserving.
@@ -1792,6 +1814,7 @@ export type T1Result =
       move_ratio: number;
       iv_crushed: boolean;
       iv_crush_magnitude: number;
+      iv_crush_cross_contract: boolean;
       breached_two_x_em: boolean;
     }
   | { captured: false; skipped: true; reason: string };
@@ -1883,6 +1906,22 @@ export async function captureEarningsT1(
   const iv_crush_magnitude = (iv_before - iv_after) / iv_before;
   const breached_two_x_em = price_after < two_x_em_strike;
 
+  // Cross-contract detection (2026-08-12 audit). No stored contract
+  // identifier exists for either T0 or T1, and Schwab's chains endpoint
+  // 400s on expired-date ranges, so T0's actual selected expiry can't be
+  // reconstructed retroactively — this is a proxy, not a direct check.
+  // T0 and T1 apply the identical minExpiryIso formula; if T1 completes
+  // on or before that date, the chain state can't have moved since T0
+  // ran (same listings, same day at worst), so it's virtually certain
+  // to be the same contract. Past that date it's uncertain — weeklies
+  // for liquid names roll off within days — so this flags conservatively
+  // (any T1 after minExpiryIso), matching the audit's explicit
+  // direction that a wrong number is worse than a gap. Only iv_after/
+  // iv_crushed/iv_crush_magnitude are contaminated by this; price_after/
+  // actual_move_pct come from the chain response's underlying quote,
+  // which doesn't depend on which expiry was requested.
+  const iv_crush_cross_contract = todayEasternIso() > minExpiryIso;
+
   // Recurrence guard (PASS_2C, revised 2026-08-05): a too-early capture
   // (T1 running before the market has had a chance to react —
   // same-session on an AMC name being the primary case, but this
@@ -1915,6 +1954,7 @@ export async function captureEarningsT1(
       move_ratio,
       iv_crushed,
       iv_crush_magnitude,
+      iv_crush_cross_contract,
       breached_two_x_em,
     };
   }
@@ -1929,6 +1969,7 @@ export async function captureEarningsT1(
       move_ratio,
       iv_crushed,
       iv_crush_magnitude,
+      iv_crush_cross_contract,
       breached_two_x_em,
       is_complete: true,
       t1_captured_at: new Date().toISOString(),
@@ -1945,6 +1986,7 @@ export async function captureEarningsT1(
     move_ratio,
     iv_crushed,
     iv_crush_magnitude,
+    iv_crush_cross_contract,
     breached_two_x_em,
   };
 }

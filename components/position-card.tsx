@@ -29,6 +29,11 @@ export type PostEarningsRecView = {
   moveRatio: number | null;
   ivCrushed: boolean | null;
   ivCrushMagnitude: number | null;
+  // T0 measured IV on the earnings-week contract; if this capture ran
+  // late enough that expiry had rolled off, ivCrushed/ivCrushMagnitude
+  // compare against a different, later contract instead — true means
+  // don't read them as a clean before/after (see the 2026-08-12 audit).
+  ivCrushCrossContract: boolean;
   breachedTwoXem: boolean | null;
   analystSentiment: string | null;
   recoveryLikelihood: string | null;
@@ -1378,7 +1383,16 @@ function PostEarningsPanel({ rec }: { rec: PostEarningsRecView }) {
           Rule: <span className="font-mono">{rec.ruleFired}</span>
         </span>
         {rec.moveRatio !== null && <span>Move ratio: {rec.moveRatio.toFixed(2)}</span>}
-        {rec.ivCrushed !== null && <span>IV crushed: {rec.ivCrushed ? "YES" : "NO"}</span>}
+        {rec.ivCrushCrossContract ? (
+          <span
+            className="text-amber-300"
+            title="This capture ran after the earnings-week contract expired, so IV was measured against a different, later contract — not a clean before/after. The recommendation above was decided without this signal."
+          >
+            IV crushed: cross-contract, unreliable
+          </span>
+        ) : (
+          rec.ivCrushed !== null && <span>IV crushed: {rec.ivCrushed ? "YES" : "NO"}</span>
+        )}
         {rec.analystSentiment && <span>Sentiment: {rec.analystSentiment}</span>}
         {rec.recoveryLikelihood && <span>Recovery: {rec.recoveryLikelihood}</span>}
       </div>

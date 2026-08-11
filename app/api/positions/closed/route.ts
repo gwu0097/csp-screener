@@ -53,6 +53,7 @@ type ClosedPositionView = {
     moveRatio: number | null;
     ivCrushed: boolean | null;
     ivCrushMagnitude: number | null;
+    ivCrushCrossContract: boolean;
     breachedTwoXem: boolean | null;
     analystSentiment: string | null;
     recoveryLikelihood: string | null;
@@ -226,7 +227,7 @@ export async function GET() {
   const recRes = await supabase
     .from("post_earnings_recommendations")
     .select(
-      "position_id,analysis_date,move_ratio,iv_crushed,iv_crush_magnitude,breached_two_x_em,analyst_sentiment,recovery_likelihood,stock_pct_from_strike,recommendation,confidence,reasoning,rule_fired",
+      "position_id,analysis_date,move_ratio,iv_crushed,iv_crush_magnitude,iv_crush_cross_contract,breached_two_x_em,analyst_sentiment,recovery_likelihood,stock_pct_from_strike,recommendation,confidence,reasoning,rule_fired",
     )
     .eq("user_id", userId)
     .in("position_id", positionIds)
@@ -237,6 +238,7 @@ export async function GET() {
     move_ratio: number | null;
     iv_crushed: boolean | null;
     iv_crush_magnitude: number | null;
+    iv_crush_cross_contract: boolean;
     breached_two_x_em: boolean | null;
     analyst_sentiment: string | null;
     recovery_likelihood: string | null;
@@ -256,6 +258,7 @@ export async function GET() {
       moveRatio: r.move_ratio,
       ivCrushed: r.iv_crushed,
       ivCrushMagnitude: r.iv_crush_magnitude,
+      ivCrushCrossContract: r.iv_crush_cross_contract,
       breachedTwoXem: r.breached_two_x_em,
       analystSentiment: r.analyst_sentiment,
       recoveryLikelihood: r.recovery_likelihood,

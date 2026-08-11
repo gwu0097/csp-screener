@@ -37,6 +37,7 @@ export type RecommendationRow = {
   move_ratio: number | null;
   iv_crushed: boolean | null;
   iv_crush_magnitude: number | null;
+  iv_crush_cross_contract: boolean;
   breached_two_x_em: boolean | null;
   analyst_sentiment: string | null;
   recovery_likelihood: string | null;
@@ -59,6 +60,7 @@ type EarningsHistoryRow = {
   move_ratio: number | null;
   iv_crushed: boolean | null;
   iv_crush_magnitude: number | null;
+  iv_crush_cross_contract: boolean;
   breached_two_x_em: boolean | null;
   analyst_sentiment: string | null;
   news_summary: string | null;
@@ -102,7 +104,7 @@ async function findRecentEarningsRow(
   const r = await sb
     .from("earnings_history")
     .select(
-      "id,symbol,earnings_date,move_ratio,iv_crushed,iv_crush_magnitude,breached_two_x_em,analyst_sentiment,news_summary",
+      "id,symbol,earnings_date,move_ratio,iv_crushed,iv_crush_magnitude,iv_crush_cross_contract,breached_two_x_em,analyst_sentiment,news_summary",
     )
     .eq("symbol", symbol.toUpperCase())
     .gte("earnings_date", windowStart)
@@ -139,6 +141,10 @@ export function applyPostEarningsRules(input: {
   analyst_sentiment: string | null;
   recovery_likelihood: string | null;
   stock_pct_from_strike: number | null;
+  // Distinguishes "no rule can fire" reasons for the DATA_GATE message
+  // below — true means iv_crushed came in null specifically because a
+  // cross-contract capture was excluded, not because T1 hasn't run yet.
+  iv_crush_cross_contract?: boolean;
 }): {
   recommendation: Recommendation;
   confidence: Confidence;
@@ -152,8 +158,11 @@ export function applyPostEarningsRules(input: {
     return {
       recommendation: "MONITOR",
       confidence: "LOW",
-      reasoning:
-        "T0/T1 data not yet captured. Recommendation unavailable until next market open.",
+      reasoning: input.iv_crush_cross_contract
+        ? "T1 captured a different, later contract than T0 (the earnings-week expiry had already " +
+          "expired) — the IV crush signal was excluded as unreliable rather than used. " +
+          "Recommendation unavailable until the underlying rule can fire on price data alone."
+        : "T0/T1 data not yet captured. Recommendation unavailable until next market open.",
       rule_fired: "DATA_GATE",
     };
   }
@@ -270,12 +279,20 @@ export async function analyzePositionPostEarnings(
       ? (stockPrice - Number(position.strike)) / Number(position.strike)
       : null;
 
+  // A cross-contract row's iv_crushed is a comparison against a contract
+  // T0 never measured — feed the rule cascade null (same as "not yet
+  // captured") rather than a signal that looks clean but isn't. The raw
+  // value is still stored below (audit trail, never deleted) alongside
+  // the flag so the UI can show why it was excluded.
+  const iv_crushed_for_rules = history.iv_crush_cross_contract ? null : history.iv_crushed;
+
   const verdict = applyPostEarningsRules({
     move_ratio: history.move_ratio,
-    iv_crushed: history.iv_crushed,
+    iv_crushed: iv_crushed_for_rules,
     analyst_sentiment: history.analyst_sentiment,
     recovery_likelihood,
     stock_pct_from_strike,
+    iv_crush_cross_contract: history.iv_crush_cross_contract,
   });
 
   // Idempotency: one rec per (position, day) via the DB-side unique
@@ -293,6 +310,7 @@ export async function analyzePositionPostEarnings(
     move_ratio: history.move_ratio,
     iv_crushed: history.iv_crushed,
     iv_crush_magnitude: history.iv_crush_magnitude,
+    iv_crush_cross_contract: history.iv_crush_cross_contract,
     breached_two_x_em: history.breached_two_x_em,
     analyst_sentiment: history.analyst_sentiment,
     recovery_likelihood,
