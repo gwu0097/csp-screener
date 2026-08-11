@@ -86,7 +86,14 @@ async function seedHistoricalRows(symbol: string): Promise<SeedReport> {
   let added = 0;
   for (const ann of yahooAnnouncements) {
     if (manualDates.has(ann.iso)) continue;
-    const price = await fetchYahooPriceAction(symbol, ann.iso);
+    // Yahoo's earningsChart carries no BMO/AMC signal, so this always
+    // resolves to timing=null — fetchYahooPriceAction's confirmed-date
+    // branch returns null rather than guess a pair when timing is
+    // unknown (2026-08-12 fix), so this fallback path now yields more
+    // incomplete rows than before. Accepted: it's already the lower-
+    // priority fallback behind Finnhub/updateEncyclopedia, and a wrong
+    // attribution here is worse than a gap, same as everywhere else.
+    const price = await fetchYahooPriceAction(symbol, ann.iso, null);
     const payload: Record<string, unknown> = {
       symbol,
       earnings_date: ann.iso,

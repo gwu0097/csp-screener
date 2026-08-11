@@ -10,14 +10,20 @@
 // 2026-08-05 CDNS/GLW/DUOL corruption (fetchYahooPriceAction's
 // report-window gap scan picking a larger unrelated move weeks out
 // when the true reaction was small) was fixed at the source in commit
-// a0dfb13: a confirmed real announcement date now uses the near-window
-// only and returns null on a data gap instead of guessing from a wider
-// window. That protects every caller, including this one, so excluding
+// a0dfb13 for quarter-end dates, then again at 2026-08-12 for confirmed
+// dates: the near-window magnitude scan was ALSO still a guess (picked
+// unrelated volatility over a real but smaller reaction, and couldn't
+// even reach a Monday BMO report's true prior close, three calendar
+// days back). A confirmed date now picks its pair DETERMINISTICALLY
+// from the row's own `timing` column (BMO/AMC), anchored by trading-day
+// position, and returns null rather than guessing when timing is
+// unknown. That protects every caller, including this one, so excluding
 // manual rows here was redundant with the .is("actual_move_pct", null)
 // filter above — the only guard actually needed against overwriting a
 // populated value (audit: 2026-08-11). Rows whose earnings_date is a
 // literal quarter-end (isQuarterEndDate) still take the wide
-// report-window path; flagged below for visibility, not excluded.
+// report-window path, untouched by the 2026-08-12 fix; flagged below
+// for visibility, not excluded.
 //
 // Writes the same field set as every other price-based write path
 // (updateEncyclopedia in lib/encyclopedia.ts): price_before/price_after/
@@ -97,7 +103,7 @@ async function main() {
 
   let query = sb
     .from("earnings_history")
-    .select("symbol,earnings_date,implied_move_pct,implied_move_source")
+    .select("symbol,earnings_date,implied_move_pct,implied_move_source,timing")
     .is("actual_move_pct", null)
     .lte("earnings_date", todayIso)
     .order("earnings_date", { ascending: true });
@@ -113,6 +119,7 @@ async function main() {
     earnings_date: string;
     implied_move_pct: number | null;
     implied_move_source: string | null;
+    timing: "bmo" | "amc" | "dmh" | null;
   }>;
   const deferred = all.filter((r) => r.earnings_date > cutoff);
   const beforeSkip = all.filter((r) => r.earnings_date <= cutoff);
@@ -154,10 +161,14 @@ async function main() {
     const row = rows[i];
     const sym = row.symbol.toUpperCase();
     try {
-      const price = await fetchYahooPriceAction(sym, row.earnings_date);
+      const price = await fetchYahooPriceAction(sym, row.earnings_date, row.timing);
       if (price.actual_move_pct === null) {
         noData += 1;
-        failures.push(`${sym}@${row.earnings_date}: no usable Yahoo bars`);
+        const reason =
+          !isQuarterEndDate(row.earnings_date) && row.timing !== "bmo" && row.timing !== "amc"
+            ? `timing unknown (${row.timing ?? "null"}) — refusing to guess a pair`
+            : "no usable Yahoo bars";
+        failures.push(`${sym}@${row.earnings_date}: ${reason}`);
       } else {
         const breach = calculateBreachAnalysis({
           price_before: price.price_before,
@@ -167,7 +178,7 @@ async function main() {
           actual_move_pct: price.actual_move_pct,
         });
         console.log(
-          `  ${sym}@${row.earnings_date} (${row.implied_move_source ?? "unknown"}${isQuarterEndDate(row.earnings_date) ? ", quarter-end" : ""}): ` +
+          `  ${sym}@${row.earnings_date} (${row.implied_move_source ?? "unknown"}, timing=${row.timing ?? "null"}${isQuarterEndDate(row.earnings_date) ? ", quarter-end" : ""}): ` +
             `actual=${(price.actual_move_pct * 100).toFixed(2)}% before=${price.price_before} after=${price.price_after} ` +
             `ratio=${breach.move_ratio !== null ? breach.move_ratio.toFixed(3) : "null"}`,
         );

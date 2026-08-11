@@ -272,14 +272,19 @@ export type PriceAction = {
 // firstOnOrAfter pairing on the stored earnings_date returns
 // month-of-March drift (~0.3%) instead of the real ~8% earnings gap.
 //
-// Strategy: scan a ±35-day window for the largest |close-to-close|
-// adjacent move. That's the earnings reaction. Auto-handles BMO/AMC
-// (whichever pairing produces the biggest gap wins) and stale-date
-// rows in earnings_history alike. The chosen pair's earlier bar
-// becomes price_before, the later bar becomes price_after.
+// Strategy: fetch a ±35-day window of bars. For a confirmed real
+// announcement date, the pair is picked DETERMINISTICALLY from timing
+// (BMO: prior trading day close -> same day close; AMC: same day close
+// -> next trading day close) — no magnitude comparison; see the
+// non-quarter-end branch below for why. For a fiscal-quarter-end
+// placeholder date (isQuarterEndDate), the real report could land
+// anywhere in a 2-6 week lag with no single day to anchor timing
+// against, so that path is untouched: still a magnitude-based scan
+// across near/report/wide windows.
 export async function fetchYahooPriceAction(
   symbol: string,
   earningsDate: string,
+  timing: CalendarEntry["hour"] = null,
 ): Promise<PriceAction> {
   // ±35-day window so we cover companies that report up to ~5 weeks
   // after quarter end. Plus expiry-week padding on the back end.
@@ -379,11 +384,42 @@ export async function fetchYahooPriceAction(
       chosen = wideGap;
     }
   } else {
-    // Confirmed announcement date: near-window only. If there's no
-    // usable pair within ±2 days (a data gap), return nulls rather
-    // than guess from a window that spans weeks — an incomplete row
-    // is recoverable later; a wrong number silently isn't.
-    chosen = nearGap;
+    // Confirmed announcement date: pick the pair DETERMINISTICALLY from
+    // timing, never by magnitude comparison. nearGap's "biggest move in
+    // ±2 calendar days" was still a guess — it silently mispicked
+    // BA@2025-01-28, GLW@2025-01-29, and TSEM@2025-02-10 (unrelated
+    // volatility in the same window, e.g. the 2025-01-27 DeepSeek
+    // selloff, outweighed the real but smaller earnings reaction) and
+    // structurally couldn't reach the true pair at all for a Monday BMO
+    // report (the prior Friday close sits 3 calendar days back, outside
+    // ±2) — that's why SOFI@2025-01-27's window never contained its own
+    // prior close (audit: 2026-08-12).
+    //
+    // Anchored by ARRAY POSITION in the actual trading-day sequence
+    // (mirrors fetchYahooPriceActionTimed's own anchor logic exactly —
+    // that function's timing rule, inlined here because not every
+    // caller of this one has a CalendarEntry to hand), not calendar-day
+    // arithmetic — this is what makes the Monday-after-weekend case
+    // resolvable: stepping to index-1 always reaches the true prior
+    // trading day regardless of how many non-trading days sit between.
+    const anchorIdx = normalized.findIndex((b) => b.iso >= earnIso);
+    if (anchorIdx === -1) {
+      chosen = null;
+    } else if (timing === "bmo" && anchorIdx - 1 >= 0) {
+      const prior = normalized[anchorIdx - 1];
+      const post = normalized[anchorIdx];
+      chosen = { prior: prior.close, post: post.close, move: (post.close - prior.close) / prior.close };
+    } else if (timing === "amc" && anchorIdx + 1 < normalized.length) {
+      const prior = normalized[anchorIdx];
+      const post = normalized[anchorIdx + 1];
+      chosen = { prior: prior.close, post: post.close, move: (post.close - prior.close) / prior.close };
+    } else {
+      // timing is null/unknown/dmh, or the needed neighbor bar is
+      // missing from the fetched window — no rule to anchor on. A
+      // wrong attribution is worse than a gap; return null and let the
+      // row stay incomplete rather than guess.
+      chosen = null;
+    }
   }
 
   const bestPriorClose = chosen?.prior ?? null;
