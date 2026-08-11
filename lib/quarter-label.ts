@@ -80,6 +80,35 @@ function calendarLabelFromReportDateFallback(dateIso: string): string {
   return `CQ${q} ${String(year).slice(-2)}`;
 }
 
+// Whether an ISO date matches one of representativeDate()'s four
+// placeholder slots (05-15/08-15/11-15/02-15, any year) — the synthetic
+// date crush-history-table.tsx's placeholder rows are keyed on before a
+// real date is known. Landing exactly here on a manual save is USUALLY
+// the placeholder never having been corrected (the 2026-08-11 audit
+// found 23 such rows, all fabricated), but not always — CAVA's real
+// 2025-05-15 Q1 print coincidentally lands on the same slot. So this is
+// a soft signal, not proof of a bad date: callers should downgrade
+// confidence and ask for a second look, not reject the save outright.
+export function isRepresentativeDateSlot(iso: string): boolean {
+  const m = /^\d{4}-(\d{2})-(\d{2})$/.exec(iso);
+  if (!m) return false;
+  const month = Number(m[1]);
+  const day = Number(m[2]);
+  if (day !== 15) return false;
+  return month === 5 || month === 8 || month === 11 || month === 2;
+}
+
+// Whether an ISO date falls on a Saturday or Sunday. Unlike the
+// placeholder-slot check above, this is a hard fact, not a soft
+// signal — no real announcement or price reaction can occur on a day
+// the market isn't open, so a caller should reject it outright rather
+// than downgrade confidence and keep it.
+export function isWeekend(iso: string): boolean {
+  const d = new Date(iso + "T00:00:00Z");
+  const day = d.getUTCDay();
+  return day === 0 || day === 6;
+}
+
 export function quarterLabel(input: QuarterLabelInput): QuarterLabelResult {
   const periodEnd = input.periodEnd;
   const calendarSource: QuarterLabelResult["calendarSource"] =

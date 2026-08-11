@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
 import { gradeFromRatio, type CrushHistoryEvent } from "@/lib/earnings-history-table";
-import { quarterLabel } from "@/lib/quarter-label";
+import { quarterLabel, isRepresentativeDateSlot, isWeekend } from "@/lib/quarter-label";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -51,6 +51,16 @@ export async function POST(req: NextRequest) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(earningsDate)) {
     return NextResponse.json({ error: "Invalid earningsDate (expected YYYY-MM-DD)" }, { status: 400 });
   }
+  // Hard reject — unlike the placeholder-slot check below, there is no
+  // legitimate case for this: markets are closed, so no announcement or
+  // price reaction can occur on a Saturday or Sunday. This is exactly
+  // what let SMCI's CQ4 24 row land on 2025-02-01 (audit: 2026-08-11).
+  if (isWeekend(earningsDate)) {
+    return NextResponse.json(
+      { error: `${earningsDate} is a Saturday/Sunday — markets are closed, this can't be a real earnings date` },
+      { status: 400 },
+    );
+  }
 
   const em = parseNullableNumber(body.impliedMovePct, "impliedMovePct");
   if (!em.ok) return NextResponse.json({ error: em.error }, { status: 400 });
@@ -67,6 +77,22 @@ export async function POST(req: NextRequest) {
       : null;
   const grade = gradeFromRatio(ratio);
 
+  // Soft signal, not a rejection — a real report can coincidentally land
+  // on a representativeDate() slot (CAVA's 2025-05-15 Q1 print did), so
+  // blocking would reject valid data. Downgrading to 'low' instead just
+  // asks for a second look; the 2026-08-11 audit found 23 rows where a
+  // placeholder date was never corrected and silently stamped
+  // 'confirmed' by this route's own DB-default, undetected until an
+  // unrelated bug report years later. When it doesn't match, this
+  // route still doesn't set date_confidence at all (preserves whatever
+  // the row already has on an update, or the DB default on insert) —
+  // only the match case is new behavior.
+  const placeholderMatch = isRepresentativeDateSlot(earningsDate);
+  const warning = placeholderMatch
+    ? `${earningsDate} matches a placeholder report-date slot (the 15th of Feb/May/Aug/Nov) — ` +
+      `saved, but marked low-confidence until the real date is confirmed against a source like ThinkorSwim.`
+    : null;
+
   const sb = createServerClient();
   const up = await sb
     .from("earnings_history")
@@ -79,6 +105,7 @@ export async function POST(req: NextRequest) {
         move_ratio: ratio,
         implied_move_source: "manual",
         is_complete: em.value !== null && actual.value !== null,
+        ...(placeholderMatch ? { date_confidence: "low" } : {}),
       },
       { onConflict: "symbol,earnings_date" },
     );
@@ -86,11 +113,11 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: up.error.message }, { status: 500 });
   }
 
-  // This upsert doesn't touch fiscal_quarter/fiscal_year/period_end or
-  // date_confidence — whatever the row already has (or doesn't) is
-  // unknown here without a re-read, so the label falls back to
-  // calendar-only (fiscal ?) rather than guessing. The next real fetch
-  // (getCrushHistory) re-reads the row and shows the true stored label.
+  // This upsert doesn't touch fiscal_quarter/fiscal_year/period_end —
+  // whatever the row already has (or doesn't) is unknown here without a
+  // re-read, so the label falls back to calendar-only (fiscal ?) rather
+  // than guessing. The next real fetch (getCrushHistory) re-reads the
+  // row and shows the true stored label and date_confidence.
   const label = quarterLabel({
     earningsDate,
     fiscalQuarter: null,
@@ -109,10 +136,10 @@ export async function POST(req: NextRequest) {
     ratio,
     grade,
     impliedMoveSource: "manual",
-    dateConfidence: null,
+    dateConfidence: placeholderMatch ? "low" : null,
     // Unknown here without a re-read (see comment above) — same
-    // fallback rationale as fiscalQuarter/dateConfidence.
+    // fallback rationale as fiscalQuarter.
     t1Unrecoverable: false,
   };
-  return NextResponse.json({ event });
+  return NextResponse.json(warning ? { event, warning } : { event });
 }
