@@ -33,7 +33,24 @@ type Member = {
   sector: string | null;
   adr20Pct: number | null;
   avgDollarVolume20d: number | null;
+  // Which theme_subqueries.name produced this row (multi-query fan-out),
+  // if any -- null for manual adds and legacy/no-subquery runs.
+  expansion_subquery: string | null;
 };
+
+type Subquery = {
+  id: string;
+  name: string;
+  query_text: string;
+  anchor_symbols: string[] | null;
+  sort_order: number;
+  created_at: string;
+};
+
+// Bounds cost/runtime of one "Run expansion" click, which fans out
+// sequentially across every sub-query -- matches the server-side cap in
+// app/api/.../subqueries/route.ts.
+const MAX_SUBQUERIES = 8;
 
 // Only these theme_types have an expansion prompt (see
 // lib/theme-expansion.ts's PROMPT_TEMPLATES) — 'custom' and any
@@ -55,7 +72,7 @@ type Rejection = {
   is_current_scope: boolean;
 };
 
-type Suggestion = { symbol: string; companyName: string; rationale: string };
+type Suggestion = { symbol: string; companyName: string; rationale: string; subQueryName?: string | null };
 type FilterVerdict = {
   symbol: string;
   companyName: string;
@@ -67,6 +84,26 @@ type FilterVerdict = {
   sector: string | null;
   avgDollarVolume20d: number | null;
   adr20Pct: number | null;
+  subQueryName: string | null;
+};
+
+// Per-sub-query segment of a fan-out run's report (requirement 4:
+// "segmented" attrition) -- rawCount/truncated come straight from that
+// sub-query's own /expand/suggest response; crossDupCount is symbols an
+// EARLIER sub-query in this same run already claimed (first-claim-wins,
+// see runExpansion); verdicts is only the subset of the merged filter
+// results attributed to this sub-query. By construction:
+//   rawCount == crossDupCount + verdicts.length   (when not truncated)
+// truncated means rawCount overcounts by (rawCount - 40) names Perplexity
+// reported but this run never even received back from /expand/suggest.
+type SubQueryRunResult = {
+  subQueryId: string;
+  name: string;
+  rawCount: number;
+  truncated: boolean;
+  crossDupCount: number;
+  error: string | null;
+  verdicts: FilterVerdict[];
 };
 
 function bucketReason(reason: string): string {
@@ -83,6 +120,31 @@ function bucketReason(reason: string): string {
   if (reason.includes("market cap")) return "Market cap below $500M";
   if (reason.includes("$ volume")) return "20d $ volume below $10M";
   return "Other";
+}
+
+// Shared by the flat (legacy single-question) and segmented (per-sub-
+// query, fan-out) attrition reports below — same grouping, same render,
+// so the two can never quietly drift into different formats.
+function AttritionBuckets({ verdicts }: { verdicts: FilterVerdict[] }) {
+  const buckets = Object.entries(
+    verdicts
+      .filter((v) => v.status === "rejected")
+      .reduce<Record<string, FilterVerdict[]>>((acc, v) => {
+        const bucket = bucketReason(v.rejectReason ?? "");
+        (acc[bucket] ??= []).push(v);
+        return acc;
+      }, {}),
+  );
+  if (buckets.length === 0) return null;
+  return (
+    <>
+      {buckets.map(([bucket, items]) => (
+        <div key={bucket} className="text-muted-foreground">
+          <span className="text-rose-300">{bucket}</span> ({items.length}): {items.map((it) => it.symbol).join(", ")}
+        </div>
+      ))}
+    </>
+  );
 }
 
 type SortKey =
@@ -221,7 +283,20 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
     rawCount: number;
     truncated: boolean;
     verdicts: FilterVerdict[];
+    // Present only for a fan-out run (subqueries.length > 0 at the time
+    // "Run expansion" was clicked) -- null keeps the legacy single-
+    // question flat report exactly as it rendered before this feature.
+    bySubQuery: SubQueryRunResult[] | null;
   } | null>(null);
+
+  // ---- Multi-query fan-out: sub-query definitions ----
+  const [subqueries, setSubqueries] = useState<Subquery[]>([]);
+  const [subqName, setSubqName] = useState("");
+  const [subqQueryText, setSubqQueryText] = useState("");
+  const [subqAnchors, setSubqAnchors] = useState("");
+  const [subqAdding, setSubqAdding] = useState(false);
+  const [subqError, setSubqError] = useState<string | null>(null);
+  const [subqDeletingId, setSubqDeletingId] = useState<string | null>(null);
 
   // ---- Phase C: pending review ----
   const [selectedPending, setSelectedPending] = useState<Set<string>>(new Set());
@@ -263,6 +338,7 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
       setTheme(t);
       setMembers(json.members as Member[]);
       setRejections((json.rejections as Rejection[]) ?? []);
+      setSubqueries((json.subqueries as Subquery[]) ?? []);
       if (!promptTouched) setPromptDraft(t.expansion_prompt ?? "");
       if (!ceilingTouched) setCeilingDraft(t.market_cap_ceiling !== null ? String(t.market_cap_ceiling) : "");
     } catch (e) {
@@ -328,47 +404,144 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
   // textarea, or the theme_type dropdown on the list page).
   const staleRejections = useMemo(() => rejections.filter((r) => !r.is_current_scope), [rejections]);
 
+  // Runs one /expand/filter chunk pass over `suggestions` (already
+  // merged+deduped, each optionally tagged with subQueryName) and
+  // returns every verdict — shared by both the legacy single-question
+  // path and the fan-out path below so chunking/progress-reporting never
+  // has to be written twice.
+  async function filterAll(suggestions: Suggestion[], progressPrefix: string): Promise<FilterVerdict[]> {
+    const verdicts: FilterVerdict[] = [];
+    for (let i = 0; i < suggestions.length; i += FILTER_CHUNK_SIZE) {
+      const chunk = suggestions.slice(i, i + FILTER_CHUNK_SIZE);
+      setExpandProgress(
+        `${progressPrefix}filtering ${Math.min(i + FILTER_CHUNK_SIZE, suggestions.length)}/${suggestions.length}…`,
+      );
+      const filterRes = await fetch(`/api/swings/universe/themes/${themeId}/expand/filter`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ suggestions: chunk }),
+      });
+      const filterJson = await filterRes.json();
+      if (!filterRes.ok) throw new Error(filterJson.error ?? `HTTP ${filterRes.status}`);
+      verdicts.push(...(filterJson.verdicts as FilterVerdict[]));
+    }
+    return verdicts;
+  }
+
   async function runExpansion() {
     if (!theme) return;
     setExpandError(null);
     setLastRun(null);
     setExpanding("suggest");
-    setExpandProgress("Asking Perplexity for suggestions…");
+
+    // Cap enforced server-side at create time (subqueries/route.ts) —
+    // sliced again here defensively so a theme that somehow ended up
+    // with more than 8 rows still only ever fans out across the first 8
+    // in one run.
+    const activeSubqueries = subqueries.slice(0, MAX_SUBQUERIES);
+
     try {
-      const suggestRes = await fetch(`/api/swings/universe/themes/${themeId}/expand/suggest`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ promptOverride: promptDraft }),
-      });
-      const suggestJson = await suggestRes.json();
-      if (!suggestRes.ok) throw new Error(suggestJson.error ?? `HTTP ${suggestRes.status}`);
-      const suggestions = suggestJson.suggestions as Suggestion[];
-      const rawCount = suggestJson.rawCount as number;
-      const truncated = suggestJson.truncated as boolean;
+      if (activeSubqueries.length === 0) {
+        // ---- Legacy single-question path, unchanged behavior ----
+        setExpandProgress("Asking Perplexity for suggestions…");
+        const suggestRes = await fetch(`/api/swings/universe/themes/${themeId}/expand/suggest`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ promptOverride: promptDraft }),
+        });
+        const suggestJson = await suggestRes.json();
+        if (!suggestRes.ok) throw new Error(suggestJson.error ?? `HTTP ${suggestRes.status}`);
+        const suggestions = suggestJson.suggestions as Suggestion[];
+        const rawCount = suggestJson.rawCount as number;
+        const truncated = suggestJson.truncated as boolean;
+        setPromptTouched(false);
+
+        if (suggestions.length === 0) {
+          setLastRun({ rawCount, truncated, verdicts: [], bySubQuery: null });
+          return;
+        }
+
+        setExpanding("filter");
+        const verdicts = await filterAll(suggestions, "");
+        setLastRun({ rawCount, truncated, verdicts, bySubQuery: null });
+        await load();
+        return;
+      }
+
+      // ---- Multi-query fan-out ----
+      // Sequential only, one HTTP request per sub-query — never bundle
+      // more than one Perplexity call (each up to askPerplexityRaw's 45s
+      // internal timeout) into a single route, or a handful of
+      // sub-queries alone could blow Vercel's 60s ceiling. Each call is
+      // independently try/caught: one flaky sub-query records itself as
+      // failed and the run continues, rather than discarding every
+      // already-completed (and paid-for) call before it.
+      const claimed = new Map<string, string>(); // symbol -> subQueryName that claimed it first
+      const bySubQuery: SubQueryRunResult[] = [];
+      const mergedSuggestions: Suggestion[] = [];
+
+      for (let i = 0; i < activeSubqueries.length; i += 1) {
+        const sq = activeSubqueries[i];
+        setExpandProgress(`Sub-query ${i + 1}/${activeSubqueries.length} (${sq.name}): asking Perplexity…`);
+        try {
+          const suggestRes = await fetch(`/api/swings/universe/themes/${themeId}/expand/suggest`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ promptOverride: promptDraft, subQueryId: sq.id }),
+          });
+          const suggestJson = await suggestRes.json();
+          if (!suggestRes.ok) throw new Error(suggestJson.error ?? `HTTP ${suggestRes.status}`);
+          const rawSuggestions = suggestJson.suggestions as Suggestion[];
+          const rawCount = suggestJson.rawCount as number;
+          const truncated = suggestJson.truncated as boolean;
+
+          let crossDupCount = 0;
+          for (const s of rawSuggestions) {
+            if (claimed.has(s.symbol)) {
+              crossDupCount += 1;
+              continue;
+            }
+            claimed.set(s.symbol, sq.name);
+            mergedSuggestions.push({ ...s, subQueryName: sq.name });
+          }
+          bySubQuery.push({
+            subQueryId: sq.id,
+            name: sq.name,
+            rawCount,
+            truncated,
+            crossDupCount,
+            error: null,
+            verdicts: [], // filled in after the merged filter pass below
+          });
+        } catch (e) {
+          bySubQuery.push({
+            subQueryId: sq.id,
+            name: sq.name,
+            rawCount: 0,
+            truncated: false,
+            crossDupCount: 0,
+            error: e instanceof Error ? e.message : "Sub-query failed",
+            verdicts: [],
+          });
+        }
+      }
       setPromptTouched(false);
 
-      if (suggestions.length === 0) {
-        setLastRun({ rawCount, truncated, verdicts: [] });
+      const totalRaw = bySubQuery.reduce((sum, r) => sum + r.rawCount, 0);
+      const anyTruncated = bySubQuery.some((r) => r.truncated);
+
+      if (mergedSuggestions.length === 0) {
+        setLastRun({ rawCount: totalRaw, truncated: anyTruncated, verdicts: [], bySubQuery });
         return;
       }
 
       setExpanding("filter");
-      const verdicts: FilterVerdict[] = [];
-      for (let i = 0; i < suggestions.length; i += FILTER_CHUNK_SIZE) {
-        const chunk = suggestions.slice(i, i + FILTER_CHUNK_SIZE);
-        setExpandProgress(
-          `Filtering ${Math.min(i + FILTER_CHUNK_SIZE, suggestions.length)}/${suggestions.length}…`,
-        );
-        const filterRes = await fetch(`/api/swings/universe/themes/${themeId}/expand/filter`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ suggestions: chunk }),
-        });
-        const filterJson = await filterRes.json();
-        if (!filterRes.ok) throw new Error(filterJson.error ?? `HTTP ${filterRes.status}`);
-        verdicts.push(...(filterJson.verdicts as FilterVerdict[]));
+      const verdicts = await filterAll(mergedSuggestions, "");
+      const byName = new Map(bySubQuery.map((r) => [r.name, r]));
+      for (const v of verdicts) {
+        if (v.subQueryName) byName.get(v.subQueryName)?.verdicts.push(v);
       }
-      setLastRun({ rawCount, truncated, verdicts });
+      setLastRun({ rawCount: totalRaw, truncated: anyTruncated, verdicts, bySubQuery });
       await load();
     } catch (e) {
       setExpandError(e instanceof Error ? e.message : "Expansion failed");
@@ -543,6 +716,57 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
       setCeilingError(e instanceof Error ? e.message : "Failed to save");
     } finally {
       setCeilingSaving(false);
+    }
+  }
+
+  async function addSubquery() {
+    const name = subqName.trim();
+    const queryText = subqQueryText.trim();
+    if (!name || !queryText) {
+      setSubqError("Name and angle are both required");
+      return;
+    }
+    const anchorSymbols = Array.from(
+      new Set(
+        subqAnchors
+          .split(/[\s,]+/)
+          .map((s) => s.trim().toUpperCase())
+          .filter((s) => s.length > 0),
+      ),
+    );
+    setSubqAdding(true);
+    setSubqError(null);
+    try {
+      const res = await fetch(`/api/swings/universe/themes/${themeId}/subqueries`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, query_text: queryText, anchor_symbols: anchorSymbols }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+      setSubqueries((prev) => [...prev, json.subquery as Subquery]);
+      setSubqName("");
+      setSubqQueryText("");
+      setSubqAnchors("");
+    } catch (e) {
+      setSubqError(e instanceof Error ? e.message : "Failed to add sub-query");
+    } finally {
+      setSubqAdding(false);
+    }
+  }
+
+  async function deleteSubquery(id: string) {
+    setSubqDeletingId(id);
+    setSubqError(null);
+    try {
+      const res = await fetch(`/api/swings/universe/themes/${themeId}/subqueries/${id}`, { method: "DELETE" });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+      setSubqueries((prev) => prev.filter((sq) => sq.id !== id));
+    } catch (e) {
+      setSubqError(e instanceof Error ? e.message : "Failed to delete sub-query");
+    } finally {
+      setSubqDeletingId(null);
     }
   }
 
@@ -725,6 +949,81 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
           </p>
         ) : (
           <>
+            <div className="mb-3 rounded border border-border/60 bg-background/60 p-2">
+              <div className="mb-1.5 flex items-center justify-between">
+                <span className="text-[11px] font-semibold text-foreground">
+                  Sub-queries ({subqueries.length}/{MAX_SUBQUERIES})
+                </span>
+                <span className="text-[11px] text-muted-foreground">
+                  {subqueries.length === 0
+                    ? "None defined — Run expansion asks one question."
+                    : "Run expansion fans out sequentially across all of these instead of asking one question."}
+                </span>
+              </div>
+              {subqueries.length > 0 && (
+                <ul className="mb-2 space-y-1">
+                  {subqueries.map((sq) => (
+                    <li
+                      key={sq.id}
+                      className="flex items-start justify-between gap-2 rounded border border-border/40 bg-background px-2 py-1 text-[11px]"
+                    >
+                      <div className="min-w-0">
+                        <div className="font-semibold text-foreground">{sq.name}</div>
+                        <div className="text-muted-foreground">{sq.query_text}</div>
+                        {sq.anchor_symbols && sq.anchor_symbols.length > 0 && (
+                          <div className="text-muted-foreground">
+                            Anchors: <span className="font-mono">{sq.anchor_symbols.join(", ")}</span>
+                          </div>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        disabled={subqDeletingId === sq.id}
+                        onClick={() => deleteSubquery(sq.id)}
+                        className="shrink-0 rounded border border-border px-1.5 py-0.5 text-muted-foreground hover:bg-white/5 hover:text-rose-300"
+                        title="Delete sub-query"
+                        aria-label={`Delete sub-query ${sq.name}`}
+                      >
+                        <Trash2 className="h-3 w-3" />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {subqueries.length < MAX_SUBQUERIES && (
+                <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center">
+                  <input
+                    type="text"
+                    value={subqName}
+                    onChange={(e) => setSubqName(e.target.value)}
+                    placeholder="Name (e.g. power and cooling infrastructure)"
+                    className="rounded border border-border bg-background px-2 py-1 text-[11px] sm:w-56"
+                  />
+                  <input
+                    type="text"
+                    value={subqQueryText}
+                    onChange={(e) => setSubqQueryText(e.target.value)}
+                    placeholder="Angle sent to Perplexity"
+                    className="flex-1 rounded border border-border bg-background px-2 py-1 text-[11px]"
+                  />
+                  <input
+                    type="text"
+                    value={subqAnchors}
+                    onChange={(e) => setSubqAnchors(e.target.value)}
+                    placeholder="Anchor subset (optional)"
+                    className="rounded border border-border bg-background px-2 py-1 font-mono text-[11px] uppercase sm:w-40"
+                  />
+                  <Button
+                    onClick={addSubquery}
+                    disabled={subqAdding || !subqName.trim() || !subqQueryText.trim()}
+                  >
+                    {subqAdding ? "Adding…" : "Add"}
+                  </Button>
+                </div>
+              )}
+              {subqError && <p className="mt-1 text-[11px] text-rose-300">{subqError}</p>}
+            </div>
+
             <textarea
               value={promptDraft}
               onChange={(e) => {
@@ -740,31 +1039,56 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
                 {expanding ? "Running…" : "Run expansion"}
               </Button>
               <span className="text-[11px] text-muted-foreground">
-                Anchors, description, and existing members are sent as context — one manual run, up to {40} suggestions.
+                {subqueries.length > 0
+                  ? `Fans out across ${subqueries.length} sub-quer${subqueries.length === 1 ? "y" : "ies"}, sequentially, up to ${40} suggestions each.`
+                  : `Anchors, description, and existing members are sent as context — one manual run, up to ${40} suggestions.`}
               </span>
             </div>
           </>
         )}
         {expandError && <p className="mt-2 text-xs text-rose-300">{expandError}</p>}
-        {lastRun && (
+        {lastRun && lastRun.bySubQuery === null && (
           <div className="mt-3 space-y-1 border-t border-border/60 pt-2 text-[11px]">
             <div className="text-muted-foreground">
               Perplexity returned {lastRun.rawCount} suggestion{lastRun.rawCount === 1 ? "" : "s"}
               {lastRun.truncated ? ` (truncated to 40)` : ""}. {lastRun.verdicts.filter((v) => v.status === "pending").length}{" "}
               queued for review.
             </div>
-            {Object.entries(
-              lastRun.verdicts
-                .filter((v) => v.status === "rejected")
-                .reduce<Record<string, FilterVerdict[]>>((acc, v) => {
-                  const bucket = bucketReason(v.rejectReason ?? "");
-                  (acc[bucket] ??= []).push(v);
-                  return acc;
-                }, {}),
-            ).map(([bucket, items]) => (
-              <div key={bucket} className="text-muted-foreground">
-                <span className="text-rose-300">{bucket}</span> ({items.length}):{" "}
-                {items.map((it) => it.symbol).join(", ")}
+            <AttritionBuckets verdicts={lastRun.verdicts} />
+          </div>
+        )}
+
+        {lastRun && lastRun.bySubQuery !== null && (
+          <div className="mt-3 space-y-3 border-t border-border/60 pt-2 text-[11px]">
+            <div className="text-muted-foreground">
+              {lastRun.bySubQuery.length} sub-quer{lastRun.bySubQuery.length === 1 ? "y" : "ies"} ·{" "}
+              {lastRun.rawCount} raw suggestion{lastRun.rawCount === 1 ? "" : "s"} total
+              {lastRun.truncated ? " (one or more truncated to 40)" : ""}.{" "}
+              {lastRun.verdicts.filter((v) => v.status === "pending").length} queued for review.
+            </div>
+            {lastRun.bySubQuery.map((r) => (
+              <div key={r.subQueryId} className="rounded border border-border/40 bg-background/60 p-2">
+                <div className="mb-1 flex flex-wrap items-baseline gap-x-2 font-semibold text-foreground">
+                  <span>{r.name}</span>
+                  <span className="font-normal text-muted-foreground">
+                    {r.error
+                      ? "failed — see below"
+                      : `${r.rawCount} raw${r.truncated ? " (truncated to 40)" : ""} · ${r.crossDupCount} already claimed by an earlier sub-query · ${
+                          r.verdicts.filter((v) => v.status === "pending").length
+                        } queued`}
+                  </span>
+                </div>
+                {r.error ? (
+                  <div className="text-rose-300">{r.error}</div>
+                ) : r.rawCount === 0 ? (
+                  <div className="text-muted-foreground">No suggestions from Perplexity for this angle.</div>
+                ) : r.crossDupCount === r.rawCount ? (
+                  <div className="text-amber-300">
+                    Every suggestion from this angle duplicated an earlier sub-query — nothing new.
+                  </div>
+                ) : (
+                  <AttritionBuckets verdicts={r.verdicts} />
+                )}
               </div>
             ))}
           </div>
@@ -989,6 +1313,7 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
                         onSort={onPendingSort}
                         align="right"
                       />
+                      <th className="px-2 py-1.5">Sub-query</th>
                       <th className="px-2 py-1.5">Rationale</th>
                       <th className="px-2 py-1.5 text-right">Actions</th>
                     </tr>
@@ -1024,6 +1349,7 @@ export function SwingUniverseThemeDetail({ themeId }: { themeId: string }) {
                           {fmtPct(m.adr20Pct)}
                         </td>
                         <td className="px-2 py-1.5 text-right font-mono">{fmtMarketCap(m.avgDollarVolume20d)}</td>
+                        <td className="px-2 py-1.5 text-muted-foreground">{m.expansion_subquery ?? "—"}</td>
                         <td className="max-w-[280px] px-2 py-1.5 text-muted-foreground">{m.notes ?? "—"}</td>
                         <td className="px-2 py-1.5">
                           <div className="flex justify-end gap-1">

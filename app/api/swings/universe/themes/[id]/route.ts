@@ -30,6 +30,19 @@ type MemberRow = {
   is_active: boolean;
   notes: string | null;
   review_status: string;
+  // Which theme_subqueries.name produced this row, if any (Perplexity-
+  // sourced pending rows from a fan-out run) -- null for manual adds and
+  // legacy/no-subquery runs. See migrations/2026-08-18-add-theme-subqueries.sql.
+  expansion_subquery: string | null;
+};
+
+type SubqueryRow = {
+  id: string;
+  name: string;
+  query_text: string;
+  anchor_symbols: string[] | null;
+  sort_order: number;
+  created_at: string;
 };
 
 export async function GET(
@@ -89,8 +102,19 @@ export async function GET(
     expansionPromptOverride: themeRes.data.expansion_prompt,
   });
 
+  const subqueriesRes = await sb
+    .from<SubqueryRow>("theme_subqueries")
+    .select("*")
+    .eq("theme_id", id)
+    .eq("user_id", userId)
+    .order("sort_order", { ascending: true });
+  if (subqueriesRes.error) {
+    return NextResponse.json({ error: subqueriesRes.error.message }, { status: 500 });
+  }
+
   return NextResponse.json({
     theme: themeRes.data,
+    subqueries: subqueriesRes.data ?? [],
     members: members.map((m) => ({
       ...m,
       ...(enrichment.get(m.symbol.toUpperCase()) ?? {

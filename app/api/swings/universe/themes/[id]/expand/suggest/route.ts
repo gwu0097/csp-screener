@@ -20,8 +20,9 @@ type ThemeRow = {
 };
 type AnchorRow = { symbol: string };
 type MemberSymbolRow = { symbol: string };
+type SubqueryRow = { id: string; name: string; query_text: string; anchor_symbols: string[] | null };
 
-type Body = { promptOverride?: unknown };
+type Body = { promptOverride?: unknown; subQueryId?: unknown };
 
 export async function POST(
   req: NextRequest,
@@ -43,6 +44,7 @@ export async function POST(
     // empty body is fine — re-running with the theme's saved prompt
   }
   const promptOverride = typeof body.promptOverride === "string" ? body.promptOverride : null;
+  const subQueryId = typeof body.subQueryId === "string" && body.subQueryId.trim() ? body.subQueryId.trim() : null;
 
   const sb = createServerClient();
   const themeRes = await sb
@@ -74,7 +76,9 @@ export async function POST(
 
   // If the caller sent an edited prompt, persist it now — "editable per-
   // theme so the user can refine it" means the refinement survives past
-  // this one run.
+  // this one run. Still applies unchanged in fan-out mode: every
+  // sub-query call in a run sends the same promptDraft, so this fires
+  // (harmlessly, as a no-op after the first) on every call.
   if (promptOverride !== null && promptOverride.trim() !== (theme.expansion_prompt ?? "")) {
     await sb
       .from("themes")
@@ -83,13 +87,40 @@ export async function POST(
       .eq("user_id", userId);
   }
 
+  // Multi-query fan-out: this ONE call answers ONE sub-query, re-fetched
+  // server-side (not trusted from the client body) the same way the
+  // theme row itself always is. Anchor subset is intersected against the
+  // theme's CURRENT anchors (not frozen at subquery-creation time) —
+  // anchors can change, and an empty intersection degrades gracefully to
+  // the theme's full anchor set below, same as "no subset configured."
+  let subQueryName: string | null = null;
+  let subQueryFocus: string | null = null;
+  let subQueryAnchors: string[] = anchorSymbols;
+  if (subQueryId) {
+    const subqRes = await sb
+      .from<SubqueryRow>("theme_subqueries")
+      .select("id,name,query_text,anchor_symbols")
+      .eq("id", subQueryId)
+      .eq("theme_id", themeId)
+      .eq("user_id", userId)
+      .maybeSingle();
+    if (subqRes.error) return NextResponse.json({ error: subqRes.error.message }, { status: 500 });
+    if (!subqRes.data) return NextResponse.json({ error: "Sub-query not found" }, { status: 404 });
+    subQueryName = subqRes.data.name;
+    subQueryFocus = subqRes.data.query_text;
+    const configured = subqRes.data.anchor_symbols ?? [];
+    const intersected = configured.filter((s) => anchorSymbols.includes(s));
+    if (intersected.length > 0) subQueryAnchors = intersected;
+  }
+
   const result = await runExpansionSuggest({
     themeType: theme.theme_type,
     promptOverride: promptOverride ?? theme.expansion_prompt,
-    anchors: anchorSymbols.map((symbol) => ({ symbol, companyName: null })),
+    anchors: subQueryAnchors.map((symbol) => ({ symbol, companyName: null })),
     description: theme.description,
     existingSymbols,
     marketCapCeiling: theme.market_cap_ceiling,
+    subQueryFocus,
   });
 
   if (!result.ok) {
@@ -99,5 +130,7 @@ export async function POST(
     suggestions: result.suggestions,
     rawCount: result.rawCount,
     truncated: result.truncated,
+    subQueryId,
+    subQueryName,
   });
 }

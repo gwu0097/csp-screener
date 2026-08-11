@@ -102,6 +102,14 @@ export type ExpansionSuggestion = {
   symbol: string;
   companyName: string;
   rationale: string;
+  // Which theme_subqueries row (by name, not id -- see the migration's
+  // comment) produced this suggestion. Set client-side when fanning out
+  // across sub-queries (this function never calls Perplexity itself, so
+  // it doesn't know or need to know which sub-query is "current" -- it
+  // just carries the tag through to the verdict and, for survivors, the
+  // theme_members insert). Null/omitted for the legacy single-question
+  // path.
+  subQueryName?: string | null;
 };
 
 // Same parse convention as lib/swing-screener.ts's private tryParseObject
@@ -156,6 +164,13 @@ function buildFullPrompt(
   // cheap nudge, not the enforcement mechanism -- the hard filter is what
   // actually guarantees it.
   marketCapCeiling?: number | null,
+  // Multi-query fan-out (theme_subqueries) -- a short angle/topic phrase
+  // ("power and cooling infrastructure") narrowing this ONE call within
+  // a broader theme so a sequence of calls covers more of a
+  // hundreds-strong universe than one unqualified question ever reaches.
+  // Independent of the anchor subset above: a subquery can narrow either
+  // or both.
+  subQueryFocus?: string | null,
 ): string {
   const anchorText =
     anchors.length > 0
@@ -166,13 +181,17 @@ function buildFullPrompt(
     marketCapCeiling !== null && marketCapCeiling !== undefined && marketCapCeiling > 0
       ? `\n\nDo NOT suggest any company with a market capitalization above ${fmtCeilingDollars(marketCapCeiling)} -- focus on smaller names below this size, not obvious mega-caps.`
       : "";
+  const subQueryLine =
+    subQueryFocus && subQueryFocus.trim()
+      ? `\n\nFocus specifically on this angle: "${subQueryFocus.trim()}" — only suggest companies that fit this specific slice, even though the broader theme covers more ground than this one angle.`
+      : "";
   return `${filled}
 
 Theme description: ${description ?? "(none provided)"}
 
 Do NOT suggest any of these — they are already members of this theme: ${
     existingSymbols.length > 0 ? existingSymbols.join(", ") : "(none yet)"
-  }.${ceilingLine}
+  }.${ceilingLine}${subQueryLine}
 
 Suggest up to ${MAX_SUGGESTIONS} publicly-traded, US-listed common stocks. For each, give the ticker, company name, and a one-sentence rationale tying it to the anchors above.
 
@@ -204,6 +223,9 @@ export async function runExpansionSuggest(opts: {
   // filterAndQueueSuggestions. Omitted/null = no ceiling, unchanged from
   // today's behavior.
   marketCapCeiling?: number | null;
+  // theme_subqueries angle text for this one call -- omitted/null runs
+  // exactly today's single-question prompt.
+  subQueryFocus?: string | null;
 }): Promise<SuggestResult> {
   const template = effectiveExpansionPrompt(opts.themeType, opts.promptOverride);
   if (!template) {
@@ -212,7 +234,14 @@ export async function runExpansionSuggest(opts: {
       error: "This theme type has no expansion prompt — expansion is manual only for 'custom' themes.",
     };
   }
-  const prompt = buildFullPrompt(template, opts.anchors, opts.description, opts.existingSymbols, opts.marketCapCeiling);
+  const prompt = buildFullPrompt(
+    template,
+    opts.anchors,
+    opts.description,
+    opts.existingSymbols,
+    opts.marketCapCeiling,
+    opts.subQueryFocus,
+  );
   const raw = await askPerplexityRaw(prompt, { label: "theme-expand", maxTokens: 4000, timeoutMs: 45_000 });
   if (!raw) {
     return { ok: false, error: "Perplexity request failed or timed out." };
@@ -249,6 +278,7 @@ export type FilterVerdict = {
   sector: string | null;
   avgDollarVolume20d: number | null;
   adr20Pct: number | null;
+  subQueryName: string | null;
 };
 
 // Runs the hard-filter pipeline over one chunk of suggestions and
@@ -289,7 +319,15 @@ export async function filterAndQueueSuggestions(opts: {
 
   const blank = { price: null, marketCap: null, sector: null, avgDollarVolume20d: null, adr20Pct: null };
   function reject(s: ExpansionSuggestion, reason: string): FilterVerdict {
-    return { symbol: s.symbol, companyName: s.companyName, rationale: s.rationale, status: "rejected", rejectReason: reason, ...blank };
+    return {
+      symbol: s.symbol,
+      companyName: s.companyName,
+      rationale: s.rationale,
+      status: "rejected",
+      rejectReason: reason,
+      subQueryName: s.subQueryName ?? null,
+      ...blank,
+    };
   }
 
   // Cheap DB-only checks first: already a member (any review_status —
@@ -384,7 +422,7 @@ export async function filterAndQueueSuggestions(opts: {
     // Reuse the Phase B backfill path — most of these symbols sit
     // outside the index universe and have never been cached.
     await backfillDailyBars(profileSurvivors.map((p) => p.s.symbol));
-    const toInsert: Array<{ symbol: string; notes: string | null }> = [];
+    const toInsert: Array<{ symbol: string; notes: string | null; subQueryName: string | null }> = [];
     for (const { s, price, marketCap, sector } of profileSurvivors) {
       const bars = await getOrFetchDailyBars(s.symbol); // cache hit after the backfill above
       const avgDollarVol = computeAvgDollarVolume(bars, 20);
@@ -401,6 +439,7 @@ export async function filterAndQueueSuggestions(opts: {
           sector,
           avgDollarVolume20d: avgDollarVol,
           adr20Pct: adr,
+          subQueryName: s.subQueryName ?? null,
         });
         continue;
       }
@@ -420,8 +459,9 @@ export async function filterAndQueueSuggestions(opts: {
         sector,
         avgDollarVolume20d: avgDollarVol,
         adr20Pct: adr,
+        subQueryName: s.subQueryName ?? null,
       });
-      toInsert.push({ symbol: s.symbol, notes: s.rationale.trim() || null });
+      toInsert.push({ symbol: s.symbol, notes: s.rationale.trim() || null, subQueryName: s.subQueryName ?? null });
     }
     if (toInsert.length > 0) {
       const ins = await sb.from("theme_members").insert(
@@ -433,6 +473,7 @@ export async function filterAndQueueSuggestions(opts: {
           source: "perplexity",
           review_status: "pending",
           notes: t.notes || null,
+          expansion_subquery: t.subQueryName,
         })),
       );
       if (ins.error) {

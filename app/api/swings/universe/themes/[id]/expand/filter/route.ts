@@ -47,6 +47,10 @@ export async function POST(
     symbol: s.symbol.trim().toUpperCase(),
     companyName: s.companyName || s.symbol,
     rationale: s.rationale || "",
+    // Multi-query fan-out tag (see lib/theme-expansion.ts) -- must be
+    // copied through explicitly here, same as every other field in this
+    // rebuild; the object isn't passed through as-is.
+    subQueryName: typeof s.subQueryName === "string" && s.subQueryName.trim() ? s.subQueryName.trim() : null,
   }));
   if (suggestions.length === 0) {
     return NextResponse.json({ error: "No valid suggestions in request" }, { status: 400 });
