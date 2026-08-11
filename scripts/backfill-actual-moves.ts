@@ -20,10 +20,31 @@
 // unknown. That protects every caller, including this one, so excluding
 // manual rows here was redundant with the .is("actual_move_pct", null)
 // filter above — the only guard actually needed against overwriting a
-// populated value (audit: 2026-08-11). Rows whose earnings_date is a
-// literal quarter-end (isQuarterEndDate) still take the wide
-// report-window path, untouched by the 2026-08-12 fix; flagged below
-// for visibility, not excluded.
+// populated value (audit: 2026-08-11).
+//
+// Rows whose earnings_date is a literal quarter-end (isQuarterEndDate)
+// are EXCLUDED outright (2026-08-11, NBIS@2024-12-31 audit) rather than
+// just flagged. That date is a Finnhub fiscal-period-end, not a real
+// announcement date — fetchYahooPriceAction's wide report-window scan
+// still returns a price_before/price_after/actual_move_pct package for
+// it (it always finds *a* biggest gap somewhere in the window), but
+// that package is exactly as untrustworthy as the date it's anchored
+// to. updateEncyclopedia already withholds ALL FOUR derived fields
+// together for an untrusted date (its `skipWrite` branch) — this
+// script used to diverge from that by writing nothing here (the
+// .is("actual_move_pct", null) filter meant these rows were already
+// untouched on disk) while still logging them as merely "flagged, not
+// excluded," which read as advisory rather than a hard exclusion and
+// invited exactly the failure this comment now documents: NBIS's Q4'24
+// row had price_before/price_after persisted by some other writer
+// (never identified — likely a since-deleted one-off script) while
+// actual_move_pct was correctly left null, leaving a row that *looked*
+// partially populated and was entirely wrong — its two_x_em_strike/
+// move_ratio would have been the largest ratio in the table, built
+// from a real NBIS price move that was the 2025-01-27 DeepSeek selloff,
+// not any Nebius earnings reaction. Excluding these rows here closes
+// that path for this script specifically: it can no longer be the
+// writer that turns a wide-window guess into a stored ratio.
 //
 // Writes the same field set as every other price-based write path
 // (updateEncyclopedia in lib/encyclopedia.ts): price_before/price_after/
@@ -124,11 +145,16 @@ async function main() {
   const deferred = all.filter((r) => r.earnings_date > cutoff);
   const beforeSkip = all.filter((r) => r.earnings_date <= cutoff);
   const skipped = skipSet.size > 0 ? beforeSkip.filter((r) => skipSet.has(`${r.symbol}@${r.earnings_date}`)) : [];
-  const rows = beforeSkip.filter((r) => !skipSet.has(`${r.symbol}@${r.earnings_date}`));
+  const afterSkipList = beforeSkip.filter((r) => !skipSet.has(`${r.symbol}@${r.earnings_date}`));
+  // Excluded outright, not just flagged — see the header comment.
+  // Neither price fields nor actual_move_pct get written for these;
+  // withholding both is the fix, not withholding actual_move_pct alone
+  // while still persisting an equally-untrustworthy price pair.
+  const quarterEndRows = afterSkipList.filter((r) => isQuarterEndDate(r.earnings_date));
+  const rows = afterSkipList.filter((r) => !isQuarterEndDate(r.earnings_date));
   const manualRows = rows.filter((r) => r.implied_move_source === "manual");
-  const quarterEndRows = rows.filter((r) => isQuarterEndDate(r.earnings_date));
   console.log(
-    `${WRITE ? "WRITE" : "DRY RUN"} candidates=${all.length} runnable=${rows.length} deferred(too recent, > ${cutoff})=${deferred.length} skipped=${skipped.length}` +
+    `${WRITE ? "WRITE" : "DRY RUN"} candidates=${all.length} runnable=${rows.length} deferred(too recent, > ${cutoff})=${deferred.length} skipped=${skipped.length} excluded(quarter-end)=${quarterEndRows.length}` +
       (symbolFilter ? ` symbol=${symbolFilter}` : "") +
       (dateFilter ? ` date=${dateFilter}` : ""),
   );
@@ -146,8 +172,10 @@ async function main() {
   }
   if (quarterEndRows.length > 0) {
     console.log(
-      `⚠ quarter-end earnings_date, still takes the wide report-window path (${quarterEndRows.length}): ` +
-        quarterEndRows.map((r) => `${r.symbol}@${r.earnings_date}`).join(", "),
+      `excluded — literal quarter-end earnings_date, not a real announcement date (${quarterEndRows.length}): ` +
+        quarterEndRows.map((r) => `${r.symbol}@${r.earnings_date}`).join(", ") +
+        ` — withholding both price fields and actual_move_pct for these; find the real announcement date first ` +
+        `(see NBIS@2024-10-31's correction for the pattern), then re-run scoped to that row.`,
     );
   }
 
