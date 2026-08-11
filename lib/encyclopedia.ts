@@ -403,8 +403,28 @@ export async function fetchYahooPriceAction(
     // resolvable: stepping to index-1 always reaches the true prior
     // trading day regardless of how many non-trading days sit between.
     const anchorIdx = normalized.findIndex((b) => b.iso >= earnIso);
+    // A real announcement CAN land on a non-trading day (BKR's true
+    // 2026-07-26 print was a Sunday, confirmed via its own 8-K —
+    // audit: 2026-08-12) — anchorIdx then points to the first trading
+    // day AFTER the closure, not a bar matching earnIso itself. On a
+    // closed day there's no "before/after the release" distinction to
+    // make: the market had the ENTIRE closure to digest it, so the
+    // pair is unconditionally the trading day immediately before the
+    // closure to the trading day immediately after it, regardless of
+    // whatever BMO/AMC label got stored — that label describes when
+    // within a trading day the release happened, which doesn't apply
+    // when there was no trading that day.
+    const earningsDateIsTradingDay = anchorIdx !== -1 && normalized[anchorIdx].iso === earnIso;
     if (anchorIdx === -1) {
       chosen = null;
+    } else if (!earningsDateIsTradingDay) {
+      if (anchorIdx - 1 >= 0) {
+        const prior = normalized[anchorIdx - 1];
+        const post = normalized[anchorIdx];
+        chosen = { prior: prior.close, post: post.close, move: (post.close - prior.close) / prior.close };
+      } else {
+        chosen = null;
+      }
     } else if (timing === "bmo" && anchorIdx - 1 >= 0) {
       const prior = normalized[anchorIdx - 1];
       const post = normalized[anchorIdx];
