@@ -394,10 +394,57 @@ export async function computeLossMultiplierLadder(symbol: string): Promise<LossM
   };
 }
 
+function addDaysIso(iso: string, days: number): string {
+  const d = new Date(iso + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+const NEARBY_WINDOW_DAYS = 10;
+
+// Finds an existing earnings_history row for `symbol` within
+// +/-windowDays of `targetDate`, excluding an exact match at
+// targetDate itself (that case is already handled by the caller's own
+// onConflict:"symbol,earnings_date" upsert). A near-but-not-exact hit
+// means the caller's date has drifted from the row a prior write
+// already established for this same event — same range-query pattern
+// lib/entry-context.ts's linkEarningsEvent already uses to find a
+// spanning event before falling back to inserting a stub. Exported so
+// both write paths prone to date drift (this file's
+// persistLiveImpliedMove and lib/encyclopedia.ts's upsertHistoryStub)
+// dedupe against the same signature that surfaced 5 duplicate pairs in
+// the 2026-08-11 audit (RKLB, CMS, MNST, SMCI).
+export async function findNearbyEarningsRow(
+  symbol: string,
+  targetDate: string,
+  windowDays: number = NEARBY_WINDOW_DAYS,
+): Promise<{ id: string; earnings_date: string } | null> {
+  const sb = createServerClient();
+  const res = await sb
+    .from("earnings_history")
+    .select("id,earnings_date")
+    .eq("symbol", symbol.toUpperCase())
+    .gte("earnings_date", addDaysIso(targetDate, -windowDays))
+    .lte("earnings_date", addDaysIso(targetDate, windowDays))
+    .neq("earnings_date", targetDate)
+    .order("earnings_date", { ascending: true })
+    .limit(1);
+  const rows = (res.data ?? []) as Array<{ id: string; earnings_date: string }>;
+  return rows[0] ?? null;
+}
+
 // Persists the live IV-implied move for a candidate's upcoming earnings
 // event. Called from the screener when stage 3 computes emPct so we
 // build a real per-event EM history over time. Only writes the two
 // fields — other earnings_history columns stay untouched on update.
+//
+// Drift guard (2026-08-11): candidate.earningsDate can come from a
+// stale client-cached screener candidate (see fetchYahooPriceAction's
+// staleness note in lib/screener.ts:2250-2260) and land a day or more
+// off the row a prior write already established for this same event.
+// Exact-date onConflict can't catch that, so we range-check first and
+// merge onto the existing nearby row's date instead of inserting a new
+// one, logging the merge so drift stays visible.
 export async function persistLiveImpliedMove(
   symbol: string,
   earningsDate: string,
@@ -406,12 +453,21 @@ export async function persistLiveImpliedMove(
 ): Promise<void> {
   if (emPct === null || !Number.isFinite(emPct) || emPct <= 0) return;
   const sb = createServerClient();
+  const nearby = await findNearbyEarningsRow(symbol, earningsDate);
+  const writeDate = nearby?.earnings_date ?? earningsDate;
+  if (nearby) {
+    console.warn(
+      `[earnings-history-table] persist live EM ${symbol}: date drift — ` +
+        `${earningsDate} requested but an existing row at ${nearby.earnings_date} is within ` +
+        `${NEARBY_WINDOW_DAYS} days; merging onto it instead of inserting a duplicate.`,
+    );
+  }
   const upsert = await sb
     .from("earnings_history")
     .upsert(
       {
         symbol: symbol.toUpperCase(),
-        earnings_date: earningsDate,
+        earnings_date: writeDate,
         implied_move_pct: emPct,
         implied_move_source: source,
       },
@@ -419,7 +475,7 @@ export async function persistLiveImpliedMove(
     );
   if (upsert.error) {
     console.warn(
-      `[earnings-history-table] persist live EM ${symbol}@${earningsDate} failed: ${upsert.error.message}`,
+      `[earnings-history-table] persist live EM ${symbol}@${writeDate} failed: ${upsert.error.message}`,
     );
   }
 }

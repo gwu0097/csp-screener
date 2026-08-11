@@ -29,6 +29,7 @@ import {
 } from "@/lib/schwab";
 import { isT1SessionEligible } from "@/lib/session-eligibility";
 import { T1_RETRY_CUTOFF_DAYS, recordCaptureAttempt } from "@/lib/earnings-capture-attempts";
+import { findNearbyEarningsRow } from "@/lib/earnings-history-table";
 import YahooFinance from "yahoo-finance2";
 
 const FINNHUB_RATE_DELAY_MS = 200;
@@ -1599,6 +1600,13 @@ async function readHistoryRow(
   return rows[0] ?? null;
 }
 
+// Drift guard (2026-08-11): the calendar-sourced earningsDate passed in
+// here can be a day or more off a row a prior write already established
+// for this same event (Finnhub calendar drift — same mechanism the
+// 2026-08-11 audit traced for RKLB/CMS/MNST/SMCI). readHistoryRow only
+// checks the exact date, so a range check first catches the near-miss
+// and merges onto the existing row's date instead of stubbing a
+// duplicate.
 async function upsertHistoryStub(
   symbol: string,
   earningsDate: string,
@@ -1607,12 +1615,22 @@ async function upsertHistoryStub(
   const sb = createServerClient();
   const existing = await readHistoryRow(symbol, earningsDate);
   if (existing) return;
+  const nearby = await findNearbyEarningsRow(symbol, earningsDate);
+  const writeDate = nearby?.earnings_date ?? earningsDate;
+  if (nearby) {
+    console.warn(
+      `[encyclopedia] upsertHistoryStub ${symbol}: date drift — ` +
+        `${earningsDate} requested but an existing row at ${nearby.earnings_date} is within 10 days; ` +
+        `merging onto it instead of inserting a duplicate stub.`,
+    );
+    return;
+  }
   await sb
     .from("earnings_history")
     .upsert(
       {
         symbol: symbol.toUpperCase(),
-        earnings_date: earningsDate,
+        earnings_date: writeDate,
         data_source: "encyclopedia-live",
         is_complete: false,
         timing,
