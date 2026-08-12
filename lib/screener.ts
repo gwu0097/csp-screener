@@ -36,6 +36,8 @@ import {
 } from "@/lib/earnings-history-table";
 import { computeOptionsFlow, type OptionsFlow } from "@/lib/options-flow";
 import { computeLiquidityRead, capGradeByLiquidity } from "@/lib/liquidity";
+import { computeTradableGrade, tradableRuleText } from "@/lib/tradable-grade";
+import { computeRiskScore, canonicalizeFlags, hasPriorLossOnTicker, type RiskScoreResult } from "@/lib/risk-score";
 
 // ---------- Hard-kill thresholds ----------
 // The price floor, market-cap floor, and Stage 2 tier gate live in
@@ -481,6 +483,30 @@ export type ThreeLayerGrade = {
   // Overhang/VIX/personal-history overrides that fired after the rule
   // cascade, in order — empty when none applied.
   overrideNotes: string[];
+
+  // ---- Tradable Grade (restructured, lib/tradable-grade.ts) ----
+  // "Can I sell this and get paid" — POP bands, the yield/liquidity
+  // gate, and the personal-history modifier, with crush/overhang/VIX
+  // removed (see lib/tradable-grade.ts's module comment for why). This
+  // is the grade the main table's "Tradable" column and sort now use;
+  // finalGrade/matchedRule/ruleText/unrated above are UNCHANGED and
+  // continue to reflect the original crush+overhang+VIX cascade,
+  // preserved verbatim for the collapsed "legacy grading" panel.
+  tradableGrade: Grade;
+  tradableMatchedRule: "A" | "B" | "C" | "F";
+  tradableRuleText: string;
+  // Same semantics as `unrated` above, evaluated against the tradable
+  // cascade (identical POP/opportunityGrade bands, so this is always
+  // equal to `unrated` in practice — kept as its own field rather than
+  // aliasing so tradableGrade's type doesn't reach back into the
+  // legacy fields).
+  tradableUnrated: boolean;
+
+  // ---- Risk Score (lib/risk-score.ts) ----
+  // Display only — never modifies tradableGrade. See lib/risk-score.ts
+  // for the frozen per-flag weights and the overhang/VIX/prior-loss
+  // structural contributions that moved out of the cascade above.
+  riskScore: RiskScoreResult;
 };
 
 // Client-facing categorization, computed here where the thresholds live —
@@ -3292,6 +3318,12 @@ export function calculateThreeLayerGrade(
   // Defaults "weekly" for callers that predate this param (none of the
   // scoring below branches on it yet — see ThreeLayerGrade.expirySource).
   expirySource: "weekly" | "monthly_fallback" = "weekly",
+  // Canonical or raw checklist flag strings from this candidate's saved
+  // research_analyses row (flags_fired), if any — feeds riskScore only.
+  // Defaults to [] for callers that predate this param (e.g. legacy
+  // Test/test-three-layer.ts fixtures); a candidate with no saved
+  // analysis simply scores 0 from the measured-flag contributions.
+  flagsFired: string[] = [],
 ): ThreeLayerGrade {
   const crushGrade = stageThreeResult.crushGrade;
   const opportunityGrade = stageFourResult.opportunityGrade;
@@ -3530,6 +3562,81 @@ export function calculateThreeLayerGrade(
     if (personalModifier === "boost") finalGrade = boostGrade(finalGrade);
     else if (personalModifier === "drop") finalGrade = dropGrade(finalGrade);
   }
+
+  // ---- Tradable Grade (restructured — see lib/tradable-grade.ts) ----
+  // Same POP/opportunityGrade bands as the legacy cascade above (so
+  // `unrated` is identical either way), crush/overhang/VIX removed.
+  // The personal-history modifier is recomputed here WITHOUT the
+  // `!hasOverhang` gate the legacy block above uses — overhang no
+  // longer touches this cascade at all, so there's nothing left to gate
+  // the modifier on. A name whose modifier used to be suppressed by an
+  // active overhang now gets it applied; that's a deliberate behavior
+  // change from the restructure, not an oversight (see the validation
+  // report). unrated is independent of personalModifier, so a
+  // throwaway call with personalModifier=null gets it cheaply before
+  // the real modifier (which needs !unrated) is known.
+  const tradableUnratedProbe = computeTradableGrade({
+    pop: probabilityOfProfit,
+    opportunityGrade,
+    penalty,
+    personalModifier: null,
+  });
+  let tradablePersonalModifier: "boost" | "drop" | null = null;
+  if (!history.dataInsufficient && history.winRate !== null) {
+    const wr = history.winRate;
+    const dropWr = history.dropWinRate ?? wr;
+    const roc = history.avgRoc ?? 0;
+    const sec = history.sector ?? null;
+    if (historyScope === "ticker") {
+      if (sampleW >= 1.0) {
+        if (!tradableUnratedProbe.unrated && wr > 80 && roc > 0.3) tradablePersonalModifier = "boost";
+        else if (dropWr < 50) tradablePersonalModifier = "drop";
+      } else if (sampleW >= 0.5) {
+        if (
+          !tradableUnratedProbe.unrated &&
+          wr > 80 &&
+          roc > 0.3 &&
+          sec !== null &&
+          (sec.winRate ?? 0) >= 60 &&
+          sec.campaigns >= 10
+        ) {
+          tradablePersonalModifier = "boost";
+        } else if (dropWr < 50) {
+          tradablePersonalModifier = "drop";
+        }
+      } else if (sampleW >= 0.25) {
+        if (dropWr < 50 && sec !== null && (sec.dropWinRate ?? 100) < 50) {
+          tradablePersonalModifier = "drop";
+        }
+      }
+    } else if (historyScope === "sector" && dropWr < 45) {
+      tradablePersonalModifier = "drop";
+    }
+  }
+  const tradable = computeTradableGrade({
+    pop: probabilityOfProfit,
+    opportunityGrade,
+    penalty,
+    personalModifier: tradablePersonalModifier,
+  });
+  const tradableRuleTextStr = tradableRuleText({
+    pop: probabilityOfProfit,
+    opportunityGrade,
+    penalty,
+    matchedRule: tradable.matchedRule,
+  });
+
+  // ---- Risk Score (lib/risk-score.ts) — display only ----
+  const riskScore = computeRiskScore({
+    firedFlags: canonicalizeFlags(flagsFired),
+    hasOverhang,
+    vix,
+    priorLossOnTicker: hasPriorLossOnTicker({
+      tickerWinRate: history.winRate,
+      tickerTradeCount: history.tradeCount,
+      dataInsufficient: history.dataInsufficient,
+    }),
+  });
 
   // Derived illustrative scores (for sort order + display compatibility).
   const industryScore = gradeToL1Score(industryGrade);
@@ -3830,5 +3937,10 @@ export function calculateThreeLayerGrade(
     matchedRule,
     ruleText: ruleExplain[matchedRule],
     overrideNotes: overrideBits,
+    tradableGrade: tradable.grade,
+    tradableMatchedRule: tradable.matchedRule,
+    tradableRuleText: tradableRuleTextStr,
+    tradableUnrated: tradable.unrated,
+    riskScore,
   };
 }

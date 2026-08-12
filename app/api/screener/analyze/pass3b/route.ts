@@ -120,6 +120,31 @@ export async function POST(req: NextRequest) {
 
   const t0 = Date.now();
 
+  // Batch-fetch saved research_analyses flags for this batch's symbols
+  // — feeds riskScore's measured-flag contributions only. Same
+  // symbol-then-client-side-earnings-date-match pattern the
+  // research-analysis GET route documents for its own batch form.
+  const flagsBySymbolDate = new Map<string, string[]>();
+  try {
+    const symbols = Array.from(new Set(candidates.map((c) => c.symbol.toUpperCase())));
+    if (symbols.length > 0) {
+      const sb = createServerClient();
+      const flagsRes = await sb
+        .from("research_analyses")
+        .select("symbol,earnings_date,flags_fired")
+        .in("symbol", symbols);
+      for (const row of (flagsRes.data ?? []) as Array<{
+        symbol: string;
+        earnings_date: string;
+        flags_fired: string[] | null;
+      }>) {
+        flagsBySymbolDate.set(keyOf(row.symbol, row.earnings_date), row.flags_fired ?? []);
+      }
+    }
+  } catch (e) {
+    console.warn(`[analyze/pass3b] flags_fired batch fetch failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
   // Personal history + grade compute per candidate, in parallel.
   // Personal history is a Supabase query (fast). The grade is pure
   // compute. News falls back to a neutral object when pass3a hasn't
@@ -136,6 +161,7 @@ export async function POST(req: NextRequest) {
       }));
       const news =
         newsByKey[keyOf(base.symbol, base.earningsDate)] ?? NEUTRAL_NEWS;
+      const flagsFired = flagsBySymbolDate.get(keyOf(base.symbol.toUpperCase(), base.earningsDate)) ?? [];
       const threeLayer = calculateThreeLayerGrade(
         base.stageThree,
         base.stageFour,
@@ -145,6 +171,7 @@ export async function POST(req: NextRequest) {
         base.price,
         undefined,
         base.expirySource,
+        flagsFired,
       );
       return { ...base, threeLayer };
     }),

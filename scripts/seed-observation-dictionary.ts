@@ -211,20 +211,11 @@ const SEED_TERMS: SeedTerm[] = [
   },
 
   // --- app_defect ---
-  {
-    // Recategorized from setup_observation in Phase B — this describes a
-    // grading-logic problem (Rule B letting POP override a failing crush
-    // grade using the same unreliable distribution), not a property of
-    // any particular setup.
-    term: "pop_override_on_failing_crush",
-    kind: "app_defect",
-    definition:
-      "Rule B allows POP >= 95% to override a failing crush grade. POP derives from delta, which derives from the same implied distribution the crush grade found unreliable — so the broken measure overrides the measure that detected the break.",
-    fallbackCitations: [
-      { symbol: "APP", earningsDate: "2026-08-05" },
-      { symbol: "AAOI", earningsDate: "2026-08-06" },
-    ],
-  },
+  // pop_override_on_failing_crush removed — see
+  // migrations/2026-08-23-remove-pop-override-crush-observation.sql.
+  // Crush left the finalGrade cascade entirely in the Tradable Grade
+  // restructure (lib/tradable-grade.ts), so there is no longer a crush
+  // term for POP to override.
   {
     term: "unfillable_reference_strike",
     kind: "app_defect",

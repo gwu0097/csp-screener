@@ -18,6 +18,7 @@ import {
   type ObservationKind,
   type ObservationResolutions,
 } from "@/lib/observation-dictionary";
+import { computeRiskScore, canonicalizeFlags } from "@/lib/risk-score";
 
 // The full research_analyses row, as returned by GET/POST
 // /api/screener/research-analysis — the persisted source of truth this
@@ -37,17 +38,23 @@ export type SavedAnalysisRow = {
   raw_paste: string;
   parse_status: "parsed" | "prose_only" | "partial";
   updated_at: string;
+  risk_score_at_analysis?: number | null;
+  risk_contributions_at_analysis?: unknown[] | null;
+  risk_config_version_at_analysis?: string | null;
 };
 
 // Shape handed to the optional onSaved callback — enough for a caller
 // (the candidates table's AI-analysis indicator) to update its own
 // index without re-fetching, and matching what the batch GET endpoint
-// returns per row so both paths populate the same shape.
+// returns per row so both paths populate the same shape. flagsFired is
+// read by the live Risk Score column (lib/risk-score.ts) — display-
+// only, never fed into grading.
 export type SavedAnalysisInfo = {
   symbol: string;
   earningsDate: string;
   updatedAt: string;
   checklistVersion: string | null;
+  flagsFired: string[];
 };
 
 function formatSavedAt(iso: string): string {
@@ -105,6 +112,11 @@ export function ResearchAnalysisPasteBack({
       ivEdgeScore: number;
       surpriseScore: number;
     } | null;
+    // Risk Score inputs not covered by the fields above — see
+    // lib/risk-score.ts. flagsFired isn't here: it comes from this
+    // paste's own parsed output at save time.
+    hasOverhang: boolean;
+    priorLossOnTicker: boolean;
   };
   // Fires after a successful save with exactly what the server
   // persisted — lets the candidates table light up its AI-analysis
@@ -258,6 +270,16 @@ export function ResearchAnalysisPasteBack({
     setSaving(true);
     setSaveError(null);
     try {
+      // Computed here (not read off `tl` — this component only ever
+      // sees the snapshot prop) so the frozen risk_*_at_analysis columns
+      // reflect the flags THIS save actually reports, not whatever an
+      // earlier partial parse happened to carry.
+      const riskResult = computeRiskScore({
+        firedFlags: canonicalizeFlags(parsed.flagsFired),
+        hasOverhang: snapshot.hasOverhang,
+        vix: snapshot.vix,
+        priorLossOnTicker: snapshot.priorLossOnTicker,
+      });
       const res = await fetch("/api/screener/research-analysis", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -297,6 +319,9 @@ export function ResearchAnalysisPasteBack({
           vixAtAnalysis: snapshot.vix,
           vixRegimeAtAnalysis: snapshot.vixRegime,
           crushSubscoresAtAnalysis: snapshot.crushSubscores,
+          riskScoreAtAnalysis: riskResult.score,
+          riskContributionsAtAnalysis: riskResult.contributions,
+          riskConfigVersionAtAnalysis: riskResult.configVersion,
         }),
       });
       const body = await res.json().catch(() => ({}));
@@ -315,6 +340,7 @@ export function ResearchAnalysisPasteBack({
           earningsDate: row.earnings_date,
           updatedAt: row.updated_at,
           checklistVersion: row.checklist_version,
+          flagsFired: row.flags_fired,
         });
       }
       setSaved(true);

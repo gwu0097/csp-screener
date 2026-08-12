@@ -11,6 +11,7 @@ import { getEarningsNewsContext } from "@/lib/perplexity";
 import { getMarketContext } from "@/lib/market";
 import { getCachedCompanyName } from "@/lib/market-snapshot";
 import { requireUserId, authErrorResponse } from "@/lib/auth";
+import { createServerClient } from "@/lib/supabase";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -126,6 +127,21 @@ export async function POST(req: NextRequest) {
       dataInsufficient: true,
     })),
   ]);
+  // Saved research_analyses flags for this candidate — feeds
+  // riskScore's measured-flag contributions only; [] when unsaved.
+  let flagsFired: string[] = [];
+  try {
+    const sb = createServerClient();
+    const flagsRes = await sb
+      .from("research_analyses")
+      .select("flags_fired")
+      .eq("symbol", upper)
+      .eq("earnings_date", base.earningsDate)
+      .maybeSingle();
+    flagsFired = (flagsRes.data as { flags_fired: string[] } | null)?.flags_fired ?? [];
+  } catch (e) {
+    console.warn(`[analyze-single] flags_fired fetch failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
   const threeLayer = calculateThreeLayerGrade(
     scored.stageThree,
     scored.stageFour,
@@ -135,6 +151,7 @@ export async function POST(req: NextRequest) {
     scored.price,
     undefined,
     scored.expirySource,
+    flagsFired,
   );
 
   return NextResponse.json({ result: { ...scored, threeLayer }, vix });

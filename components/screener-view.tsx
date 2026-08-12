@@ -38,6 +38,14 @@ import {
 import { cn } from "@/lib/utils";
 import type { ScreenerResult, StageFourResult, ReferenceStrikeCheck } from "@/lib/screener";
 import { computeLiquidityRead, capGradeByLiquidity } from "@/lib/liquidity";
+import { computeTradableGrade, type TradableResult } from "@/lib/tradable-grade";
+import {
+  computeRiskScore,
+  canonicalizeFlags,
+  hasPriorLossOnTicker,
+  RISK_BASE_RATE,
+  type RiskScoreResult,
+} from "@/lib/risk-score";
 import type { PerplexityNewsResult } from "@/lib/perplexity";
 import type { MarketContext } from "@/lib/market";
 import { CrushHistoryTable } from "@/components/crush-history-table";
@@ -165,7 +173,8 @@ type SortKey =
   | "delta"
   | "spread"
   | "stage2"
-  | "grade";
+  | "grade"
+  | "risk";
 
 function gradeColor(grade: string | null | undefined) {
   if (!grade) return "text-muted-foreground";
@@ -186,14 +195,6 @@ function finalGradeBadgeColor(grade: string | null | undefined) {
   return "border-border bg-background text-muted-foreground";
 }
 
-// Display "?" instead of F when the F grade reflects insufficient history
-// rather than a genuinely weak crusher.
-function displayCrushGrade(s: ScreenerResult["stageThree"]): string {
-  if (!s) return "—";
-  if (s.crushGrade === "F" && s.insufficientData) return "?";
-  return s.crushGrade;
-}
-
 // Display "Unrated" instead of the bare F when Opportunity graded F
 // blocked what would otherwise have been a B or C — see the
 // `unrated` field / rule cascade comment in calculateThreeLayerGrade.
@@ -201,6 +202,58 @@ function displayFinalGrade(tl: { finalGrade: string; unrated?: boolean } | null 
   if (!tl) return "—";
   if (tl.unrated) return "Unrated";
   return tl.finalGrade;
+}
+
+// Same "Unrated" treatment as displayFinalGrade, against the
+// restructured Tradable Grade (lib/tradable-grade.ts) instead of the
+// legacy finalGrade cascade.
+function displayTradableGrade(
+  tl: { tradableGrade: string; tradableUnrated?: boolean } | null | undefined,
+): string {
+  if (!tl) return "—";
+  if (tl.tradableUnrated) return "Unrated";
+  return tl.tradableGrade;
+}
+
+// Stable empty default for analysisIndex-less callers (the sandbox
+// tester) — a module-level constant so it isn't a fresh object on every
+// render.
+const EMPTY_ANALYSIS_INDEX = new Map<string, SavedAnalysisInfo>();
+
+// Live Risk Score for a candidate row — computed from data already on
+// the client (no new fetch): saved research_analyses flags
+// (analysisIndex), threeLayer's overhang/vix regime factors, and
+// threeLayer's personal-history factors. Returns null when threeLayer
+// hasn't been computed yet (pre-analysis row) — same "—" treatment as
+// every other threeLayer-derived cell.
+function computeLiveRiskScore(
+  r: ScreenerResult,
+  analysisIndex: Map<string, SavedAnalysisInfo>,
+): RiskScoreResult | null {
+  const tl = r.threeLayer;
+  if (!tl) return null;
+  const analysis = analysisIndex.get(`${r.symbol.toUpperCase()}|${r.earningsDate}`);
+  return computeRiskScore({
+    firedFlags: canonicalizeFlags(analysis?.flagsFired ?? []),
+    hasOverhang: tl.regimeFactors.hasActiveOverhang,
+    vix: tl.regimeFactors.vix,
+    priorLossOnTicker: hasPriorLossOnTicker({
+      tickerWinRate: tl.personalFactors.tickerWinRate,
+      tickerTradeCount: tl.personalFactors.tickerTradeCount,
+      dataInsufficient: tl.personalFactors.dataInsufficient,
+    }),
+  });
+}
+
+// Risk Score badge palette — rising is worse, inverted from grade
+// colors (green=low risk, red=high risk). Thresholds are illustrative
+// bucketing for the badge only, not a graded cutoff like Tradable's
+// letter bands.
+function riskScoreColor(score: number): string {
+  if (score <= 0) return "border-border bg-background text-muted-foreground";
+  if (score <= 8) return "border-emerald-500/40 bg-emerald-500/20 text-emerald-300";
+  if (score <= 18) return "border-amber-500/40 bg-amber-500/20 text-amber-300";
+  return "border-rose-500/40 bg-rose-500/20 text-rose-300";
 }
 
 // Pass 3: is the 2xEM reference strike (the ONLY strike this app ever
@@ -656,8 +709,9 @@ export function ScreenerView({ connected }: Props) {
   const [chainProgress, setChainProgress] = useState<
     { done: number; total: number; phase: "verifying" | "done" } | null
   >(null);
-  // Default sort: finalGrade (A→F). ascending=true means A before F because
-  // gradeOrder returns 0 for A, 3 for F. Tracked rows always float to top.
+  // Default sort: tradableGrade (A→F). ascending=true means A before F
+  // because gradeOrder returns 0 for A, 3 for F. Tracked rows always
+  // float to top.
   const [sortKey, setSortKey] = useState<SortKey>("grade");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   // When `groupMode` is non-null, results render as two groups with a divider.
@@ -840,6 +894,7 @@ export function ScreenerView({ connected }: Props) {
             earnings_date: string;
             checklist_version: string | null;
             updated_at: string;
+            flags_fired: string[] | null;
           }>;
         };
         if (cancelled) return;
@@ -850,6 +905,7 @@ export function ScreenerView({ connected }: Props) {
             earningsDate: a.earnings_date,
             updatedAt: a.updated_at,
             checklistVersion: a.checklist_version,
+            flagsFired: a.flags_fired ?? [],
           });
         }
         setAnalysisIndex(next);
@@ -1032,8 +1088,15 @@ export function ScreenerView({ connected }: Props) {
           vb = b.stageTwo?.score ?? -999;
           break;
         case "grade":
-          va = gradeOrder(a.threeLayer?.finalGrade);
-          vb = gradeOrder(b.threeLayer?.finalGrade);
+          va = gradeOrder(a.threeLayer?.tradableGrade);
+          vb = gradeOrder(b.threeLayer?.tradableGrade);
+          break;
+        case "risk":
+          // No fired flags / no threeLayer sorts as 0 (best, not worst)
+          // — a candidate with nothing measured against it isn't riskier
+          // than one that is, it's simply unscored.
+          va = computeLiveRiskScore(a, analysisIndex)?.score ?? 0;
+          vb = computeLiveRiskScore(b, analysisIndex)?.score ?? 0;
           break;
       }
       let primary: number;
@@ -1045,13 +1108,13 @@ export function ScreenerView({ connected }: Props) {
       }
       if (primary !== 0) return primary;
 
-      // 3. Tiebreakers: finalGrade (A→F) then quality score (desc).
-      const gDiff = gradeOrder(a.threeLayer?.finalGrade) - gradeOrder(b.threeLayer?.finalGrade);
+      // 3. Tiebreakers: tradableGrade (A→F) then quality score (desc).
+      const gDiff = gradeOrder(a.threeLayer?.tradableGrade) - gradeOrder(b.threeLayer?.tradableGrade);
       if (gDiff !== 0) return gDiff;
       return (b.stageTwo?.score ?? -999) - (a.stageTwo?.score ?? -999);
     });
     return { items: copy, group1Count: null };
-  }, [results, prices, sortKey, sortDir, groupMode, tracked]);
+  }, [results, prices, sortKey, sortDir, groupMode, tracked, analysisIndex]);
 
   const sortedResults = view.items;
   const group1Count = view.group1Count;
@@ -2540,23 +2603,35 @@ export function ScreenerView({ connected }: Props) {
                   <TableHead className="w-14 text-sm text-muted-foreground">Track</TableHead>
                   <SortableHeader label="Symbol" active={sortKey === "symbol"} dir={sortDir} onClick={() => onSort("symbol")} />
                   <SortableHeader
-                    label="Grade"
+                    label="Tradable"
                     active={sortKey === "grade"}
                     dir={sortDir}
                     onClick={() => onSort("grade")}
                     tooltip={
                       <>
-                        Three-layer final grade: Industry (POP, IV edge, term, opp) +
-                        Your history (win rate, ROC) + Regime (news, VIX). A ≥ 80,
-                        B ≥ 65, C ≥ 50, F &lt; 50.
+                        Can I sell this and get paid: POP band, yield/liquidity
+                        gate, personal-history modifier. A ≥ 90% POP, B ≥ 83%,
+                        C ≥ 75% — each gated on a real, non-liquidity-capped
+                        premium. Crush/overhang/VIX moved to Risk; see the
+                        legacy grading panel for the old combined letter.
                       </>
                     }
                   />
-                  <TableHead
-                    title="Is the 2xEM strike above actually tradeable — a real bid, and at what premium/POP. Never a different strike: 2xEM is the recommendation, full stop."
-                  >
-                    Liquidity
-                  </TableHead>
+                  <SortableHeader
+                    label="Risk"
+                    active={sortKey === "risk"}
+                    dir={sortDir}
+                    onClick={() => onSort("risk")}
+                    tooltip={
+                      <>
+                        Display only — does not change Tradable. Starts at 0,
+                        rising is worse: measured checklist-flag contributions
+                        (weighted by sample confidence) plus overhang/VIX/
+                        prior-loss-on-ticker. Expand the row for the
+                        itemized breakdown.
+                      </>
+                    }
+                  />
                   <SortableHeader label="Price" active={sortKey === "price"} dir={sortDir} onClick={() => onSort("price")} />
                   <TableHead>Earnings</TableHead>
                   <SortableHeader
@@ -2573,33 +2648,6 @@ export function ScreenerView({ connected }: Props) {
                       </>
                     }
                   />
-                  <SortableHeader
-                    label="Crush"
-                    active={sortKey === "crush"}
-                    dir={sortDir}
-                    onClick={() => onSort("crush")}
-                    tooltip={
-                      <>
-                        Stage 3 crush grade — quality of the IV-crush setup
-                        (historical moves, consistency, term structure, IV edge,
-                        surprise reliability). &ldquo;?&rdquo; = fewer than 3
-                        historical earnings moves available.
-                      </>
-                    }
-                  />
-                  <SortableHeader
-                    label="Opp."
-                    active={sortKey === "opportunity"}
-                    dir={sortDir}
-                    onClick={() => onSort("opportunity")}
-                    tooltip={
-                      <>
-                        Stage 4 opportunity grade — premium yield + delta.
-                        Spread is no longer part of the score; shown as
-                        informational only.
-                      </>
-                    }
-                  />
                   <SortableHeader label="Strike" active={sortKey === "strike"} dir={sortDir} onClick={() => onSort("strike")} />
                   <TableHead title="How far the stock has to fall to breach the strike: (price − strike) / price">
                     % Drop
@@ -2607,13 +2655,18 @@ export function ScreenerView({ connected }: Props) {
                   <SortableHeader label="Premium" active={sortKey === "premium"} dir={sortDir} onClick={() => onSort("premium")} />
                   <SortableHeader label="Yield%" active={sortKey === "yield"} dir={sortDir} onClick={() => onSort("yield")} />
                   <SortableHeader label="Delta" active={sortKey === "delta"} dir={sortDir} onClick={() => onSort("delta")} />
+                  <TableHead
+                    title="Is the 2xEM strike above actually tradeable — a real bid, and at what premium/POP. Never a different strike: 2xEM is the recommendation, full stop."
+                  >
+                    Liquidity
+                  </TableHead>
                   <TableHead className="w-10 text-center" title="Wide spread (>50% of premium)">⚠️</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {sortedResults.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={16} className="py-10 text-center text-base text-muted-foreground">
+                    <TableCell colSpan={15} className="py-10 text-center text-base text-muted-foreground">
                       No qualifying earnings today or tomorrow after filters.
                     </TableCell>
                   </TableRow>
@@ -2629,7 +2682,7 @@ export function ScreenerView({ connected }: Props) {
                       {showDivider && (
                         <TableRow key={`divider-${idx}`} className="hover:bg-transparent">
                           <TableCell
-                            colSpan={16}
+                            colSpan={15}
                             className="bg-amber-500/10 py-1.5 text-center text-sm italic text-amber-300/90"
                           >
                             <AlertTriangle className="mr-1.5 inline h-3 w-3" />
@@ -2693,11 +2746,13 @@ export function ScreenerView({ connected }: Props) {
                               <span
                                 className={cn(
                                   "rounded-md border px-3 py-1 text-base font-bold",
-                                  finalGradeBadgeColor(displayFinalGrade(r.threeLayer)),
+                                  finalGradeBadgeColor(displayTradableGrade(r.threeLayer)),
                                 )}
                               >
-                                {displayFinalGrade(r.threeLayer)}
+                                {displayTradableGrade(r.threeLayer)}
                               </span>
+                            ) : analyzingRow ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
                             ) : (
                               <span className="text-base text-muted-foreground">—</span>
                             )}
@@ -2734,25 +2789,20 @@ export function ScreenerView({ connected }: Props) {
                           </div>
                         </TableCell>
                         <TableCell>
-                          {r.threeLayer?.referenceStrikeCheck ? (
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <span
-                                  className={cn(
-                                    "inline-flex cursor-default items-center gap-1 rounded-md border px-2 py-1 text-sm font-semibold",
-                                    referenceStrikeBadgeColor(r.threeLayer.referenceStrikeCheck.status),
-                                  )}
-                                >
-                                  {referenceStrikeChipLabel(r.threeLayer.referenceStrikeCheck)}
-                                </span>
-                              </TooltipTrigger>
-                              <TooltipContent className="max-w-xs whitespace-normal text-sm">
-                                {r.threeLayer.referenceStrikeCheck.text}
-                              </TooltipContent>
-                            </Tooltip>
-                          ) : (
-                            <span className="text-sm text-muted-foreground">—</span>
-                          )}
+                          {(() => {
+                            const risk = computeLiveRiskScore(r, analysisIndex);
+                            if (!risk) return <span className="text-base text-muted-foreground">—</span>;
+                            return (
+                              <span
+                                className={cn(
+                                  "rounded-md border px-3 py-1 text-base font-bold",
+                                  riskScoreColor(risk.score),
+                                )}
+                              >
+                                {risk.score}
+                              </span>
+                            );
+                          })()}
                         </TableCell>
                         <TableCell className="text-base">{fmtPrice(displayedPrice)}</TableCell>
                         <TableCell className="text-sm">
@@ -2774,19 +2824,6 @@ export function ScreenerView({ connected }: Props) {
                             }
                             return "—";
                           })()}
-                        </TableCell>
-                        <TableCell className={cn("font-mono text-base", gradeColor(displayCrushGrade(r.stageThree)))}>
-                          {analyzingRow ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : displayCrushGrade(r.stageThree)}
-                        </TableCell>
-                        <TableCell
-                          className={cn("font-mono text-base", gradeColor(r.stageFour?.opportunityGrade))}
-                          title={
-                            r.stageFour?.liquidityReason
-                              ? `Liquidity: ${r.stageFour.liquidityGrade} — ${r.stageFour.liquidityReason}`
-                              : undefined
-                          }
-                        >
-                          {analyzingRow ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : (r.stageFour?.opportunityGrade ?? "—")}
                         </TableCell>
                         {(() => {
                           const ov = strikeOverrides[id] ?? null;
@@ -2834,6 +2871,30 @@ export function ScreenerView({ connected }: Props) {
                                 {fmtYield(effPremium, effStrike)}
                               </TableCell>
                               <TableCell className="text-base">{fmtNum(effDelta, 3)}</TableCell>
+                              <TableCell>
+                                {r.threeLayer?.referenceStrikeCheck ? (
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <span
+                                        className={cn(
+                                          "inline-flex cursor-default items-center gap-1 rounded-md border px-2 py-1 text-sm font-semibold",
+                                          referenceStrikeBadgeColor(r.threeLayer.referenceStrikeCheck.status),
+                                        )}
+                                      >
+                                        {referenceStrikeChipLabel(r.threeLayer.referenceStrikeCheck)}
+                                      </span>
+                                    </TooltipTrigger>
+                                    <TooltipContent className="max-w-xs whitespace-normal text-sm">
+                                      {r.threeLayer.referenceStrikeCheck.text}
+                                      {r.stageFour?.liquidityReason
+                                        ? ` Liquidity ${r.stageFour.liquidityGrade} — ${r.stageFour.liquidityReason}`
+                                        : ""}
+                                    </TooltipContent>
+                                  </Tooltip>
+                                ) : (
+                                  <span className="text-sm text-muted-foreground">—</span>
+                                )}
+                              </TableCell>
                               <TableCell className="text-center">
                                 {effSpread !== null && effSpread !== undefined ? (
                                   <Tooltip>
@@ -2858,7 +2919,7 @@ export function ScreenerView({ connected }: Props) {
                       </TableRow>
                       {open && (
                         <TableRow key={`${id}-detail`}>
-                          <TableCell colSpan={16} className="bg-muted/30">
+                          <TableCell colSpan={15} className="bg-muted/30">
                             <ExpandedDetail
                               r={r}
                               analyzing={analyzingSymbols.has(r.symbol.toUpperCase())}
@@ -2875,6 +2936,7 @@ export function ScreenerView({ connected }: Props) {
                                 })
                               }
                               screenedAt={screenedAt}
+                              analysisIndex={analysisIndex}
                               onAnalysisSaved={(info) =>
                                 setAnalysisIndex((prev) => {
                                   const next = new Map(prev);
@@ -3061,62 +3123,13 @@ function GradeBadge({
   );
 }
 
-// Client-side replica of the rule cascade in lib/screener.ts so the
-// CustomStrikeAnalyzer can preview a grade impact without round-tripping
-// the server. Keep in sync with calculateThreeLayerGrade().
-function dropGradeClient(g: "A" | "B" | "C" | "F"): "A" | "B" | "C" | "F" {
-  if (g === "A") return "B";
-  if (g === "B") return "C";
-  return "F";
-}
-function boostGradeClient(g: "A" | "B" | "C" | "F"): "A" | "B" | "C" | "F" {
-  if (g === "F") return "C";
-  if (g === "C") return "B";
-  return "A";
-}
-
-function gradeFromRulesClient(params: {
-  pop: number;
-  crushGrade: "A" | "B" | "C" | "F";
-  opportunityGrade: "A" | "B" | "C" | "F";
-  hasOverhang: boolean;
-  vix: number | null;
-  penalty: number;
-  personalModifier: "boost" | "drop" | null;
-}): { grade: "A" | "B" | "C" | "F"; unrated: boolean } {
-  const { pop, crushGrade, opportunityGrade, hasOverhang, vix, penalty, personalModifier } = params;
-  const crushOk = crushGrade === "A" || crushGrade === "B";
-  let grade: "A" | "B" | "C" | "F";
-  let unrated = false;
-  if (crushOk && pop >= 0.9 && opportunityGrade !== "F" && !hasOverhang && (vix === null || vix < 25)) {
-    grade = "A";
-  } else if (pop >= 0.83 && (crushOk || pop >= 0.95) && !hasOverhang) {
-    if (opportunityGrade === "F") {
-      grade = "F";
-      unrated = true;
-    } else {
-      grade = "B";
-    }
-  } else if (pop >= 0.75 && penalty > -15) {
-    if (opportunityGrade === "F") {
-      grade = "F";
-      unrated = true;
-    } else {
-      grade = "C";
-    }
-  } else {
-    grade = "F";
-  }
-  if (hasOverhang) grade = "F";
-  else if (vix !== null && vix > 30) grade = dropGradeClient(grade);
-  if (!hasOverhang) {
-    // unrated never boosts — mirrors the !unrated guard in
-    // calculateThreeLayerGrade (lib/screener.ts).
-    if (personalModifier === "boost" && !unrated) grade = boostGradeClient(grade);
-    else if (personalModifier === "drop") grade = dropGradeClient(grade);
-  }
-  return { grade, unrated };
-}
+// The rule-cascade replica that used to live here (gradeFromRulesClient
+// + its dropGradeClient/boostGradeClient helpers) is gone — the
+// Tradable Grade cascade has no server-specific dependencies left after
+// the crush/overhang/VIX restructure, so it's shared verbatim from
+// lib/tradable-grade.ts (computeTradableGrade) instead of hand-kept in
+// sync. CustomStrikeAnalyzer/OptionsChainTab's what-if previews now
+// call that shared function directly.
 
 // Mirrors gradeFromYield (lib/screener.ts) — same thresholds, same
 // order. opportunityGrade is yield-derived (premium/strike), so it
@@ -3311,6 +3324,7 @@ function ExpandedDetail({
   onResetStrike,
   screenedAt,
   onAnalysisSaved,
+  analysisIndex,
 }: {
   r: ScreenerResult;
   analyzing: boolean;
@@ -3327,6 +3341,11 @@ function ExpandedDetail({
   // Omitted at the sandbox call site (that result isn't in the main
   // candidates list, so there's no row/badge to update).
   onAnalysisSaved?: (info: SavedAnalysisInfo) => void;
+  // Saved research_analyses flags, for the live Risk Score panel. Omitted
+  // at the sandbox call site — that result isn't in the main candidates
+  // list, so there's no saved-analysis lookup for it; Risk Score there
+  // simply reflects overhang/VIX/prior-loss with 0 flag contribution.
+  analysisIndex?: Map<string, SavedAnalysisInfo>;
 }) {
   // Live campaign data — hooks must run unconditionally, so this sits
   // above the pre-analysis early return. The Layer 2 card's "your
@@ -3347,6 +3366,10 @@ function ExpandedDetail({
   const [refreshedChain, setRefreshedChain] = useState<RefreshedChain | null>(null);
   const [chainRefreshing, setChainRefreshing] = useState(false);
   const [chainRefreshError, setChainRefreshError] = useState<string | null>(null);
+  // Collapsed by default — the legacy crush/overhang/VIX finalGrade
+  // cascade stays computed and available for comparison, but Tradable +
+  // Risk are the primary reading surface now.
+  const [legacyGradingExpanded, setLegacyGradingExpanded] = useState(false);
 
   async function refreshChain() {
     if (!r.expiry) return;
@@ -3834,53 +3857,170 @@ function ExpandedDetail({
         </LayerCard>
           </div>
 
-          <div className="rounded-md border border-border bg-background/40 p-3">
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-medium text-muted-foreground">FINAL GRADE:</span>
-              <GradeBadge
-                grade={displayFinalGrade(tl)}
-                size="md"
-                tooltip={
-                  <div className="space-y-1">
-                    <div className="font-semibold">Rule-based grade</div>
-                    <div>A: crush A/B · POP ≥ 90% · opp ≠ F · no overhang · VIX &lt; 25</div>
-                    <div>B: POP ≥ 83% and (crush A/B or POP ≥ 95%), no overhang</div>
-                    <div>C: POP ≥ 75% and penalty &gt; −15</div>
-                    <div>B/C also require opp ≠ F — opp F alone yields &ldquo;Unrated,&rdquo; not B/C</div>
-                    <div className="pt-1 text-muted-foreground">
-                      Overrides: overhang → F · VIX &gt; 30 drops one level · personal wr &gt;80%+roc &gt;0.4% boosts (never on Unrated) · wr &lt;50% drops
+          {(() => {
+            const savedAnalysis = (analysisIndex ?? EMPTY_ANALYSIS_INDEX).get(
+              `${r.symbol.toUpperCase()}|${r.earningsDate}`,
+            );
+            const risk = computeRiskScore({
+              firedFlags: canonicalizeFlags(savedAnalysis?.flagsFired ?? []),
+              hasOverhang: tl.regimeFactors.hasActiveOverhang,
+              vix: tl.regimeFactors.vix,
+              priorLossOnTicker: hasPriorLossOnTicker({
+                tickerWinRate: tl.personalFactors.tickerWinRate,
+                tickerTradeCount: tl.personalFactors.tickerTradeCount,
+                dataInsufficient: tl.personalFactors.dataInsufficient,
+              }),
+            });
+            const noBid = (r.stageFour?.bid ?? 0) <= 0;
+            // Heuristic, not a calendar lookup — no next-earnings-date
+            // data is available on ScreenerResult to check this exactly.
+            // monthly_fallback only fires when no weekly chain exists for
+            // THIS earnings week, so a monthly_fallback expiry far enough
+            // out (>75 days — comfortably past a typical ~91-day quarterly
+            // cadence's midpoint) is plausibly holding through a second
+            // print, not just this one.
+            const possibleSecondEarnings = r.expirySource === "monthly_fallback" && r.daysToExpiry > 75;
+            return (
+              <>
+                <div className="rounded-md border border-border bg-background/40 p-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-sm font-medium text-muted-foreground">TRADABLE:</span>
+                    <GradeBadge
+                      grade={displayTradableGrade(tl)}
+                      size="md"
+                      tooltip={
+                        <div className="space-y-1">
+                          <div className="font-semibold">
+                            &ldquo;Can I sell this and get paid&rdquo; — rule cascade
+                          </div>
+                          <div>A: POP ≥ 90% · opportunity ≠ F</div>
+                          <div>B: POP ≥ 83% · opportunity ≠ F (else &ldquo;Unrated&rdquo;)</div>
+                          <div>C: POP ≥ 75% · penalty &gt; −15 · opportunity ≠ F (else &ldquo;Unrated&rdquo;)</div>
+                          <div className="pt-1 text-muted-foreground">
+                            opportunity already includes the noBid hard-F and the graduated
+                            liquidity cap. Personal wr &gt;80%+roc &gt;0.3% boosts (never on
+                            Unrated) · wr &lt;50% drops. Crush/overhang/VIX are no longer part
+                            of this cascade — see Risk below and the legacy panel.
+                          </div>
+                        </div>
+                      }
+                    />
+                    <span className="ml-2 text-sm font-medium text-muted-foreground">RISK:</span>
+                    <span
+                      className={cn("rounded-md border px-3 py-1 text-base font-bold", riskScoreColor(risk.score))}
+                    >
+                      {risk.score}
+                    </span>
+                    {noBid && (
+                      <span className="rounded-md border border-rose-500/40 bg-rose-500/20 px-2 py-1 text-xs font-semibold uppercase tracking-wide text-rose-300">
+                        No bid
+                      </span>
+                    )}
+                    {possibleSecondEarnings && (
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <span className="cursor-default rounded-md border border-amber-500/40 bg-amber-500/20 px-2 py-1 text-xs font-semibold uppercase tracking-wide text-amber-300">
+                            2nd earnings?
+                          </span>
+                        </TooltipTrigger>
+                        <TooltipContent className="max-w-xs whitespace-normal text-sm">
+                          Monthly-fallback expiry, {r.daysToExpiry} days to expiry — long enough
+                          that a second earnings print plausibly falls inside the hold window if
+                          this isn&apos;t the trade. Heuristic (no next-earnings-date lookup
+                          available here); verify the calendar before holding through it.
+                        </TooltipContent>
+                      </Tooltip>
+                    )}
+                  </div>
+
+                  <div className="mt-3 space-y-1 text-sm">
+                    {risk.contributions.length === 0 ? (
+                      <div className="text-muted-foreground">No risk contributions fired.</div>
+                    ) : (
+                      risk.contributions.map((c) => (
+                        <div key={c.key} className="flex items-baseline gap-2">
+                          <span className="w-6 text-right font-mono text-foreground">+{c.points}</span>
+                          <span className="text-foreground">{c.label}</span>
+                          {c.kind === "measured" && (
+                            <span className="text-muted-foreground">
+                              measured (n={c.n}, effect {c.effect?.toFixed(2)}, conf {c.confidencePct}%)
+                            </span>
+                          )}
+                        </div>
+                      ))
+                    )}
+                    <div className="mt-2 border-t border-border/60 pt-2">
+                      <div className="font-semibold text-muted-foreground">Measured, no effect:</div>
+                      {risk.noEffect.map((f) => (
+                        <div key={f.key} className="text-muted-foreground">
+                          {f.key} — n={f.n}, effect {f.effect.toFixed(2)} — below base rate ({RISK_BASE_RATE.toFixed(3)})
+                        </div>
+                      ))}
                     </div>
                   </div>
-                }
-              />
-            </div>
-            <div className="mt-3 space-y-2 text-sm leading-relaxed text-muted-foreground">
-              {tl.recommendationReason.split("\n\n").map((para, i) => {
-                const sep = para.indexOf(": ");
-                if (sep === -1) return <div key={i}>{para}</div>;
-                return (
-                  <div key={i}>
-                    <span className="font-semibold text-foreground">
-                      {para.slice(0, sep + 1)}
-                    </span>{" "}
-                    <span>{para.slice(sep + 2)}</span>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setLegacyGradingExpanded((v) => !v)}
+                  className="flex w-full items-center gap-1.5 rounded border border-border bg-background/40 px-2 py-1.5 text-xs text-muted-foreground hover:text-foreground"
+                >
+                  {legacyGradingExpanded ? (
+                    <ChevronDown className="h-3.5 w-3.5" />
+                  ) : (
+                    <ChevronRight className="h-3.5 w-3.5" />
+                  )}
+                  Legacy grading (crush + overhang + VIX combined into one letter, pre-restructure)
+                </button>
+                {legacyGradingExpanded && (
+                  <div className="rounded-md border border-border bg-background/40 p-3">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium text-muted-foreground">FINAL GRADE:</span>
+                      <GradeBadge
+                        grade={displayFinalGrade(tl)}
+                        size="md"
+                        tooltip={
+                          <div className="space-y-1">
+                            <div className="font-semibold">Rule-based grade (legacy)</div>
+                            <div>A: crush A/B · POP ≥ 90% · opp ≠ F · no overhang · VIX &lt; 25</div>
+                            <div>B: POP ≥ 83% and (crush A/B or POP ≥ 95%), no overhang</div>
+                            <div>C: POP ≥ 75% and penalty &gt; −15</div>
+                            <div>B/C also require opp ≠ F — opp F alone yields &ldquo;Unrated,&rdquo; not B/C</div>
+                            <div className="pt-1 text-muted-foreground">
+                              Overrides: overhang → F · VIX &gt; 30 drops one level · personal wr &gt;80%+roc &gt;0.4% boosts (never on Unrated) · wr &lt;50% drops
+                            </div>
+                          </div>
+                        }
+                      />
+                    </div>
+                    <div className="mt-3 space-y-2 text-sm leading-relaxed text-muted-foreground">
+                      {tl.recommendationReason.split("\n\n").map((para, i) => {
+                        const sep = para.indexOf(": ");
+                        if (sep === -1) return <div key={i}>{para}</div>;
+                        return (
+                          <div key={i}>
+                            <span className="font-semibold text-foreground">
+                              {para.slice(0, sep + 1)}
+                            </span>{" "}
+                            <span>{para.slice(sep + 2)}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
                   </div>
-                );
-              })}
-            </div>
-          </div>
+                )}
+              </>
+            );
+          })()}
 
           <CustomStrikeAnalyzer
             suggestedStrike={tl.industryFactors.breakevenPrice + (r.stageFour?.premium ?? 0)}
             currentPrice={r.price}
             availableStrikes={r.stageFour?.availableStrikes}
-            crushGrade={tl.industryFactors.crushGrade}
             currentOpportunityGrade={tl.industryFactors.opportunityGrade}
-            hasOverhang={tl.regimeFactors.hasActiveOverhang}
-            vix={tl.regimeFactors.vix}
             penalty={tl.regimeFactors.gradePenalty}
             personalModifier={personalModifier}
-            currentFinalGrade={displayFinalGrade(tl)}
+            currentTradableGrade={displayTradableGrade(tl)}
           />
         </TabsContent>
 
@@ -3926,9 +4066,6 @@ function ExpandedDetail({
             r={r}
             strikeOverride={strikeOverride}
             onSelectStrike={onSelectStrike}
-            crushGrade={tl.industryFactors.crushGrade}
-            hasOverhang={tl.regimeFactors.hasActiveOverhang}
-            vix={tl.regimeFactors.vix}
             penalty={tl.regimeFactors.gradePenalty}
             personalModifier={personalModifier}
             refreshedChain={refreshedChain}
@@ -4047,9 +4184,6 @@ function OptionsChainTab({
   r,
   strikeOverride,
   onSelectStrike,
-  crushGrade,
-  hasOverhang,
-  vix,
   penalty,
   personalModifier,
   refreshedChain,
@@ -4060,9 +4194,6 @@ function OptionsChainTab({
   r: ScreenerResult;
   strikeOverride: StrikeOverride | null;
   onSelectStrike: (o: StrikeOverride) => void;
-  crushGrade: "A" | "B" | "C" | "F";
-  hasOverhang: boolean;
-  vix: number | null;
   penalty: number;
   personalModifier: "boost" | "drop" | null;
   // Lifted to the shared parent (ExpandedDetail) so AnalysisDumpTab reads
@@ -4101,9 +4232,9 @@ function OptionsChainTab({
   // opportunityGrade from THIS strike's yield rather than reusing the
   // original suggested strike's, capped by the SAME shared
   // lib/liquidity.ts read the server uses in runStageFour — not a
-  // second hand-kept-in-sync copy — then gradeFromRulesClient runs the
-  // same cascade calculateThreeLayerGrade uses server-side). Never
-  // written back to r.threeLayer.
+  // second hand-kept-in-sync copy — then the shared lib/tradable-
+  // grade.ts cascade runs, same as calculateThreeLayerGrade server-
+  // side). Never written back to r.threeLayer.
   const previewOpportunityGrade =
     strikeOverride !== null && selectedYieldPct !== null
       ? strikeOverride.bid <= 0
@@ -4113,14 +4244,11 @@ function OptionsChainTab({
             computeLiquidityRead(strikeOverride.oi, strikeOverride.volume, strikeOverride.bidAskSpreadPct).grade,
           )
       : null;
-  const previewGrade =
+  const previewGrade: TradableResult | null =
     strikeOverride !== null && selectedPop !== null && previewOpportunityGrade !== null
-      ? gradeFromRulesClient({
+      ? computeTradableGrade({
           pop: selectedPop,
-          crushGrade,
           opportunityGrade: previewOpportunityGrade,
-          hasOverhang,
-          vix,
           penalty,
           personalModifier,
         })
@@ -4939,6 +5067,18 @@ function AnalysisDumpTab({
             surpriseScore: d.surpriseScore,
           }
         : null,
+      // Risk Score inputs not already covered above — see
+      // lib/risk-score.ts. flagsFired comes from the paste itself
+      // (ResearchAnalysisPasteBack computes the score at save time,
+      // once flags are parsed), so only the non-flag inputs go here.
+      hasOverhang: tl?.regimeFactors.hasActiveOverhang ?? false,
+      priorLossOnTicker: tl
+        ? hasPriorLossOnTicker({
+            tickerWinRate: tl.personalFactors.tickerWinRate,
+            tickerTradeCount: tl.personalFactors.tickerTradeCount,
+            dataInsufficient: tl.personalFactors.dataInsufficient,
+          })
+        : false,
     };
   }, [r, tl, d]);
 
@@ -5078,27 +5218,21 @@ function CustomStrikeAnalyzer({
   suggestedStrike,
   currentPrice,
   availableStrikes,
-  crushGrade,
   currentOpportunityGrade,
-  hasOverhang,
-  vix,
   penalty,
   personalModifier,
-  currentFinalGrade,
+  currentTradableGrade,
 }: {
   suggestedStrike: number;
   currentPrice: number;
   availableStrikes: StageFourResult["availableStrikes"];
-  crushGrade: "A" | "B" | "C" | "F";
   // Original suggested strike's yield grade — display-only "before" in
-  // the Opportunity impact row below. Never fed into gradeFromRulesClient;
-  // that used to be the bug (see gradeFromYieldClient's comment).
+  // the Opportunity impact row below. Never fed into the tradable
+  // cascade; that used to be the bug (see gradeFromYieldClient's comment).
   currentOpportunityGrade: "A" | "B" | "C" | "F";
-  hasOverhang: boolean;
-  vix: number | null;
   penalty: number;
   personalModifier: "boost" | "drop" | null;
-  currentFinalGrade: string;
+  currentTradableGrade: string;
 }) {
   const [input, setInput] = useState("");
   const [result, setResult] = useState<CustomStrikeAnalysis | null>(null);
@@ -5151,12 +5285,9 @@ function CustomStrikeAnalyzer({
             computeLiquidityRead(nearest.oi, nearest.volume, nearestSpreadPct).grade,
           );
 
-    const { grade: finalGradeNew, unrated } = gradeFromRulesClient({
+    const { grade: finalGradeNew, unrated } = computeTradableGrade({
       pop,
-      crushGrade,
       opportunityGrade: opportunityGradeNew,
-      hasOverhang,
-      vix,
       penalty,
       personalModifier,
     });
@@ -5225,7 +5356,7 @@ function CustomStrikeAnalyzer({
           </div>
           <div className="mt-1 flex items-center gap-2">
             <span className="text-muted-foreground">Grade impact:</span>
-            <GradeBadge grade={currentFinalGrade} />
+            <GradeBadge grade={currentTradableGrade} />
             <span className="text-muted-foreground">→</span>
             <GradeBadge grade={result.unrated ? "Unrated" : result.finalGradeNew} />
           </div>

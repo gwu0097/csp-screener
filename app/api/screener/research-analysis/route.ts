@@ -61,7 +61,7 @@ export async function GET(req: NextRequest) {
     const sb = createServerClient();
     const res = await sb
       .from("research_analyses")
-      .select("symbol,earnings_date,checklist_version,updated_at")
+      .select("symbol,earnings_date,checklist_version,updated_at,flags_fired")
       .in("symbol", symbols);
     if (res.error) {
       return NextResponse.json({ error: res.error.message }, { status: 500 });
@@ -137,6 +137,12 @@ type Body = {
   vixAtAnalysis?: unknown;
   vixRegimeAtAnalysis?: unknown;
   crushSubscoresAtAnalysis?: unknown;
+  // Added for the Tradable Grade + Risk Score restructure — the
+  // client-computed lib/risk-score.ts result at save time, frozen
+  // first-write-wins like every other *_at_analysis field above.
+  riskScoreAtAnalysis?: unknown;
+  riskContributionsAtAnalysis?: unknown;
+  riskConfigVersionAtAnalysis?: unknown;
 };
 
 function asStringArray(v: unknown, field: string): { ok: true; value: string[] } | { ok: false; error: string } {
@@ -220,6 +226,15 @@ function asCrushSubscores(
     out[k] = val;
   }
   return { ok: true, value: out };
+}
+
+function asNullableJsonArray(
+  v: unknown,
+  field: string,
+): { ok: true; value: unknown[] | null } | { ok: false; error: string } {
+  if (v === undefined || v === null) return { ok: true, value: null };
+  if (!Array.isArray(v)) return { ok: false, error: `${field} must be an array or null` };
+  return { ok: true, value: v };
 }
 
 // First-write-wins: an existing non-null snapshot value survives a
@@ -499,6 +514,16 @@ export async function POST(req: NextRequest) {
   if (!crushSubscoresAtAnalysis.ok) {
     return NextResponse.json({ error: crushSubscoresAtAnalysis.error }, { status: 400 });
   }
+  const riskScoreAtAnalysis = asNullableInt(body.riskScoreAtAnalysis, "riskScoreAtAnalysis");
+  if (!riskScoreAtAnalysis.ok) return NextResponse.json({ error: riskScoreAtAnalysis.error }, { status: 400 });
+  const riskContributionsAtAnalysis = asNullableJsonArray(
+    body.riskContributionsAtAnalysis,
+    "riskContributionsAtAnalysis",
+  );
+  if (!riskContributionsAtAnalysis.ok) {
+    return NextResponse.json({ error: riskContributionsAtAnalysis.error }, { status: 400 });
+  }
+  const riskConfigVersionAtAnalysis = asNullableString(body.riskConfigVersionAtAnalysis);
 
   const recommendation = asNullableEnum(body.recommendation, "recommendation", ["take", "take_smaller", "pass"] as const);
   if (!recommendation.ok) return NextResponse.json({ error: recommendation.error }, { status: 400 });
@@ -538,7 +563,8 @@ export async function POST(req: NextRequest) {
       "reference_strike,spot_at_analysis,em_pct_at_analysis,numeric_grade,crush_grade,max_downside_ratio," +
         "implied_move_source_at_analysis,pop_at_analysis,delta_at_analysis,yield_at_analysis," +
         "premium_bid_at_analysis,premium_ask_at_analysis,spread_pct_at_analysis,oi_at_analysis," +
-        "volume_at_analysis,vix_at_analysis,vix_regime_at_analysis,crush_subscores_at_analysis,snapshot_saved_at",
+        "volume_at_analysis,vix_at_analysis,vix_regime_at_analysis,crush_subscores_at_analysis,snapshot_saved_at," +
+        "risk_score_at_analysis,risk_contributions_at_analysis,risk_config_version_at_analysis",
     )
     .eq("symbol", symbol)
     .eq("earnings_date", earningsDate)
@@ -584,6 +610,18 @@ export async function POST(req: NextRequest) {
     crush_subscores_at_analysis: freezeField(
       existing?.crush_subscores_at_analysis as Record<string, number> | null,
       crushSubscoresAtAnalysis.value,
+    ),
+    risk_score_at_analysis: freezeField(
+      existing?.risk_score_at_analysis as number | null,
+      riskScoreAtAnalysis.value,
+    ),
+    risk_contributions_at_analysis: freezeField(
+      existing?.risk_contributions_at_analysis as unknown[] | null,
+      riskContributionsAtAnalysis.value,
+    ),
+    risk_config_version_at_analysis: freezeField(
+      existing?.risk_config_version_at_analysis as string | null,
+      riskConfigVersionAtAnalysis,
     ),
   };
   // Stamped once, the moment ANY snapshot field first becomes non-null
