@@ -116,6 +116,9 @@ type Body = {
   // analyses are passes with no position — omitted/null is the common
   // case, not an error.
   positionId?: unknown;
+  // Added 2026-08-11 (v6 template) — the field the prediction log
+  // scores. Optional/nullable, same as the four fields above.
+  leftTailRisk?: unknown;
 };
 
 function asStringArray(v: unknown, field: string): { ok: true; value: string[] } | { ok: false; error: string } {
@@ -144,6 +147,14 @@ function asNullableEnum<T extends string>(
     return { ok: false, error: `${field} must be one of ${allowed.join(", ")}, or null` };
   }
   return { ok: true, value: v as T };
+}
+
+function asNullableBoolean(v: unknown, field: string): { ok: true; value: boolean | null } | { ok: false; error: string } {
+  if (v === undefined || v === null) return { ok: true, value: null };
+  if (typeof v !== "boolean") {
+    return { ok: false, error: `${field} must be a boolean or null` };
+  }
+  return { ok: true, value: v };
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -396,13 +407,15 @@ export async function POST(req: NextRequest) {
   const downCatalystPlausibility = asNullableEnum(
     body.downCatalystPlausibility,
     "downCatalystPlausibility",
-    ["low", "moderate", "high"] as const,
+    ["low", "moderate", "high", "n/a"] as const,
   );
   if (!downCatalystPlausibility.ok) {
     return NextResponse.json({ error: downCatalystPlausibility.error }, { status: 400 });
   }
   const positionId = asNullableUuid(body.positionId, "positionId");
   if (!positionId.ok) return NextResponse.json({ error: positionId.error }, { status: 400 });
+  const leftTailRisk = asNullableBoolean(body.leftTailRisk, "leftTailRisk");
+  if (!leftTailRisk.ok) return NextResponse.json({ error: leftTailRisk.error }, { status: 400 });
 
   // v4 saves derive candidate_flags from the observation term list
   // server-side rather than trusting the client's flat array, so the
@@ -440,6 +453,7 @@ export async function POST(req: NextRequest) {
         down_catalyst: asNullableString(body.downCatalyst),
         down_catalyst_plausibility: downCatalystPlausibility.value,
         position_id: positionId.value,
+        left_tail_risk: leftTailRisk.value,
         updated_at: new Date().toISOString(),
       },
       { onConflict: "symbol,earnings_date" },

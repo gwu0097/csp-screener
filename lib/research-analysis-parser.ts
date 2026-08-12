@@ -71,7 +71,7 @@ export function isKnownFlag(name: string): boolean {
 export type ParseStatus = "parsed" | "prose_only" | "partial";
 
 export type Recommendation = "take" | "take_smaller" | "pass";
-export type DownCatalystPlausibility = "low" | "moderate" | "high";
+export type DownCatalystPlausibility = "low" | "moderate" | "high" | "n/a";
 
 export type ParsedResearchAnalysis = {
   status: ParseStatus;
@@ -90,6 +90,10 @@ export type ParsedResearchAnalysis = {
   recommendedStrike: number | null;
   downCatalyst: string | null;
   downCatalystPlausibility: DownCatalystPlausibility | null;
+  // Added 2026-08-11 (v6): the one field the prediction log actually
+  // scores — Part 2's yes/no verdict. Same absence treatment as the
+  // fields above; absent on any v5-or-earlier paste, never an error.
+  leftTailRisk: boolean | null;
   // Whether a CANDIDATE_OBSERVATIONS: header was found at all — distinct
   // from candidateObservations.length === 0 (a v4 paste can legitimately
   // list zero observations). Callers use this, not the list length, to
@@ -249,6 +253,7 @@ export function parseResearchAnalysisPaste(raw: string): ParsedResearchAnalysis 
       recommendedStrike: null,
       downCatalyst: null,
       downCatalystPlausibility: null,
+      leftTailRisk: null,
       prose: raw.trim(),
       proseCharCount: raw.trim().length,
       rawPaste,
@@ -323,12 +328,27 @@ export function parseResearchAnalysisPaste(raw: string): ParsedResearchAnalysis 
   let downCatalystPlausibility: DownCatalystPlausibility | null = null;
   if (downCatalystPlausibilityRaw !== null) {
     const normalized = downCatalystPlausibilityRaw.trim().toLowerCase();
-    if (normalized === "low" || normalized === "moderate" || normalized === "high") {
+    if (normalized === "low" || normalized === "moderate" || normalized === "high" || normalized === "n/a") {
       downCatalystPlausibility = normalized;
     } else {
       notes.push(
-        `DOWN_CATALYST_PLAUSIBILITY "${downCatalystPlausibilityRaw}" is not one of low/moderate/high — left null.`,
+        `DOWN_CATALYST_PLAUSIBILITY "${downCatalystPlausibilityRaw}" is not one of low/moderate/high/n/a — left null.`,
       );
+    }
+  }
+
+  // Added 2026-08-11 (v6) — the field the prediction log scores. Same
+  // absent-vs-malformed treatment as RECOMMENDATION above.
+  const leftTailRiskRaw = extractField(block, "LEFT_TAIL_RISK");
+  let leftTailRisk: boolean | null = null;
+  if (leftTailRiskRaw !== null) {
+    const normalized = leftTailRiskRaw.trim().toLowerCase();
+    if (normalized === "yes") {
+      leftTailRisk = true;
+    } else if (normalized === "no") {
+      leftTailRisk = false;
+    } else {
+      notes.push(`LEFT_TAIL_RISK "${leftTailRiskRaw}" is not yes/no — left null.`);
     }
   }
 
@@ -361,6 +381,7 @@ export function parseResearchAnalysisPaste(raw: string): ParsedResearchAnalysis 
     recommendedStrike,
     downCatalyst,
     downCatalystPlausibility,
+    leftTailRisk,
     prose,
     proseCharCount: prose.length,
     rawPaste,

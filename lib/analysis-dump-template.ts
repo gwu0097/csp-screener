@@ -22,29 +22,62 @@
 // DOWN_CATALYST_PLAUSIBILITY to the metadata block (audit found PART 2's
 // and PART 6's answers were prose-only and couldn't be scored — see
 // research_analyses migration 2026-08-11-add-research-analyses-scoring-
-// fields.sql). Not a version bump: Part 1's checklist vocabulary is
-// unchanged, and these fields follow the same optional-field precedent
-// as FLAGS_NA/CANDIDATE_OBSERVATIONS — a pre-2026-08-11 paste simply
-// won't have them, which the parser treats as expected absence, not a
-// defect.
-export const ANALYSIS_TEMPLATE_VERSION = "v5";
+// fields.sql).
+//
+// 2026-08-11 (v6): restructured around one binary question instead of an
+// open-ended catch-all. Five names analyzed the same day all got a
+// cautious v5 verdict ("take smaller" or "pass") and all would have
+// paid — the analysis was re-deriving what the chain already prices
+// (cushion, POP, IV) and then hedging on that basis, which isn't a real
+// signal at the deltas this strategy trades. v6's Part 2 asks a single
+// yes/no question — is there a specific, nameable, non-price reason
+// this event's left tail is fatter than the chain implies — and
+// LEFT_TAIL_RISK stores the answer (research_analyses migration
+// 2026-08-11-add-research-analyses-left-tail-risk.sql) so it can be
+// checked against outcomes later. Part 1's checklist items and
+// definitions are unchanged, only reframed as evidence-gathering, not
+// verdict; Parts 3-6 are shortened on the same theory — a clean setup
+// should read short, and length in Part 3's cushion arithmetic instead
+// of Part 2's actual risk case was the v5 failure mode.
+export const ANALYSIS_TEMPLATE_VERSION = "v6";
 
 export const ANALYSIS_TEMPLATE = `=== RESEARCH ANALYSIS REQUEST ===
 
-You are reviewing a cash-secured put setup on the ticker above. The numeric
-grade in this dump is data-derived, and that data is largely already priced
-into EM and IV. Your job is NOT to re-derive it. Your job is to find the
-setup risks that make the LEFT TAIL fatter than the implied distribution
-suggests — the things that would cause the market's own pricing to be wrong.
+You are reviewing a cash-secured put setup on the ticker above. At the
+deltas this strategy trades, the chain already prices a high base-rate win
+(call it ~95%). Your job is NOT to re-derive what the chain already knows.
+Your job is to find whether there is a specific, nameable reason this
+event's left tail is fatter than the chain implies — for a reason that is
+NOT in the chain.
 
 The reference strike for this analysis is 2x EM below spot, regardless of
 what strike I may actually trade.
 
-PART 1 — CHECKLIST (v5)
-Check each item. Report FIRED, CLEAR, N/A, or UNKNOWN with one line of
-evidence. N/A means the item does not apply to this company or setup.
-UNKNOWN means it applies but could not be determined. Both are valid and
-useful answers — do not guess.
+ALREADY PRICED — reference in a clause, never re-derive: cushion multiples,
+% below spot, x EM, POP, delta, EV, historical move ratios, max downside
+ratio, IV level, term structure, IV vs realized, liquidity, spreads, OI.
+
+NOT IN THE CHAIN — this is the entire value of the analysis: consensus vs
+management's own guide, growth deceleration across quarters, guidance
+beat/miss record, a peer already punished this cycle, event sequencing
+(another company reporting inside the hold window), a named short thesis on
+a specific disclosure, audit/filing/restatement events landing with the
+report, a pre-announcement that moved information into guidance, macro
+landing the same session, capital raise risk tied to the print, position
+history on this exact ticker at this event.
+
+LENGTH — no target length. A clean setup should produce a short analysis. A
+dangerous setup earns more space in Part 2 and nowhere else. If this
+analysis is long because Part 3 ran to five paragraphs of cushion
+arithmetic, that is the failure mode this version exists to fix.
+
+PART 1 — CHECKLIST (v6)
+This is evidence gathering, not the verdict. A fired flag is a prompt to
+look for a real risk, not a risk by itself. Report FIRED, CLEAR, N/A, or
+UNKNOWN with one line of evidence each, one or two sentences. N/A means the
+item does not apply to this company or setup. UNKNOWN means it applies but
+could not be determined. Both are valid and useful answers — do not guess.
+No editorializing inside the checklist — interpretation belongs in Part 2.
 
   consensus_above_guide
     Compare analyst consensus to management's OWN guided range, on
@@ -84,49 +117,55 @@ useful answers — do not guess.
     downside ones are the whole risk. Report the max DOWNSIDE ratio
     specifically, not the mean.
 
-PART 2 — CATCH-ALL (most important section)
-The checklist captures what we already learned. This section is where the
-next lesson comes from. Answer freely:
+PART 2 — THE VERDICT (most important section)
+One question: is there a specific, nameable, non-price reason this event's
+left tail is fatter than the chain implies?
 
-  - What is genuinely dangerous about THIS setup that the checklist does not
-    ask about?
-  - What single event or disclosure on this call would cause the largest
-    down move, and how plausible is it? State the catalyst in one line and
-    rate its plausibility low / moderate / high — both go in the metadata
-    block below (DOWN_CATALYST, DOWN_CATALYST_PLAUSIBILITY) so this answer
-    can be checked against what actually happens.
-  - What would have to be true for the reference strike to be breached, and
-    is there a credible path to it?
-  - What is the market apparently NOT worried about that it should be?
+If NO: say so in two or three sentences, name what could have made it
+dangerous and did not, state the strongest counterargument, stop. A short
+Part 2 is expected. Do not manufacture concern to fill space. Set
+LEFT_TAIL_RISK: no below, and DOWN_CATALYST: none,
+DOWN_CATALYST_PLAUSIBILITY: n/a.
+
+If YES, for each risk (rarely more than one): name it in one sentence
+specific enough to be wrong; explain why the chain does not price it (if
+the answer is "it does, in the IV," it is not a Part 2 risk); state what
+would confirm or refute it; give plausibility low / moderate / high with
+reasoning. Set LEFT_TAIL_RISK: yes below, and put the single most dangerous
+risk in DOWN_CATALYST with its DOWN_CATALYST_PLAUSIBILITY.
+
+The bar for YES is high. Do not list risks true of every earnings event —
+"guidance could disappoint" is not a risk, it is the definition of an
+earnings event.
 
 If you propose a risk that isn't in the checklist, name it explicitly as a
 candidate observation — give it a short snake_case term and put it in
 CANDIDATE_OBSERVATIONS below with a one-line definition. If a term you've
 used before in a prior analysis applies again, reuse the exact same term
-name (no definition needed on reuse — see the response format).
+name (no definition needed on reuse — see the response format). Do not coin
+an observation for a condition that is already priced in the chain — a term
+describing a cushion multiple or IV level is a restatement, not an
+observation.
 
-PART 3 — CUSHION MATH
-State plainly: what multiple of this ticker's worst historical DOWN move is
-required to breach the reference strike? Show the arithmetic.
+PART 3 — CUSHION
+One or two sentences: the strike, its distance in x EM, and the multiple of
+this ticker's worst historical down move required to breach it. Note if the
+reference strike is untradeable and name one that is. No comparisons to
+prior tickers, no multiple framings of the same number unless they
+materially disagree.
 
 PART 4 — HONEST UNCERTAINTY
-What could you not determine? What are you least confident about? Where
-might you be wrong?
+Only what would change the verdict.
 
-PART 5 — DATA GAPS TO FIX
-List specifically what would need to be backfilled or corrected in the app
-for this analysis to be better next quarter. Be concrete: which quarters,
-which fields, which source. If the data is complete, say so.
+PART 5 — DATA GAPS
+Only gaps affecting this analysis. Known structural defects mentioned once,
+not re-explained every time.
 
 PART 6 — RECOMMENDATION
-Given everything above, state plainly:
-  - Would you take this trade at the reference strike? Take / take smaller /
-    pass — and why, in one or two sentences.
-  - If the reference strike is wrong, name the strike that would work and
-    what it costs in premium.
-  - What single thing would change your answer?
-This is advisory. It does not override the numeric grade and it does not
-veto anything.
+Three or four sentences: the verdict, the strike it applies to, the single
+reason, and what would change the answer. Do not restate Parts 1-5. This is
+advisory. It does not override the numeric grade and it does not veto
+anything.
 
 Your recommendation must reduce to exactly one take / take_smaller / pass
 call and exactly one strike it's about — even if your prose above is
@@ -144,14 +183,16 @@ EARNINGS_DATE: <YYYY-MM-DD>
 FLAGS_FIRED: <comma-separated from the vocabulary above, or \`none\`>
 FLAGS_NA: <comma-separated, or \`none\`>
 FLAGS_UNKNOWN: <comma-separated, or \`none\`>
-CHECKLIST_VERSION: v5
+CHECKLIST_VERSION: v6
+LEFT_TAIL_RISK: <yes | no — Part 2's verdict>
+DOWN_CATALYST: <one line — the risk from Part 2, or \`none\` if
+  LEFT_TAIL_RISK is no>
+DOWN_CATALYST_PLAUSIBILITY: <low | moderate | high, or \`n/a\` if
+  LEFT_TAIL_RISK is no>
 RECOMMENDATION: <take | take_smaller | pass — your PART 6 answer, resolved
   to exactly one value>
 RECOMMENDED_STRIKE: <the strike that recommendation is actually about —
   may differ from the reference strike>
-DOWN_CATALYST: <one line — the single disclosure from PART 2 that would
-  cause the largest down move>
-DOWN_CATALYST_PLAUSIBILITY: <low | moderate | high>
 === END METADATA ===
 
 DICTIONARY USE
@@ -173,6 +214,10 @@ mispricing. On a ticker pinned to a pending acquisition, the implied move is
 also low relative to history — but correctly so, because the price is
 anchored to a deal rather than to earnings. Same observable condition,
 opposite meaning. That warranted \`pending_acquisition\`, not a reuse.
+
+Do not coin an observation for a condition already priced in the chain — see
+NOT IN THE CHAIN above. A term describing a cushion multiple or IV level is
+a restatement of what the chain already prices, not an observation.
 
 When you coin a new term, state explicitly what distinguishes it from the
 nearest existing term.
