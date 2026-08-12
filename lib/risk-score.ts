@@ -114,20 +114,16 @@ export type RiskScoreResult = {
   configVersion: string;
 };
 
-// tickerTradeCount >= 1 with a winRate below 100% means at least one
-// tracked campaign on this ticker lost money — the simplest available
-// reading of "prior documented loss on this ticker" from data already
-// on hand (lib/screener.ts's PersonalHistory / the client's mirrored
-// personalFactors). This does not confirm the loss happened AT an
-// earnings event specifically (PersonalHistory isn't event-scoped) —
-// noted as a known looseness, not a precise per-event match.
-export function hasPriorLossOnTicker(history: {
-  tickerWinRate: number | null;
-  tickerTradeCount: number;
-  dataInsufficient: boolean;
-}): boolean {
-  if (history.dataInsufficient || history.tickerWinRate === null) return false;
-  return history.tickerTradeCount >= 1 && history.tickerWinRate < 100;
+// Event-scoped: true when a CSP campaign on THIS symbol, tied to an
+// earnings event, realized a net loss — computed upstream by
+// lib/campaigns.ts's hasPriorCspEarningsLoss (campaigns rows only ever
+// exist for a chain that resolved to an earnings_history match, so
+// querying campaigns.symbol alone already means "at an earnings
+// event"). Previously read tickerTradeCount>=1 && tickerWinRate<100 —
+// ANY terminal position on the ticker, including swing trades and
+// non-earnings CSPs; that was the loose reading, not this one.
+export function hasPriorLossOnTicker(history: { priorCspEarningsLoss: boolean }): boolean {
+  return history.priorCspEarningsLoss;
 }
 
 export function computeRiskScore(params: {

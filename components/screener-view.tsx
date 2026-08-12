@@ -238,9 +238,7 @@ function computeLiveRiskScore(
     hasOverhang: tl.regimeFactors.hasActiveOverhang,
     vix: tl.regimeFactors.vix,
     priorLossOnTicker: hasPriorLossOnTicker({
-      tickerWinRate: tl.personalFactors.tickerWinRate,
-      tickerTradeCount: tl.personalFactors.tickerTradeCount,
-      dataInsufficient: tl.personalFactors.dataInsufficient,
+      priorCspEarningsLoss: tl.personalFactors.priorCspEarningsLoss,
     }),
   });
 }
@@ -3897,9 +3895,7 @@ function ExpandedDetail({
               hasOverhang: tl.regimeFactors.hasActiveOverhang,
               vix: tl.regimeFactors.vix,
               priorLossOnTicker: hasPriorLossOnTicker({
-                tickerWinRate: tl.personalFactors.tickerWinRate,
-                tickerTradeCount: tl.personalFactors.tickerTradeCount,
-                dataInsufficient: tl.personalFactors.dataInsufficient,
+                priorCspEarningsLoss: tl.personalFactors.priorCspEarningsLoss,
               }),
             });
             const noBid = (r.stageFour?.bid ?? 0) <= 0;
@@ -5110,11 +5106,7 @@ function AnalysisDumpTab({
       // once flags are parsed), so only the non-flag inputs go here.
       hasOverhang: tl?.regimeFactors.hasActiveOverhang ?? false,
       priorLossOnTicker: tl
-        ? hasPriorLossOnTicker({
-            tickerWinRate: tl.personalFactors.tickerWinRate,
-            tickerTradeCount: tl.personalFactors.tickerTradeCount,
-            dataInsufficient: tl.personalFactors.dataInsufficient,
-          })
+        ? hasPriorLossOnTicker({ priorCspEarningsLoss: tl.personalFactors.priorCspEarningsLoss })
         : false,
     };
   }, [r, tl, d]);

@@ -20,7 +20,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import type { ObservationDictionaryEntry, ObservationUsage } from "@/lib/observation-dictionary";
+import type { ObservationDictionaryEntry, ObservationUsage, ChecklistItemView } from "@/lib/observation-dictionary";
+import { RISK_BASE_RATE } from "@/lib/risk-score";
 
 type SortKey = "use_count" | "last_used_at";
 
@@ -117,9 +118,107 @@ function KindSection({
   );
 }
 
+// Checklist Items — the fixed 7-item Part 1 checklist, a different
+// vocabulary from the freeform CANDIDATE_OBSERVATIONS terms above (no
+// observation_dictionary row, no observation_usages; fired counts come
+// from research_analyses.flags_fired instead — see
+// lib/observation-dictionary.ts's buildChecklistItemsView). Measured
+// effect (n fired, effect, clears/doesn't-clear the base rate) mirrors
+// the Risk panel's own numbers exactly, including the "measured, no
+// effect" framing for downside_fat_tail/live_narrative_risk — this page
+// and that panel must never quote different numbers for the same flag.
+function ChecklistItemsSection({
+  items,
+  expanded,
+  onToggle,
+}: {
+  items: ChecklistItemView[];
+  expanded: Set<string>;
+  onToggle: (term: string) => void;
+}) {
+  return (
+    <div className="space-y-2">
+      <h2 className="text-base font-semibold">
+        Checklist Items <span className="text-sm font-normal text-muted-foreground">({items.length})</span>
+      </h2>
+      <div className="overflow-x-auto rounded border border-border">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead className="w-6" />
+              <TableHead>Term</TableHead>
+              <TableHead>Definition</TableHead>
+              <TableHead className="text-right">Fired</TableHead>
+              <TableHead>Measured</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {items.map((it) => {
+              const usages = it.usages
+                .slice()
+                .sort((a, b) => b.earnings_date.localeCompare(a.earnings_date));
+              const isOpen = expanded.has(it.term);
+              return (
+                <Fragment key={it.term}>
+                  <TableRow className="cursor-pointer" onClick={() => onToggle(it.term)}>
+                    <TableCell>
+                      {isOpen ? (
+                        <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
+                      ) : (
+                        <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />
+                      )}
+                    </TableCell>
+                    <TableCell className="font-mono font-medium">{it.term}</TableCell>
+                    <TableCell className="max-w-[420px] text-muted-foreground">{it.definition}</TableCell>
+                    <TableCell className="text-right">{it.firedCount}</TableCell>
+                    <TableCell>
+                      {it.measured ? (
+                        <span className="text-emerald-400">
+                          n={it.measured.n}, effect {it.measured.effect.toFixed(2)} — clears{" "}
+                          {RISK_BASE_RATE.toFixed(3)}
+                        </span>
+                      ) : it.measuredNoEffect ? (
+                        <span className="text-amber-400">
+                          measured, no effect — n={it.measuredNoEffect.n}, effect{" "}
+                          {it.measuredNoEffect.effect.toFixed(2)} (below {RISK_BASE_RATE.toFixed(3)})
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground">unmeasured</span>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                  {isOpen && (
+                    <TableRow>
+                      <TableCell />
+                      <TableCell colSpan={4} className="bg-muted/10 text-xs">
+                        {usages.length === 0 ? (
+                          <span className="text-muted-foreground">No usages recorded.</span>
+                        ) : (
+                          <div className="flex flex-wrap gap-x-3 gap-y-1 py-1">
+                            {usages.map((u, i) => (
+                              <span key={`${u.symbol}-${u.earnings_date}-${i}`} className="font-mono">
+                                {u.symbol} <span className="text-muted-foreground">({u.earnings_date})</span>
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  )}
+                </Fragment>
+              );
+            })}
+          </TableBody>
+        </Table>
+      </div>
+    </div>
+  );
+}
+
 export default function ObservationDictionaryPage() {
   const [entries, setEntries] = useState<ObservationDictionaryEntry[] | null>(null);
   const [usages, setUsages] = useState<ObservationUsage[]>([]);
+  const [checklistItems, setChecklistItems] = useState<ChecklistItemView[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("use_count");
@@ -133,12 +232,14 @@ export default function ObservationDictionaryPage() {
         const json = (await res.json()) as {
           entries?: ObservationDictionaryEntry[];
           usages?: ObservationUsage[];
+          checklistItems?: ChecklistItemView[];
           error?: string;
         };
         if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
         if (!cancelled) {
           setEntries(json.entries ?? []);
           setUsages(json.usages ?? []);
+          setChecklistItems(json.checklistItems ?? []);
         }
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : "Load failed");
@@ -176,6 +277,17 @@ export default function ObservationDictionaryPage() {
 
   const setupObservations = filteredSorted.filter((e) => e.kind === "setup_observation");
   const appDefects = filteredSorted.filter((e) => e.kind === "app_defect");
+
+  const filteredChecklistItems = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    const filtered =
+      q === ""
+        ? checklistItems
+        : checklistItems.filter(
+            (it) => it.term.toLowerCase().includes(q) || it.definition.toLowerCase().includes(q),
+          );
+    return filtered.slice().sort((a, b) => b.firedCount - a.firedCount);
+  }, [checklistItems, search]);
 
   function toggle(term: string) {
     setExpanded((prev) => {
@@ -242,28 +354,31 @@ export default function ObservationDictionaryPage() {
             </div>
           </div>
 
-          {entries.length === 0 ? (
-            <div className="rounded border border-border bg-background/40 p-6 text-base text-muted-foreground">
-              No observations recorded yet.
-            </div>
-          ) : (
-            <div className="space-y-6">
-              <KindSection
-                title="Setup Observations"
-                entries={setupObservations}
-                usagesByTerm={usagesByTerm}
-                expanded={expanded}
-                onToggle={toggle}
-              />
-              <KindSection
-                title="App Defects"
-                entries={appDefects}
-                usagesByTerm={usagesByTerm}
-                expanded={expanded}
-                onToggle={toggle}
-              />
-            </div>
-          )}
+          <div className="space-y-6">
+            <ChecklistItemsSection items={filteredChecklistItems} expanded={expanded} onToggle={toggle} />
+            {entries.length === 0 ? (
+              <div className="rounded border border-border bg-background/40 p-6 text-base text-muted-foreground">
+                No observations recorded yet.
+              </div>
+            ) : (
+              <>
+                <KindSection
+                  title="Setup Observations"
+                  entries={setupObservations}
+                  usagesByTerm={usagesByTerm}
+                  expanded={expanded}
+                  onToggle={toggle}
+                />
+                <KindSection
+                  title="App Defects"
+                  entries={appDefects}
+                  usagesByTerm={usagesByTerm}
+                  expanded={expanded}
+                  onToggle={toggle}
+                />
+              </>
+            )}
+          </div>
         </>
       )}
     </div>

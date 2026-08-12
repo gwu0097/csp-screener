@@ -158,6 +158,7 @@ export async function POST(req: NextRequest) {
         winRate: null,
         avgRoc: null,
         dataInsufficient: true,
+        priorCspEarningsLoss: false,
       }));
       const news =
         newsByKey[keyOf(base.symbol, base.earningsDate)] ?? NEUTRAL_NEWS;

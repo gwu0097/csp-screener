@@ -234,3 +234,49 @@ no definition — a definition on a term that already has one will be read
 as a proposed redefinition, not a restatement.
 
 Do not output a letter grade.`;
+
+// The 7 checklist items (Part 1) with their template definitions,
+// parsed out of ANALYSIS_TEMPLATE itself rather than duplicated by
+// hand — one source of truth, so a future template edit can't silently
+// drift the dictionary page's "Checklist Items" section out of sync
+// with what the template actually asks for. Parses everything between
+// "PART 1 — CHECKLIST" and "PART 2 —": each 2-space-indented bare term
+// line starts an item, the following 4-space-indented lines (until the
+// next term or the section boundary) are its definition, joined and
+// whitespace-collapsed to one line for display.
+export type ChecklistItemDefinition = { term: string; definition: string };
+
+function parseChecklistItemDefinitions(template: string): ChecklistItemDefinition[] {
+  const start = template.indexOf("PART 1 — CHECKLIST");
+  const end = template.indexOf("PART 2 —");
+  if (start === -1 || end === -1 || end <= start) return [];
+  const section = template.slice(start, end);
+  const items: ChecklistItemDefinition[] = [];
+  const lines = section.split("\n");
+  let current: { term: string; lines: string[] } | null = null;
+  const termLineRe = /^  ([a-z][a-z0-9_]*)$/;
+  const defLineRe = /^    (.*)$/;
+  for (const line of lines) {
+    const termMatch = line.match(termLineRe);
+    if (termMatch) {
+      if (current) items.push({ term: current.term, definition: current.lines.join(" ").replace(/\s+/g, " ").trim() });
+      current = { term: termMatch[1], lines: [] };
+      continue;
+    }
+    if (current) {
+      const defMatch = line.match(defLineRe);
+      if (defMatch) {
+        current.lines.push(defMatch[1]);
+      } else if (line.trim() === "" && current.lines.length > 0) {
+        // Blank line ends the current item's definition (next line is
+        // either another term or prose outside the indented block).
+        items.push({ term: current.term, definition: current.lines.join(" ").replace(/\s+/g, " ").trim() });
+        current = null;
+      }
+    }
+  }
+  if (current) items.push({ term: current.term, definition: current.lines.join(" ").replace(/\s+/g, " ").trim() });
+  return items;
+}
+
+export const CHECKLIST_ITEM_DEFINITIONS: ChecklistItemDefinition[] = parseChecklistItemDefinitions(ANALYSIS_TEMPLATE);

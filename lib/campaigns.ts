@@ -576,3 +576,47 @@ export async function getCampaignReport(
     positionCount: positions.length,
   };
 }
+
+// Risk Score's "prior documented loss on this ticker" contribution
+// (lib/risk-score.ts) — event-scoped, replacing the earlier
+// tickerTradeCount/tickerWinRate read (any terminal position on the
+// symbol, including swing trades and non-earnings CSPs). campaigns rows
+// only ever exist for a chain that resolved to an earnings_history
+// match (see resolveEarningsForChain / buildAndPersistCampaigns — an
+// unresolved chain never gets a campaign_id), so `campaigns.symbol = X`
+// alone already means "on an earnings event for that symbol"; this
+// only needs to additionally restrict to CSP legs (short puts) and sum
+// realized_pnl per campaign to find one that nets negative.
+export async function hasPriorCspEarningsLoss(userId: string, symbol: string): Promise<boolean> {
+  const sb = createServerClient();
+  const campRes = await sb
+    .from("campaigns")
+    .select("id")
+    .eq("user_id", userId)
+    .eq("symbol", symbol.toUpperCase());
+  const campaignIds = ((campRes.data ?? []) as Array<{ id: string }>).map((c) => c.id);
+  if (campaignIds.length === 0) return false;
+
+  const posRes = await sb
+    .from("positions")
+    .select("campaign_id,realized_pnl,option_type,direction")
+    .eq("user_id", userId)
+    .in("campaign_id", campaignIds)
+    .eq("option_type", "put");
+  const positions = (posRes.data ?? []) as Array<{
+    campaign_id: string;
+    realized_pnl: number | null;
+    option_type: "put" | "call" | null;
+    direction: "long" | "short" | null;
+  }>;
+
+  const pnlByCampaign = new Map<string, number>();
+  for (const p of positions) {
+    // Missing direction = pre-migration row = implicitly short (every
+    // pre-03559d3 row was a CSP) — same convention app/api/positions/
+    // open/route.ts already applies.
+    if ((p.direction ?? "short") !== "short") continue;
+    pnlByCampaign.set(p.campaign_id, (pnlByCampaign.get(p.campaign_id) ?? 0) + Number(p.realized_pnl ?? 0));
+  }
+  return Array.from(pnlByCampaign.values()).some((pnl) => pnl < 0);
+}

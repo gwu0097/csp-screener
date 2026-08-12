@@ -4,6 +4,19 @@
 // research-analysis POST route (authoritative validation, on save) so the
 // two never drift — the server re-runs this against its own dictionary
 // read rather than trusting the client's classification.
+//
+// The dictionary page's third section (Checklist Items) is a DIFFERENT
+// vocabulary — the fixed 7-item Part 1 checklist (lib/analysis-dump-
+// template.ts), not a CANDIDATE_OBSERVATIONS term. It has no
+// observation_dictionary row and no observation_usages — those tables
+// only ever held freeform-coined terms — so buildChecklistItemsView
+// below is a separate, read-only view built fresh from
+// research_analyses.flags_fired each request, not merged into `entries`
+// (that field feeds classifyObservations too; a checklist term
+// appearing there would be misclassified as an existing freeform term).
+
+import { CHECKLIST_ITEM_DEFINITIONS, type ChecklistItemDefinition } from "@/lib/analysis-dump-template";
+import { canonicalizeFlags, MEASURED_FLAGS } from "@/lib/risk-score";
 
 export type ObservationKind = "setup_observation" | "app_defect";
 
@@ -180,4 +193,63 @@ export function buildDictionaryInjectionSection(
   }
 
   return { lines, includedCount: included.length, totalCount: entries.length };
+}
+
+// ---- Checklist Items (dictionary page's third section) ----
+
+export type ChecklistItemUsage = { symbol: string; earnings_date: string };
+
+export type ChecklistItemView = {
+  term: string;
+  definition: string;
+  firedCount: number;
+  // Present only for the 4 flags that clear the 0.431 base rate after
+  // leave-one-out (lib/risk-score.ts's MEASURED_FLAGS) — n/effect/
+  // clearsBaseRate mirror exactly what the Risk panel shows, so this
+  // page and that panel can never quote different numbers for the same
+  // flag. clearsBaseRate is always true when non-null since only
+  // clearing flags carry points; non-clearing flags (downside_fat_tail,
+  // live_narrative_risk) get measuredNoEffect instead, matching how
+  // they render in the Risk panel's "measured, no effect" section.
+  measured: { n: number; effect: number } | null;
+  measuredNoEffect: { n: number; effect: number } | null;
+  usages: ChecklistItemUsage[];
+};
+
+// Pure — no I/O. `analyses` is every research_analyses row's
+// (symbol, earnings_date, flags_fired) — fired counts come from this,
+// NOT observation_usages (that table only tracks freeform terms).
+// flags_fired strings are canonicalized (lib/risk-score.ts's
+// canonicalizeFlags, itself mirroring the flag_vocabulary_mapping
+// table) before counting, so guidance_streak_extrapolated (the v1/v2
+// name) and guidance_beat_streak land on the same entry.
+export function buildChecklistItemsView(
+  analyses: Array<{ symbol: string; earnings_date: string; flags_fired: string[] }>,
+): ChecklistItemView[] {
+  const measuredByTerm = new Map(MEASURED_FLAGS.map((f) => [f.key, f]));
+  const usagesByTerm = new Map<string, ChecklistItemUsage[]>();
+  const firedCountByTerm = new Map<string, number>();
+
+  for (const a of analyses) {
+    const canonical = canonicalizeFlags(a.flags_fired);
+    for (const term of Array.from(canonical)) {
+      firedCountByTerm.set(term, (firedCountByTerm.get(term) ?? 0) + 1);
+      const list = usagesByTerm.get(term);
+      const usage = { symbol: a.symbol, earnings_date: a.earnings_date };
+      if (list) list.push(usage);
+      else usagesByTerm.set(term, [usage]);
+    }
+  }
+
+  return CHECKLIST_ITEM_DEFINITIONS.map((d: ChecklistItemDefinition) => {
+    const m = measuredByTerm.get(d.term) ?? null;
+    return {
+      term: d.term,
+      definition: d.definition,
+      firedCount: firedCountByTerm.get(d.term) ?? 0,
+      measured: m && m.clearsBaseRate ? { n: m.n, effect: m.effect } : null,
+      measuredNoEffect: m && !m.clearsBaseRate ? { n: m.n, effect: m.effect } : null,
+      usages: usagesByTerm.get(d.term) ?? [],
+    };
+  });
 }

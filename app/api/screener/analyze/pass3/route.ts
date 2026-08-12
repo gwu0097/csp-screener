@@ -215,6 +215,7 @@ export async function POST(req: NextRequest) {
           winRate: null,
           avgRoc: null,
           dataInsufficient: true,
+          priorCspEarningsLoss: false,
         })),
       ]);
       const threeLayer = calculateThreeLayerGrade(

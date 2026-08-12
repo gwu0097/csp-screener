@@ -125,6 +125,7 @@ export async function POST(req: NextRequest) {
       winRate: null,
       avgRoc: null,
       dataInsufficient: true,
+      priorCspEarningsLoss: false,
     })),
   ]);
   // Saved research_analyses flags for this candidate — feeds

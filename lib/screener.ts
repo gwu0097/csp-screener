@@ -39,6 +39,7 @@ import { computeLiquidityRead, capGradeByLiquidity } from "@/lib/liquidity";
 import { computeTradableGrade, tradableRuleText } from "@/lib/tradable-grade";
 import { computeLiquidityAwareSuggestion, type LiquidityStrikeSuggestion } from "@/lib/liquidity-strike";
 import { computeRiskScore, canonicalizeFlags, hasPriorLossOnTicker, type RiskScoreResult } from "@/lib/risk-score";
+import { hasPriorCspEarningsLoss } from "@/lib/campaigns";
 
 // ---------- Hard-kill thresholds ----------
 // The price floor, market-cap floor, and Stage 2 tier gate live in
@@ -432,6 +433,9 @@ export type ThreeLayerGrade = {
       dropWinRate: number | null;
       recoveryCount: number;
     } | null;
+    // Risk Score's event-scoped prior-loss input — see PersonalHistory.
+    // priorCspEarningsLoss / lib/campaigns.ts's hasPriorCspEarningsLoss.
+    priorCspEarningsLoss: boolean;
   };
   regimeGrade: Grade;
   regimeScore: number;
@@ -588,6 +592,15 @@ export type PersonalHistory = {
     dropWinRate: number | null;
     recoveryCount: number;
   } | null;
+  // Risk Score's "prior documented loss on this ticker" input
+  // (lib/risk-score.ts) — event-scoped via the campaigns table
+  // (lib/campaigns.ts's hasPriorCspEarningsLoss): a CSP campaign on
+  // THIS symbol, tied to an earnings event (every campaigns row is, by
+  // construction — see resolveEarningsForChain), that realized a net
+  // loss. Distinct from tickerWinRate/tickerTradeCount above, which
+  // aggregate every terminal position on the ticker regardless of
+  // instrument or event.
+  priorCspEarningsLoss: boolean;
 };
 
 // ---------- Helpers ----------
@@ -3084,6 +3097,7 @@ const NO_HISTORY: PersonalHistory = {
   cleanCount: 0,
   rolledCount: 0,
   recoveryCount: 0,
+  priorCspEarningsLoss: false,
 };
 
 const PERSONAL_COLS =
@@ -3104,6 +3118,7 @@ export async function getPersonalHistory(
       .in("status", TERMINAL_STATUSES);
     if (error || !data) return { ...NO_HISTORY };
     const ticker = personalStats(data as PersonalRow[]);
+    const priorCspEarningsLoss = await hasPriorCspEarningsLoss(userId, upper).catch(() => false);
     const tickerLevel = {
       campaigns: ticker.tradeCount,
       clean: ticker.cleanCount,
@@ -3171,6 +3186,7 @@ export async function getPersonalHistory(
         tickerLevel,
         sampleWeight,
         sector,
+        priorCspEarningsLoss,
       };
     }
     if (sector && sectorStatsFull) {
@@ -3188,6 +3204,12 @@ export async function getPersonalHistory(
         tickerLevel,
         sampleWeight: 0,
         sector,
+        // priorCspEarningsLoss stays THIS symbol's own signal even at
+        // sector scope (it's never a sector aggregate) — a symbol with
+        // no ticker-level win-rate evidence can still have a campaign
+        // history if those campaigns didn't clear the 5-campaign
+        // sampleWeight bar but did resolve to an earnings event.
+        priorCspEarningsLoss,
       };
     }
     return {
@@ -3198,6 +3220,7 @@ export async function getPersonalHistory(
       tickerLevel,
       sampleWeight: 0,
       sector: null,
+      priorCspEarningsLoss,
     };
   } catch {
     return { ...NO_HISTORY };
@@ -3462,6 +3485,7 @@ export function calculateThreeLayerGrade(
     dataInsufficient: true,
     scope: "none",
     sectorIndustry: null,
+    priorCspEarningsLoss: false,
   };
   // Legacy PersonalHistory objects (pre-sector-fallback) carry no
   // scope — they were always ticker-level.
@@ -3673,11 +3697,7 @@ export function calculateThreeLayerGrade(
     firedFlags: canonicalizeFlags(flagsFired),
     hasOverhang,
     vix,
-    priorLossOnTicker: hasPriorLossOnTicker({
-      tickerWinRate: history.winRate,
-      tickerTradeCount: history.tradeCount,
-      dataInsufficient: history.dataInsufficient,
-    }),
+    priorLossOnTicker: hasPriorLossOnTicker({ priorCspEarningsLoss: history.priorCspEarningsLoss }),
   });
 
   // Derived illustrative scores (for sort order + display compatibility).
@@ -3956,6 +3976,7 @@ export function calculateThreeLayerGrade(
       tickerLevel: history.tickerLevel,
       sampleWeight: history.sampleWeight,
       sector: history.sector ?? null,
+      priorCspEarningsLoss: history.priorCspEarningsLoss,
     },
     regimeGrade,
     regimeScore,
