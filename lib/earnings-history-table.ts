@@ -433,6 +433,38 @@ export async function findNearbyEarningsRow(
   return rows[0] ?? null;
 }
 
+export type ImpliedMoveCaptureSource = "schwab" | "schwab_t0" | "manual" | "perplexity";
+
+// Append-only capture log — see
+// migrations/2026-08-25-add-implied-move-captures.sql. Every write path
+// that measures implied_move_pct calls this in ADDITION to whatever it
+// does to earnings_history, so a capture survives even when
+// earnings_history.implied_move_pct itself later gets overwritten (or,
+// after the guard below, is deliberately NOT written). Never throws —
+// a failed insert here must not break the caller's own, more load-
+// bearing earnings_history write.
+export async function recordImpliedMoveCapture(
+  symbol: string,
+  earningsDate: string,
+  impliedMovePct: number,
+  source: ImpliedMoveCaptureSource,
+  spotPrice: number | null,
+): Promise<void> {
+  const sb = createServerClient();
+  const insert = await sb.from("implied_move_captures").insert({
+    symbol: symbol.toUpperCase(),
+    earnings_date: earningsDate,
+    implied_move_pct: impliedMovePct,
+    source,
+    spot_price: spotPrice,
+  });
+  if (insert.error) {
+    console.warn(
+      `[earnings-history-table] capture-history append ${symbol}@${earningsDate} (${source}) failed: ${insert.error.message}`,
+    );
+  }
+}
+
 // Persists the live IV-implied move for a candidate's upcoming earnings
 // event. Called from the screener when stage 3 computes emPct so we
 // build a real per-event EM history over time. Only writes the two
@@ -445,11 +477,26 @@ export async function findNearbyEarningsRow(
 // Exact-date onConflict can't catch that, so we range-check first and
 // merge onto the existing nearby row's date instead of inserting a new
 // one, logging the merge so drift stays visible.
+//
+// T0/manual guard (EM audit, 2026-08-12): this is an ad-hoc pass, not
+// the scheduled canonical read. If a T0 capture already ran for this
+// row (iv_before set — lib/encyclopedia.ts's captureEarningsT0 is the
+// only writer of that column) or the row is hand-entered
+// (implied_move_source="manual", the same protection
+// captureEarningsT0 and updateEncyclopedia's fetch path already give
+// manual rows), this pass's own read is never better information than
+// what's already there — skip the earnings_history write and keep
+// whatever's there untouched. The capture itself is NEVER discarded
+// either way: it's always appended to implied_move_captures below,
+// guard or no guard, so a stronger later selection rule (PASS 3 of the
+// EM audit) has the full history to choose from even for a read that
+// lost the promotion race.
 export async function persistLiveImpliedMove(
   symbol: string,
   earningsDate: string,
   emPct: number | null,
   source: "schwab" | "perplexity" = "schwab",
+  spotPrice: number | null = null,
 ): Promise<void> {
   if (emPct === null || !Number.isFinite(emPct) || emPct <= 0) return;
   const sb = createServerClient();
@@ -462,22 +509,42 @@ export async function persistLiveImpliedMove(
         `${NEARBY_WINDOW_DAYS} days; merging onto it instead of inserting a duplicate.`,
     );
   }
-  const upsert = await sb
+
+  const existingRes = await sb
     .from("earnings_history")
-    .upsert(
-      {
-        symbol: symbol.toUpperCase(),
-        earnings_date: writeDate,
-        implied_move_pct: emPct,
-        implied_move_source: source,
-      },
-      { onConflict: "symbol,earnings_date" },
+    .select("iv_before,implied_move_source")
+    .eq("symbol", symbol.toUpperCase())
+    .eq("earnings_date", writeDate)
+    .maybeSingle();
+  const existing = existingRes.data as { iv_before: number | null; implied_move_source: string | null } | null;
+  const protectedByT0 = existing?.iv_before !== null && existing?.iv_before !== undefined;
+  const protectedByManual = existing?.implied_move_source === "manual";
+
+  if (protectedByT0 || protectedByManual) {
+    console.log(
+      `[earnings-history-table] persist live EM ${symbol}@${writeDate} skipped earnings_history write — ` +
+        `${protectedByT0 ? "T0 already captured" : "manual entry"} takes precedence; capture still appended.`,
     );
-  if (upsert.error) {
-    console.warn(
-      `[earnings-history-table] persist live EM ${symbol}@${writeDate} failed: ${upsert.error.message}`,
-    );
+  } else {
+    const upsert = await sb
+      .from("earnings_history")
+      .upsert(
+        {
+          symbol: symbol.toUpperCase(),
+          earnings_date: writeDate,
+          implied_move_pct: emPct,
+          implied_move_source: source,
+        },
+        { onConflict: "symbol,earnings_date" },
+      );
+    if (upsert.error) {
+      console.warn(
+        `[earnings-history-table] persist live EM ${symbol}@${writeDate} failed: ${upsert.error.message}`,
+      );
+    }
   }
+
+  await recordImpliedMoveCapture(symbol, writeDate, emPct, source, spotPrice);
 }
 
 // Persists a small options-flow snapshot for the upcoming earnings

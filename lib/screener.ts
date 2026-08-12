@@ -2766,6 +2766,7 @@ export async function runStagesThreeFour(
       candidate.earningsDate,
       stageThree.details.expectedMovePct,
       "schwab",
+      candidate.price,
     );
   }
 

@@ -29,7 +29,7 @@ import {
 } from "@/lib/schwab";
 import { isT1SessionEligible } from "@/lib/session-eligibility";
 import { T1_RETRY_CUTOFF_DAYS, recordCaptureAttempt } from "@/lib/earnings-capture-attempts";
-import { findNearbyEarningsRow } from "@/lib/earnings-history-table";
+import { findNearbyEarningsRow, recordImpliedMoveCapture } from "@/lib/earnings-history-table";
 import YahooFinance from "yahoo-finance2";
 
 const FINNHUB_RATE_DELAY_MS = 200;
@@ -1875,6 +1875,11 @@ export async function captureEarningsT0(
     console.warn(`[encyclopedia:T0] update(${sym}, ${earningsDate}) failed: ${up.error.message}`);
     return { captured: false, skipped: true, reason: `db_error:${up.error.message}` };
   }
+  // Append to the capture log too — see recordImpliedMoveCapture's
+  // comment (lib/earnings-history-table.ts). T0 already self-gates
+  // against running twice (the iv_before check above), so this never
+  // double-appends for the same row.
+  await recordImpliedMoveCapture(sym, earningsDate, implied_move_pct, "schwab_t0", price_before);
   return { captured: true, implied_move_pct, iv_before, price_before, two_x_em_strike };
 }
 

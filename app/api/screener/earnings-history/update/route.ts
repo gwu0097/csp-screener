@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
-import { gradeFromRatio, type CrushHistoryEvent } from "@/lib/earnings-history-table";
+import { gradeFromRatio, recordImpliedMoveCapture, type CrushHistoryEvent } from "@/lib/earnings-history-table";
 import { quarterLabel, isRepresentativeDateSlot, isWeekend } from "@/lib/quarter-label";
 
 export const dynamic = "force-dynamic";
@@ -111,6 +111,12 @@ export async function POST(req: NextRequest) {
     );
   if (up.error) {
     return NextResponse.json({ error: up.error.message }, { status: 500 });
+  }
+  // Append to the capture log too (null spot — a hand-typed value has
+  // no live read behind it). Only when a real EM was submitted, not a
+  // clear (em.value === null wipes the field, nothing was captured).
+  if (em.value !== null) {
+    await recordImpliedMoveCapture(symbol, earningsDate, em.value, "manual", null);
   }
 
   // This upsert doesn't touch fiscal_quarter/fiscal_year/period_end —

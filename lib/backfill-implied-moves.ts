@@ -11,6 +11,7 @@
 
 import { askPerplexityRaw } from "@/lib/perplexity";
 import { createServerClient } from "@/lib/supabase";
+import { recordImpliedMoveCapture } from "@/lib/earnings-history-table";
 
 export type BackfillResult = {
   scanned: number;
@@ -171,6 +172,9 @@ export async function backfillImpliedMoves(opts: {
         result.errors.push(`${sym}@${row.earnings_date}: ${upd.error.message}`);
         continue;
       }
+      // No spot at capture — this is a retrospective Perplexity estimate,
+      // not a live chain read.
+      await recordImpliedMoveCapture(sym, row.earnings_date, fraction, "perplexity", null);
       result.updated += 1;
     } catch (e) {
       result.errors.push(
