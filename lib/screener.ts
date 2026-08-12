@@ -994,11 +994,21 @@ function historicalMoveScoreFromRatio(ratio: number | null): number {
 // result). That's gone now — getPopulationPriorMoveRatio always runs
 // and its value is always stamped onto the dump (populationPriorRatio
 // alongside shrinkageK), so the prior is visible regardless of
-// whether shrinkage is actually active. Harmless while k stays 0
-// (applyShrinkage's own k===0 branch ignores the prior entirely), but
-// it means flipping k on no longer silently shrinks toward a
-// hardcoded 1.0 instead of the real ~0.72 population median.
-export const DEFAULT_SHRINKAGE_K = 0;
+// whether shrinkage is actually active.
+//
+// PROVISIONAL: k=5, enabled 2026-08-25. Chosen as a judgment call, not
+// derived from an outcome study — there's no measured relationship
+// between k and downstream trade results the way MEASURED_FLAGS has
+// for the checklist items. At the current population (n=1368 settled
+// pairs, prior=0.7228) 38% of tickers sit at n<=2 of their own
+// history, which is exactly the regime shrinkage exists for, but also
+// means k is being picked against a population that's still small and
+// will keep shifting as more verified history accumulates. PASS_2F
+// previously held k at 0 after k=2 reintroduced per-letter
+// non-monotonicity (B below A, F below C) — re-check that before
+// trusting this value long-term, not just once. Revisit k itself once
+// there's more verified (schwab/schwab_t0) history to test it against.
+export const DEFAULT_SHRINKAGE_K = 5;
 
 export function applyShrinkage(
   tickerMean: number | null,
