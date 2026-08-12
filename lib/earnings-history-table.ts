@@ -176,13 +176,29 @@ export async function getCrushHistory(
 // Cached in-process for 30 minutes — this is a full-table-ish scan
 // (~2-3 requests as of this audit), too expensive to redo once per
 // candidate in a screener batch that may grade 100+ candidates.
-type PopulationMeanCache = { value: number; n: number; at: number } | null;
-let populationMeanCache: PopulationMeanCache = null;
-const POPULATION_MEAN_CACHE_TTL_MS = 30 * 60 * 1000;
+//
+// MEDIAN, not mean (shrinkage audit, 2026-08-25): move_ratio is
+// right-skewed by blow-throughs — mean 0.843 vs median 0.723 across
+// the full population, a 16% gap. The mean is pulled up by the tail;
+// the median answers "what does a typical quarter look like," which
+// is what a shrinkage PRIOR is supposed to represent. Was previously
+// named/typed around "mean" throughout (function name, cache, return
+// field) while ALSO never actually running — shrinkageEnabled in
+// runStagesThreeFour short-circuited this to a hardcoded
+// Promise.resolve({mean:1,n:0}) whenever DEFAULT_SHRINKAGE_K===0, so
+// flipping k on without also touching that would have shrunk toward
+// 1.0, not the real prior. Renamed end to end (median, not mean) so a
+// stale "Mean" name can't misdescribe what's actually stored here
+// again, and the short-circuit is gone — this always runs now,
+// regardless of k, so the dump can show the real prior even while
+// shrinkage stays off.
+type PopulationPriorCache = { value: number; n: number; at: number } | null;
+let populationPriorCache: PopulationPriorCache = null;
+const POPULATION_PRIOR_CACHE_TTL_MS = 30 * 60 * 1000;
 
-export async function getPopulationMeanMoveRatio(opts?: { forceFresh?: boolean }): Promise<{ mean: number; n: number }> {
-  if (!opts?.forceFresh && populationMeanCache && Date.now() - populationMeanCache.at < POPULATION_MEAN_CACHE_TTL_MS) {
-    return { mean: populationMeanCache.value, n: populationMeanCache.n };
+export async function getPopulationPriorMoveRatio(opts?: { forceFresh?: boolean }): Promise<{ median: number; n: number }> {
+  if (!opts?.forceFresh && populationPriorCache && Date.now() - populationPriorCache.at < POPULATION_PRIOR_CACHE_TTL_MS) {
+    return { median: populationPriorCache.value, n: populationPriorCache.n };
   }
   const sb = createServerClient();
   type Row = {
@@ -192,8 +208,7 @@ export async function getPopulationMeanMoveRatio(opts?: { forceFresh?: boolean }
     move_ratio: number | null;
     t1_unrecoverable: boolean | null;
   };
-  let sum = 0;
-  let count = 0;
+  const ratios: number[] = [];
   let cursor: string | null = null;
   const PAGE = 1000;
   for (;;) {
@@ -205,7 +220,7 @@ export async function getPopulationMeanMoveRatio(opts?: { forceFresh?: boolean }
     if (cursor !== null) q = q.gt("id", cursor);
     const res = await q;
     if (res.error) {
-      console.warn(`[earnings-history-table] getPopulationMeanMoveRatio page failed: ${res.error.message}`);
+      console.warn(`[earnings-history-table] getPopulationPriorMoveRatio page failed: ${res.error.message}`);
       break;
     }
     const rows = (res.data ?? []) as Row[];
@@ -221,8 +236,7 @@ export async function getPopulationMeanMoveRatio(opts?: { forceFresh?: boolean }
           ? Math.abs(r.actual_move_pct) / r.implied_move_pct
           : null);
       if (ratio !== null && Number.isFinite(ratio)) {
-        sum += ratio;
-        count += 1;
+        ratios.push(ratio);
       }
     }
     if (rows.length < PAGE) break;
@@ -231,10 +245,17 @@ export async function getPopulationMeanMoveRatio(opts?: { forceFresh?: boolean }
   // Fallback only reachable if the table has zero valid pairs at all
   // (shouldn't happen in practice) — 1.0 is the "realized exactly
   // matched implied" neutral point, not a guess at any real bias.
-  const mean = count > 0 ? sum / count : 1.0;
-  populationMeanCache = { value: mean, n: count, at: Date.now() };
-  console.log(`[earnings-history-table] population mean move_ratio recomputed: mean=${mean.toFixed(4)} n=${count}`);
-  return { mean, n: count };
+  let median: number;
+  if (ratios.length === 0) {
+    median = 1.0;
+  } else {
+    const sorted = ratios.slice().sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    median = sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  }
+  populationPriorCache = { value: median, n: ratios.length, at: Date.now() };
+  console.log(`[earnings-history-table] population prior move_ratio recomputed: median=${median.toFixed(4)} n=${ratios.length}`);
+  return { median, n: ratios.length };
 }
 
 // ---------- Fix B: empirical E[loss|breach] shrinkage ladder ----------
@@ -319,7 +340,7 @@ async function getPoolEvents(): Promise<NormalizedMoveRow[]> {
     actual_move_pct: number | null;
     t1_unrecoverable: boolean | null;
   }>)
-    // Same t1_unrecoverable exclusion as getPopulationMeanMoveRatio —
+    // Same t1_unrecoverable exclusion as getPopulationPriorMoveRatio —
     // actual_move_pct on a phantom too-early capture predates real
     // settlement, so its normMove would poison the ladder's pooled
     // overshoot estimate for every ticker, not just the flagged one

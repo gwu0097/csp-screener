@@ -30,7 +30,7 @@ import {
   persistFlowSnapshot,
   persistLiveImpliedMove,
   computeLossMultiplierLadder,
-  getPopulationMeanMoveRatio,
+  getPopulationPriorMoveRatio,
   type CrushHistoryEvent,
   type LossMultiplierResult,
 } from "@/lib/earnings-history-table";
@@ -121,11 +121,11 @@ export type StageThreeResult = {
     // entirely (see scoreComponentsComputed.historicalMove).
     historicalMoveRatioN: number;
     // The estimate historicalMoveScore is ACTUALLY computed from —
-    // historicalMoveRatio shrunk toward populationMeanRatio by
+    // historicalMoveRatio shrunk toward populationPriorRatio by
     // shrinkageK "worth" of population evidence. null iff
     // historicalMoveRatioN===0 (nothing to shrink, component excluded).
     historicalMoveRatioShrunk: number | null;
-    populationMeanRatio: number;
+    populationPriorRatio: number;
     shrinkageK: number;
     // Full per-quarter diagnostic breakdown — source used, exclusion
     // reason, DB-vs-Yahoo divergence flag. Powers the crush caption and
@@ -933,14 +933,15 @@ function historicalMoveScoreFromRatio(ratio: number | null): number {
 // (population mean sits above its median), so a single draw lands
 // below the mean more often than not and disproportionately catches
 // the top scoring band (<0.7 -> 8pts). More quarters regress toward
-// the population mean. Standard empirical-Bayes shrinkage toward the
-// population mean fixes this without an arbitrary n-based cutoff:
-//   adjusted = (n * tickerMean + k * populationMean) / (n + k)
-// k is the "worth of evidence" a single population-mean draw carries,
-// in units of quarters — k=2 means a ticker needs roughly 2 of its own
-// quarters before its own mean starts to dominate the population prior.
-// n=0 is NOT shrunk — there is no tickerMean to shrink, the component
-// stays excluded via the existing neutral-missing-data path untouched.
+// the population center. Standard empirical-Bayes shrinkage toward a
+// population prior fixes this without an arbitrary n-based cutoff:
+//   adjusted = (n * tickerMean + k * populationPrior) / (n + k)
+// k is the "worth of evidence" a single population-prior draw
+// carries, in units of quarters — k=2 means a ticker needs roughly 2
+// of its own quarters before its own mean starts to dominate the
+// population prior. n=0 is NOT shrunk — there is no tickerMean to
+// shrink, the component stays excluded via the existing neutral-
+// missing-data path untouched.
 //
 // PASS_2F: held back at k=0 (a verified exact no-op — see
 // applyShrinkage below). At k=2 it reintroduced per-letter
@@ -948,12 +949,20 @@ function historicalMoveScoreFromRatio(ratio: number | null): number {
 // didn't have, and monotonicity was the one outcome signal favoring
 // the new grades — not worth trading away for a variance correction
 // with no outcome evidence of its own. The mechanism, the population-
-// mean function, and the k config all stay in place so this can be
-// revisited (e.g. a different prior, a data-driven k) without
-// rebuilding it. Runtime cost is also gated off at k=0 — see the
-// shrinkageEnabled check in runStagesThreeFour, which skips
-// getPopulationMeanMoveRatio's paginated table scan entirely when the
-// result can't affect the score.
+// prior function, and the k config all stay in place so this can be
+// revisited (e.g. a data-driven k) without rebuilding it.
+//
+// Shrinkage audit (2026-08-25): the population prior itself used to
+// be skipped and hardcoded to 1.0 whenever k===0 (a runtime-cost
+// short-circuit — no reason to pay getPopulationPriorMoveRatio's
+// paginated scan when applyShrinkage(mean, n, pop, 0) can't use the
+// result). That's gone now — getPopulationPriorMoveRatio always runs
+// and its value is always stamped onto the dump (populationPriorRatio
+// alongside shrinkageK), so the prior is visible regardless of
+// whether shrinkage is actually active. Harmless while k stays 0
+// (applyShrinkage's own k===0 branch ignores the prior entirely), but
+// it means flipping k on no longer silently shrinks toward a
+// hardcoded 1.0 instead of the real ~0.72 population median.
 export const DEFAULT_SHRINKAGE_K = 0;
 
 export function applyShrinkage(
@@ -1234,11 +1243,11 @@ export type CrushCompositeInputs = {
   surpriseQuartersExamined: number;
   termStructureBands?: TermStructureBands;
   divergenceThreshold?: number;
-  // Population mean of move_ratio across ALL valid paired quarters in
-  // earnings_history (see getPopulationMeanMoveRatio in
+  // Population MEDIAN of move_ratio across ALL valid paired quarters in
+  // earnings_history (see getPopulationPriorMoveRatio in
   // lib/earnings-history-table.ts) — required, not defaulted, so a
   // caller can never silently grade against a stale/hardcoded value.
-  populationMeanRatio: number;
+  populationPriorRatio: number;
   shrinkageK?: number;
 };
 
@@ -1277,7 +1286,7 @@ export function computeCrushComposite(inputs: CrushCompositeInputs): CrushCompos
     inputs.earningsDate,
     inputs.divergenceThreshold,
   );
-  const shrunkRatio = applyShrinkage(quarterlyRatio.meanRatio, quarterlyRatio.n, inputs.populationMeanRatio, inputs.shrinkageK);
+  const shrunkRatio = applyShrinkage(quarterlyRatio.meanRatio, quarterlyRatio.n, inputs.populationPriorRatio, inputs.shrinkageK);
 
   const scoreComponentsComputed = {
     historicalMove: quarterlyRatio.n > 0,
@@ -1561,11 +1570,11 @@ export async function runStageThree(
   // has real implied-move-at-the-time data instead of the old
   // medianMove/today's-emPct approximation.
   crushHistory: CrushHistoryEvent[],
-  // Shrinkage prior for historicalMoveRatio (PASS_2E) — see
-  // getPopulationMeanMoveRatio in lib/earnings-history-table.ts.
-  // Fetched once per batch by the caller (cached ~30min), not re-queried
-  // per candidate.
-  populationMeanRatio: number,
+  // Shrinkage prior for historicalMoveRatio (PASS_2E) — the population
+  // MEDIAN move_ratio, see getPopulationPriorMoveRatio in
+  // lib/earnings-history-table.ts. Fetched once per batch by the
+  // caller (cached ~30min), not re-queried per candidate.
+  populationPriorRatio: number,
   opts: { forceFresh?: boolean } = {},
 ): Promise<StageThreeResult> {
   const sym = candidate.symbol;
@@ -1692,7 +1701,7 @@ export async function runStageThree(
     realizedVol,
     surpriseScore: surprise.surpriseScore,
     surpriseQuartersExamined: surprise.quartersExamined,
-    populationMeanRatio,
+    populationPriorRatio,
   });
   const {
     score,
@@ -1782,7 +1791,7 @@ export async function runStageThree(
       historicalMoveRatio: quarterlyRatio.meanRatio,
       historicalMoveRatioN: quarterlyRatio.n,
       historicalMoveRatioShrunk: shrunkRatio,
-      populationMeanRatio,
+      populationPriorRatio,
       shrinkageK: DEFAULT_SHRINKAGE_K,
       historicalMoveRatioQuarters: quarterlyRatio.quarters,
       expectedMovePct: emPct,
@@ -2671,19 +2680,20 @@ export async function runStagesThreeFour(
   // directly instead of the old medianMove/today's-emPct approximation
   // — see buildQuarterlyMoveRatio.
   //
-  // populationMeanRatio (PASS_2E shrinkage prior) is SKIPPED at k=0
-  // (PASS_2F: shrinkage disabled) — applyShrinkage(mean, n, pop, 0)
-  // always returns mean unchanged, so the value literally cannot affect
-  // the score. getPopulationMeanMoveRatio does a paginated full-table
-  // scan (cached ~30min, but still real DB round-trips on a cache
-  // miss); no reason to pay that cost in the hot path when shrinkage is
-  // off. This check assumes no caller overrides shrinkageK away from
-  // DEFAULT_SHRINKAGE_K — if that ever changes, this needs to track it.
-  const shrinkageEnabled = DEFAULT_SHRINKAGE_K !== 0;
+  // populationPriorRatio (PASS_2E shrinkage prior) always runs now
+  // (shrinkage audit, 2026-08-25) — this used to be skipped at k=0 via
+  // a shrinkageEnabled short-circuit (applyShrinkage(mean, n, pop, 0)
+  // can't use the result, so why pay for it), hardcoding the value to
+  // {mean:1, n:0} instead. That made the dump's shrinkage fields
+  // (populationPriorRatio/shrinkageK) always show a fake number instead
+  // of the real one, and would have shrunk toward the WRONG prior the
+  // moment DEFAULT_SHRINKAGE_K went nonzero without this being touched
+  // too. getPopulationPriorMoveRatio is cached ~30min in-process, so
+  // this is one real DB round-trip per cache window, not per candidate.
   const [historicalMoves, crushHistory, population] = await Promise.all([
     getHistoricalEarningsMovements(candidate.symbol),
     getCrushHistory(candidate.symbol, 8),
-    shrinkageEnabled ? getPopulationMeanMoveRatio() : Promise.resolve({ mean: 1, n: 0 }),
+    getPopulationPriorMoveRatio(),
   ]);
 
   // Monthly IV needs a date RANGE, not a single day — 3rd-Friday monthly
@@ -2700,7 +2710,7 @@ export async function runStagesThreeFour(
       `result=${monthlyChain ? "ok" : "null"}`,
   );
 
-  const stageThree = await runStageThree(candidate, chain, monthlyChain, historicalMoves, crushHistory, population.mean, {
+  const stageThree = await runStageThree(candidate, chain, monthlyChain, historicalMoves, crushHistory, population.median, {
     forceFresh: opts?.forceFresh,
   });
 

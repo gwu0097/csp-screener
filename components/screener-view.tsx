@@ -4951,7 +4951,7 @@ function AnalysisDumpTab({
       `historicalMoveRatio (raw): ${dumpNum(d?.historicalMoveRatio ?? null, 3)} (n=${d?.historicalMoveRatioN ?? 0})`,
     );
     push(
-      `historicalMoveRatio (shrunk toward population mean): ${dumpNum(d?.historicalMoveRatioShrunk ?? null, 3)} [populationMeanRatio=${dumpNum(d?.populationMeanRatio ?? null, 3)} shrinkageK=${dumpNum(d?.shrinkageK ?? null, 1)}]`,
+      `historicalMoveRatio (shrunk toward population median): ${dumpNum(d?.historicalMoveRatioShrunk ?? null, 3)} [populationPriorRatio=${dumpNum(d?.populationPriorRatio ?? null, 3)} shrinkageK=${dumpNum(d?.shrinkageK ?? null, 1)}]`,
     );
     push(
       `verifiedModifier: delta=${d?.crushVerifiedModifierDelta ?? 0} (${d?.crushRatioSeverity ?? "no verified evidence"}) [verified ratio=${dumpNum(d?.crushRatio ?? null, 3)} verified-n=${d?.crushRatioVerifiedN ?? 0} applied=${d?.crushRatioCapApplied ?? false}]`,
