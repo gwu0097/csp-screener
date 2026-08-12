@@ -521,12 +521,59 @@ export type PositionBadgeInput = {
     recommendation: "CLOSE" | "HOLD" | "PARTIAL" | "MONITOR";
     confidence: "HIGH" | "MEDIUM" | "LOW";
     reasoning: string;
+    // The print this rec is about (post_earnings_recommendations.
+    // earnings_date) — null only for rows written before that column
+    // existed. Used to expire a stale rec; see
+    // POST_EARNINGS_REC_EXPIRY_SESSIONS below. Deliberately NOT
+    // analysis_date: the daily maintenance pass re-upserts the row
+    // (and bumps analysis_date) every time it successfully re-touches
+    // an open position, even though move_ratio never changes — using
+    // analysis_date would make a rec look fresh forever as long as the
+    // cron keeps hitting it.
+    earningsDate: string | null;
   } | null;
   currentStockPrice: number | null;
 };
 
 function todayUtcIso(): string {
   return new Date().toISOString().slice(0, 10);
+}
+
+// Trading sessions (weekdays only, no market-holiday calendar — same
+// simplification lib/campaigns.ts's tradingDaysBetween already makes)
+// between two ISO dates, inclusive of the start day. A same-day rec is
+// 0 sessions old.
+function tradingSessionsSince(fromIso: string, toIso: string): number {
+  let count = 0;
+  const cur = new Date(fromIso + "T00:00:00Z");
+  const end = new Date(toIso + "T00:00:00Z");
+  while (cur <= end) {
+    const day = cur.getUTCDay();
+    if (day !== 0 && day !== 6) count += 1;
+    cur.setUTCDate(cur.getUTCDate() + 1);
+  }
+  return Math.max(0, count - 1);
+}
+
+// A post-earnings rec answers "what should I do about the print" — a
+// question with a shelf life. move_ratio is frozen at earnings day, so
+// re-running the same rule on a later day produces the identical
+// verdict at the identical confidence, forever; CLOSE_MEDIUM_MOVE kept
+// firing at MEDIUM for CRWV/NBIS days after the print with no decay at
+// all (the audit that motivated this: RKLB's LOW confidence wasn't
+// decay either — its move_ratio never exceeded the CLOSE threshold in
+// the first place). Past this many trading sessions since the print,
+// the rec is treated as expired for badge purposes — forced out of
+// Priority 2's HIGH/MEDIUM gate regardless of its original confidence.
+// A single hard cutoff rather than a multi-step ladder: easier to
+// reason about and validate, and by the time this many sessions have
+// passed the weekly contract the rec was scoped to has usually already
+// rolled past its own expiry anyway. Editable.
+export const POST_EARNINGS_REC_EXPIRY_SESSIONS = 3;
+
+function isPostEarningsRecExpired(earningsDate: string | null, today: string): boolean {
+  if (earningsDate === null) return false;
+  return tradingSessionsSince(earningsDate, today) >= POST_EARNINGS_REC_EXPIRY_SESSIONS;
 }
 
 function firstSentence(s: string): string {
@@ -644,9 +691,45 @@ export function computePositionBadge(input: PositionBadgeInput): BadgeResult {
     // Expiry day but no price data — fall through to lower priorities.
   }
 
-  // ---------- PRIORITY 2: post-earnings rec (HIGH/MEDIUM only) ----------
+  // ---------- PRIORITY 2: max profit (premium captured) ----------
+  // Ahead of the post-earnings rec (was Priority 3, below it) — a
+  // position marked at a penny with the print behind it is at max
+  // profit regardless of what the stock did on the print. A stale
+  // MEDIUM-confidence CLOSE rec (see Priority 3 below) can't tell you
+  // anything the current mark doesn't already say more directly.
+  const pctPremiumRemaining = latestSnapshot?.pct_premium_remaining ?? null;
+  // Deep OTM fallback when we don't have pct_premium_remaining —
+  // stock >20% above strike on a put means the option is functionally
+  // worthless even without an option price to confirm.
+  const deepOtm =
+    pctFromStrike !== null && pctFromStrike > 0.2;
+  if (
+    (pctPremiumRemaining !== null && pctPremiumRemaining < 0.1) ||
+    (pctPremiumRemaining === null && deepOtm)
+  ) {
+    const captured =
+      pctPremiumRemaining !== null
+        ? `${Math.round((1 - pctPremiumRemaining) * 100)}%`
+        : ">90%";
+    return {
+      badge: "MAX_PROFIT",
+      label: "MAX PROFIT",
+      color: "green",
+      tooltip: `${captured} of premium captured. Closing costs exceed remaining value — let it expire.`,
+      ruleFired: "MAX_PROFIT",
+    };
+  }
+
+  // ---------- PRIORITY 3: post-earnings rec (HIGH/MEDIUM, not expired) ----------
+  // Expired (POST_EARNINGS_REC_EXPIRY_SESSIONS trading sessions past the
+  // print) forces this out of the gate regardless of stored confidence
+  // — move_ratio is frozen at earnings day, so an un-expired check here
+  // would let CLOSE_MEDIUM_MOVE keep re-firing at MEDIUM indefinitely.
+  const recExpired =
+    postEarningsRec !== null && isPostEarningsRecExpired(postEarningsRec.earningsDate, today);
   if (
     postEarningsRec &&
+    !recExpired &&
     (postEarningsRec.confidence === "HIGH" || postEarningsRec.confidence === "MEDIUM")
   ) {
     const r = postEarningsRec.recommendation;
@@ -698,30 +781,6 @@ export function computePositionBadge(input: PositionBadgeInput): BadgeResult {
       };
     }
     // LOW confidence and anything else falls through.
-  }
-
-  // ---------- PRIORITY 3: max profit (premium captured) ----------
-  const pctPremiumRemaining = latestSnapshot?.pct_premium_remaining ?? null;
-  // Deep OTM fallback when we don't have pct_premium_remaining —
-  // stock >20% above strike on a put means the option is functionally
-  // worthless even without an option price to confirm.
-  const deepOtm =
-    pctFromStrike !== null && pctFromStrike > 0.2;
-  if (
-    (pctPremiumRemaining !== null && pctPremiumRemaining < 0.1) ||
-    (pctPremiumRemaining === null && deepOtm)
-  ) {
-    const captured =
-      pctPremiumRemaining !== null
-        ? `${Math.round((1 - pctPremiumRemaining) * 100)}%`
-        : ">90%";
-    return {
-      badge: "MAX_PROFIT",
-      label: "MAX PROFIT",
-      color: "green",
-      tooltip: `${captured} of premium captured. Closing costs exceed remaining value — let it expire.`,
-      ruleFired: "MAX_PROFIT",
-    };
   }
 
   // ---------- PRIORITY 4: move ratio danger ----------

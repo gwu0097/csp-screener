@@ -33,6 +33,13 @@ export type RecommendationRow = {
   id: string;
   position_id: string;
   earnings_history_id: string | null;
+  // The print this rec is ABOUT — distinct from analysis_date (when the
+  // rec was last WRITTEN, which resets every time the daily maintenance
+  // pass re-touches the row even though move_ratio never changes).
+  // computePositionBadge expires a rec based on sessions since THIS
+  // date, not since it was last recomputed — see lib/positions.ts's
+  // POST_EARNINGS_REC_EXPIRY_SESSIONS.
+  earnings_date: string | null;
   analysis_date: string;
   move_ratio: number | null;
   iv_crushed: boolean | null;
@@ -306,6 +313,7 @@ export async function analyzePositionPostEarnings(
     // Callers select user_id with the position (select("*") covers it).
     user_id: (position as { user_id?: string }).user_id ?? null,
     earnings_history_id: history.id,
+    earnings_date: history.earnings_date,
     analysis_date: new Date().toISOString(),
     move_ratio: history.move_ratio,
     iv_crushed: history.iv_crushed,

@@ -38,6 +38,10 @@ type PostEarningsRecView = {
   reasoning: string;
   ruleFired: string;
   analysisDate: string;
+  // The print this rec is about — feeds computePositionBadge's rec-
+  // expiry check (POST_EARNINGS_REC_EXPIRY_SESSIONS). Null only for
+  // rows written before the earnings_date column existed.
+  earningsDate: string | null;
   moveRatio: number | null;
   ivCrushed: boolean | null;
   ivCrushMagnitude: number | null;
@@ -486,7 +490,7 @@ export async function GET(req: NextRequest) {
     const recRes = await supabase
       .from("post_earnings_recommendations")
       .select(
-        "position_id,analysis_date,move_ratio,iv_crushed,iv_crush_magnitude,iv_crush_cross_contract,breached_two_x_em,analyst_sentiment,recovery_likelihood,stock_pct_from_strike,recommendation,confidence,reasoning,rule_fired",
+        "position_id,analysis_date,earnings_date,move_ratio,iv_crushed,iv_crush_magnitude,iv_crush_cross_contract,breached_two_x_em,analyst_sentiment,recovery_likelihood,stock_pct_from_strike,recommendation,confidence,reasoning,rule_fired",
       )
       .eq("user_id", userId)
       .in("position_id", positionIds)
@@ -494,6 +498,7 @@ export async function GET(req: NextRequest) {
     const allRecs = (recRes.data ?? []) as Array<{
       position_id: string;
       analysis_date: string;
+      earnings_date: string | null;
       move_ratio: number | null;
       iv_crushed: boolean | null;
       iv_crush_magnitude: number | null;
@@ -515,6 +520,7 @@ export async function GET(req: NextRequest) {
         reasoning: r.reasoning,
         ruleFired: r.rule_fired,
         analysisDate: r.analysis_date,
+        earningsDate: r.earnings_date,
         moveRatio: r.move_ratio,
         ivCrushed: r.iv_crushed,
         ivCrushMagnitude: r.iv_crush_magnitude,
@@ -825,6 +831,7 @@ export async function GET(req: NextRequest) {
             recommendation: (recsByPosition.get(p.id) as PostEarningsRecView).recommendation,
             confidence: (recsByPosition.get(p.id) as PostEarningsRecView).confidence,
             reasoning: (recsByPosition.get(p.id) as PostEarningsRecView).reasoning,
+            earningsDate: (recsByPosition.get(p.id) as PostEarningsRecView).earningsDate,
           }
         : null,
       currentStockPrice,
