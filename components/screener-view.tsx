@@ -2611,9 +2611,12 @@ export function ScreenerView({ connected }: Props) {
                       <>
                         Can I sell this and get paid: POP band, yield/liquidity
                         gate, personal-history modifier. A ≥ 90% POP, B ≥ 83%,
-                        C ≥ 75% — each gated on a real, non-liquidity-capped
-                        premium. Crush/overhang/VIX moved to Risk; see the
-                        legacy grading panel for the old combined letter.
+                        C ≥ 75%. A requires a real, non-F premium; at B/C a
+                        thin-but-evaluable premium caps to C instead of
+                        blocking the trade — noBid or dead liquidity is the
+                        only true &ldquo;Unrated.&rdquo; Crush/overhang/VIX
+                        moved to Risk; see the legacy grading panel for the
+                        old combined letter.
                       </>
                     }
                   />
@@ -3894,12 +3897,14 @@ function ExpandedDetail({
                             &ldquo;Can I sell this and get paid&rdquo; — rule cascade
                           </div>
                           <div>A: POP ≥ 90% · opportunity ≠ F</div>
-                          <div>B: POP ≥ 83% · opportunity ≠ F (else &ldquo;Unrated&rdquo;)</div>
-                          <div>C: POP ≥ 75% · penalty &gt; −15 · opportunity ≠ F (else &ldquo;Unrated&rdquo;)</div>
+                          <div>B: POP ≥ 83%</div>
+                          <div>C: POP ≥ 75% · penalty &gt; −15</div>
                           <div className="pt-1 text-muted-foreground">
-                            opportunity already includes the noBid hard-F and the graduated
-                            liquidity cap. Personal wr &gt;80%+roc &gt;0.3% boosts (never on
-                            Unrated) · wr &lt;50% drops. Crush/overhang/VIX are no longer part
+                            opportunity F blocks A outright. At B/C: noBid or liquidity F
+                            (can&apos;t be evaluated) → &ldquo;Unrated&rdquo;; a real market with
+                            thin yield → capped to C instead (a real letter, not an absence of
+                            one). Personal wr &gt;80%+roc &gt;0.3% boosts (never on Unrated or a
+                            capped C) · wr &lt;50% drops. Crush/overhang/VIX are no longer part
                             of this cascade — see Risk below and the legacy panel.
                           </div>
                         </div>
@@ -4235,14 +4240,16 @@ function OptionsChainTab({
   // second hand-kept-in-sync copy — then the shared lib/tradable-
   // grade.ts cascade runs, same as calculateThreeLayerGrade server-
   // side). Never written back to r.threeLayer.
+  const previewNoBid = strikeOverride !== null && strikeOverride.bid <= 0;
+  const previewLiquidity =
+    strikeOverride !== null
+      ? computeLiquidityRead(strikeOverride.oi, strikeOverride.volume, strikeOverride.bidAskSpreadPct)
+      : null;
   const previewOpportunityGrade =
     strikeOverride !== null && selectedYieldPct !== null
-      ? strikeOverride.bid <= 0
+      ? previewNoBid
         ? "F"
-        : capGradeByLiquidity(
-            gradeFromYieldClient(selectedYieldPct),
-            computeLiquidityRead(strikeOverride.oi, strikeOverride.volume, strikeOverride.bidAskSpreadPct).grade,
-          )
+        : capGradeByLiquidity(gradeFromYieldClient(selectedYieldPct), previewLiquidity!.grade)
       : null;
   const previewGrade: TradableResult | null =
     strikeOverride !== null && selectedPop !== null && previewOpportunityGrade !== null
@@ -4251,6 +4258,8 @@ function OptionsChainTab({
           opportunityGrade: previewOpportunityGrade,
           penalty,
           personalModifier,
+          noBid: previewNoBid,
+          liquidityGrade: previewLiquidity!.grade,
         })
       : null;
 
@@ -5277,19 +5286,19 @@ function CustomStrikeAnalyzer({
     // runStageFour — shared lib/liquidity.ts function, not a re-derived
     // copy, so this what-if can't silently disagree with the real grade.
     const nearestSpreadPct = nearest.mark > 0 ? ((nearest.ask - nearest.bid) / nearest.mark) * 100 : 0;
-    const opportunityGradeNew =
-      nearest.bid <= 0
-        ? "F"
-        : capGradeByLiquidity(
-            gradeFromYieldClient(yieldPct),
-            computeLiquidityRead(nearest.oi, nearest.volume, nearestSpreadPct).grade,
-          );
+    const nearestNoBid = nearest.bid <= 0;
+    const nearestLiquidity = computeLiquidityRead(nearest.oi, nearest.volume, nearestSpreadPct);
+    const opportunityGradeNew = nearestNoBid
+      ? "F"
+      : capGradeByLiquidity(gradeFromYieldClient(yieldPct), nearestLiquidity.grade);
 
     const { grade: finalGradeNew, unrated } = computeTradableGrade({
       pop,
       opportunityGrade: opportunityGradeNew,
       penalty,
       personalModifier,
+      noBid: nearestNoBid,
+      liquidityGrade: nearestLiquidity.grade,
     });
     setResult({
       strike: nearest.strike,

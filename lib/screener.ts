@@ -495,12 +495,17 @@ export type ThreeLayerGrade = {
   tradableGrade: Grade;
   tradableMatchedRule: "A" | "B" | "C" | "F";
   tradableRuleText: string;
-  // Same semantics as `unrated` above, evaluated against the tradable
-  // cascade (identical POP/opportunityGrade bands, so this is always
-  // equal to `unrated` in practice — kept as its own field rather than
-  // aliasing so tradableGrade's type doesn't reach back into the
-  // legacy fields).
+  // True only when opportunityGrade is F for a hard-gate reason (noBid,
+  // or a liquidity grade of F) — the setup can't be evaluated at all.
+  // NOT the same predicate as legacy `unrated` above: legacy treats any
+  // opportunityGrade-F as unrated, this one carves out the thin-yield-
+  // but-liquid case (see `tradableCapped`) — the two can disagree on
+  // the exact same candidate.
   tradableUnrated: boolean;
+  // True when a good POP band got capped down to C because
+  // opportunityGrade is F for an evaluable reason (thin yield, real
+  // liquidity) rather than a hard gate — a real letter, not Unrated.
+  tradableCapped: boolean;
 
   // ---- Risk Score (lib/risk-score.ts) ----
   // Display only — never modifies tradableGrade. See lib/risk-score.ts
@@ -3575,11 +3580,20 @@ export function calculateThreeLayerGrade(
   // report). unrated is independent of personalModifier, so a
   // throwaway call with personalModifier=null gets it cheaply before
   // the real modifier (which needs !unrated) is known.
+  //
+  // noBid/stage4LiquidityGrade determine WHY opportunityGrade is F —
+  // see lib/tradable-grade.ts's module comment. Defaults fail closed
+  // (F liquidity, i.e. hard-gated) if either field is somehow missing,
+  // rather than silently granting a capped C on incomplete data.
+  const stageFourNoBid = (stageFourResult.bid ?? 0) <= 0;
+  const stage4LiquidityGrade = stageFourResult.liquidityGrade ?? "F";
   const tradableUnratedProbe = computeTradableGrade({
     pop: probabilityOfProfit,
     opportunityGrade,
     penalty,
     personalModifier: null,
+    noBid: stageFourNoBid,
+    liquidityGrade: stage4LiquidityGrade,
   });
   let tradablePersonalModifier: "boost" | "drop" | null = null;
   if (!history.dataInsufficient && history.winRate !== null) {
@@ -3618,12 +3632,15 @@ export function calculateThreeLayerGrade(
     opportunityGrade,
     penalty,
     personalModifier: tradablePersonalModifier,
+    noBid: stageFourNoBid,
+    liquidityGrade: stage4LiquidityGrade,
   });
   const tradableRuleTextStr = tradableRuleText({
     pop: probabilityOfProfit,
     opportunityGrade,
     penalty,
     matchedRule: tradable.matchedRule,
+    capped: tradable.capped,
   });
 
   // ---- Risk Score (lib/risk-score.ts) — display only ----
@@ -3941,6 +3958,7 @@ export function calculateThreeLayerGrade(
     tradableMatchedRule: tradable.matchedRule,
     tradableRuleText: tradableRuleTextStr,
     tradableUnrated: tradable.unrated,
+    tradableCapped: tradable.capped,
     riskScore,
   };
 }
