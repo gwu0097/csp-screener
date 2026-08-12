@@ -2885,6 +2885,14 @@ export function ScreenerView({ connected }: Props) {
                                         )}
                                       >
                                         {referenceStrikeChipLabel(r.threeLayer.referenceStrikeCheck)}
+                                        {r.stageFour?.liquiditySuggestion?.status === "snapped" && (
+                                          <span className="text-amber-300">
+                                            → ${r.stageFour.liquiditySuggestion.strike?.toFixed(2)}
+                                          </span>
+                                        )}
+                                        {r.stageFour?.liquiditySuggestion?.status === "none_qualify" && (
+                                          <AlertTriangle className="h-3 w-3 text-rose-400" />
+                                        )}
                                       </span>
                                     </TooltipTrigger>
                                     <TooltipContent className="max-w-xs whitespace-normal text-sm">
@@ -2892,6 +2900,11 @@ export function ScreenerView({ connected }: Props) {
                                       {r.stageFour?.liquidityReason
                                         ? ` Liquidity ${r.stageFour.liquidityGrade} — ${r.stageFour.liquidityReason}`
                                         : ""}
+                                      {r.stageFour?.liquiditySuggestion && (
+                                        <div className="mt-1.5 border-t border-border/60 pt-1.5">
+                                          {r.stageFour.liquiditySuggestion.reason}
+                                        </div>
+                                      )}
                                     </TooltipContent>
                                   </Tooltip>
                                 ) : (
@@ -3614,6 +3627,21 @@ function ExpandedDetail({
               valueClassName={gradeColor(r.stageFour.liquidityGrade)}
               title={`${r.stageFour.liquidityReason}. Depth (open interest, volume) weighs more than the quoted spread — a wide spread with real depth degrades the grade rather than failing it; noBid (no bid at any price) is the only hard kill.`}
             />
+          )}
+          {r.stageFour?.liquiditySuggestion && (
+            <div
+              className={cn(
+                "mt-1.5 rounded border px-2 py-1.5 text-[11px] leading-snug",
+                r.stageFour.liquiditySuggestion.status === "already_qualifies"
+                  ? "border-border/60 bg-background/40 text-muted-foreground"
+                  : r.stageFour.liquiditySuggestion.status === "snapped"
+                    ? "border-amber-500/40 bg-amber-500/10 text-amber-200"
+                    : "border-rose-500/40 bg-rose-500/10 text-rose-200",
+              )}
+            >
+              <span className="font-semibold uppercase tracking-wide">Liquidity-aware strike</span>{" "}
+              — {r.stageFour.liquiditySuggestion.reason}
+            </div>
           )}
           <Row
             k="Prob of profit"

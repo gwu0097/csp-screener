@@ -37,6 +37,7 @@ import {
 import { computeOptionsFlow, type OptionsFlow } from "@/lib/options-flow";
 import { computeLiquidityRead, capGradeByLiquidity } from "@/lib/liquidity";
 import { computeTradableGrade, tradableRuleText } from "@/lib/tradable-grade";
+import { computeLiquidityAwareSuggestion, type LiquidityStrikeSuggestion } from "@/lib/liquidity-strike";
 import { computeRiskScore, canonicalizeFlags, hasPriorLossOnTicker, type RiskScoreResult } from "@/lib/risk-score";
 
 // ---------- Hard-kill thresholds ----------
@@ -248,6 +249,11 @@ export type StageFourResult = {
   // surfaced separately so the UI can show WHY it was capped.
   liquidityGrade: "A" | "B" | "C" | "F";
   liquidityReason: string;
+  // A SECOND, display-only strike suggestion (lib/liquidity-strike.ts)
+  // — does not change suggestedStrike/opportunityGrade/liquidityGrade
+  // above. Null only when there's no chain/contract to evaluate at all
+  // (same early-return cases that leave every other stage-4 field null).
+  liquiditySuggestion: LiquidityStrikeSuggestion | null;
   note: string | null;
   details: {
     premiumYieldScore: number;
@@ -1989,6 +1995,7 @@ export async function runStageFour(
       volume: null,
       liquidityGrade: "F",
       liquidityReason: "no chain data",
+      liquiditySuggestion: null,
       note: null,
       details: { premiumYieldScore: 0, deltaScore: 0, spreadScore: 0, contractSymbol: null },
     };
@@ -2141,6 +2148,7 @@ export async function runStageFour(
       volume: null,
       liquidityGrade: "F",
       liquidityReason: "no contract picked",
+      liquiditySuggestion: null,
       note: null,
       details: { premiumYieldScore: 0, deltaScore: 0, spreadScore: 0, contractSymbol: null },
     };
@@ -2258,6 +2266,22 @@ export async function runStageFour(
     availableStrikes!.sort((a, b) => a.strike - b.strike);
   }
 
+  // Liquidity-aware suggestion — a SECOND strike, display-only, never
+  // fed back into suggestedStrike/opportunityGrade/liquidityGrade
+  // above. See lib/liquidity-strike.ts for the search rule (outward-
+  // preferred, bounded by 0.5x the reference move) and why it exists
+  // (the strike selector itself reads no chain data at all).
+  const liquiditySuggestion = computeLiquidityAwareSuggestion({
+    anchorStrike: Math.round(contract.strikePrice * 100) / 100,
+    anchorOi: openInterest,
+    anchorVolume: volume,
+    anchorSpreadPct: spreadPctOfMid,
+    anchorPremiumFill: Math.round(premium * 100) / 100,
+    anchorDelta: Math.round(delta * 1000) / 1000,
+    referenceMove,
+    candidates: availableStrikes ?? [],
+  });
+
   return {
     score: rawScore,
     maxScore: 20,
@@ -2278,6 +2302,7 @@ export async function runStageFour(
     volume,
     liquidityGrade: liquidity.grade,
     liquidityReason: liquidity.reason,
+    liquiditySuggestion,
     note,
     availableStrikes,
     details: {
