@@ -37,6 +37,7 @@ import {
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import type { ScreenerResult, StageFourResult, ReferenceStrikeCheck } from "@/lib/screener";
+import { computeLiquidityRead, capGradeByLiquidity } from "@/lib/liquidity";
 import type { PerplexityNewsResult } from "@/lib/perplexity";
 import type { MarketContext } from "@/lib/market";
 import { CrushHistoryTable } from "@/components/crush-history-table";
@@ -233,6 +234,9 @@ type StrikeOverride = {
   last: number;
   delta: number;
   bidAskSpreadPct: number;
+  bid: number;
+  oi: number;
+  volume: number;
 };
 
 // The 2xEM strike is the only recommendation this app makes — no
@@ -2774,7 +2778,14 @@ export function ScreenerView({ connected }: Props) {
                         <TableCell className={cn("font-mono text-base", gradeColor(displayCrushGrade(r.stageThree)))}>
                           {analyzingRow ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : displayCrushGrade(r.stageThree)}
                         </TableCell>
-                        <TableCell className={cn("font-mono text-base", gradeColor(r.stageFour?.opportunityGrade))}>
+                        <TableCell
+                          className={cn("font-mono text-base", gradeColor(r.stageFour?.opportunityGrade))}
+                          title={
+                            r.stageFour?.liquidityReason
+                              ? `Liquidity: ${r.stageFour.liquidityGrade} — ${r.stageFour.liquidityReason}`
+                              : undefined
+                          }
+                        >
                           {analyzingRow ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : (r.stageFour?.opportunityGrade ?? "—")}
                         </TableCell>
                         {(() => {
@@ -3570,6 +3581,14 @@ function ExpandedDetail({
             currentPrice={r.price}
           />
           <Row k="Opportunity" v={`${tl.industryFactors.opportunityGrade}`} />
+          {r.stageFour?.liquidityGrade && (
+            <Row
+              k="Liquidity"
+              v={`${r.stageFour.liquidityGrade} — OI ${r.stageFour.openInterest ?? 0} / vol ${r.stageFour.volume ?? 0}`}
+              valueClassName={gradeColor(r.stageFour.liquidityGrade)}
+              title={`${r.stageFour.liquidityReason}. Depth (open interest, volume) weighs more than the quoted spread — a wide spread with real depth degrades the grade rather than failing it; noBid (no bid at any price) is the only hard kill.`}
+            />
+          )}
           <Row
             k="Prob of profit"
             v={`${(tl.industryFactors.probabilityOfProfit * 100).toFixed(0)}%`}
@@ -3970,6 +3989,8 @@ function overrideFromStrike(s: {
   last: number;
   premiumFill: number;
   delta: number;
+  oi?: number;
+  volume?: number;
 }): StrikeOverride {
   const spreadPct = s.mark > 0 ? ((s.ask - s.bid) / s.mark) * 100 : 0;
   return {
@@ -3980,6 +4001,9 @@ function overrideFromStrike(s: {
     last: s.last ?? 0,
     delta: s.delta,
     bidAskSpreadPct: spreadPct,
+    bid: s.bid,
+    oi: s.oi ?? 0,
+    volume: s.volume ?? 0,
   };
 }
 
@@ -4075,15 +4099,26 @@ function OptionsChainTab({
   // What-if grade at the selected strike — same pipeline as
   // CustomStrikeAnalyzer's "Try:" box (gradeFromYieldClient recomputes
   // opportunityGrade from THIS strike's yield rather than reusing the
-  // original suggested strike's, then gradeFromRulesClient runs the
+  // original suggested strike's, capped by the SAME shared
+  // lib/liquidity.ts read the server uses in runStageFour — not a
+  // second hand-kept-in-sync copy — then gradeFromRulesClient runs the
   // same cascade calculateThreeLayerGrade uses server-side). Never
   // written back to r.threeLayer.
+  const previewOpportunityGrade =
+    strikeOverride !== null && selectedYieldPct !== null
+      ? strikeOverride.bid <= 0
+        ? "F"
+        : capGradeByLiquidity(
+            gradeFromYieldClient(selectedYieldPct),
+            computeLiquidityRead(strikeOverride.oi, strikeOverride.volume, strikeOverride.bidAskSpreadPct).grade,
+          )
+      : null;
   const previewGrade =
-    strikeOverride !== null && selectedPop !== null && selectedYieldPct !== null
+    strikeOverride !== null && selectedPop !== null && previewOpportunityGrade !== null
       ? gradeFromRulesClient({
           pop: selectedPop,
           crushGrade,
-          opportunityGrade: gradeFromYieldClient(selectedYieldPct),
+          opportunityGrade: previewOpportunityGrade,
           hasOverhang,
           vix,
           penalty,
@@ -5104,7 +5139,17 @@ function CustomStrikeAnalyzer({
     // band), so holding it fixed understated the grade impact of trying
     // a different strike.
     const yieldPct = nearest.strike > 0 ? (premium / nearest.strike) * 100 : 0;
-    const opportunityGradeNew = gradeFromYieldClient(yieldPct);
+    // Same liquidity cap as OptionsChainTab's preview and the server's
+    // runStageFour — shared lib/liquidity.ts function, not a re-derived
+    // copy, so this what-if can't silently disagree with the real grade.
+    const nearestSpreadPct = nearest.mark > 0 ? ((nearest.ask - nearest.bid) / nearest.mark) * 100 : 0;
+    const opportunityGradeNew =
+      nearest.bid <= 0
+        ? "F"
+        : capGradeByLiquidity(
+            gradeFromYieldClient(yieldPct),
+            computeLiquidityRead(nearest.oi, nearest.volume, nearestSpreadPct).grade,
+          );
 
     const { grade: finalGradeNew, unrated } = gradeFromRulesClient({
       pop,
@@ -5615,13 +5660,19 @@ function Row({
   k,
   v,
   valueClassName,
+  title,
 }: {
   k: string;
   v: string;
   valueClassName?: string;
+  // Same helper-text-on-hover treatment the swing screener uses for
+  // its column headers — a plain title attribute, no extra tooltip
+  // component, so a Row can explain a value (e.g. why liquidity capped
+  // the grade) without a bespoke widget.
+  title?: string;
 }) {
   return (
-    <div className="flex justify-between gap-2">
+    <div className="flex justify-between gap-2" title={title}>
       <span className="text-muted-foreground">{k}</span>
       <span className={`font-mono ${valueClassName ?? "text-foreground"}`}>
         {v}

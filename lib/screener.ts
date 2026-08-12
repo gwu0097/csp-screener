@@ -35,6 +35,7 @@ import {
   type LossMultiplierResult,
 } from "@/lib/earnings-history-table";
 import { computeOptionsFlow, type OptionsFlow } from "@/lib/options-flow";
+import { computeLiquidityRead, capGradeByLiquidity } from "@/lib/liquidity";
 
 // ---------- Hard-kill thresholds ----------
 // The price floor, market-cap floor, and Stage 2 tier gate live in
@@ -232,10 +233,26 @@ export type StageFourResult = {
   last: number | null;
   bidAskSpreadPct: number | null;
   premiumYieldPct: number | null;
+  // Open interest / today's volume at the RECOMMENDED strike specifically
+  // (availableStrikes carries these per-strike across the whole chain;
+  // these are the same numbers pulled out for the one strike the grade
+  // actually cares about, so callers don't need an availableStrikes
+  // find() just to read the recommended strike's own depth).
+  openInterest: number | null;
+  volume: number | null;
+  // Graduated liquidity read (lib/liquidity.ts) — depth (OI/volume)
+  // weighted above quoted spread, never a hard-kill on its own (that
+  // stays noBid). opportunityGrade above is already capped by this;
+  // surfaced separately so the UI can show WHY it was capped.
+  liquidityGrade: "A" | "B" | "C" | "F";
+  liquidityReason: string;
   note: string | null;
   details: {
     premiumYieldScore: number;
     deltaScore: number;
+    // Liquidity's 0-100 composite score (lib/liquidity.ts) — no longer
+    // a dead 0; see liquidityGrade/liquidityReason above for the graded
+    // read this score maps to.
     spreadScore: number;
     contractSymbol: string | null;
     // Math-formula strike (currentPrice × (1 − 2 × emPct)). Surfaced
@@ -1937,6 +1954,10 @@ export async function runStageFour(
       last: null,
       bidAskSpreadPct: null,
       premiumYieldPct: null,
+      openInterest: null,
+      volume: null,
+      liquidityGrade: "F",
+      liquidityReason: "no chain data",
       note: null,
       details: { premiumYieldScore: 0, deltaScore: 0, spreadScore: 0, contractSymbol: null },
     };
@@ -2085,14 +2106,18 @@ export async function runStageFour(
       last: null,
       bidAskSpreadPct: null,
       premiumYieldPct: null,
+      openInterest: null,
+      volume: null,
+      liquidityGrade: "F",
+      liquidityReason: "no contract picked",
       note: null,
       details: { premiumYieldScore: 0, deltaScore: 0, spreadScore: 0, contractSymbol: null },
     };
   }
 
-  // Spread% still uses the mid as its denominator (standard
-  // convention for expressing spread tightness) — display-only, no
-  // effect on any grade or kill (see isSpreadTooWide below).
+  // Spread% still uses the mid as its denominator (standard convention
+  // for expressing spread tightness) — feeds the graduated liquidity
+  // read below (lib/liquidity.ts), alongside OI/volume.
   const mid = (contract.bid + contract.ask) / 2 || contract.mark || contract.last || 0;
   const bid = Number.isFinite(contract.bid) ? contract.bid : 0;
   const ask = Number.isFinite(contract.ask) ? contract.ask : 0;
@@ -2130,19 +2155,28 @@ export async function runStageFour(
   const deltaScore = scoreDelta(delta);
   const rawScore = premiumYieldScore + deltaScore;
 
+  const openInterest = Number.isFinite(contract.openInterest) ? (contract.openInterest as number) : 0;
+  const volume = Number.isFinite(contract.totalVolume) ? (contract.totalVolume as number) : 0;
+  const liquidity = computeLiquidityRead(openInterest, volume, spreadPctOfMid);
+
   // Grade is yield-direct: > 0.75% / 0.40-0.75% / 0.20-0.40% / < 0.20%
-  // → A / B / C / F. Delta no longer influences the letter grade —
-  // a thin-premium A would still be a bad trade — but deltaScore
-  // stays in details for transparency in the expanded row.
-  // noBid is a hard kill regardless of the yield bucket math (though
-  // premium=0 already lands in the F bucket via gradeFromYield too —
-  // this makes the reason explicit via `note` rather than implicit).
-  const opportunityGrade = noBid ? "F" : gradeFromYield(yieldPct);
+  // → A / B / C / F (gradeFromYield/its thresholds are unchanged by
+  // this). Delta doesn't influence the letter grade — a thin-premium A
+  // would still be a bad trade — but deltaScore stays in details for
+  // transparency. Liquidity then CAPS this down (never up — a thin
+  // strike at great yield still can't grade A) via capGradeByLiquidity;
+  // noBid remains the only hard kill, applied after the cap so a real
+  // bid's liquidity read can't override "no bid at all."
+  const yieldGrade = gradeFromYield(yieldPct);
+  const opportunityGrade = noBid ? "F" : capGradeByLiquidity(yieldGrade, liquidity.grade);
+  const liquidityCapped = !noBid && opportunityGrade !== yieldGrade;
   const note: string | null = noBid
     ? "No bid — cannot be sold at any price"
     : midInvalid
       ? "Bid/ask quote invalid (missing or crossed ask) — priced at bid, not mid"
-      : null;
+      : liquidityCapped
+        ? `Liquidity-capped from ${yieldGrade} — ${liquidity.reason}`
+        : null;
 
   // Compact snapshot of the weekly put chain — the UI uses it to let
   // users try a custom strike without another API round-trip. When
@@ -2209,13 +2243,18 @@ export async function runStageFour(
     last: Math.round(last * 100) / 100,
     bidAskSpreadPct: Math.round(spreadPctOfMid * 10) / 10,
     premiumYieldPct: Math.round(yieldPct * 1000) / 1000,
+    openInterest,
+    volume,
+    liquidityGrade: liquidity.grade,
+    liquidityReason: liquidity.reason,
     note,
     availableStrikes,
     details: {
       premiumYieldScore,
       deltaScore,
-      // Kept at 0 for type compatibility — spread no longer scored.
-      spreadScore: 0,
+      // Liquidity's 0-100 composite score (lib/liquidity.ts) — depth
+      // (OI/volume) weighted above spread. No longer a dead 0.
+      spreadScore: liquidity.score,
       contractSymbol: contract.symbol,
       mathTargetStrike: Math.round(suggestedStrike * 100) / 100,
       usedTargetedLookup,
@@ -2223,9 +2262,16 @@ export async function runStageFour(
   };
 }
 
-// Spread is no longer a hard-kill; retained as a display-only field on
-// StageFourResult.bidAskSpreadPct. Helper always returns false so any
-// remaining call short-circuits harmlessly.
+// Deliberately still always false, even after the liquidity-gate fix
+// below wired real OI/volume/spread into opportunityGrade. Reactivating
+// this as a binary hard-kill would directly violate the liquidity-gate
+// requirement that a wide QUOTED spread must degrade, not fail, when
+// real depth exists (the thin_chain_workable_limit case — a limit near
+// mid often fills on a thin chain despite the spread looking bad).
+// That graduated behavior now lives in stageFour.opportunityGrade via
+// lib/liquidity.ts's capGradeByLiquidity; this recommendation-level
+// binary kill would bypass it. Kept (not deleted) only so
+// ScreenerResult.spreadTooWide/tradeable below keep resolving.
 function isSpreadTooWide(): boolean {
   return false;
 }
