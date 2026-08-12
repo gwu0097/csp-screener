@@ -19,6 +19,8 @@ const PUBLIC_PATHS = new Set([
   // on its own CRON_SECRET bearer check (lib/cron-auth.ts).
   "/api/earnings/capture-t0",
   "/api/earnings/capture-t1",
+  "/api/earnings/seed-em",
+  "/api/earnings/sweep-eps",
 ]);
 
 function secret(): Uint8Array {

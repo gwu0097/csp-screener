@@ -696,7 +696,7 @@ export type UpdateSummary = {
   isComplete: boolean;
 };
 
-function pctChange(actual: number | null, estimate: number | null): number | null {
+export function pctChange(actual: number | null, estimate: number | null): number | null {
   if (actual === null || estimate === null || estimate === 0) return null;
   return (actual - estimate) / Math.abs(estimate);
 }
@@ -1550,7 +1550,7 @@ export async function reingestHistoricalDates(
 // overwrites. Partial writes are forbidden — either we have all the
 // fields for a given stage or we skip the row entirely.
 
-type HistoryRow = {
+export type HistoryRow = {
   symbol: string;
   earnings_date: string;
   timing: "amc" | "bmo" | "unknown" | null;
@@ -1584,7 +1584,7 @@ type HistoryRow = {
   period_end: string | null;
 };
 
-async function readHistoryRow(
+export async function readHistoryRow(
   symbol: string,
   earningsDate: string,
 ): Promise<HistoryRow | null> {
@@ -1607,7 +1607,7 @@ async function readHistoryRow(
 // checks the exact date, so a range check first catches the near-miss
 // and merges onto the existing row's date instead of stubbing a
 // duplicate.
-async function upsertHistoryStub(
+export async function upsertHistoryStub(
   symbol: string,
   earningsDate: string,
   timing: "amc" | "bmo" | "unknown" = "unknown",

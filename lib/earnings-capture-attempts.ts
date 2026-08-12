@@ -15,6 +15,41 @@ import { createServerClient } from "./supabase";
 
 export type CapturePhase = "t0" | "t1";
 
+// em-seed / eps-sweep (lib/em-universe-seed.ts, lib/eps-sweep.ts) are
+// NOT T0/T1 capture phases — neither one calls Schwab or performs a
+// T0/T1 capture, so they must never patch t0_*/t1_* bookkeeping columns
+// (recordCaptureAttempt below does that unconditionally, keyed only on
+// "t1" vs "everything else"). Logged through the same table anyway, per
+// the capture-attempts audit's own principle: a symbol failing
+// repeatedly should be visible, not silent.
+export type AncillaryPhase = "em-seed" | "eps-sweep";
+
+// Insert-only counterpart to recordCaptureAttempt — no earnings_history
+// patch, so it's safe for phases that aren't a T0/T1 capture.
+export async function recordAncillaryAttempt(opts: {
+  earningsHistoryId: string | null;
+  symbol: string;
+  earningsDate: string;
+  phase: AncillaryPhase;
+  outcome: string;
+  errorMessage?: string | null;
+}): Promise<void> {
+  const sb = createServerClient();
+  const ins = await sb.from("earnings_capture_attempts").insert({
+    earnings_history_id: opts.earningsHistoryId,
+    symbol: opts.symbol.toUpperCase(),
+    earnings_date: opts.earningsDate,
+    capture_phase: opts.phase,
+    outcome: opts.outcome,
+    error_message: opts.errorMessage ?? null,
+  });
+  if (ins.error) {
+    console.warn(
+      `[earnings-capture-attempts] insert failed for ${opts.symbol}/${opts.earningsDate}/${opts.phase}: ${ins.error.message}`,
+    );
+  }
+}
+
 // How many calendar days past earnings_date a row stays a T1 candidate.
 // Was a fixed 4-day window with no retry at all — one Schwab failure
 // (chain_fetch_failed / schwab_disconnected / timeout) inside that
