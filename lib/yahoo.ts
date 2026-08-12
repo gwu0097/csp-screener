@@ -906,24 +906,39 @@ export async function getHistoricalEarningsMovements(symbol: string): Promise<Ea
 // Pullback's data-quality tracking). getSectorIndustry below is the
 // original, kept byte-for-byte behaviorally identical for its existing
 // callers (which all rely on it never throwing).
+// Widened (2026-08-12) to also return marketCap, in the same call —
+// this is now the single shared Yahoo profile fetch for BOTH
+// lib/classification.ts's CSP-screener classification path and
+// lib/swing-screener.ts's getOrFetchSector, so neither one fetches a
+// field the other then has no way to see. Throw-on-hard-failure is
+// preserved unchanged for swing-screener's existing "fetch failed" vs
+// "no sector on file" distinction; classification.ts wraps its own
+// call in a try/catch to keep its established never-throws contract.
 export async function getSectorIndustryOrThrow(
   symbol: string,
-): Promise<{ sector: string | null; industry: string | null }> {
-  const summary = await quoteSummary(symbol, ["assetProfile", "summaryProfile"]);
+): Promise<{ sector: string | null; industry: string | null; marketCap: number | null }> {
+  const summary = await quoteSummary(symbol, [
+    "assetProfile",
+    "summaryProfile",
+    "summaryDetail",
+    "price",
+  ]);
   const profile = summary?.assetProfile ?? summary?.summaryProfile ?? null;
+  const marketCap = summary?.summaryDetail?.marketCap ?? summary?.price?.marketCap ?? null;
   return {
     sector: profile?.sector ?? null,
     industry: profile?.industry ?? null,
+    marketCap: typeof marketCap === "number" ? marketCap : null,
   };
 }
 
 export async function getSectorIndustry(
   symbol: string,
-): Promise<{ sector: string | null; industry: string | null }> {
+): Promise<{ sector: string | null; industry: string | null; marketCap: number | null }> {
   try {
     return await getSectorIndustryOrThrow(symbol);
   } catch (e) {
     logYahooFailure(`getSectorIndustry(${symbol})`, e);
-    return { sector: null, industry: null };
+    return { sector: null, industry: null, marketCap: null };
   }
 }

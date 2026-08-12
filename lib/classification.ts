@@ -3,7 +3,7 @@
 // ticker is missing from INDUSTRY_MAP.
 
 import { createServerClient } from "@/lib/supabase";
-import { getCompanyProfile } from "@/lib/yahoo";
+import { getSectorIndustryOrThrow } from "@/lib/yahoo";
 
 export type IndustryClass =
   | "consumer_staples"
@@ -352,24 +352,38 @@ async function readProfileCache(symbol: string): Promise<CachedProfile | null> {
   }
 }
 
-async function writeProfileCache(
+// Shared stock_profiles writer — used by classifyFromYahoo below AND
+// by lib/swing-screener.ts's getOrFetchSector, so the two independent
+// Yahoo-lookup paths never again clobber a field the other one already
+// wrote. A field left `undefined` is omitted from the upsert entirely
+// (not written as null): if this particular fetch didn't come back
+// with, say, a sector, that must not erase a sector the OTHER caller
+// already cached. Only classifyFromYahoo's explicit "total failure,
+// cache the negative result" branch writes null for both fields at
+// once — that's a real "checked, found nothing" state, not a partial
+// fetch, so there's nothing to protect there.
+export async function cacheStockProfile(
   symbol: string,
-  record: { industry: string | null; industry_pass: boolean; marketCapBillions: number | null },
+  fields: {
+    industry?: string | null;
+    sector?: string | null;
+    industry_pass?: boolean;
+    marketCapBillions?: number | null;
+  },
 ): Promise<void> {
   try {
     const supabase = createServerClient();
-    await supabase.from("stock_profiles").upsert(
-      {
-        symbol: symbol.toUpperCase(),
-        industry: record.industry,
-        industry_pass: record.industry_pass,
-        market_cap_billions: record.marketCapBillions,
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: "symbol" },
-    );
+    const payload: Record<string, unknown> = {
+      symbol: symbol.toUpperCase(),
+      updated_at: new Date().toISOString(),
+    };
+    if (fields.industry !== undefined) payload.industry = fields.industry;
+    if (fields.sector !== undefined) payload.sector = fields.sector;
+    if (fields.industry_pass !== undefined) payload.industry_pass = fields.industry_pass;
+    if (fields.marketCapBillions !== undefined) payload.market_cap_billions = fields.marketCapBillions;
+    await supabase.from("stock_profiles").upsert(payload, { onConflict: "symbol" });
   } catch (e) {
-    console.error(`[classify] cache write failed for ${symbol}:`, e instanceof Error ? e.message : e);
+    console.error(`[classify] cacheStockProfile write failed for ${symbol}:`, e instanceof Error ? e.message : e);
   }
 }
 
@@ -413,10 +427,20 @@ export async function cacheMarketCapBillions(
 }
 
 async function classifyFromYahoo(symbol: string): Promise<ClassificationResult> {
-  const profile = await getCompanyProfile(symbol);
+  // getSectorIndustryOrThrow throws on a hard fetch failure (that's the
+  // point — it lets swing-screener's getOrFetchSector tell "fetch
+  // failed" apart from "no sector on file"). classifyFromYahoo has
+  // never thrown to its own callers, so that distinction is collapsed
+  // back into the existing !profile branch here, same as before.
+  let profile: { sector: string | null; industry: string | null; marketCap: number | null } | null;
+  try {
+    profile = await getSectorIndustryOrThrow(symbol);
+  } catch {
+    profile = null;
+  }
   if (!profile || (!profile.sector && !profile.industry)) {
-    // No usable data — cache the failure so we don't re-query.
-    await writeProfileCache(symbol, { industry: null, industry_pass: false, marketCapBillions: null });
+    // No usable data — cache the failure (both fields) so we don't re-query.
+    await cacheStockProfile(symbol, { industry: null, sector: null, industry_pass: false, marketCapBillions: null });
     return { pass: false, industry: "unknown", source: "yahoo" };
   }
   const { pass, industry } = mapYahooToPass(profile);
@@ -424,7 +448,17 @@ async function classifyFromYahoo(symbol: string): Promise<ClassificationResult> 
     typeof profile.marketCap === "number" && profile.marketCap > 0
       ? Math.round((profile.marketCap / 1e9) * 100) / 100
       : null;
-  await writeProfileCache(symbol, { industry, industry_pass: pass, marketCapBillions: mcapBillions });
+  // sector: profile.sector could be null even on an otherwise-successful
+  // fetch (Yahoo had industry but not sector this time) — pass undefined
+  // rather than null in that case so cacheStockProfile omits the key
+  // instead of clobbering a sector getOrFetchSector may have already
+  // cached for this symbol.
+  await cacheStockProfile(symbol, {
+    industry,
+    sector: profile.sector ?? undefined,
+    industry_pass: pass,
+    marketCapBillions: mcapBillions,
+  });
   return { pass, industry, source: "yahoo" };
 }
 

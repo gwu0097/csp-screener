@@ -24,6 +24,7 @@ import {
   type SchwabOptionsChain,
 } from "./schwab";
 import { getResearchSnapshot, getSectorIndustryOrThrow } from "./yahoo";
+import { cacheStockProfile } from "./classification";
 import {
   batchRefreshSnapshots,
   type SymbolSnapshot,
@@ -1034,6 +1035,13 @@ async function fetchAtrAndAdr(
 // needs that distinction for data-quality tracking; pass2Enrich (the
 // four legacy tabs) just reads `.sector` and ignores `.failed`, so this
 // is a behavior-preserving change for that caller.
+//
+// Writes through cacheStockProfile (lib/classification.ts) — the same
+// shared writer classifyFromYahoo uses — so a live fetch that comes
+// back with industry too (Yahoo returns both from one assetProfile
+// call) no longer gets half of it thrown away. Previously this upserted
+// `sector` alone even when `industry` was sitting right there in the
+// same response.
 async function getOrFetchSector(symbol: string): Promise<{ sector: string | null; failed: boolean }> {
   const sb = createServerClient();
   try {
@@ -1048,15 +1056,12 @@ async function getOrFetchSector(symbol: string): Promise<{ sector: string | null
     // fall through to a live fetch
   }
   try {
-    const { sector } = await getSectorIndustryOrThrow(symbol);
-    if (sector) {
-      // Partial upsert — only touches `sector`/`updated_at`, leaves
-      // industry/industry_pass/market_cap_billions alone if the row
-      // already exists (same pattern as classification.ts's
-      // cacheMarketCapBillions).
-      await sb
-        .from("stock_profiles")
-        .upsert({ symbol, sector, updated_at: new Date().toISOString() }, { onConflict: "symbol" });
+    const { sector, industry } = await getSectorIndustryOrThrow(symbol);
+    if (sector !== null || industry !== null) {
+      await cacheStockProfile(symbol, {
+        sector: sector ?? undefined,
+        industry: industry ?? undefined,
+      });
     }
     return { sector, failed: false };
   } catch (e) {
