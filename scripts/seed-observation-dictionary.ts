@@ -250,12 +250,6 @@ const SEED_TERMS: SeedTerm[] = [
     fallbackCitations: [{ symbol: "ROKU", earningsDate: "2026-08-06" }],
   },
   {
-    term: "verified_modifier_not_applied",
-    kind: "app_defect",
-    definition: "verifiedModifier computes a non-zero delta but reports applied=false, so a detected penalty or credit does not reach the grade.",
-    fallbackCitations: [{ symbol: "TXRH", earningsDate: "2026-08-06" }],
-  },
-  {
     term: "blind_history",
     kind: "app_defect",
     definition:

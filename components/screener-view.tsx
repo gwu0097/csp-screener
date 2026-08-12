@@ -4954,7 +4954,7 @@ function AnalysisDumpTab({
       `historicalMoveRatio (shrunk toward population median): ${dumpNum(d?.historicalMoveRatioShrunk ?? null, 3)} [populationPriorRatio=${dumpNum(d?.populationPriorRatio ?? null, 3)} shrinkageK=${dumpNum(d?.shrinkageK ?? null, 1)}]`,
     );
     push(
-      `verifiedModifier: delta=${d?.crushVerifiedModifierDelta ?? 0} (${d?.crushRatioSeverity ?? "no verified evidence"}) [verified ratio=${dumpNum(d?.crushRatio ?? null, 3)} verified-n=${d?.crushRatioVerifiedN ?? 0} applied=${d?.crushRatioCapApplied ?? false}]`,
+      `verifiedModifier (reporting only, does not change crush grade): delta=${d?.crushVerifiedModifierDelta ?? 0} (${d?.crushRatioSeverity ?? "no verified evidence"}) [verified ratio=${dumpNum(d?.crushRatio ?? null, 3)} verified-n=${d?.crushRatioVerifiedN ?? 0} wouldApply=${d?.crushRatioWouldApply ?? false}]`,
     );
     push(
       `Loss-multiplier calibration (E[loss|breach] as a multiple of EM): ${dumpNum(d?.lossMultiplier ?? null, 2)}x [source=${d?.lossMultiplierSource ?? "pool"} tickerN=${d?.lossMultiplierTickerN ?? 0} sectorN=${d?.lossMultiplierSectorN ?? 0} poolN=${d?.lossMultiplierPoolN ?? 0}]`,

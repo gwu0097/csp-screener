@@ -134,9 +134,20 @@ export type StageThreeResult = {
     // Mean of each SCHWAB-VERIFIED (schwab/schwab_t0 source only)
     // historical event's own realized/implied-at-the-time ratio — a
     // narrower, higher-trust population than historicalMoveRatio above.
-    // Feeds computeVerifiedModifier, applied post-hoc in
+    // Feeds computeVerifiedModifier, computed post-hoc in
     // runStagesThreeFour once crushHistory is available — placeholder
     // null/0 here.
+    //
+    // Reporting-only as of the verifiedModifier audit (2026-08-25):
+    // computeVerifiedModifier no longer touches crushGrade (see that
+    // call site's comment). The apparent 0.333-vs-0.751 predictive gap
+    // between flagged and unflagged tickers was a recency confound —
+    // verified (schwab/schwab_t0) data only exists inside the app's own
+    // live-capture window, and restricting the unflagged group to that
+    // same window collapsed the gap to 0.403, statistically
+    // indistinguishable from the flagged group. All five fields below
+    // stay computed and on the dump so the number stays visible; none
+    // of them feed a grade anymore.
     crushRatio: number | null;
     // Human-readable band the verified ratio landed in (e.g. "severe
     // miss (>2.0x)"), or null when crushRatioVerifiedN is 0.
@@ -149,12 +160,18 @@ export type StageThreeResult = {
     // At 0, computeVerifiedModifier returns delta 0 — genuinely neutral,
     // not a ceiling.
     crushRatioVerifiedN: number;
-    // Grade steps applied by computeVerifiedModifier (+raises/-lowers/0
-    // neutral) — replaces the old ceiling-only crushRatioCap.
+    // Grade steps computeVerifiedModifier WOULD apply (+raises/-lowers/0
+    // neutral) if it were still wired into the grade — diagnostic only,
+    // no longer applied.
     crushVerifiedModifierDelta: number;
-    // True when the modifier actually changed the grade the composite
-    // score (or the encyclopedia fallback) would otherwise have produced.
-    crushRatioCapApplied: boolean;
+    // True when applying crushVerifiedModifierDelta WOULD change the
+    // grade the composite score (or the encyclopedia fallback)
+    // produced — hypothetical only, never actually applied. Renamed
+    // from crushRatioCapApplied (2026-08-25): that name claimed a past
+    // action ("applied") this field no longer performs. Audit found
+    // ~57.5% of nonzero-delta candidates land here as true-but-already-F
+    // — floor-clamped either way, applied or not.
+    crushRatioWouldApply: boolean;
     // Implied move actually used downstream (crush scoring, stage 4
     // strike selection). Straddle-derived when available; see
     // impliedMoveMethod for which method produced this value.
@@ -821,6 +838,21 @@ function gradeFromCrushScore(score: number, maxScore: number = 25): StageThreeRe
 // can move the grade UP when verified evidence is good, and returns a
 // hard 0 (no modifier at all) when verifiedN===0 — absence of evidence
 // is not evidence of a bad setup.
+//
+// REPORTING ONLY as of the verifiedModifier audit (2026-08-25) — the
+// call site in runStagesThreeFour no longer assigns this function's
+// output to stageThree.crushGrade. 143 tickers currently carry a
+// nonzero delta (always exactly -1, always from verifiedN 1 or 2); the
+// apparent predictive gap this delta seemed to carry (flagged tickers'
+// next-event move_ratio 0.333 vs unflagged 0.751) was a recency
+// confound — verified (schwab/schwab_t0) data only exists inside the
+// app's own live-capture window, and restricting the unflagged group
+// to that same window collapsed it to 0.403, statistically
+// indistinguishable from 0.333. The function itself is unchanged and
+// still computed for every candidate — its output stays on the dump
+// (crushRatio/crushRatioSeverity/crushRatioVerifiedN/
+// crushVerifiedModifierDelta/crushRatioWouldApply) as a visible,
+// inert diagnostic.
 const GRADE_ORDER: Record<"A" | "B" | "C" | "F", number> = { A: 3, B: 2, C: 1, F: 0 };
 export type VerifiedModifierResult = {
   ratio: number | null;
@@ -895,7 +927,10 @@ const GRADE_STEPS: Array<"A" | "B" | "C" | "F"> = ["F", "C", "B", "A"];
 
 // Applies computeVerifiedModifier's delta to a letter grade, clamped to
 // the A..F range. delta===0 always returns the input grade unchanged —
-// the neutral case is a true no-op, not a re-derivation.
+// the neutral case is a true no-op, not a re-derivation. As of the
+// verifiedModifier audit (2026-08-25) its only call site uses this for
+// the crushRatioWouldApply diagnostic (a hypothetical grade, never
+// assigned) — not to compute a real grade anymore.
 export function applyGradeModifier(grade: "A" | "B" | "C" | "F", delta: number): "A" | "B" | "C" | "F" {
   if (delta === 0) return grade;
   const idx = GRADE_ORDER[grade];
@@ -1800,7 +1835,7 @@ export async function runStageThree(
       crushRatioCapSampleWeight: 0,
       crushRatioVerifiedN: 0,
       crushVerifiedModifierDelta: 0,
-      crushRatioCapApplied: false,
+      crushRatioWouldApply: false,
       impliedMoveMethod,
       impliedMoveDegradedReason,
       impliedMovePctIvFormula: ivFormulaEmPct,
@@ -2811,19 +2846,24 @@ export async function runStagesThreeFour(
   stageThree.details.crushHistory = crushHistory;
   stageThree.details.optionsFlow = optionsFlow;
 
-  // Verified modifier: apply bidirectional, evidence-scaled adjustment
-  // now that crushHistory (with each quarter's implied_move_source) is
-  // available. Schwab-only filter per the PASS_2A source-quality audit
-  // — see computeVerifiedModifier's docblock. Applied AFTER whichever
-  // grade is currently on stageThree (composite score or the
-  // encyclopedia-fallback substitution above), so it's a backstop
-  // regardless of which mechanism produced the letter. Excludes
-  // h.earningsDate === candidate.earningsDate: the T0/T1 crush capture
-  // cron writes a schwab_t0 row for the CURRENT cycle's own earnings
-  // before it's happened yet (seeding the pre-earnings implied move) —
-  // found live on NOW's own 2026-07-22 row, actual_move_pct 0.0003
-  // sampled hours apart same-day, nowhere near a real post-earnings
-  // reaction. That's the live candidate itself, not history.
+  // Verified modifier — REPORTING ONLY as of the verifiedModifier audit
+  // (2026-08-25). Used to apply a bidirectional grade adjustment here;
+  // removed from the grade path because the apparent predictive gap
+  // (flagged tickers' next-event ratio 0.333 vs unflagged 0.751) was a
+  // recency confound, not signal: verified (schwab/schwab_t0) data only
+  // exists inside the app's own live-capture window, and restricting
+  // the unflagged group to that same window collapsed its median to
+  // 0.403 — statistically indistinguishable from the flagged group's
+  // 0.333. The n=1 asymmetry (excellent-suppressed 0.334 vs moderate-
+  // miss-penalized 0.345) was equally unsupported. computeVerifiedModifier
+  // and its inputs stay exactly as they were — schwab-only filter per
+  // the PASS_2A source-quality audit, excluding
+  // h.earningsDate === candidate.earningsDate (the T0/T1 cron seeds a
+  // schwab_t0 row for the CURRENT cycle's own earnings before it's
+  // happened yet — that's the live candidate itself, not history) — the
+  // only change is stageThree.crushGrade no longer gets reassigned.
+  // crushGrade stays whatever the composite score (or the encyclopedia
+  // fallback above) produced.
   const schwabRatios = crushHistory
     .filter(
       (h) =>
@@ -2834,16 +2874,20 @@ export async function runStagesThreeFour(
     .map((h) => h.ratio as number);
   const modifier = computeVerifiedModifier(schwabRatios);
   const preModifierGrade = stageThree.crushGrade;
-  stageThree.crushGrade = applyGradeModifier(preModifierGrade, modifier.delta);
+  // Hypothetical only — NOT assigned to stageThree.crushGrade. Kept so
+  // crushRatioWouldApply can report whether the (now-inert) modifier
+  // would have mattered, same diagnostic value the audit used to find
+  // the 57.5% floor-clamped rate.
+  const wouldBeGrade = applyGradeModifier(preModifierGrade, modifier.delta);
   stageThree.details.crushRatio = modifier.ratio;
   stageThree.details.crushRatioSeverity = modifier.verifiedN > 0 ? modifier.band : null;
   stageThree.details.crushRatioCapSampleWeight = modifier.weight;
   stageThree.details.crushRatioVerifiedN = modifier.verifiedN;
   stageThree.details.crushVerifiedModifierDelta = modifier.delta;
-  stageThree.details.crushRatioCapApplied = stageThree.crushGrade !== preModifierGrade;
+  stageThree.details.crushRatioWouldApply = wouldBeGrade !== preModifierGrade;
   console.log(
-    `[crush-verified-modifier] ${candidate.symbol} ${modifier.reason} ` +
-      `preModifierGrade=${preModifierGrade} postModifierGrade=${stageThree.crushGrade}`,
+    `[crush-verified-modifier] ${candidate.symbol} ${modifier.reason} (reporting only) ` +
+      `preModifierGrade=${preModifierGrade} wouldBeGrade=${wouldBeGrade}`,
   );
 
   if (lossMultiplierResult) {
