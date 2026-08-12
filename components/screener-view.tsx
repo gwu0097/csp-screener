@@ -4865,13 +4865,45 @@ function AnalysisDumpTab({
   const analysisSnapshot = useMemo(() => {
     const history = d?.crushHistory ?? [];
     const maxDownside = findMaxDownsideRatio(history);
+    const rsc = tl?.referenceStrikeCheck;
+    const referenceStrike = rsc?.referenceStrike ?? null;
+    const strikeRow =
+      referenceStrike !== null
+        ? (r.stageFour?.availableStrikes?.find((s) => s.strike === referenceStrike) ?? null)
+        : null;
     return {
-      referenceStrike: tl?.referenceStrikeCheck.referenceStrike ?? null,
+      referenceStrike,
       spot: r.price,
       emPct: d?.expectedMovePct ?? null,
       numericGrade: tl?.finalGrade ?? null,
       crushGrade: r.stageThree?.crushGrade ?? null,
       maxDownsideRatio: maxDownside?.ratio ?? null,
+      // Everything below fills the rest of "what the decision was made
+      // on" — all already in scope here with zero new fetches, per the
+      // capture-layer audit (research_analyses previously only froze
+      // spot/EM/grade, so the fill-quality/VIX/crush-breakdown numbers
+      // behind that grade were silently recomputed against later,
+      // possibly-changed data).
+      impliedMoveSource: d?.impliedMoveMethod ?? null,
+      pop: rsc?.status === "tradeable" ? rsc.pop : null,
+      delta: rsc?.status === "tradeable" ? rsc.delta : null,
+      yieldPct: r.stageFour?.premiumYieldPct ?? null,
+      premiumBid: r.stageFour?.bid ?? null,
+      premiumAsk: r.stageFour?.ask ?? null,
+      spreadPct: r.stageFour?.bidAskSpreadPct ?? null,
+      oi: strikeRow?.oi ?? null,
+      volume: strikeRow?.volume ?? null,
+      vix: tl?.regimeFactors.vix ?? null,
+      vixRegime: tl?.regimeFactors.vixRegime ?? null,
+      crushSubscores: d
+        ? {
+            historicalMoveScore: d.historicalMoveScore,
+            consistencyScore: d.consistencyScore,
+            termStructureScore: d.termStructureScore,
+            ivEdgeScore: d.ivEdgeScore,
+            surpriseScore: d.surpriseScore,
+          }
+        : null,
     };
   }, [r, tl, d]);
 

@@ -14,6 +14,7 @@ import { recordPositionOutcome } from "@/lib/post-earnings";
 import { requireUserId, authErrorResponse } from "@/lib/auth";
 import { buildStampContext, stampEntryContext } from "@/lib/entry-context";
 import { classifyUserChains, persistChains } from "@/lib/trade-chains";
+import { buildAndPersistCampaigns } from "@/lib/campaigns";
 
 export const dynamic = "force-dynamic";
 // Phase 2b entry-context stamping adds a VIX + snapshot + chain fetch
@@ -108,25 +109,22 @@ const TZ_BY_CODE: Record<string, string> = {
 //
 // When source is PT/PST the conversion is a no-op (just strip any
 // time suffix and return the date portion).
-function toPstDate(input: string, sourceTzCode?: string): string {
-  const sourceTz = TZ_BY_CODE[sourceTzCode ?? "PT"] ?? "America/Los_Angeles";
-  const dt = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(input);
-  const dm = !dt ? /^(\d{4})-(\d{2})-(\d{2})$/.exec(input) : null;
-  const m = dt ?? dm;
-  if (!m) return input;
-  if (sourceTz === "America/Los_Angeles") return `${m[1]}-${m[2]}-${m[3]}`;
-
-  const y = Number(m[1]);
-  const mo = Number(m[2]);
-  const d = Number(m[3]);
-  const h = dt ? Number(dt[4]) : 17;
-  const mi = dt ? Number(dt[5]) : 0;
-  const s = dt && dt[6] ? Number(dt[6]) : 0;
-
-  // Treat the wall-clock components as if they were UTC, find the
-  // source-TZ DST-aware offset at that date, then subtract the offset
-  // to get the real UTC instant for that source-tz wall clock.
+// Treat the wall-clock components as if they were UTC, find the
+// source-TZ DST-aware offset at that date, then subtract the offset to
+// get the real UTC instant for that source-tz wall clock. Shared by
+// toPstDate (collapses the instant to a PT calendar date) and
+// toSourceInstant (keeps the full instant, for fill_time).
+function sourceInstantFromParts(
+  y: number,
+  mo: number,
+  d: number,
+  h: number,
+  mi: number,
+  s: number,
+  sourceTz: string,
+): Date {
   let utcMs = Date.UTC(y, mo - 1, d, h, mi, s);
+  if (sourceTz === "UTC") return new Date(utcMs);
   const dtf = new Intl.DateTimeFormat("en-US", {
     timeZone: sourceTz,
     hourCycle: "h23",
@@ -149,12 +147,50 @@ function toPstDate(input: string, sourceTzCode?: string): string {
   );
   const offsetMs = tzTimeAsUtc - utcMs;
   utcMs -= offsetMs;
+  return new Date(utcMs);
+}
+
+function toPstDate(input: string, sourceTzCode?: string): string {
+  const sourceTz = TZ_BY_CODE[sourceTzCode ?? "PT"] ?? "America/Los_Angeles";
+  const dt = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(input);
+  const dm = !dt ? /^(\d{4})-(\d{2})-(\d{2})$/.exec(input) : null;
+  const m = dt ?? dm;
+  if (!m) return input;
+  if (sourceTz === "America/Los_Angeles") return `${m[1]}-${m[2]}-${m[3]}`;
+
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const d = Number(m[3]);
+  const h = dt ? Number(dt[4]) : 17;
+  const mi = dt ? Number(dt[5]) : 0;
+  const s = dt && dt[6] ? Number(dt[6]) : 0;
+  const instant = sourceInstantFromParts(y, mo, d, h, mi, s, sourceTz);
   return new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/Los_Angeles",
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
-  }).format(new Date(utcMs));
+  }).format(instant);
+}
+
+// Real execution instant for fills.fill_time, when the input carries an
+// actual time-of-day ("YYYY-MM-DDTHH:MM:SS", e.g. Gemini's parsed
+// broker "Time Placed"). Returns null for date-only input — callers
+// fall back to import wall-clock time in that case, same as before
+// this existed (a bare trade_date genuinely has no time to recover).
+function toSourceInstant(input: string, sourceTzCode?: string): Date | null {
+  const sourceTz = TZ_BY_CODE[sourceTzCode ?? "PT"] ?? "America/Los_Angeles";
+  const dt = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(input);
+  if (!dt) return null;
+  return sourceInstantFromParts(
+    Number(dt[1]),
+    Number(dt[2]),
+    Number(dt[3]),
+    Number(dt[4]),
+    Number(dt[5]),
+    dt[6] ? Number(dt[6]) : 0,
+    sourceTz,
+  );
 }
 
 function todayPst(): string {
@@ -319,6 +355,7 @@ export async function POST(req: NextRequest) {
     symbol: string;
     broker: string;
     fillDate: string;
+    fillTime: string;
     expiry: string;
     // Resolved position id when one already exists (exact or fuzzy
     // match), or when an earlier item in this batch will create it.
@@ -372,6 +409,12 @@ export async function POST(req: NextRequest) {
     const broker = normalizeBroker(input.broker);
     const rawFillDate = input.timePlaced ?? input.trade_date ?? null;
     const fillDate = rawFillDate ? toPstDate(rawFillDate, sourceTimezone) : todayPst();
+    // Real broker execution time when the parser captured one (Schwab
+    // screenshots via Gemini's "Time Placed" field); otherwise fall back
+    // to import wall-clock time, same as before this existed.
+    const fillTimeIso = (
+      input.timePlaced ? toSourceInstant(input.timePlaced, sourceTimezone) : null
+    )?.toISOString() ?? new Date().toISOString();
 
     // Per-fill date validation (weekend / future / >30d stale). Bad
     // dates corrupt opened_date/closed_date and monthly P&L attribution
@@ -550,6 +593,7 @@ export async function POST(req: NextRequest) {
       symbol,
       broker,
       fillDate,
+      fillTime: fillTimeIso,
       expiry,
       existingPositionId,
       createsNewPosition,
@@ -872,7 +916,7 @@ export async function POST(req: NextRequest) {
   // ---- Phase 2a — options: create positions, insert fills, recompute ----
   try {
     for (const plan of optionPlans) {
-      const { input, symbol, broker, fillDate, expiry, keyForBatch } = plan;
+      const { input, symbol, broker, fillDate, fillTime, expiry, keyForBatch } = plan;
       let positionId: string;
       if (plan.existingPositionId) {
         positionId = plan.existingPositionId;
@@ -929,7 +973,7 @@ export async function POST(req: NextRequest) {
         contracts: input.contracts,
         premium: input.premium,
         fill_date: fillDate,
-        fill_time: new Date().toISOString(),
+        fill_time: fillTime,
         import_batch_id: importBatchId,
         user_id: userId,
       });
@@ -1263,6 +1307,26 @@ export async function POST(req: NextRequest) {
       } catch (e) {
         console.warn(
           `[bulk-create] chain detection failed for ${sym}: ${e instanceof Error ? e.message : e}`,
+        );
+      }
+    }
+
+    // Campaign layer — resolve each just-reclassified chain to the
+    // earnings event it belongs to (lib/campaigns.ts) and stamp
+    // campaign_id on every member. Runs AFTER chain detection so a
+    // roll/scale-in fill that just joined an existing chain gets
+    // folded into that chain's campaign rather than left unstamped.
+    for (const sym of symbolsWithOpens) {
+      try {
+        const built = await buildAndPersistCampaigns(userId, sym);
+        if (built.unresolved > 0) {
+          console.log(
+            `[bulk-create] campaign resolution ${sym}: ${built.resolved} resolved, ${built.unresolved} unresolved`,
+          );
+        }
+      } catch (e) {
+        console.warn(
+          `[bulk-create] campaign build failed for ${sym}: ${e instanceof Error ? e.message : e}`,
         );
       }
     }

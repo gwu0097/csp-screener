@@ -2837,9 +2837,16 @@ type PersonalRow = {
   total_contracts: number | null;
   position_type: string | null;
   trade_chain_id: string | null;
+  campaign_id: string | null;
   trade_type: string | null;
   peak_capital: number | null;
 };
+
+// Most-severe-wins when a campaign groups chains that disagree on type
+// — recovery_play contamination is exactly why the exclusion below
+// exists, so it dominates a milder rolled/clean chain sharing the same
+// campaign. Mirrors lib/campaigns.ts's mostSevereType.
+const TRADE_TYPE_SEVERITY: Record<string, number> = { clean: 0, rolled: 1, recovery_play: 2 };
 
 type PersonalStats = {
   tradeCount: number;
@@ -2851,9 +2858,14 @@ type PersonalStats = {
   recoveryCount: number;
 };
 
-// Chain-aware stats. Positions are grouped into trade chains
-// (lib/trade-chains classification); each chain is ONE outcome, its P&L
-// computed here at read time as sum(realized_pnl) across all members
+// Campaign-aware stats. Positions are grouped into campaigns
+// (lib/campaigns.ts — one earnings decision, spanning every chain and
+// strike opened against the same print), falling back to trade chains
+// or a solo position when no campaign was resolved. Each group is ONE
+// outcome/sample: personalStats counts one earnings event once, not
+// once per chain the app happened to split it into (CRWV's three
+// 2026-05-07 chains were one decision and are one sample here). P&L is
+// computed at read time as sum(realized_pnl) across all members
 // (including assignment stock legs) over peak_capital. chain_pnl is a
 // write-time-only cache populated at import; it is never revisited when
 // a position later closes via auto-expiry/confirm-expire, so it goes
@@ -2868,25 +2880,42 @@ function personalStats(rows: PersonalRow[]): PersonalStats {
   type ChainAgg = {
     type: string;
     pnl: number;
-    capital: number | null;
+    // peak_capital is a chain-level cache: every member row of the same
+    // trade_chain_id carries an IDENTICAL value. Summing per row would
+    // multiply it by member count once a campaign groups multiple
+    // chains together, so capital is tracked per underlying chain here
+    // and summed once per distinct chain at finalization — an upper
+    // bound when a campaign's chains overlap in time (two strikes sold
+    // the same morning), not an exact concurrent peak.
+    capitalByChain: Map<string, number>;
     fallbackCapital: number;
   };
   const chains = new Map<string, ChainAgg>();
   for (const r of rows) {
     const isStock =
       r.position_type === "stock_long" || r.position_type === "stock_short";
-    // Stock rows only participate through their chain's pnl sum;
-    // an unchained stock row is not a CSP outcome.
-    if (isStock && !r.trade_chain_id) continue;
-    const key = r.trade_chain_id ?? `solo:${r.id}`;
+    // Stock rows only participate through their group's pnl sum; an
+    // unchained, uncampaigned stock row is not a CSP outcome.
+    if (isStock && !r.campaign_id && !r.trade_chain_id) continue;
+    const key = r.campaign_id ?? r.trade_chain_id ?? `solo:${r.id}`;
     const agg = chains.get(key) ?? {
       type: r.trade_type ?? "clean",
       pnl: 0,
-      capital: r.peak_capital !== null ? Number(r.peak_capital) : null,
+      capitalByChain: new Map<string, number>(),
       fallbackCapital: 0,
     };
-    if (r.trade_type) agg.type = r.trade_type;
-    if (r.peak_capital !== null) agg.capital = Number(r.peak_capital);
+    // Most-severe-wins across members of the group, not last-row-wins
+    // — a campaign can hold more than one chain (e.g. one clean, one
+    // recovery_play), and the contamination has to survive the merge.
+    if (r.trade_type) {
+      const cur = TRADE_TYPE_SEVERITY[agg.type] ?? 0;
+      const next = TRADE_TYPE_SEVERITY[r.trade_type] ?? 0;
+      if (next >= cur) agg.type = r.trade_type;
+    }
+    if (r.peak_capital !== null) {
+      const chainKey = r.trade_chain_id ?? `solo:${r.id}`;
+      agg.capitalByChain.set(chainKey, Number(r.peak_capital));
+    }
     agg.pnl += Number(r.realized_pnl ?? 0);
     if (!isStock) {
       agg.fallbackCapital += Number(r.strike ?? 0) * Number(r.total_contracts ?? 0) * 100;
@@ -2904,8 +2933,8 @@ function personalStats(rows: PersonalRow[]): PersonalStats {
   const rocW: Array<{ roc: number; w: number }> = [];
   for (const agg of Array.from(chains.values())) {
     const pnl = agg.pnl;
-    const capital =
-      agg.capital !== null && agg.capital > 0 ? agg.capital : agg.fallbackCapital;
+    const chainCapitalSum = Array.from(agg.capitalByChain.values()).reduce((s, c) => s + c, 0);
+    const capital = chainCapitalSum > 0 ? chainCapitalSum : agg.fallbackCapital;
     const win = pnl > 0 ? 1 : 0;
     const roc = capital > 0 ? (pnl / capital) * 100 : null;
     if (agg.type === "recovery_play") {
@@ -2956,7 +2985,7 @@ const NO_HISTORY: PersonalHistory = {
 };
 
 const PERSONAL_COLS =
-  "id, strike, realized_pnl, total_contracts, position_type, trade_chain_id, trade_type, peak_capital";
+  "id, strike, realized_pnl, total_contracts, position_type, trade_chain_id, campaign_id, trade_type, peak_capital";
 
 export async function getPersonalHistory(
   userId: string,

@@ -87,6 +87,24 @@ export function ResearchAnalysisPasteBack({
     numericGrade: string | null;
     crushGrade: string | null;
     maxDownsideRatio: number | null;
+    impliedMoveSource: string | null;
+    pop: number | null;
+    delta: number | null;
+    yieldPct: number | null;
+    premiumBid: number | null;
+    premiumAsk: number | null;
+    spreadPct: number | null;
+    oi: number | null;
+    volume: number | null;
+    vix: number | null;
+    vixRegime: string | null;
+    crushSubscores: {
+      historicalMoveScore: number;
+      consistencyScore: number;
+      termStructureScore: number;
+      ivEdgeScore: number;
+      surpriseScore: number;
+    } | null;
   };
   // Fires after a successful save with exactly what the server
   // persisted — lets the candidates table light up its AI-analysis
@@ -267,6 +285,18 @@ export function ResearchAnalysisPasteBack({
           numericGrade: snapshot.numericGrade,
           crushGrade: snapshot.crushGrade,
           maxDownsideRatio: snapshot.maxDownsideRatio,
+          impliedMoveSourceAtAnalysis: snapshot.impliedMoveSource,
+          popAtAnalysis: snapshot.pop,
+          deltaAtAnalysis: snapshot.delta,
+          yieldAtAnalysis: snapshot.yieldPct,
+          premiumBidAtAnalysis: snapshot.premiumBid,
+          premiumAskAtAnalysis: snapshot.premiumAsk,
+          spreadPctAtAnalysis: snapshot.spreadPct,
+          oiAtAnalysis: snapshot.oi,
+          volumeAtAnalysis: snapshot.volume,
+          vixAtAnalysis: snapshot.vix,
+          vixRegimeAtAnalysis: snapshot.vixRegime,
+          crushSubscoresAtAnalysis: snapshot.crushSubscores,
         }),
       });
       const body = await res.json().catch(() => ({}));

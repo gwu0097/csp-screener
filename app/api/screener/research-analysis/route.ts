@@ -119,6 +119,24 @@ type Body = {
   // Added 2026-08-11 (v6 template) — the field the prediction log
   // scores. Optional/nullable, same as the four fields above.
   leftTailRisk?: unknown;
+  // Added 2026-08-21 (capture-layer audit) — the rest of "what the
+  // decision was made on," alongside the pre-existing
+  // referenceStrike/spotAtAnalysis/emPctAtAnalysis/numericGrade/
+  // crushGrade/maxDownsideRatio above. All frozen first-write-wins
+  // (see freezeField below) — a re-save must never silently overwrite
+  // what an earlier save already captured.
+  impliedMoveSourceAtAnalysis?: unknown;
+  popAtAnalysis?: unknown;
+  deltaAtAnalysis?: unknown;
+  yieldAtAnalysis?: unknown;
+  premiumBidAtAnalysis?: unknown;
+  premiumAskAtAnalysis?: unknown;
+  spreadPctAtAnalysis?: unknown;
+  oiAtAnalysis?: unknown;
+  volumeAtAnalysis?: unknown;
+  vixAtAnalysis?: unknown;
+  vixRegimeAtAnalysis?: unknown;
+  crushSubscoresAtAnalysis?: unknown;
 };
 
 function asStringArray(v: unknown, field: string): { ok: true; value: string[] } | { ok: false; error: string } {
@@ -169,6 +187,51 @@ function asNullableUuid(v: unknown, field: string): { ok: true; value: string | 
 
 function asNullableString(v: unknown): string | null {
   return typeof v === "string" && v.length > 0 ? v : null;
+}
+
+function asNullableInt(v: unknown, field: string): { ok: true; value: number | null } | { ok: false; error: string } {
+  if (v === undefined || v === null) return { ok: true, value: null };
+  if (typeof v !== "number" || !Number.isFinite(v)) {
+    return { ok: false, error: `${field} must be a finite number or null` };
+  }
+  return { ok: true, value: Math.round(v) };
+}
+
+const CRUSH_SUBSCORE_KEYS = [
+  "historicalMoveScore",
+  "consistencyScore",
+  "termStructureScore",
+  "ivEdgeScore",
+  "surpriseScore",
+] as const;
+
+function asCrushSubscores(
+  v: unknown,
+): { ok: true; value: Record<string, number> | null } | { ok: false; error: string } {
+  if (v === undefined || v === null) return { ok: true, value: null };
+  if (typeof v !== "object") return { ok: false, error: "crushSubscoresAtAnalysis must be an object or null" };
+  const rec = v as Record<string, unknown>;
+  const out: Record<string, number> = {};
+  for (const k of CRUSH_SUBSCORE_KEYS) {
+    const val = rec[k];
+    if (typeof val !== "number" || !Number.isFinite(val)) {
+      return { ok: false, error: `crushSubscoresAtAnalysis.${k} must be a finite number` };
+    }
+    out[k] = val;
+  }
+  return { ok: true, value: out };
+}
+
+// First-write-wins: an existing non-null snapshot value survives a
+// re-save untouched. This is the fix for the failure this snapshot
+// feature exists to prevent — "22 rows had their prices overwritten
+// this week" happened because every save previously recomputed and
+// blindly overwrote these columns, so "what a 0.30% yield looked like
+// six months ago" was unanswerable. A field that's still null (a
+// pre-feature row, or a value that genuinely wasn't available at any
+// prior save) gets backfilled from this save.
+function freezeField<T>(existing: T | null | undefined, incoming: T | null): T | null {
+  return existing !== null && existing !== undefined ? existing : incoming;
 }
 
 const OBSERVATION_TERM_RE = /^[a-z][a-z0-9_]*$/;
@@ -400,6 +463,43 @@ export async function POST(req: NextRequest) {
   const maxDownsideRatio = asNullableNumber(body.maxDownsideRatio, "maxDownsideRatio");
   if (!maxDownsideRatio.ok) return NextResponse.json({ error: maxDownsideRatio.error }, { status: 400 });
 
+  const impliedMoveSourceAtAnalysis = asNullableEnum(
+    body.impliedMoveSourceAtAnalysis,
+    "impliedMoveSourceAtAnalysis",
+    ["straddle", "iv_formula_degraded"] as const,
+  );
+  if (!impliedMoveSourceAtAnalysis.ok) {
+    return NextResponse.json({ error: impliedMoveSourceAtAnalysis.error }, { status: 400 });
+  }
+  const popAtAnalysis = asNullableNumber(body.popAtAnalysis, "popAtAnalysis");
+  if (!popAtAnalysis.ok) return NextResponse.json({ error: popAtAnalysis.error }, { status: 400 });
+  const deltaAtAnalysis = asNullableNumber(body.deltaAtAnalysis, "deltaAtAnalysis");
+  if (!deltaAtAnalysis.ok) return NextResponse.json({ error: deltaAtAnalysis.error }, { status: 400 });
+  const yieldAtAnalysis = asNullableNumber(body.yieldAtAnalysis, "yieldAtAnalysis");
+  if (!yieldAtAnalysis.ok) return NextResponse.json({ error: yieldAtAnalysis.error }, { status: 400 });
+  const premiumBidAtAnalysis = asNullableNumber(body.premiumBidAtAnalysis, "premiumBidAtAnalysis");
+  if (!premiumBidAtAnalysis.ok) return NextResponse.json({ error: premiumBidAtAnalysis.error }, { status: 400 });
+  const premiumAskAtAnalysis = asNullableNumber(body.premiumAskAtAnalysis, "premiumAskAtAnalysis");
+  if (!premiumAskAtAnalysis.ok) return NextResponse.json({ error: premiumAskAtAnalysis.error }, { status: 400 });
+  const spreadPctAtAnalysis = asNullableNumber(body.spreadPctAtAnalysis, "spreadPctAtAnalysis");
+  if (!spreadPctAtAnalysis.ok) return NextResponse.json({ error: spreadPctAtAnalysis.error }, { status: 400 });
+  const oiAtAnalysis = asNullableInt(body.oiAtAnalysis, "oiAtAnalysis");
+  if (!oiAtAnalysis.ok) return NextResponse.json({ error: oiAtAnalysis.error }, { status: 400 });
+  const volumeAtAnalysis = asNullableInt(body.volumeAtAnalysis, "volumeAtAnalysis");
+  if (!volumeAtAnalysis.ok) return NextResponse.json({ error: volumeAtAnalysis.error }, { status: 400 });
+  const vixAtAnalysis = asNullableNumber(body.vixAtAnalysis, "vixAtAnalysis");
+  if (!vixAtAnalysis.ok) return NextResponse.json({ error: vixAtAnalysis.error }, { status: 400 });
+  const vixRegimeAtAnalysis = asNullableEnum(
+    body.vixRegimeAtAnalysis,
+    "vixRegimeAtAnalysis",
+    ["calm", "elevated", "panic"] as const,
+  );
+  if (!vixRegimeAtAnalysis.ok) return NextResponse.json({ error: vixRegimeAtAnalysis.error }, { status: 400 });
+  const crushSubscoresAtAnalysis = asCrushSubscores(body.crushSubscoresAtAnalysis);
+  if (!crushSubscoresAtAnalysis.ok) {
+    return NextResponse.json({ error: crushSubscoresAtAnalysis.error }, { status: 400 });
+  }
+
   const recommendation = asNullableEnum(body.recommendation, "recommendation", ["take", "take_smaller", "pass"] as const);
   if (!recommendation.ok) return NextResponse.json({ error: recommendation.error }, { status: 400 });
   const recommendedStrike = asNullableNumber(body.recommendedStrike, "recommendedStrike");
@@ -427,6 +527,72 @@ export async function POST(req: NextRequest) {
       ? Array.from(new Set(candidateObservations.value.map((o) => o.term)))
       : candidateFlags.value;
 
+  // Snapshot fields freeze at the FIRST save for this (symbol,
+  // earnings_date), not whatever the numbers read at the most recent
+  // save — see freezeField above. Read the existing row's snapshot
+  // columns first so a re-save (this is an iterative paste/revise/save
+  // workflow, not one-shot) can't silently overwrite them.
+  const existingRes = await sb
+    .from("research_analyses")
+    .select(
+      "reference_strike,spot_at_analysis,em_pct_at_analysis,numeric_grade,crush_grade,max_downside_ratio," +
+        "implied_move_source_at_analysis,pop_at_analysis,delta_at_analysis,yield_at_analysis," +
+        "premium_bid_at_analysis,premium_ask_at_analysis,spread_pct_at_analysis,oi_at_analysis," +
+        "volume_at_analysis,vix_at_analysis,vix_regime_at_analysis,crush_subscores_at_analysis,snapshot_saved_at",
+    )
+    .eq("symbol", symbol)
+    .eq("earnings_date", earningsDate)
+    .maybeSingle();
+  const existing = (existingRes.data ?? null) as Record<string, unknown> | null;
+
+  const numericGradeVal = asNullableString(body.numericGrade);
+  const crushGradeVal = asNullableString(body.crushGrade);
+
+  const snapshotPatch = {
+    reference_strike: freezeField(existing?.reference_strike as number | null, referenceStrike.value),
+    spot_at_analysis: freezeField(existing?.spot_at_analysis as number | null, spotAtAnalysis.value),
+    em_pct_at_analysis: freezeField(existing?.em_pct_at_analysis as number | null, emPctAtAnalysis.value),
+    numeric_grade: freezeField(existing?.numeric_grade as string | null, numericGradeVal),
+    crush_grade: freezeField(existing?.crush_grade as string | null, crushGradeVal),
+    max_downside_ratio: freezeField(existing?.max_downside_ratio as number | null, maxDownsideRatio.value),
+    implied_move_source_at_analysis: freezeField(
+      existing?.implied_move_source_at_analysis as string | null,
+      impliedMoveSourceAtAnalysis.value,
+    ),
+    pop_at_analysis: freezeField(existing?.pop_at_analysis as number | null, popAtAnalysis.value),
+    delta_at_analysis: freezeField(existing?.delta_at_analysis as number | null, deltaAtAnalysis.value),
+    yield_at_analysis: freezeField(existing?.yield_at_analysis as number | null, yieldAtAnalysis.value),
+    premium_bid_at_analysis: freezeField(
+      existing?.premium_bid_at_analysis as number | null,
+      premiumBidAtAnalysis.value,
+    ),
+    premium_ask_at_analysis: freezeField(
+      existing?.premium_ask_at_analysis as number | null,
+      premiumAskAtAnalysis.value,
+    ),
+    spread_pct_at_analysis: freezeField(
+      existing?.spread_pct_at_analysis as number | null,
+      spreadPctAtAnalysis.value,
+    ),
+    oi_at_analysis: freezeField(existing?.oi_at_analysis as number | null, oiAtAnalysis.value),
+    volume_at_analysis: freezeField(existing?.volume_at_analysis as number | null, volumeAtAnalysis.value),
+    vix_at_analysis: freezeField(existing?.vix_at_analysis as number | null, vixAtAnalysis.value),
+    vix_regime_at_analysis: freezeField(
+      existing?.vix_regime_at_analysis as string | null,
+      vixRegimeAtAnalysis.value,
+    ),
+    crush_subscores_at_analysis: freezeField(
+      existing?.crush_subscores_at_analysis as Record<string, number> | null,
+      crushSubscoresAtAnalysis.value,
+    ),
+  };
+  // Stamped once, the moment ANY snapshot field first becomes non-null
+  // — records "when was this decision snapshot frozen," not "when was
+  // this row last saved" (updated_at already covers that).
+  const snapshotSavedAt =
+    (existing?.snapshot_saved_at as string | null | undefined) ??
+    (Object.values(snapshotPatch).some((v) => v !== null) ? new Date().toISOString() : null);
+
   const up = await sb
     .from("research_analyses")
     .upsert(
@@ -442,12 +608,8 @@ export async function POST(req: NextRequest) {
         analysis_prose: asNullableString(body.analysisProse),
         raw_paste: rawPaste,
         parse_status: parseStatus,
-        reference_strike: referenceStrike.value,
-        spot_at_analysis: spotAtAnalysis.value,
-        em_pct_at_analysis: emPctAtAnalysis.value,
-        numeric_grade: asNullableString(body.numericGrade),
-        crush_grade: asNullableString(body.crushGrade),
-        max_downside_ratio: maxDownsideRatio.value,
+        ...snapshotPatch,
+        snapshot_saved_at: snapshotSavedAt,
         recommendation: recommendation.value,
         recommended_strike: recommendedStrike.value,
         down_catalyst: asNullableString(body.downCatalyst),
