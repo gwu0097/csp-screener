@@ -36,7 +36,6 @@ type Row = {
   total_contracts: number | null;
   trade_chain_id: string | null;
   trade_type: string | null;
-  chain_pnl: number | null;
   peak_capital: number | null;
   entry_stock_price: number | null;
   entry_em_pct: number | null;
@@ -90,7 +89,7 @@ export async function GET(req: NextRequest) {
   const res = await sb
     .from("positions")
     .select(
-      "id,strike,expiry,status,position_type,option_type,opened_date,closed_date,realized_pnl,total_contracts,trade_chain_id,trade_type,chain_pnl,peak_capital,entry_stock_price,entry_em_pct,earnings_history_id",
+      "id,strike,expiry,status,position_type,option_type,opened_date,closed_date,realized_pnl,total_contracts,trade_chain_id,trade_type,peak_capital,entry_stock_price,entry_em_pct,earnings_history_id",
     )
     .eq("user_id", userId)
     .eq("symbol", symbol);
@@ -123,7 +122,6 @@ export async function GET(req: NextRequest) {
   type Agg = {
     members: Row[];
     type: string;
-    chainPnl: number | null;
     peakCapital: number | null;
   };
   const byChain = new Map<string, Agg>();
@@ -135,12 +133,10 @@ export async function GET(req: NextRequest) {
     const agg = byChain.get(key) ?? {
       members: [],
       type: r.trade_type ?? "clean",
-      chainPnl: null,
       peakCapital: null,
     };
     agg.members.push(r);
     if (r.trade_type) agg.type = r.trade_type;
-    if (r.chain_pnl !== null) agg.chainPnl = Number(r.chain_pnl);
     if (r.peak_capital !== null) agg.peakCapital = Number(r.peak_capital);
     byChain.set(key, agg);
   }
@@ -181,10 +177,12 @@ export async function GET(req: NextRequest) {
     const end = stillOpen
       ? null
       : agg.members.map((m) => m.closed_date ?? m.opened_date).sort().pop() ?? null;
+    // Read-time sum, not the write-time-cached chain_pnl column: chain_pnl
+    // is only (re)computed at import and never revisited when a position
+    // later closes via auto-expiry/confirm-expire, so it goes stale.
     const pnl =
-      agg.chainPnl ??
       Math.round(agg.members.reduce((s, m) => s + Number(m.realized_pnl ?? 0), 0) * 100) /
-        100;
+      100;
     const roc =
       agg.peakCapital !== null && agg.peakCapital > 0
         ? (pnl / agg.peakCapital) * 100

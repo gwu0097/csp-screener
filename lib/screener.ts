@@ -2838,7 +2838,6 @@ type PersonalRow = {
   position_type: string | null;
   trade_chain_id: string | null;
   trade_type: string | null;
-  chain_pnl: number | null;
   peak_capital: number | null;
 };
 
@@ -2853,8 +2852,12 @@ type PersonalStats = {
 };
 
 // Chain-aware stats. Positions are grouped into trade chains
-// (lib/trade-chains classification); each chain is ONE outcome with
-// chain_pnl (includes assignment stock legs) over peak_capital.
+// (lib/trade-chains classification); each chain is ONE outcome, its P&L
+// computed here at read time as sum(realized_pnl) across all members
+// (including assignment stock legs) over peak_capital. chain_pnl is a
+// write-time-only cache populated at import; it is never revisited when
+// a position later closes via auto-expiry/confirm-expire, so it goes
+// stale — deliberately not read here.
 // Weights per trade type:
 //   clean          — 1.0 toward boost, 1.0 toward drop
 //   rolled         — 0.5 toward boost, 1.0 toward drop (patience, not edge)
@@ -2866,29 +2869,26 @@ function personalStats(rows: PersonalRow[]): PersonalStats {
     type: string;
     pnl: number;
     capital: number | null;
-    fallbackPnl: number;
     fallbackCapital: number;
   };
   const chains = new Map<string, ChainAgg>();
   for (const r of rows) {
     const isStock =
       r.position_type === "stock_long" || r.position_type === "stock_short";
-    // Stock rows only participate through their chain's chain_pnl;
+    // Stock rows only participate through their chain's pnl sum;
     // an unchained stock row is not a CSP outcome.
     if (isStock && !r.trade_chain_id) continue;
     const key = r.trade_chain_id ?? `solo:${r.id}`;
     const agg = chains.get(key) ?? {
       type: r.trade_type ?? "clean",
-      pnl: r.chain_pnl !== null ? Number(r.chain_pnl) : NaN,
+      pnl: 0,
       capital: r.peak_capital !== null ? Number(r.peak_capital) : null,
-      fallbackPnl: 0,
       fallbackCapital: 0,
     };
     if (r.trade_type) agg.type = r.trade_type;
-    if (r.chain_pnl !== null) agg.pnl = Number(r.chain_pnl);
     if (r.peak_capital !== null) agg.capital = Number(r.peak_capital);
+    agg.pnl += Number(r.realized_pnl ?? 0);
     if (!isStock) {
-      agg.fallbackPnl += Number(r.realized_pnl ?? 0);
       agg.fallbackCapital += Number(r.strike ?? 0) * Number(r.total_contracts ?? 0) * 100;
     }
     chains.set(key, agg);
@@ -2903,7 +2903,7 @@ function personalStats(rows: PersonalRow[]): PersonalStats {
   let winDrop = 0;
   const rocW: Array<{ roc: number; w: number }> = [];
   for (const agg of Array.from(chains.values())) {
-    const pnl = Number.isFinite(agg.pnl) ? agg.pnl : agg.fallbackPnl;
+    const pnl = agg.pnl;
     const capital =
       agg.capital !== null && agg.capital > 0 ? agg.capital : agg.fallbackCapital;
     const win = pnl > 0 ? 1 : 0;
@@ -2956,7 +2956,7 @@ const NO_HISTORY: PersonalHistory = {
 };
 
 const PERSONAL_COLS =
-  "id, strike, realized_pnl, total_contracts, position_type, trade_chain_id, trade_type, chain_pnl, peak_capital";
+  "id, strike, realized_pnl, total_contracts, position_type, trade_chain_id, trade_type, peak_capital";
 
 export async function getPersonalHistory(
   userId: string,
