@@ -4876,8 +4876,17 @@ function AnalysisDumpTab({
     } else {
       push("date | qtr | implied% | actual% (signed) | ratio | grade | source | date_confidence");
       for (const h of history) {
+        // getCrushHistory reads earnings_history BEFORE this pass's own
+        // straddle computation/persist, so h.impliedMovePct for today's
+        // row is always the PRIOR pass's number (see the EM-audit
+        // report). Same override crush-history-table.tsx:640 applies to
+        // its pinned row — prefer this pass's live expectedMovePct for
+        // the row matching today's event, so the dump's header and its
+        // own history table can't disagree about the same print.
+        const isTodayRow = h.earningsDate === r.earningsDate;
+        const impliedForRow = isTodayRow ? (d?.expectedMovePct ?? h.impliedMovePct) : h.impliedMovePct;
         push(
-          `${h.earningsDate} | ${h.qtrLabel} | ${h.impliedMovePct === null ? "MISSING" : dumpPct(h.impliedMovePct)} | ${h.actualMovePct === null ? "MISSING" : dumpPct(h.actualMovePct)} | ${h.ratio === null ? "MISSING" : dumpNum(h.ratio, 3)} | ${h.grade ?? "MISSING"} | ${h.impliedMoveSource ?? "unknown"} | ${h.dateConfidence ?? "unknown"}`,
+          `${h.earningsDate} | ${h.qtrLabel} | ${impliedForRow === null ? "MISSING" : dumpPct(impliedForRow)} | ${h.actualMovePct === null ? "MISSING" : dumpPct(h.actualMovePct)} | ${h.ratio === null ? "MISSING" : dumpNum(h.ratio, 3)} | ${h.grade ?? "MISSING"} | ${h.impliedMoveSource ?? "unknown"} | ${h.dateConfidence ?? "unknown"}`,
         );
       }
     }
