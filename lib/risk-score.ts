@@ -18,14 +18,33 @@
 // small, which is correct; a flag doesn't get to swing the score hard
 // off four observations.
 //
-// Overhang, VIX, and "prior documented loss on this ticker at this
-// event" have NO outcome study behind them (unlike the measured flags
-// above, or lib/liquidity.ts's distribution-anchored thresholds) — they
-// carry fixed, hand-picked point values as a placeholder magnitude,
-// roughly scaled against what a strongly-clearing measured flag
-// contributes. Adjust RISK_CONFIG_VERSION if these numbers change, so a
-// score frozen under the old weights stays visibly distinct from one
-// scored under the new ones.
+// Overhang and VIX have NO outcome study behind them (unlike the
+// measured flags above, or lib/liquidity.ts's distribution-anchored
+// thresholds) — they carry fixed, hand-picked point values as a
+// placeholder magnitude, roughly scaled against what a strongly-
+// clearing measured flag contributes. Adjust RISK_CONFIG_VERSION if
+// these numbers change, so a score frozen under the old weights stays
+// visibly distinct from one scored under the new ones.
+//
+// "Prior documented loss on this ticker at this event" (priorLossOnTicker)
+// USED to be one of these placeholders (flat 8 points); it's now
+// measured, same population logic as MEASURED_FLAGS but the flag is
+// hasPriorCspEarningsLoss (lib/campaigns.ts) rather than a checklist
+// item. Study population: every symbol with a losing CSP-earnings
+// campaign that has at least one SETTLED subsequent earnings print as
+// of RISK_CONFIG_VERSION's date (actual_move_pct populated) — settled,
+// not just re-traded, so the population isn't conditioned on the user
+// choosing to re-enter the name. That's currently ANET, GE, HOOD, NET,
+// SPOT, UAL — n=6. effect is the LOO median move_ratio (removing NET,
+// the single largest |actual_move_pct| in the group) = 0.118 across the
+// remaining 5. This sits below RISK_BASE_RATE (0.431) — it would NOT
+// clear the same bar the checklist flags above are held to — but this
+// contribution only borrows the flags' SIZING treatment
+// (effect × n/(n+RISK_K)), not their base-rate clearing gate, so it's
+// included anyway at whatever weight the math gives it. At n=6 that
+// weight is small (confidence 6/16 ≈ 38%, 1 point) — consistent with a
+// signal this thin. Revisit both the gate question and the number as
+// the campaign table grows past single digits per symbol.
 //
 // Zero server dependencies — shared verbatim by lib/screener.ts
 // (server, calculateThreeLayerGrade) and components/screener-view.tsx /
@@ -63,9 +82,13 @@ export const MEASURED_FLAGS: MeasuredFlagConfig[] = [
 export const OVERHANG_RISK_POINTS = 15;
 export const VIX_ELEVATED_RISK_POINTS = 5; // 25 <= vix <= 30
 export const VIX_PANIC_RISK_POINTS = 10; // vix > 30
-export const PRIOR_LOSS_RISK_POINTS = 8;
 
-export const RISK_CONFIG_VERSION = "2026-08-12-flagscore-v1";
+// priorLossOnTicker's measured effect — see the module comment above
+// for population/settlement/LOO detail. n=6, effect=LOO median 0.118.
+export const PRIOR_LOSS_EFFECT = 0.118;
+export const PRIOR_LOSS_N = 6;
+
+export const RISK_CONFIG_VERSION = "2026-08-12-priorloss-measured-v1";
 
 // v1/v2 checklist name for the item now called guidance_beat_streak —
 // mirrors migrations/2026-08-11-add-flag-vocabulary-mapping.sql's
@@ -176,8 +199,11 @@ export function computeRiskScore(params: {
     contributions.push({
       key: "prior_loss",
       label: "Prior documented loss on this ticker",
-      points: PRIOR_LOSS_RISK_POINTS,
-      kind: "structural",
+      points: pointsFor(PRIOR_LOSS_EFFECT, PRIOR_LOSS_N),
+      kind: "measured",
+      n: PRIOR_LOSS_N,
+      effect: PRIOR_LOSS_EFFECT,
+      confidencePct: Math.round(confidenceWeight(PRIOR_LOSS_N) * 100),
     });
   }
 

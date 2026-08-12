@@ -1,7 +1,18 @@
-// Tradable Grade — "can I sell this and get paid": POP bands, the
+// Tradable Grade — "can I sell this and get paid": POP bands and the
 // yield/liquidity gate (opportunityGrade, which already embeds noBid
-// and the graduated liquidity cap from lib/liquidity.ts), and the
-// personal-history boost/drop modifier.
+// and the graduated liquidity cap from lib/liquidity.ts). Nothing else
+// — the personal-history boost/drop modifier that used to sit here is
+// gone. Report: boost was structurally unreachable against real
+// campaign counts (0 of 107 (user,symbol) pairs ever reach 5+
+// campaigns, max is 2) and only reached its top sample-weight tier by
+// counting trade chains instead of campaigns — the exact double-
+// counting 03559d3 eliminated elsewhere. The modifier fired on 8% of
+// candidates and changed the final letter on 1.3% (2 of 150), both
+// drops. The drop side moved to lib/risk-score.ts as a measured
+// contribution (priorLossOnTicker, campaign-based); the boost side
+// wasn't carried over anywhere — there's no evidence a good record on
+// a ticker predicts anything, and at max 2 campaigns per symbol there's
+// no sample to build one from.
 //
 // This is the restructured replacement for the crush/overhang/VIX-
 // laden cascade calculateThreeLayerGrade used to compute finalGrade
@@ -39,19 +50,6 @@
 
 export type Grade = "A" | "B" | "C" | "F";
 
-function dropGrade(g: Grade): Grade {
-  if (g === "A") return "B";
-  if (g === "B") return "C";
-  return "F";
-}
-
-function boostGrade(g: Grade): Grade {
-  if (g === "F") return "C";
-  if (g === "C") return "B";
-  if (g === "B") return "A";
-  return "A";
-}
-
 export type TradableResult = {
   grade: Grade;
   matchedRule: "A" | "B" | "C" | "F";
@@ -75,14 +73,13 @@ export function computeTradableGrade(params: {
   pop: number;
   opportunityGrade: Grade;
   penalty: number;
-  personalModifier: "boost" | "drop" | null;
   // noBid / liquidityGrade determine WHY opportunityGrade is F — see
   // the module comment. Both required (not derived from opportunityGrade
   // alone) so a caller can't silently drift the hard-gate definition.
   noBid: boolean;
   liquidityGrade: Grade;
 }): TradableResult {
-  const { pop, opportunityGrade, penalty, personalModifier, noBid, liquidityGrade } = params;
+  const { pop, opportunityGrade, penalty, noBid, liquidityGrade } = params;
 
   // The letter POP (and, for C, the news penalty) alone would earn,
   // ignoring opportunityGrade entirely.
@@ -115,13 +112,6 @@ export function computeTradableGrade(params: {
       capped = bandGrade !== "C";
     }
   }
-
-  // Unrated AND capped trades never boost — a good win rate on past
-  // trades can't manufacture reward that isn't there at THIS strike.
-  // Without the opportunityGrade check, a boost would lift a capped C
-  // straight back to B/A, silently defeating the cap.
-  if (personalModifier === "boost" && !unrated && opportunityGrade !== "F") grade = boostGrade(grade);
-  else if (personalModifier === "drop") grade = dropGrade(grade);
 
   return { grade, matchedRule, unrated, capped };
 }

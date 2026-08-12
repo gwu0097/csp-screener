@@ -3619,16 +3619,13 @@ export function calculateThreeLayerGrade(
 
   // ---- Tradable Grade (restructured — see lib/tradable-grade.ts) ----
   // Same POP/opportunityGrade bands as the legacy cascade above (so
-  // `unrated` is identical either way), crush/overhang/VIX removed.
-  // The personal-history modifier is recomputed here WITHOUT the
-  // `!hasOverhang` gate the legacy block above uses — overhang no
-  // longer touches this cascade at all, so there's nothing left to gate
-  // the modifier on. A name whose modifier used to be suppressed by an
-  // active overhang now gets it applied; that's a deliberate behavior
-  // change from the restructure, not an oversight (see the validation
-  // report). unrated is independent of personalModifier, so a
-  // throwaway call with personalModifier=null gets it cheaply before
-  // the real modifier (which needs !unrated) is known.
+  // `unrated` is identical either way), crush/overhang/VIX removed. The
+  // personal-history modifier is gone too — Tradable is now POP band +
+  // yield/liquidity gate only. The modifier's drop side moved to Risk
+  // (lib/risk-score.ts's priorLossOnTicker contribution, now measured
+  // rather than a hardcoded grade drop); the boost side wasn't carried
+  // anywhere — the campaign layer shows at most 2 campaigns per symbol,
+  // no sample to build a boost signal from.
   //
   // noBid/stage4LiquidityGrade determine WHY opportunityGrade is F —
   // see lib/tradable-grade.ts's module comment. Defaults fail closed
@@ -3636,51 +3633,10 @@ export function calculateThreeLayerGrade(
   // rather than silently granting a capped C on incomplete data.
   const stageFourNoBid = (stageFourResult.bid ?? 0) <= 0;
   const stage4LiquidityGrade = stageFourResult.liquidityGrade ?? "F";
-  const tradableUnratedProbe = computeTradableGrade({
-    pop: probabilityOfProfit,
-    opportunityGrade,
-    penalty,
-    personalModifier: null,
-    noBid: stageFourNoBid,
-    liquidityGrade: stage4LiquidityGrade,
-  });
-  let tradablePersonalModifier: "boost" | "drop" | null = null;
-  if (!history.dataInsufficient && history.winRate !== null) {
-    const wr = history.winRate;
-    const dropWr = history.dropWinRate ?? wr;
-    const roc = history.avgRoc ?? 0;
-    const sec = history.sector ?? null;
-    if (historyScope === "ticker") {
-      if (sampleW >= 1.0) {
-        if (!tradableUnratedProbe.unrated && wr > 80 && roc > 0.3) tradablePersonalModifier = "boost";
-        else if (dropWr < 50) tradablePersonalModifier = "drop";
-      } else if (sampleW >= 0.5) {
-        if (
-          !tradableUnratedProbe.unrated &&
-          wr > 80 &&
-          roc > 0.3 &&
-          sec !== null &&
-          (sec.winRate ?? 0) >= 60 &&
-          sec.campaigns >= 10
-        ) {
-          tradablePersonalModifier = "boost";
-        } else if (dropWr < 50) {
-          tradablePersonalModifier = "drop";
-        }
-      } else if (sampleW >= 0.25) {
-        if (dropWr < 50 && sec !== null && (sec.dropWinRate ?? 100) < 50) {
-          tradablePersonalModifier = "drop";
-        }
-      }
-    } else if (historyScope === "sector" && dropWr < 45) {
-      tradablePersonalModifier = "drop";
-    }
-  }
   const tradable = computeTradableGrade({
     pop: probabilityOfProfit,
     opportunityGrade,
     penalty,
-    personalModifier: tradablePersonalModifier,
     noBid: stageFourNoBid,
     liquidityGrade: stage4LiquidityGrade,
   });

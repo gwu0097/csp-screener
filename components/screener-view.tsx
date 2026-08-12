@@ -2608,13 +2608,13 @@ export function ScreenerView({ connected }: Props) {
                     tooltip={
                       <>
                         Can I sell this and get paid: POP band, yield/liquidity
-                        gate, personal-history modifier. A ≥ 90% POP, B ≥ 83%,
-                        C ≥ 75%. A requires a real, non-F premium; at B/C a
+                        gate. Nothing else. A ≥ 90% POP, B ≥ 83%, C ≥ 75%. A
+                        requires a real, non-F premium; at B/C a
                         thin-but-evaluable premium caps to C instead of
                         blocking the trade — noBid or dead liquidity is the
-                        only true &ldquo;Unrated.&rdquo; Crush/overhang/VIX
-                        moved to Risk; see the legacy grading panel for the
-                        old combined letter.
+                        only true &ldquo;Unrated.&rdquo; Crush/overhang/VIX/
+                        personal-history moved to Risk; see the legacy
+                        grading panel for the old combined letter.
                       </>
                     }
                   />
@@ -2626,10 +2626,10 @@ export function ScreenerView({ connected }: Props) {
                     tooltip={
                       <>
                         Display only — does not change Tradable. Starts at 0,
-                        rising is worse: measured checklist-flag contributions
-                        (weighted by sample confidence) plus overhang/VIX/
-                        prior-loss-on-ticker. Expand the row for the
-                        itemized breakdown.
+                        rising is worse: measured checklist-flag and
+                        prior-loss-on-ticker contributions (weighted by
+                        sample confidence) plus overhang/VIX. Expand the row
+                        for the itemized breakdown.
                       </>
                     }
                   />
@@ -3927,9 +3927,9 @@ function ExpandedDetail({
                             opportunity F blocks A outright. At B/C: noBid or liquidity F
                             (can&apos;t be evaluated) → &ldquo;Unrated&rdquo;; a real market with
                             thin yield → capped to C instead (a real letter, not an absence of
-                            one). Personal wr &gt;80%+roc &gt;0.3% boosts (never on Unrated or a
-                            capped C) · wr &lt;50% drops. Crush/overhang/VIX are no longer part
-                            of this cascade — see Risk below and the legacy panel.
+                            one). Nothing else feeds this — crush/overhang/VIX/personal-history
+                            are no longer part of this cascade; see Risk below and the legacy
+                            panel.
                           </div>
                         </div>
                       }
@@ -4048,7 +4048,6 @@ function ExpandedDetail({
             availableStrikes={r.stageFour?.availableStrikes}
             currentOpportunityGrade={tl.industryFactors.opportunityGrade}
             penalty={tl.regimeFactors.gradePenalty}
-            personalModifier={personalModifier}
             currentTradableGrade={displayTradableGrade(tl)}
           />
         </TabsContent>
@@ -4096,7 +4095,6 @@ function ExpandedDetail({
             strikeOverride={strikeOverride}
             onSelectStrike={onSelectStrike}
             penalty={tl.regimeFactors.gradePenalty}
-            personalModifier={personalModifier}
             refreshedChain={refreshedChain}
             refreshing={chainRefreshing}
             refreshError={chainRefreshError}
@@ -4204,17 +4202,16 @@ type RefreshedChain = {
 // The grade PREVIEW alongside it runs the exact same
 // gradeFromYieldClient + gradeFromRulesClient pipeline
 // CustomStrikeAnalyzer's "Try:" box uses — same inputs (crush/overhang/
-// vix/penalty/personalModifier are candidate-level, strike-independent,
-// passed straight through from ExpandedDetail), so a chain click and
-// typing the same strike into "Try:" produce the same what-if grade.
-// It is display-only: r.threeLayer, sort order, and saved snapshots
-// are never touched here.
+// vix/penalty are candidate-level, strike-independent, passed straight
+// through from ExpandedDetail), so a chain click and typing the same
+// strike into "Try:" produce the same what-if grade. It is display-
+// only: r.threeLayer, sort order, and saved snapshots are never
+// touched here.
 function OptionsChainTab({
   r,
   strikeOverride,
   onSelectStrike,
   penalty,
-  personalModifier,
   refreshedChain,
   refreshing,
   refreshError,
@@ -4224,7 +4221,6 @@ function OptionsChainTab({
   strikeOverride: StrikeOverride | null;
   onSelectStrike: (o: StrikeOverride) => void;
   penalty: number;
-  personalModifier: "boost" | "drop" | null;
   // Lifted to the shared parent (ExpandedDetail) so AnalysisDumpTab reads
   // the exact same refreshed snapshot instead of the stale screener-run
   // one — see ExpandedDetail's refreshChain().
@@ -4281,7 +4277,6 @@ function OptionsChainTab({
           pop: selectedPop,
           opportunityGrade: previewOpportunityGrade,
           penalty,
-          personalModifier,
           noBid: previewNoBid,
           liquidityGrade: previewLiquidity!.grade,
         })
@@ -5249,7 +5244,6 @@ function CustomStrikeAnalyzer({
   availableStrikes,
   currentOpportunityGrade,
   penalty,
-  personalModifier,
   currentTradableGrade,
 }: {
   suggestedStrike: number;
@@ -5260,7 +5254,6 @@ function CustomStrikeAnalyzer({
   // cascade; that used to be the bug (see gradeFromYieldClient's comment).
   currentOpportunityGrade: "A" | "B" | "C" | "F";
   penalty: number;
-  personalModifier: "boost" | "drop" | null;
   currentTradableGrade: string;
 }) {
   const [input, setInput] = useState("");
@@ -5316,7 +5309,6 @@ function CustomStrikeAnalyzer({
       pop,
       opportunityGrade: opportunityGradeNew,
       penalty,
-      personalModifier,
       noBid: nearestNoBid,
       liquidityGrade: nearestLiquidity.grade,
     });
