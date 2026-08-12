@@ -49,13 +49,13 @@ import {
   DEFAULT_TERM_STRUCTURE_BANDS,
   type CrushCompositeResult,
 } from "@/lib/screener";
-import { getCrushHistory, getPopulationMeanMoveRatio, type CrushHistoryEvent } from "@/lib/earnings-history-table";
+import { getCrushHistory, getPopulationPriorMoveRatio, type CrushHistoryEvent } from "@/lib/earnings-history-table";
 
 // Fetched once at script start (see main()) and reused for every
 // regradeCandidate call — matches the real pipeline's cache behavior
-// (getPopulationMeanMoveRatio caches ~30min) without re-paginating the
+// (getPopulationPriorMoveRatio caches ~30min) without re-paginating the
 // full table per candidate.
-let POPULATION_MEAN_RATIO = 1.0;
+let POPULATION_PRIOR_RATIO = 1.0;
 
 // --live-history: fetch each candidate's crushHistory LIVE from
 // earnings_history instead of using the frozen stageThree.details
@@ -213,7 +213,7 @@ async function regradeCandidate(c: PersistedCandidate): Promise<OldVsNew | null>
     realizedVol: d.realizedVol30d,
     surpriseScore: surprise.surpriseScore,
     surpriseQuartersExamined: surprise.quartersExamined,
-    populationMeanRatio: POPULATION_MEAN_RATIO,
+    populationPriorRatio: POPULATION_PRIOR_RATIO,
   });
 
   const schwabRatios = crushHistory
@@ -490,7 +490,7 @@ function runNeutralDataProof(): void {
     realizedVol: 0.35,
     surpriseScore: 3,
     surpriseQuartersExamined: 8,
-    populationMeanRatio: POPULATION_MEAN_RATIO,
+    populationPriorRatio: POPULATION_PRIOR_RATIO,
   };
 
   // Candidate A: historicalMoves present (consistency computed), but
@@ -791,9 +791,9 @@ async function runFullBatch(): Promise<void> {
 // ---------- main ----------
 
 async function main() {
-  const pop = await getPopulationMeanMoveRatio();
-  POPULATION_MEAN_RATIO = pop.mean;
-  console.log(`Population mean move_ratio: ${pop.mean.toFixed(4)} (n=${pop.n} valid pairs)\n`);
+  const pop = await getPopulationPriorMoveRatio();
+  POPULATION_PRIOR_RATIO = pop.median;
+  console.log(`Population prior (median) move_ratio: ${pop.median.toFixed(4)} (n=${pop.n} valid pairs)\n`);
 
   const results = await runAuditTickerSection();
   runDivergenceReport(results);

@@ -8,7 +8,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { createClient } from "@supabase/supabase-js";
 import { getEarningsSurpriseHistory } from "@/lib/earnings";
-import { getCrushHistory, getPopulationMeanMoveRatio, type CrushHistoryEvent } from "@/lib/earnings-history-table";
+import { getCrushHistory, getPopulationPriorMoveRatio, type CrushHistoryEvent } from "@/lib/earnings-history-table";
 import { computeCrushComposite, computeVerifiedModifier, applyGradeModifier, type CrushCompositeResult } from "@/lib/screener";
 import type { EarningsMove } from "@/lib/yahoo";
 
@@ -51,7 +51,7 @@ type Prepared = {
 const K_VALUES = [0, 1, 2, 3, 5] as const;
 const isAB = (g: string) => g === "A" || g === "B";
 
-function gradeAt(p: Prepared, populationMeanRatio: number, k: number): { composite: CrushCompositeResult; finalGrade: string } {
+function gradeAt(p: Prepared, populationPriorRatio: number, k: number): { composite: CrushCompositeResult; finalGrade: string } {
   const composite = computeCrushComposite({
     historicalMoves: p.historicalMoves,
     crushHistory: p.crushHistory,
@@ -62,7 +62,7 @@ function gradeAt(p: Prepared, populationMeanRatio: number, k: number): { composi
     realizedVol: p.c.realized_vol,
     surpriseScore: p.surpriseScore,
     surpriseQuartersExamined: p.surpriseQuartersExamined,
-    populationMeanRatio,
+    populationPriorRatio,
     shrinkageK: k,
   });
   const schwabRatios = p.crushHistory
@@ -74,8 +74,8 @@ function gradeAt(p: Prepared, populationMeanRatio: number, k: number): { composi
 }
 
 async function main() {
-  const pop = await getPopulationMeanMoveRatio();
-  console.log(`Population mean move_ratio: ${pop.mean.toFixed(4)} (n=${pop.n} valid pairs, recomputed live from earnings_history)\n`);
+  const pop = await getPopulationPriorMoveRatio();
+  console.log(`Population prior (median) move_ratio: ${pop.median.toFixed(4)} (n=${pop.n} valid pairs, recomputed live from earnings_history)\n`);
 
   const { data, error } = await sb.from("screener_results").select("id, created_at, candidates").order("created_at", { ascending: false });
   if (error) throw new Error(error.message);
@@ -132,7 +132,7 @@ async function main() {
 
   // ---- n-distribution (k-independent — n comes from crushHistory only) ----
   console.log("================ n-distribution for historicalMoveRatio ================\n");
-  const nOf = (p: Prepared) => gradeAt(p, pop.mean, 2).composite.quarterlyRatio.n; // n is identical at any k
+  const nOf = (p: Prepared) => gradeAt(p, pop.median, 2).composite.quarterlyRatio.n; // n is identical at any k
   const buckets = [0, 1, 2, 3, 4, "5+"] as const;
   for (const b of buckets) {
     const inBucket = prepared.filter((p) => (b === "5+" ? nOf(p) >= 5 : nOf(p) === b));
@@ -144,7 +144,7 @@ async function main() {
   function meanScoreByBucket(k: number): Map<string, { n: number; mean: number }> {
     const out = new Map<string, { sum: number; count: number }>();
     for (const p of prepared) {
-      const { composite } = gradeAt(p, pop.mean, k);
+      const { composite } = gradeAt(p, pop.median, k);
       const n = composite.quarterlyRatio.n;
       const bucket = n >= 5 ? "5+" : String(n);
       const cur = out.get(bucket) ?? { sum: 0, count: 0 };
@@ -175,9 +175,9 @@ async function main() {
     let abCount = 0;
     let changedVsBaseline = 0;
     for (const p of prepared) {
-      const g = gradeAt(p, pop.mean, k).finalGrade;
+      const g = gradeAt(p, pop.median, k).finalGrade;
       if (isAB(g)) abCount++;
-      if (k !== 0 && gradeAt(p, pop.mean, 0).finalGrade !== g) changedVsBaseline++;
+      if (k !== 0 && gradeAt(p, pop.median, 0).finalGrade !== g) changedVsBaseline++;
     }
     const bucketStr = ["1", "2", "3", "4", "5+"].map((b) => `n${b}=${byBucket.get(b)?.mean.toFixed(2) ?? "n/a"}`).join(" ");
     console.log(
@@ -192,8 +192,8 @@ async function main() {
   const n0 = prepared.filter((p) => nOf(p) === 0);
   let n0Unaffected = 0;
   for (const p of n0) {
-    const g0 = gradeAt(p, pop.mean, 0);
-    const g2 = gradeAt(p, pop.mean, 2);
+    const g0 = gradeAt(p, pop.median, 0);
+    const g2 = gradeAt(p, pop.median, 2);
     const same = g0.composite.shrunkRatio === null && g2.composite.shrunkRatio === null && g0.composite.historicalMoveScore === g2.composite.historicalMoveScore;
     if (same) n0Unaffected++;
     else console.log(`  MISMATCH: ${p.c.symbol} shrunkRatio k0=${g0.composite.shrunkRatio} k2=${g2.composite.shrunkRatio}`);

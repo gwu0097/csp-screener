@@ -17,9 +17,9 @@ import { resolve } from "node:path";
 import { getHistoricalEarningsMovements, type EarningsMove } from "@/lib/yahoo";
 import { getEarningsSurpriseHistory } from "@/lib/earnings";
 import { computeCrushComposite, computeVerifiedModifier, applyGradeModifier } from "@/lib/screener";
-import { getPopulationMeanMoveRatio, type CrushHistoryEvent } from "@/lib/earnings-history-table";
+import { getPopulationPriorMoveRatio, type CrushHistoryEvent } from "@/lib/earnings-history-table";
 
-let POPULATION_MEAN_RATIO = 1.0;
+let POPULATION_PRIOR_RATIO = 1.0;
 
 const JOIN_PATH = resolve(
   "/private/tmp/claude-501/-Users-raitsai-csp-screener/ab3c3900-236c-448e-8535-85d682a53a99/scratchpad/crush_outcomes_join.json",
@@ -55,9 +55,9 @@ type ScoredRow = {
 };
 
 async function main() {
-  const pop = await getPopulationMeanMoveRatio();
-  POPULATION_MEAN_RATIO = pop.mean;
-  console.log(`Population mean move_ratio: ${pop.mean.toFixed(4)} (n=${pop.n} valid pairs)\n`);
+  const pop = await getPopulationPriorMoveRatio();
+  POPULATION_PRIOR_RATIO = pop.median;
+  console.log(`Population prior (median) move_ratio: ${pop.median.toFixed(4)} (n=${pop.n} valid pairs)\n`);
 
   if (!existsSync(JOIN_PATH)) {
     console.error(`Join file not found: ${JOIN_PATH}`);
@@ -126,7 +126,7 @@ async function main() {
         realizedVol: r.realized_vol !== null ? Number(r.realized_vol) : null,
         surpriseScore: surprise.surpriseScore,
         surpriseQuartersExamined: surprise.quartersExamined,
-        populationMeanRatio: POPULATION_MEAN_RATIO,
+        populationPriorRatio: POPULATION_PRIOR_RATIO,
       });
       const schwabRatios = crushHistory
         .filter(
