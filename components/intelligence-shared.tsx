@@ -584,6 +584,15 @@ export function PerformanceSection({
     optionsCount: number;
     stockCount: number;
     positionLines: Array<{ label: string; pnl: number }>;
+    // Full premium banked if every open option expires worthless —
+    // options only (avgPremiumSold has no equivalent for stock legs),
+    // same definition Positions' own Max Profit stat uses
+    // (components/positions-view.tsx computeBrokerStats). Remaining =
+    // this minus optionsUnrealized: what's still at stake, not yet
+    // captured. A hypothetical ceiling, never added into any total.
+    maxProfit: number;
+    maxProfitMissing: number;
+    noMarkCount: number;
   } | null>(null);
   const [unrealizedLoading, setUnrealizedLoading] = useState(false);
   const [unrealizedError, setUnrealizedError] = useState<string | null>(null);
@@ -763,6 +772,13 @@ export function PerformanceSection({
           optionsCount: opts.length,
           stockCount: stocks.length,
           positionLines,
+          maxProfit: opts.reduce(
+            (s, p) =>
+              s + (p.avgPremiumSold !== null ? p.avgPremiumSold * p.remainingContracts * 100 : 0),
+            0,
+          ),
+          maxProfitMissing: opts.filter((p) => p.avgPremiumSold === null).length,
+          noMarkCount: opts.filter((p) => p.pnlDollars === null).length,
         });
       } catch (e) {
         if (!cancelled) {
@@ -789,6 +805,13 @@ export function PerformanceSection({
   const totalUnrealized = unrealized
     ? unrealized.optionsUnrealized + unrealized.stockUnrealized
     : 0;
+  // What's still at stake on open options if every one of them expires
+  // worthless: the full premium (maxProfit) minus what's already been
+  // captured (optionsUnrealized). A hypothetical ceiling, not a
+  // position value — deliberately never folded into grandTotal below.
+  // null (not 0) while marks haven't loaded yet, so the headline
+  // doesn't flash a false "$0 remaining" before the fetch resolves.
+  const remaining = unrealized ? unrealized.maxProfit - unrealized.optionsUnrealized : null;
   // Money already banked by closing SOME contracts of a position that's
   // still open overall (e.g. 2 of 4 puts bought back at a gain, 2 still
   // live). realized_pnl accrues on the position row as soon as those
@@ -918,6 +941,14 @@ export function PerformanceSection({
             >
               {fmtMoney(mode === "total" ? grandTotal : combinedRealized, true)}
             </span>
+            {mode === "total" && remaining !== null && (
+              <span
+                className="ml-1.5 text-sm text-muted-foreground"
+                title="Max profit on open options (full premium if every one expires worthless) minus what's already captured. A hypothetical ceiling, not part of the total above."
+              >
+                ({fmtMoney(remaining, true)} remaining)
+              </span>
+            )}
             {(stockRealized !== 0 || mode === "total") && (
               <div className="space-y-0 text-[10px] leading-snug text-muted-foreground">
                 {/* Realized breakdown — always shown when stocks
@@ -954,6 +985,20 @@ export function PerformanceSection({
                         ? "…"
                         : fmtMoney(totalUnrealized, true)}
                     </span>
+                  </div>
+                )}
+                {mode === "total" && remaining !== null && (
+                  <div className="flex items-baseline justify-between gap-2 text-muted-foreground/70">
+                    <span
+                      title={
+                        unrealized && unrealized.maxProfitMissing > 0
+                          ? `Max profit if every open option expires worthless, minus what's already captured. ${unrealized.maxProfitMissing} open position(s) missing premium data are excluded.`
+                          : "Max profit if every open option expires worthless, minus what's already captured."
+                      }
+                    >
+                      Remaining (if all expire worthless)
+                    </span>
+                    <span className="font-mono">{fmtMoney(remaining, true)}</span>
                   </div>
                 )}
                 {mode === "total" && totalPartialClosePnl !== 0 && (
