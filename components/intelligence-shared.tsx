@@ -319,10 +319,35 @@ export function presetForRange(range: DateRange): PresetKey | null {
 
 // -------- Formatters + color helpers --------
 
-export function fmtMoney(n: number | null | undefined, signed = false): string {
+// signed: prefix a "+" on positive values (negatives always get "-").
+// autoDecimals: show cents only when the value actually has them
+// ($175 instead of $175.00, but $175.50 keeps the .50) — for precise
+// readouts like tooltips, as opposed to fmtMoneyAxis's always-whole-
+// dollar scale markers.
+export function fmtMoney(
+  n: number | null | undefined,
+  signed = false,
+  autoDecimals = false,
+): string {
   if (n === null || n === undefined || !Number.isFinite(n)) return "—";
-  const sign = signed && n > 0 ? "+" : "";
-  return `${sign}$${n.toFixed(2)}`;
+  const isNeg = n < 0;
+  const abs = Math.abs(n);
+  const sign = isNeg ? "-" : signed && n > 0 ? "+" : "";
+  const hasCents = autoDecimals && Math.round(abs * 100) % 100 !== 0;
+  const formatted = abs.toLocaleString("en-US", {
+    minimumFractionDigits: autoDecimals ? (hasCents ? 2 : 0) : 2,
+    maximumFractionDigits: 2,
+  });
+  return `${sign}$${formatted}`;
+}
+
+// Axis scale markers: whole dollars only, sign before the symbol,
+// thousands separator, never decimals — "-$4,000 / $0 / $3,000".
+export function fmtMoneyAxis(n: number | null | undefined): string {
+  if (n === null || n === undefined || !Number.isFinite(n)) return "—";
+  const isNeg = n < 0;
+  const rounded = Math.round(Math.abs(n));
+  return `${isNeg ? "-" : ""}$${rounded.toLocaleString("en-US")}`;
 }
 
 export function fmtPct(n: number | null | undefined, digits = 0): string {
@@ -1144,7 +1169,11 @@ export function PerformanceSection({
                 </defs>
                 <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
                 <XAxis dataKey="label" stroke="#71717a" tick={{ fontSize: 11 }} />
-                <YAxis stroke="#71717a" tick={{ fontSize: 11 }} />
+                <YAxis
+                  stroke="#71717a"
+                  tick={{ fontSize: 11 }}
+                  tickFormatter={(v) => fmtMoneyAxis(Number(v))}
+                />
                 <Tooltip content={<EquityTooltip consolidate={shouldConsolidateTooltip} />} />
                 <Area
                   type="monotone"
@@ -1175,10 +1204,10 @@ const TICKER_PNL_MAX_BARS = 25;
 function spanningCampaignsNote(spanning: Array<{ allTimeNet: number }>): string | null {
   if (spanning.length === 0) return null;
   if (spanning.length === 1) {
-    return `1 campaign spans beyond this window (net ${fmtMoney(spanning[0].allTimeNet, true)} all-time)`;
+    return `1 campaign spans beyond this window (net ${fmtMoney(spanning[0].allTimeNet, true, true)} all-time)`;
   }
   const sum = Math.round(spanning.reduce((s, c) => s + c.allTimeNet, 0) * 100) / 100;
-  return `${spanning.length} campaigns span beyond this window (combined net ${fmtMoney(sum, true)} all-time)`;
+  return `${spanning.length} campaigns span beyond this window (combined net ${fmtMoney(sum, true, true)} all-time)`;
 }
 
 // One vertical column per ticker, netting options + stock together —
@@ -1248,9 +1277,9 @@ function TickerPnlPanel({ rows }: { rows: TickerPnl[] }) {
               const d = idx !== undefined ? shown[idx] : undefined;
               if (!d) return [];
               const lines = [
-                `Options net: ${fmtMoney(d.optionsNet, true)}`,
-                `Stock net: ${fmtMoney(d.stockNet, true)}`,
-                `Total: ${fmtMoney(d.totalNet, true)}`,
+                `Options net: ${fmtMoney(d.optionsNet, true, true)}`,
+                `Stock net: ${fmtMoney(d.stockNet, true, true)}`,
+                `Total: ${fmtMoney(d.totalNet, true, true)}`,
               ];
               if (d.campaignCount > 0) {
                 lines.push(`Campaigns (in window): ${d.campaignCount}`);
@@ -1273,7 +1302,7 @@ function TickerPnlPanel({ rows }: { rows: TickerPnl[] }) {
           ticks: {
             color: "#71717a",
             font: { size: 11 },
-            callback: (value) => fmtMoney(Number(value)),
+            callback: (value) => fmtMoneyAxis(Number(value)),
           },
         },
       },
@@ -1306,7 +1335,7 @@ function TickerPnlPanel({ rows }: { rows: TickerPnl[] }) {
           >
             {rest.length} others:{" "}
             <span className={othersNet >= 0 ? "text-emerald-300" : "text-rose-300"}>
-              {fmtMoney(othersNet, true)}
+              {fmtMoney(othersNet, true, true)}
             </span>{" "}
             ({othersExpanded ? "hide" : "show"})
           </button>
@@ -1322,7 +1351,7 @@ function TickerPnlPanel({ rows }: { rows: TickerPnl[] }) {
                     <td
                       className={`py-1 text-right font-mono ${r.totalNet >= 0 ? "text-emerald-300" : "text-rose-300"}`}
                     >
-                      {fmtMoney(r.totalNet, true)}
+                      {fmtMoney(r.totalNet, true, true)}
                     </td>
                   </tr>
                 ))}
