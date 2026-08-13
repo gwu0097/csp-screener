@@ -13,7 +13,13 @@ import {
 } from "@/components/intelligence-shared";
 
 export default function PerformancePage() {
-  const [range, setRange] = useState<DateRange>(() => presetToRange("month"));
+  // Default to the current quarter, not month: campaigns are earnings-
+  // driven and a season runs ~6 weeks straddling month boundaries, so
+  // a calendar month is the one window guaranteed to split a season in
+  // half. Quarter holds a full season plus context. The "Quarter"
+  // button (PresetKey "last_quarter") already resolves to the current
+  // calendar quarter, not the prior one — see presetToRange.
+  const [range, setRange] = useState<DateRange>(() => presetToRange("last_quarter"));
   const [broker, setBroker] = useState<BrokerFilter>("all");
   const [copyStatus, setCopyStatus] = useState<string | null>(null);
   const { data, loading, error } = useIntelligenceData(range, broker);
