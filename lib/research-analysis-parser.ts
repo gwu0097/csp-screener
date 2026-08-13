@@ -142,11 +142,37 @@ function extractField(block: string, label: string): string | null {
 // (Analysis Dump tab, the AI-badge modal, the History tab).
 //
 // The block is delimited structurally, not by a closing marker: every
-// blank or indented line right after the CANDIDATE_OBSERVATIONS: header
-// belongs to it; the first non-blank, unindented line ends it. A term
-// line is `term_name: definition text` (first use) or a bare
-// `term_name` (reuse of an already-known term, no colon). An indented
-// line under a just-defined term is a continuation of that definition.
+// line right after the CANDIDATE_OBSERVATIONS: header belongs to it,
+// up to (not including) the first blank line. A term line is
+// `term_name: definition text` (first use) or a bare `term_name`
+// (reuse of an already-known term, no colon).
+//
+// NOT gated on indentation, unlike an earlier version of this function.
+// The template's own response-format example shows indented entries
+// (lib/analysis-dump-template.ts), and real pastes matched that through
+// 2026-08-10 (confirmed: ASTS's 2026-08-10 paste has every
+// CANDIDATE_OBSERVATIONS line 2-space indented, and parsed correctly).
+// Starting with the next paste saved, 2026-08-11 15:11 (NBIS), every
+// real paste checked writes every entry flush-left instead — a drift in
+// how the external analyst formats its response, not a change to this
+// app's template or prompt (lib/analysis-dump-template.ts's format
+// section is unchanged across that window). The old, indentation-gated
+// loop required a line to be indented (or blank) to stay "inside" the
+// block, so once pastes went flush-left it broke on line 1 every time —
+// not a bare-reuse-specific bug (a definition line on line 1 fails
+// identically), and not v6-specific (v5 pastes from 2026-08-11 onward
+// hit it too; only the 2026-08-06 through 2026-08-10 window, coincident
+// with indented pastes, ever worked). It happened to look selective
+// because a dropped definition line still renders fine once
+// mis-classified as ordinary prose — it just never becomes a candidate
+// observation. Blank-line termination matches the template's own
+// structure exactly: CANDIDATE_OBSERVATIONS is always immediately
+// followed by one blank line then PART 1, in every real paste checked,
+// indented or not. A wrapped/continuation line (the template allows a
+// definition to wrap onto further lines) still works with no
+// indentation requirement here — the loop below already decides "is
+// this line a continuation of the currently-open term" by whether it
+// fails to match a term pattern while a term is open, not by whitespace.
 function extractCandidateObservationsBlock(proseRaw: string): {
   found: boolean;
   observations: ParsedCandidateObservation[];
@@ -164,9 +190,7 @@ function extractCandidateObservationsBlock(proseRaw: string): {
   while (i < lines.length) {
     const line = lines[i];
     const trimmed = line.trim();
-    const isIndented = /^[ \t]/.test(line) && trimmed.length > 0;
-    const isBlank = trimmed.length === 0;
-    if (!isIndented && !isBlank) break;
+    if (trimmed.length === 0) break;
     blockLines.push(line);
     i += 1;
   }
