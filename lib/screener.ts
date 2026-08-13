@@ -1009,11 +1009,31 @@ function historicalMoveScoreFromRatio(ratio: number | null): number {
 // pairs, prior=0.7228) 38% of tickers sit at n<=2 of their own
 // history, which is exactly the regime shrinkage exists for, but also
 // means k is being picked against a population that's still small and
-// will keep shifting as more verified history accumulates. PASS_2F
-// previously held k at 0 after k=2 reintroduced per-letter
-// non-monotonicity (B below A, F below C) — re-check that before
-// trusting this value long-term, not just once. Revisit k itself once
-// there's more verified (schwab/schwab_t0) history to test it against.
+// will keep shifting as more verified history accumulates.
+//
+// Monotonicity re-check (2026-08-12): re-ran PASS_2F's per-letter
+// (A/B/C/F mean realized move_ratio) check against 61 deduped
+// candidates with resolved outcomes, calling applyShrinkage/
+// gradeFromCrushScore directly rather than hand-reimplementing them.
+// Per-letter non-monotonicity is present at EVERY k tested (0 through
+// 20) — including k=0 — under both current live conditions (median
+// prior, no verifiedModifier) and a reconstruction of PASS_2F's
+// original conditions (prior=1.0, verifiedModifier folded back in via
+// computeVerifiedModifier/applyGradeModifier). So the original framing
+// ("pre-shrinkage was clean, k=2 broke it") does not hold on today's
+// data — k=0 is broken too, and no k up to 20 fixes it. The specific
+// violation also isn't the same one PASS_2F recorded: today's is
+// C-below-B (not B-below-A), plus F-below-C at low k which does match
+// half the original signature; F stops violating by k>=7 as shrinkage
+// promotes former-F candidates into C, but C never recovers through
+// k=20. Sample is thin and single-regime — A sits at n=2-4 (below this
+// codebase's own n>=10 adequacy bar), though B/C both clear n=10 at
+// k=5 (n=15/n=28), and a bootstrap over that pair gives P(C_mean <
+// B_mean) ~= 85%, i.e. not pure noise either. Net: this check can't
+// currently be used to pick k — the population is too small and too
+// narrow a vol regime to trust a monotonicity verdict at any k, not
+// just at 5. Revisit once there's more verified (schwab/schwab_t0)
+// history spanning more than one earnings season.
 export const DEFAULT_SHRINKAGE_K = 5;
 
 export function applyShrinkage(

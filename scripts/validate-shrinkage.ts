@@ -9,7 +9,7 @@ import { resolve } from "node:path";
 import { createClient } from "@supabase/supabase-js";
 import { getEarningsSurpriseHistory } from "@/lib/earnings";
 import { getCrushHistory, getPopulationPriorMoveRatio, type CrushHistoryEvent } from "@/lib/earnings-history-table";
-import { computeCrushComposite, computeVerifiedModifier, applyGradeModifier, type CrushCompositeResult } from "@/lib/screener";
+import { computeCrushComposite, type CrushCompositeResult } from "@/lib/screener";
 import type { EarningsMove } from "@/lib/yahoo";
 
 function loadEnvLocal(): void {
@@ -51,6 +51,10 @@ type Prepared = {
 const K_VALUES = [0, 1, 2, 3, 5] as const;
 const isAB = (g: string) => g === "A" || g === "B";
 
+// finalGrade === composite.crushGrade — since 3049066,
+// computeVerifiedModifier/applyGradeModifier are no longer applied to the
+// live crushGrade (kept as an inert diagnostic only), so this must match
+// that, not fold the modifier back in.
 function gradeAt(p: Prepared, populationPriorRatio: number, k: number): { composite: CrushCompositeResult; finalGrade: string } {
   const composite = computeCrushComposite({
     historicalMoves: p.historicalMoves,
@@ -65,12 +69,7 @@ function gradeAt(p: Prepared, populationPriorRatio: number, k: number): { compos
     populationPriorRatio,
     shrinkageK: k,
   });
-  const schwabRatios = p.crushHistory
-    .filter((h) => (h.impliedMoveSource === "schwab" || h.impliedMoveSource === "schwab_t0") && h.ratio !== null && h.earningsDate !== p.c.earnings_date)
-    .map((h) => h.ratio as number);
-  const modifier = computeVerifiedModifier(schwabRatios);
-  const finalGrade = applyGradeModifier(composite.crushGrade, modifier.delta);
-  return { composite, finalGrade };
+  return { composite, finalGrade: composite.crushGrade };
 }
 
 async function main() {

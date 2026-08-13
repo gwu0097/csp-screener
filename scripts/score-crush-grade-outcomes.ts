@@ -16,7 +16,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { getHistoricalEarningsMovements, type EarningsMove } from "@/lib/yahoo";
 import { getEarningsSurpriseHistory } from "@/lib/earnings";
-import { computeCrushComposite, computeVerifiedModifier, applyGradeModifier } from "@/lib/screener";
+import { computeCrushComposite } from "@/lib/screener";
 import { getPopulationPriorMoveRatio, type CrushHistoryEvent } from "@/lib/earnings-history-table";
 
 let POPULATION_PRIOR_RATIO = 1.0;
@@ -128,16 +128,11 @@ async function main() {
         surpriseQuartersExamined: surprise.quartersExamined,
         populationPriorRatio: POPULATION_PRIOR_RATIO,
       });
-      const schwabRatios = crushHistory
-        .filter(
-          (h) =>
-            (h.impliedMoveSource === "schwab" || h.impliedMoveSource === "schwab_t0") &&
-            h.ratio !== null &&
-            h.earningsDate !== r.earnings_date,
-        )
-        .map((h) => h.ratio as number);
-      const modifier = computeVerifiedModifier(schwabRatios);
-      const newGrade = applyGradeModifier(composite.crushGrade, modifier.delta);
+      // newGrade is the composite grade with no further modifier — since
+      // 3049066, computeVerifiedModifier/applyGradeModifier are no longer
+      // applied to the live crushGrade (kept as an inert diagnostic only),
+      // so "new" here must match that, not fold the modifier back in.
+      const newGrade = composite.crushGrade;
       scoredAll.push({ ...r, newGrade, newScore: composite.score, newMax: composite.maxScore });
       if ((i + 1) % 30 === 0) console.log(`  ...${i + 1}/${rows.length}`);
     }
