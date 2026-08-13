@@ -82,14 +82,13 @@ function weeklyCheckpointIndices(bars: Bar[]): number[] {
 
 async function main() {
   const { symbolCap, years } = parseArgs();
-  process.chdir("/Users/raitsai/csp-screener");
 
-  const { getHistoricalPrices } = await import("/Users/raitsai/csp-screener/lib/yahoo");
-  const { SWING_UNIVERSE } = await import("/Users/raitsai/csp-screener/lib/stock-universe");
+  const { getHistoricalPrices } = await import("../lib/yahoo");
+  const { SWING_UNIVERSE } = await import("../lib/stock-universe");
   const { evaluateBaseBreakout, classifyBaseBreakout, DEFAULT_BASE_BREAKOUT_THRESHOLDS } = await import(
-    "/Users/raitsai/csp-screener/lib/base-breakout"
+    "../lib/base-breakout"
   );
-  const { computeSMA } = await import("/Users/raitsai/csp-screener/lib/indicators");
+  const { computeSMA } = await import("../lib/indicators");
 
   const thresholds = DEFAULT_BASE_BREAKOUT_THRESHOLDS;
   const universe = symbolCap ? SWING_UNIVERSE.slice(0, symbolCap) : SWING_UNIVERSE;
