@@ -29,7 +29,11 @@ import {
   type SchwabOptionsChain,
 } from "@/lib/schwab";
 import { isT1SessionEligible } from "@/lib/session-eligibility";
-import { T1_RETRY_CUTOFF_DAYS, recordCaptureAttempt } from "@/lib/earnings-capture-attempts";
+import {
+  T1_RETRY_CUTOFF_DAYS,
+  recordCaptureAttempt,
+  checkAndMarkCorruptedBaseline,
+} from "@/lib/earnings-capture-attempts";
 import { findNearbyEarningsRow, recordImpliedMoveCapture } from "@/lib/earnings-history-table";
 import YahooFinance from "yahoo-finance2";
 
@@ -1934,7 +1938,11 @@ export type T1Result =
       iv_crush_cross_contract: boolean;
       breached_two_x_em: boolean;
     }
-  | { captured: false; skipped: true; reason: string };
+  // iv_crush_magnitude here is only ever set on the too_early_capture /
+  // corrupted_t0_baseline reasons — it's how checkAndMarkCorruptedBaseline
+  // (lib/earnings-capture-attempts.ts) compares this attempt against
+  // prior ones, via error_message on the recorded attempt row.
+  | { captured: false; skipped: true; reason: string; iv_crush_magnitude?: number };
 
 export async function captureEarningsT1(
   symbol: string,
@@ -2069,12 +2077,32 @@ export async function captureEarningsT1(
   // replacement for those fixes. The row stays eligible (iv_after
   // still null) and is retried on the next cron run.
   if (iv_crush_magnitude < TOO_EARLY_ACTUAL_FLOOR) {
+    // A genuine too-early capture (market hasn't reacted yet) resolves
+    // within hours as iv_after moves on subsequent attempts. A corrupted
+    // T0 baseline never resolves — iv_before is fixed at capture time and
+    // dominates this ratio, so the SAME magnitude keeps recurring however
+    // many times this is retried. checkAndMarkCorruptedBaseline tells the
+    // two apart by comparing this attempt's magnitude against the last
+    // two recorded ones; see its comment (lib/earnings-capture-attempts.ts)
+    // for the threshold/tolerance reasoning and the TECH case that
+    // motivated it (11 identical failures over 34 hours, 2026-08-13).
+    let reason = "too_early_capture";
+    if (opts?.dryRun !== true) {
+      const corrupted = await checkAndMarkCorruptedBaseline({
+        symbol: sym,
+        earningsDate,
+        currentMagnitude: iv_crush_magnitude,
+      });
+      if (corrupted.marked) reason = "corrupted_t0_baseline";
+    }
     console.warn(
       `[encyclopedia:T1] ${sym} ${earningsDate}: rejected — looks like a too-early capture ` +
         `(iv_crush_magnitude=${iv_crush_magnitude.toFixed(4)} < floor ${TOO_EARLY_ACTUAL_FLOOR}). ` +
-        `Not writing — will retry on the next eligible cron run.`,
+        (reason === "corrupted_t0_baseline"
+          ? `Same magnitude recurred across 2+ sessions — marked t1_unrecoverable, will not retry.`
+          : `Not writing — will retry on the next eligible cron run.`),
     );
-    return { captured: false, skipped: true, reason: "too_early_capture" };
+    return { captured: false, skipped: true, reason, iv_crush_magnitude };
   }
 
   if (opts?.dryRun === true) {
@@ -2735,6 +2763,9 @@ export async function runEncyclopediaMaintenance(): Promise<MaintenanceReport> {
         earningsDate: c.earnings_date,
         phase: "t1",
         outcome: r.captured ? "captured" : (r.reason ?? "unknown"),
+        // Only ever set on too_early_capture/corrupted_t0_baseline — see
+        // the matching comment in lib/earnings-capture.ts's runT1Capture.
+        errorMessage: !r.captured && r.iv_crush_magnitude !== undefined ? String(r.iv_crush_magnitude) : null,
       });
       if (r.captured) report.t1Captured.push({ symbol: c.symbol, earnings_date: c.earnings_date });
       else if (

@@ -447,6 +447,10 @@ export async function runT1Capture(opts?: {
           earningsDate: c.earnings_date,
           phase: "t1",
           outcome: r.captured ? "captured" : (r.reason ?? "unknown"),
+          // Only ever set on too_early_capture/corrupted_t0_baseline —
+          // checkAndMarkCorruptedBaseline reads it back off the last two
+          // attempt rows to detect a recurring, unchanging magnitude.
+          errorMessage: !r.captured && r.iv_crush_magnitude !== undefined ? String(r.iv_crush_magnitude) : null,
         });
       }
       if (r.captured) {
