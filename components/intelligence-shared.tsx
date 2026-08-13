@@ -121,6 +121,15 @@ export type EmCalibrationRow = {
   traded: boolean;
 };
 
+export type TickerPnl = {
+  symbol: string;
+  optionsNet: number;
+  stockNet: number;
+  totalNet: number;
+  campaignCount: number;
+  winRate: number | null;
+};
+
 export type PairedAssignment = {
   symbol: string;
   broker: string | null;
@@ -180,6 +189,7 @@ export type IntelligenceResponse = {
   paired_assignments: PairedAssignment[];
   partial_closes?: PartialClose[];
   total_partial_pnl?: number;
+  ticker_pnl?: TickerPnl[];
   ticker_rankings: TickerRanking[];
   patterns: {
     enabled: boolean;
@@ -1130,12 +1140,184 @@ export function PerformanceSection({
         })()}
       </div>
 
+      <TickerPnlPanel rows={data.ticker_pnl ?? []} />
       <PartialClosesPanel
         rows={data.partial_closes ?? []}
         total={data.total_partial_pnl ?? 0}
       />
       <PairedAssignmentsPanel pairs={data.paired_assignments ?? []} />
     </section>
+  );
+}
+
+const TICKER_PNL_MAX_BARS = 30;
+
+type TickerBarDatum = TickerPnl & { isOthers: boolean; othersCount?: number };
+
+// One horizontal bar per ticker, netting options + stock together —
+// row-level windowed exactly like the Realized P&L card and equity
+// curve above it, so these always sum to combined_realized_pnl (rows
+// come pre-sorted by |totalNet| descending from the API). Above 30
+// tickers, the tail collapses into one "N others" bar that expands
+// in place into a small table — not a mode switch.
+function TickerPnlPanel({ rows }: { rows: TickerPnl[] }) {
+  const [othersExpanded, setOthersExpanded] = useState(false);
+  if (rows.length === 0) return null;
+
+  const shown = rows.length <= TICKER_PNL_MAX_BARS ? rows : rows.slice(0, TICKER_PNL_MAX_BARS);
+  const rest = rows.length <= TICKER_PNL_MAX_BARS ? [] : rows.slice(TICKER_PNL_MAX_BARS);
+  const othersNet = Math.round(rest.reduce((s, r) => s + r.totalNet, 0) * 100) / 100;
+
+  // Concentration uses the FULL list (pre-cap) and absolute values in
+  // the denominator, per spec — offsetting wins/losses shouldn't hide
+  // concentration the way a signed sum would.
+  const grossAbs = rows.reduce((s, r) => s + Math.abs(r.totalNet), 0);
+  const top3 = rows.slice(0, 3);
+  const top3Abs = top3.reduce((s, r) => s + Math.abs(r.totalNet), 0);
+  const concentrationPct = grossAbs > 0 ? (top3Abs / grossAbs) * 100 : 0;
+
+  const chartData: TickerBarDatum[] = [
+    ...shown.map((r) => ({ ...r, isOthers: false })),
+    ...(rest.length > 0
+      ? [
+          {
+            symbol: `${rest.length} others`,
+            optionsNet: Math.round(rest.reduce((s, r) => s + r.optionsNet, 0) * 100) / 100,
+            stockNet: Math.round(rest.reduce((s, r) => s + r.stockNet, 0) * 100) / 100,
+            totalNet: othersNet,
+            campaignCount: rest.reduce((s, r) => s + r.campaignCount, 0),
+            winRate: null,
+            isOthers: true,
+            othersCount: rest.length,
+          },
+        ]
+      : []),
+  ];
+  const rowHeight = 26;
+
+  return (
+    <div className="rounded-md border border-border bg-background/40 p-3">
+      <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+        <div className="text-base font-medium">P&L by ticker</div>
+        {top3.length > 0 && (
+          <div className="text-[11px] text-muted-foreground">
+            Top {top3.length} ({top3.map((t) => t.symbol).join(", ")}) ={" "}
+            <span className="font-mono">{Math.round(concentrationPct)}%</span> of gross P&L
+          </div>
+        )}
+      </div>
+      <div style={{ width: "100%", height: Math.max(160, chartData.length * rowHeight) }}>
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart data={chartData} layout="vertical" margin={{ top: 4, right: 48, bottom: 4, left: 4 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#27272a" horizontal={false} />
+            <XAxis
+              type="number"
+              stroke="#71717a"
+              tick={{ fontSize: 11 }}
+              tickFormatter={(v) => fmtMoney(Number(v))}
+            />
+            <YAxis
+              type="category"
+              dataKey="symbol"
+              stroke="#71717a"
+              tick={{ fontSize: 11 }}
+              width={64}
+            />
+            <Tooltip content={<TickerPnlTooltip />} cursor={{ fill: "#27272a", opacity: 0.4 }} />
+            <Bar dataKey="totalNet">
+              {chartData.map((d) => (
+                <Cell
+                  key={d.symbol}
+                  fill={d.isOthers ? (d.totalNet >= 0 ? "#10b98180" : "#ef444480") : d.totalNet >= 0 ? "#10b981" : "#ef4444"}
+                />
+              ))}
+            </Bar>
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+      {rest.length > 0 && (
+        <div className="mt-1">
+          <button
+            type="button"
+            onClick={() => setOthersExpanded((v) => !v)}
+            className="text-[11px] text-muted-foreground underline decoration-dotted underline-offset-2 hover:text-foreground"
+          >
+            {othersExpanded ? "Hide" : "Show"} {rest.length} others (
+            <span className={othersNet >= 0 ? "text-emerald-300" : "text-rose-300"}>
+              {fmtMoney(othersNet, true)}
+            </span>
+            )
+          </button>
+          {othersExpanded && (
+            <table className="mt-2 w-full text-[11px]">
+              <tbody>
+                {rest.map((r) => (
+                  <tr key={r.symbol} className="border-t border-border/40">
+                    <td className="py-1 text-muted-foreground">{r.symbol}</td>
+                    <td className="py-1 text-right text-muted-foreground">
+                      {r.campaignCount} {r.campaignCount === 1 ? "campaign" : "campaigns"}
+                    </td>
+                    <td
+                      className={`py-1 text-right font-mono ${r.totalNet >= 0 ? "text-emerald-300" : "text-rose-300"}`}
+                    >
+                      {fmtMoney(r.totalNet, true)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TickerPnlTooltip({
+  active,
+  payload,
+}: {
+  active?: boolean;
+  payload?: Array<{ payload: TickerBarDatum }>;
+}) {
+  if (!active || !payload || payload.length === 0) return null;
+  const d = payload[0].payload;
+  const totalColor = d.totalNet >= 0 ? "text-emerald-300" : "text-rose-300";
+  const optionsColor = d.optionsNet >= 0 ? "text-emerald-300" : "text-rose-300";
+  const stockColor = d.stockNet >= 0 ? "text-emerald-300" : "text-rose-300";
+  return (
+    <div className="min-w-[200px] rounded border border-border bg-zinc-900/95 p-2 text-sm shadow-lg">
+      <div className="mb-1 font-medium text-foreground">{d.symbol}</div>
+      {!d.isOthers && (
+        <>
+          <div className="flex justify-between gap-3">
+            <span className="text-muted-foreground">Options net:</span>
+            <span className={optionsColor}>{fmtMoney(d.optionsNet, true)}</span>
+          </div>
+          <div className="flex justify-between gap-3">
+            <span className="text-muted-foreground">Stock net:</span>
+            <span className={stockColor}>{fmtMoney(d.stockNet, true)}</span>
+          </div>
+          <div className="my-1 border-t border-border/60" />
+        </>
+      )}
+      <div className="flex justify-between gap-3 font-semibold">
+        <span className="text-muted-foreground">Total:</span>
+        <span className={totalColor}>{fmtMoney(d.totalNet, true)}</span>
+      </div>
+      {!d.isOthers && (
+        <>
+          <div className="flex justify-between gap-3">
+            <span className="text-muted-foreground">Campaigns:</span>
+            <span>{d.campaignCount}</span>
+          </div>
+          <div className="flex justify-between gap-3">
+            <span className="text-muted-foreground">Win rate:</span>
+            <span>{d.winRate !== null ? fmtPct(d.winRate, 0) : "—"}</span>
+          </div>
+        </>
+      )}
+    </div>
   );
 }
 

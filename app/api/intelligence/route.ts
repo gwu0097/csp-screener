@@ -458,6 +458,64 @@ export async function GET(req: NextRequest) {
   const unresolvedCampaignsPnlAllTime =
     Math.round(unresolvedEarningsCampaigns.reduce((s, c) => s + c.netPnl, 0) * 100) / 100;
 
+  // ---------- P&L by ticker (row-level window, options+stock netted) ----------
+  // Deliberately row-level closed_date attribution — the same window
+  // filter behind `windowed`/`windowedStocks` above — so these bars
+  // always sum to combined_realized_pnl exactly, the same guarantee the
+  // equity curve already gives. This is a different windowing rule from
+  // the campaign-outcome block above (which attributes a campaign to
+  // its terminal close date, even outside [from, to]) — a ticker's bar
+  // here can be smaller than its full campaign net if that campaign
+  // spans outside the window; campaignCount/winRate in the tooltip
+  // still look up each touching campaign's true all-time net via
+  // campaignMap, independent of the bar's own windowed dollar value.
+  type TickerAgg = { optionsNet: number; stockNet: number; campaignKeys: Set<string> };
+  const tickerMap = new Map<string, TickerAgg>();
+  const addToTicker = (symbol: string, key: string, isStock: boolean, pnl: number) => {
+    let t = tickerMap.get(symbol);
+    if (!t) {
+      t = { optionsNet: 0, stockNet: 0, campaignKeys: new Set<string>() };
+      tickerMap.set(symbol, t);
+    }
+    if (isStock) t.stockNet += pnl;
+    else t.optionsNet += pnl;
+    t.campaignKeys.add(key);
+  };
+  for (const p of windowed) {
+    addToTicker(p.symbol, campaignKey(p), false, Number(p.realized_pnl ?? 0));
+  }
+  for (const p of windowedStocks) {
+    addToTicker(p.symbol, campaignKey(p), true, Number(p.realized_pnl ?? 0));
+  }
+  type TickerPnl = {
+    symbol: string;
+    optionsNet: number;
+    stockNet: number;
+    totalNet: number;
+    campaignCount: number;
+    winRate: number | null;
+  };
+  const ticker_pnl: TickerPnl[] = Array.from(tickerMap.entries())
+    .map(([symbol, t]) => {
+      let resolvedCount = 0;
+      let wins = 0;
+      for (const key of Array.from(t.campaignKeys)) {
+        if (openKeys.has(key)) continue; // no outcome yet — excluded from count and win rate
+        resolvedCount++;
+        const camp = campaignMap.get(key);
+        if (camp && camp.netPnl > 0) wins++;
+      }
+      return {
+        symbol,
+        optionsNet: Math.round(t.optionsNet * 100) / 100,
+        stockNet: Math.round(t.stockNet * 100) / 100,
+        totalNet: Math.round((t.optionsNet + t.stockNet) * 100) / 100,
+        campaignCount: resolvedCount,
+        winRate: resolvedCount > 0 ? wins / resolvedCount : null,
+      };
+    })
+    .sort((a, b) => Math.abs(b.totalNet) - Math.abs(a.totalNet));
+
   // Equity curve is bucketed so multiple trades on the same date collapse
   // into a single data point. Granularity stretches with range length so
   // a "year" view doesn't render 250 daily ticks.
@@ -1277,6 +1335,10 @@ export async function GET(req: NextRequest) {
     // again in the snapshot.
     partial_close_pnl_in_window:
       Math.round(partialClosePnlInWindow * 100) / 100,
+    // Row-level, window-scoped, options+stock netted per symbol — see
+    // the computation above for how this differs from ticker_rankings
+    // below (which is all-time, option-only, per-row).
+    ticker_pnl,
     ticker_rankings,
     patterns: {
       enabled: patternsEnabled,
