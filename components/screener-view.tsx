@@ -283,7 +283,11 @@ type StrikeOverride = {
   strike: number;
   premium: number;
   last: number;
-  delta: number;
+  // null when Schwab's reported delta failed server-side validation
+  // (see parseSchwabOptionDelta, lib/schwab.ts) — a rejected sentinel,
+  // not a real quote. POP must default to 0 (not delta to 0), never
+  // read as a falsely-perfect trade — see every `.delta` consumer below.
+  delta: number | null;
   bidAskSpreadPct: number;
   bid: number;
   oi: number;
@@ -3163,7 +3167,11 @@ type CustomStrikeAnalysis = {
   distancePct: number;
   pop: number;
   premium: number;
-  delta: number;
+  // null when Schwab's reported delta failed validation (see
+  // parseSchwabOptionDelta, lib/schwab.ts) — `pop` above already
+  // defaults conservatively to 0 in that case, independent of this
+  // display-only field.
+  delta: number | null;
   breakeven: number;
   opportunityGradeNew: "A" | "B" | "C" | "F";
   finalGradeNew: "A" | "B" | "C" | "F";
@@ -4135,7 +4143,10 @@ type ChainStrikeRow = {
   last: number;
   premiumFill: number;
   fillInvalid: boolean;
-  delta: number;
+  // null when Schwab's reported delta failed validation server-side
+  // (see parseSchwabOptionDelta, lib/schwab.ts) — a rejected sentinel,
+  // not a real quote.
+  delta: number | null;
   oi: number;
   volume: number;
 };
@@ -4152,7 +4163,7 @@ function overrideFromStrike(s: {
   mark: number;
   last: number;
   premiumFill: number;
-  delta: number;
+  delta: number | null;
   oi?: number;
   volume?: number;
 }): StrikeOverride {
@@ -4242,8 +4253,11 @@ function OptionsChainTab({
   }
 
   const selectedStrike = strikeOverride?.strike ?? null;
+  // Same conservative-default rule as the server (lib/screener.ts
+  // buildThreeLayerGrade): a null delta must never coerce to 0 and then
+  // read as 100% POP — default POP itself to 0 instead.
   const selectedPop =
-    strikeOverride !== null ? 1 - Math.abs(strikeOverride.delta) : null;
+    strikeOverride !== null ? (strikeOverride.delta !== null ? 1 - Math.abs(strikeOverride.delta) : 0) : null;
   const selectedDropPct =
     strikeOverride !== null && r.price > 0
       ? ((r.price - strikeOverride.strike) / r.price) * 100
@@ -5286,7 +5300,10 @@ function CustomStrikeAnalyzer({
         bestDiff = d;
       }
     }
-    const pop = 1 - Math.abs(nearest.delta);
+    // Same conservative-default rule as the server (lib/screener.ts
+    // buildThreeLayerGrade): a null delta must never coerce to 0 and
+    // then read as 100% POP — default POP itself to 0 instead.
+    const pop = nearest.delta !== null ? 1 - Math.abs(nearest.delta) : 0;
     // Fill-priced (mid by default, see computeFillPrice in lib/screener.ts)
     // — nearest.mark stays a separate, purely informational mid/spread
     // denominator field. ?? 0, not a mark fallback: a stale cached row
@@ -5368,7 +5385,7 @@ function CustomStrikeAnalyzer({
             <Row k="Strike" v={`$${result.strike.toFixed(2)}`} />
             <Row k="% Drop to Strike" v={`${result.distancePct.toFixed(1)}%`} />
             <Row k="Premium" v={`$${result.premium.toFixed(2)}`} />
-            <Row k="Delta" v={result.delta.toFixed(3)} />
+            <Row k="Delta" v={result.delta !== null ? result.delta.toFixed(3) : "invalid quote"} />
             <Row
               k="Yield%"
               v={fmtYield(result.premium, result.strike)}

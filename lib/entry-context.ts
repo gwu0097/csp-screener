@@ -13,6 +13,7 @@ import { createServerClient } from "@/lib/supabase";
 import {
   getOptionsChain,
   isSchwabConnected,
+  parseSchwabImpliedVol,
   type SchwabOptionContract,
   type SchwabOptionsChain,
 } from "@/lib/schwab";
@@ -143,7 +144,12 @@ function chainReadings(
   // The position's own contract — IV and delta at its strike.
   const own = contractAt(optionType, strike);
   if (own && Math.abs(own.strikePrice - strike) < 0.51) {
-    out.contractIv = Number.isFinite(own.volatility) ? own.volatility / 100 : null;
+    // parseSchwabImpliedVol (lib/schwab.ts) rejects Schwab's -999 "not
+    // computable" sentinel and any other implausible value — same fix
+    // as captureEarningsT0/T1 (lib/encyclopedia.ts) and ivPercent()
+    // (lib/screener.ts), all now sharing this one validator so a -999
+    // divided by 100 can't quietly become entry_iv on a new position.
+    out.contractIv = parseSchwabImpliedVol(own.volatility);
     out.contractDelta = Number.isFinite(own.delta) ? own.delta : null;
   }
   return out;

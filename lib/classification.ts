@@ -280,6 +280,22 @@ function isManagedCareIndustry(industry: string): boolean {
   );
 }
 
+// Yahoo intermittently omits marketCap even on real, large, liquid
+// names on an otherwise-successful quote() call (confirmed live in
+// commit c5f4410 — ADI/MU/WDC, all $150B+, hit this on the same day).
+// `marketCap ?? 0` treats that gap as a literal $0 market cap, which
+// silently fails every floor gated on it — a coverage gap masquerading
+// as "this is a micro-cap." One shared check so any current or future
+// market-cap floor in this file treats missing as unknown, not zero:
+// unknown passes rather than fails, matching this codebase's own
+// established default for a Yahoo coverage gap (classifyFromYahoo's own
+// comment: "we'd rather not throw out a valid candidate over a coverage
+// gap") — the alternative (fail-closed) would misclassify exactly the
+// real large caps c5f4410 already found being hit by this.
+function marketCapAtLeastOrUnknown(marketCap: number | null, floorUsd: number): boolean {
+  return marketCap === null ? true : marketCap >= floorUsd;
+}
+
 // Yahoo sector → pass/fail as specified by the user.
 // PASS: Technology, Financial Services, Healthcare (not managed care),
 //       Consumer Defensive, Utilities, Communication Services (large cap only).
@@ -321,7 +337,7 @@ function mapYahooToPass(profile: {
 
   // Communication Services: large-cap only (>= $10B)
   if (sector.includes("communication")) {
-    const largeCap = (profile.marketCap ?? 0) >= 10_000_000_000;
+    const largeCap = marketCapAtLeastOrUnknown(profile.marketCap, 10_000_000_000);
     return { pass: largeCap, industry };
   }
 

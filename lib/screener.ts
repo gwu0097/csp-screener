@@ -2,6 +2,8 @@ import {
   getOptionsChain,
   getOptionsChainRange,
   schwabGet,
+  parseSchwabImpliedVol,
+  parseSchwabOptionDelta,
   SchwabOptionContract,
   SchwabOptionsChain,
 } from "@/lib/schwab";
@@ -318,7 +320,11 @@ export type StageFourResult = {
     // Chain tab and ladder diagnostics can flag it, not just silently
     // use a possibly-stale bid.
     fillInvalid: boolean;
-    delta: number;
+    // null when Schwab's reported delta failed validation (sentinel or
+    // out-of-range — see parseSchwabOptionDelta) — evaluateReferenceStrike
+    // must treat this the same way runStageFour treats its own picked
+    // contract's rejected delta: no POP computed from it.
+    delta: number | null;
     // Open interest / today's volume for this strike — same Schwab
     // contract response runStageFour already fetches for bid/ask/mark,
     // just extracted; not a new round-trip. Powers the Analysis Dump
@@ -1394,10 +1400,17 @@ function pickAtmContract(chain: SchwabOptionsChain, expiryPrefix: string, spot: 
   return best;
 }
 
+// Delegates to parseSchwabImpliedVol (lib/schwab.ts) — the old
+// `raw > 1 ? raw / 100 : raw` heuristic here unconditionally accepted
+// Schwab's -999 "not computable" sentinel unscaled (since -999 > 1 is
+// false, it returned -999 as-is, not even divided by 100 — worse than
+// the /100 bug this app already found and fixed on the T0/T1 capture
+// path). Every real caller here passes a raw Schwab options-chain
+// volatility (always percent-form, per SchwabOptionContract's own
+// comment), so there's no legitimate case that actually needed the
+// ambiguous "maybe it's already a decimal" branch.
 function ivPercent(raw: number | undefined | null): number | null {
-  if (raw === undefined || raw === null || !Number.isFinite(raw)) return null;
-  // Schwab reports IV in percent (e.g. 45 for 45%). Normalize to fraction.
-  return raw > 1 ? raw / 100 : raw;
+  return parseSchwabImpliedVol(raw);
 }
 
 function annualizedRealizedVol(closes: number[]): number | null {
@@ -2250,7 +2263,20 @@ export async function runStageFour(
   const strike = contract.strikePrice;
   const yieldPct = strike > 0 ? (premium / strike) * 100 : 0;
   const spreadPctOfMid = mid > 0 ? ((contract.ask - contract.bid) / mid) * 100 : 100;
-  const delta = contract.delta;
+  // parseSchwabOptionDelta (lib/schwab.ts) rejects Schwab's sentinel
+  // fallback (delta=1 regardless of put/call, confirmed live — a real
+  // put delta can never be +1) and anything outside a real delta's
+  // plausible (-1,0)/(0,1) range. Reject, don't silently compute POP
+  // from it: probabilityOfProfit (below, in buildThreeLayerGrade)
+  // defaults to 0 — not 100% — when delta is null, so a rejected
+  // sentinel can never masquerade as a safe trade.
+  const delta = parseSchwabOptionDelta(contract.delta, contract.putCall);
+  if (delta === null) {
+    console.warn(
+      `[stage4:${candidate.symbol}] rejected delta=${contract.delta} for putCall=${contract.putCall} — ` +
+        `outside the plausible range (Schwab sentinel or bad quote). POP will not be computed from this contract.`,
+    );
+  }
 
   console.log(
     `[stage4:${candidate.symbol}] pricing: bid=${bid} ask=${ask} mid=${mid.toFixed(2)} last=${last.toFixed(2)} ` +
@@ -2258,7 +2284,9 @@ export async function runStageFour(
   );
 
   const premiumYieldScore = scorePremiumYield(yieldPct);
-  const deltaScore = scoreDelta(delta);
+  // deltaScore is a display-only detail (see the comment on opportunityGrade
+  // below) — 0 on a rejected delta is a safe, non-grade-determining default.
+  const deltaScore = scoreDelta(delta ?? 0);
   const rawScore = premiumYieldScore + deltaScore;
 
   const openInterest = Number.isFinite(contract.openInterest) ? (contract.openInterest as number) : 0;
@@ -2280,9 +2308,11 @@ export async function runStageFour(
     ? "No bid — cannot be sold at any price"
     : midInvalid
       ? "Bid/ask quote invalid (missing or crossed ask) — priced at bid, not mid"
-      : liquidityCapped
-        ? `Liquidity-capped from ${yieldGrade} — ${liquidity.reason}`
-        : null;
+      : delta === null
+        ? "Invalid delta from Schwab (sentinel or out-of-range) — POP not computed, defaults to 0%"
+        : liquidityCapped
+          ? `Liquidity-capped from ${yieldGrade} — ${liquidity.reason}`
+          : null;
 
   // Compact snapshot of the weekly put chain — the UI uses it to let
   // users try a custom strike without another API round-trip. When
@@ -2316,6 +2346,13 @@ export async function runStageFour(
           strikeBidRaw,
           strikeAskRaw,
         );
+        // This loop already filters to PUT-or-unset contracts above, so
+        // the side passed here is always "PUT" — same rejection as the
+        // picked contract's own delta (see parseSchwabOptionDelta):
+        // Schwab's sentinel fallback (a real put delta can never be +1)
+        // rejected rather than stored, since this same array feeds
+        // evaluateReferenceStrike's own POP text below.
+        const strikeDelta = parseSchwabOptionDelta(c.delta, "PUT");
         availableStrikes!.push({
           strike: c.strikePrice,
           bid: c.bid,
@@ -2324,7 +2361,7 @@ export async function runStageFour(
           last: Number.isFinite(c.last) ? Math.round(c.last * 100) / 100 : 0,
           premiumFill: Math.round(strikeFill * 100) / 100,
           fillInvalid: strikeFillInvalid,
-          delta: Math.round(c.delta * 1000) / 1000,
+          delta: strikeDelta !== null ? Math.round(strikeDelta * 1000) / 1000 : null,
           oi: Number.isFinite(c.openInterest) ? (c.openInterest as number) : 0,
           volume: Number.isFinite(c.totalVolume) ? (c.totalVolume as number) : 0,
         });
@@ -2344,7 +2381,10 @@ export async function runStageFour(
     anchorVolume: volume,
     anchorSpreadPct: spreadPctOfMid,
     anchorPremiumFill: Math.round(premium * 100) / 100,
-    anchorDelta: Math.round(delta * 1000) / 1000,
+    // Display-only on the liquidity suggestion (never a POP input in
+    // this function) — 0 is a safe, non-misleading placeholder when
+    // delta was rejected.
+    anchorDelta: delta !== null ? Math.round(delta * 1000) / 1000 : 0,
     referenceMove,
     candidates: availableStrikes ?? [],
   });
@@ -2359,7 +2399,7 @@ export async function runStageFour(
     // surfaced separately in details.mathTargetStrike for reference.
     suggestedStrike: Math.round(contract.strikePrice * 100) / 100,
     premium: Math.round(premium * 100) / 100,
-    delta: Math.round(delta * 1000) / 1000,
+    delta: delta !== null ? Math.round(delta * 1000) / 1000 : null,
     bid: Math.round(bid * 100) / 100,
     ask: Math.round(ask * 100) / 100,
     last: Math.round(last * 100) / 100,
@@ -3404,6 +3444,20 @@ function evaluateReferenceStrike(
       text: `No bid at 2xEM ($${referenceStrike.toFixed(2)}).`,
     };
   }
+  // Reuses the "no_bid" (not-tradeable) status rather than adding a
+  // third union member — the two consumers of `status` (screener-view's
+  // badge color and chip label) only ever branch tradeable-vs-not, so a
+  // third value would need updating both anyway for no real gain. `text`
+  // (the field actually rendered as the row's explanation) carries the
+  // real reason. Reject, don't compute POP from a rejected delta — see
+  // parseSchwabOptionDelta.
+  if (rung.delta === null) {
+    return {
+      status: "no_bid",
+      referenceStrike,
+      text: `2xEM strike ($${referenceStrike.toFixed(2)}) has a bid but an invalid delta (Schwab sentinel or out-of-range) — POP not computed.`,
+    };
+  }
   const pop = 1 - Math.abs(rung.delta);
   const pctOtm = spot > 0 ? ((spot - referenceStrike) / spot) * 100 : 0;
   return {
@@ -3446,8 +3500,14 @@ export function calculateThreeLayerGrade(
   const crushGrade = stageThreeResult.crushGrade;
   const opportunityGrade = stageFourResult.opportunityGrade;
 
-  const delta = stageFourResult.delta ?? 0;
-  const probabilityOfProfit = 1 - Math.abs(delta);
+  // Defaulting a MISSING delta to 0 and then computing 1-|0| would read
+  // as 100% POP — the single most dangerous possible value for exactly
+  // the case where the input is untrustworthy (Schwab's -999-class
+  // sentinel or a rejected out-of-range quote, see
+  // parseSchwabOptionDelta). Default probabilityOfProfit itself to 0 —
+  // the conservative direction — so an untrustworthy delta fails every
+  // POP-gated grading rule below rather than reading as a perfect trade.
+  const probabilityOfProfit = stageFourResult.delta !== null ? 1 - Math.abs(stageFourResult.delta) : 0;
   const premium = stageFourResult.premium ?? 0;
   const strike = stageFourResult.suggestedStrike ?? 0;
   const breakevenPrice = strike - premium;

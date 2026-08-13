@@ -53,7 +53,11 @@ export type LiquidityStrikeCandidate = {
   ask: number;
   mark: number;
   premiumFill: number;
-  delta: number;
+  // null when Schwab's reported delta failed validation (see
+  // parseSchwabOptionDelta, lib/schwab.ts) — display-only here, never a
+  // search/qualification input, so a rejected delta just carries
+  // through as null rather than needing a fallback.
+  delta: number | null;
 };
 
 export type LiquidityStrikeSuggestion = {

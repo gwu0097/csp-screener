@@ -371,6 +371,63 @@ export type SchwabOptionContract = {
   totalVolume?: number;
 };
 
+// ---------- Shared sentinel/plausibility validators ----------
+//
+// Schwab encodes "not computable" two different ways on the same
+// contract response rather than omitting the field: -999 on volatility
+// AND theoreticalOptionValue (confirmed live on a real illiquid
+// contract — TECH's Aug-2026 weekly, near-zero volume, empty markets —
+// both fields read exactly -999 on the same strike), and a separate
+// fallback of delta=1/gamma=0/theta=0/vega=0 regardless of put-vs-call
+// (a real put delta can never be +1, so a put reading exactly 1 is the
+// same class of tell). A raw value merely passing Number.isFinite()
+// lets either encoding through disguised as real data — this app
+// stored -999/100 = -9.99 as an implied volatility this way, which then
+// poisoned every downstream crush calculation with no retry able to
+// fix it, since the corrupted number never changes.
+//
+// One parser per field TYPE (not one per call site) so every consumer
+// — capture (lib/encyclopedia.ts), the CSP screener (lib/screener.ts),
+// and entry-context stamping (lib/entry-context.ts) — rejects the same
+// sentinel the same way, and a future consumer of these fields inherits
+// the check by construction rather than needing its own copy.
+
+// Schwab reports volatility as a percent (e.g. 45.6 for 45.6%). Returns
+// a decimal fraction, or null if raw is missing, non-finite, or outside
+// a plausible range for a real implied volatility.
+//   Lower bound: must be positive — IV is a variance-derived quantity,
+//   never zero or negative for a real quote.
+//   Upper bound: 10.0 (1000%) — this app's full captured history
+//   (earnings_history.iv_before/iv_after) tops out around 3.0-3.6
+//   (300-360%, its most extreme real earnings-crush captures), so 1000%
+//   is ~3x headroom above anything ever genuinely observed while still
+//   comfortably catching -999 and any similarly out-of-range garbage.
+export function parseSchwabImpliedVol(raw: number | null | undefined): number | null {
+  if (raw === null || raw === undefined || !Number.isFinite(raw)) return null;
+  const decimal = raw / 100;
+  if (decimal <= 0 || decimal > 10) return null;
+  return decimal;
+}
+
+// A real option delta is strictly between 0 and 1 in magnitude, signed
+// by side: a call's delta is in (0, 1), a put's in (-1, 0) — 0 and the
+// unit bounds themselves are excluded since a real, continuously-priced
+// delta essentially never lands exactly on them (0/±1 is what Schwab's
+// fallback actually returns, confirmed live: a real illiquid contract
+// read delta=1 for BOTH its call AND its put, which is only possible
+// from a default value, never from two different real deltas). Returns
+// null — reject, don't silently pass through — for anything missing,
+// non-finite, wrong-signed for the given side, or at/outside the (0,1)
+// unit bounds.
+export function parseSchwabOptionDelta(
+  raw: number | null | undefined,
+  putCall: "PUT" | "CALL",
+): number | null {
+  if (raw === null || raw === undefined || !Number.isFinite(raw)) return null;
+  if (putCall === "CALL") return raw > 0 && raw < 1 ? raw : null;
+  return raw > -1 && raw < 0 ? raw : null;
+}
+
 export type SchwabOptionsChain = {
   symbol: string;
   status?: string;
