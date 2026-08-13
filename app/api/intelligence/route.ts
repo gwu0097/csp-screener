@@ -1053,6 +1053,28 @@ export async function GET(req: NextRequest) {
     if (r.position_type === "stock_long" || r.position_type === "stock_short") continue;
     putById.set(r.id, r);
   }
+  // total_contracts on a stock_long row tracks REMAINING shares
+  // (recalculatePositionFromFills writes it that way) — 0 once the lot
+  // is fully sold, which every row here is by definition. The actual
+  // assigned-share count only lives in the stock's own OPEN fill, so it
+  // has to be fetched separately rather than read off the position row.
+  const assignedStockIds = closedStocks
+    .filter((s) => s.assignment_source_id)
+    .map((s) => s.id);
+  const assignedSharesByStock = new Map<string, number>();
+  if (assignedStockIds.length > 0) {
+    const openFillsRes = await sb
+      .from("fills")
+      .select("position_id,contracts")
+      .in("position_id", assignedStockIds)
+      .eq("fill_type", "open");
+    for (const f of (openFillsRes.data ?? []) as Array<{ position_id: string; contracts: number }>) {
+      assignedSharesByStock.set(
+        f.position_id,
+        (assignedSharesByStock.get(f.position_id) ?? 0) + Number(f.contracts),
+      );
+    }
+  }
   type PairedAssignment = {
     symbol: string;
     broker: string | null;
@@ -1062,6 +1084,17 @@ export async function GET(req: NextRequest) {
       expiry: string;
       contracts: number;
       avgPremiumSold: number | null;
+      // Premium actually collected on the ASSIGNED shares
+      // (avgPremiumSold × assigned shares) — independent of
+      // realizedPnl below, since the assignment-attribution fix moved
+      // that premium onto the stock leg's cost basis and zeroed it
+      // here for a clean assignment.
+      premiumCollected: number;
+      // What's left on the option row itself post-fix: 0 for a clean
+      // full assignment, nonzero only when part of the position was
+      // closed separately from the assignment (e.g. a partial buyback)
+      // — that leftover P&L has nothing to do with the assigned shares
+      // and isn't part of premiumCollected above.
       realizedPnl: number;
       closedDate: string | null;
     } | null;
@@ -1080,6 +1113,9 @@ export async function GET(req: NextRequest) {
     const parent = putById.get(s.assignment_source_id) ?? null;
     const stockPnl = Number(s.realized_pnl ?? 0);
     const parentPnl = parent ? Number(parent.realized_pnl ?? 0) : 0;
+    const shares = assignedSharesByStock.get(s.id) ?? Number(s.total_contracts ?? 0);
+    const avgPremiumSold =
+      parent && parent.avg_premium_sold !== null ? Number(parent.avg_premium_sold) : null;
     paired_assignments.push({
       symbol: s.symbol,
       broker: s.broker,
@@ -1089,17 +1125,16 @@ export async function GET(req: NextRequest) {
             strike: Number(parent.strike),
             expiry: parent.expiry,
             contracts: Number(parent.total_contracts ?? 0),
-            avgPremiumSold:
-              parent.avg_premium_sold !== null
-                ? Number(parent.avg_premium_sold)
-                : null,
+            avgPremiumSold,
+            premiumCollected:
+              avgPremiumSold !== null ? Math.round(avgPremiumSold * shares * 100) / 100 : 0,
             realizedPnl: parentPnl,
             closedDate: parent.closed_date,
           }
         : null,
       stock: {
         positionId: s.id,
-        shares: Number(s.total_contracts ?? 0),
+        shares,
         costBasis:
           s.entry_stock_price !== null ? Number(s.entry_stock_price) : null,
         realizedPnl: stockPnl,

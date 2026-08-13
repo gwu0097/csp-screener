@@ -130,6 +130,7 @@ export type PairedAssignment = {
     expiry: string;
     contracts: number;
     avgPremiumSold: number | null;
+    premiumCollected: number;
     realizedPnl: number;
     closedDate: string | null;
   } | null;
@@ -1217,11 +1218,12 @@ function PairedAssignmentsPanel({ pairs }: { pairs: PairedAssignment[] }) {
       <div className="space-y-3">
         {pairs.map((p) => {
           const parentPnl = p.parent?.realizedPnl ?? 0;
+          const premiumCollected = p.parent?.premiumCollected ?? 0;
           const stockPnl = p.stock.realizedPnl;
           const totalColor =
             p.totalPnl >= 0 ? "text-emerald-300" : "text-rose-300";
-          const parentColor =
-            parentPnl >= 0 ? "text-emerald-300" : "text-rose-300";
+          const premiumColor =
+            premiumCollected >= 0 ? "text-emerald-300" : "text-rose-300";
           const stockColor =
             stockPnl >= 0 ? "text-emerald-300" : "text-rose-300";
           return (
@@ -1237,18 +1239,32 @@ function PairedAssignmentsPanel({ pairs }: { pairs: PairedAssignment[] }) {
               </div>
               <div className="space-y-0.5 font-mono">
                 {p.parent ? (
-                  <div className="flex justify-between gap-3">
+                  <div
+                    className="flex justify-between gap-3"
+                    title="Premium collected on the assigned shares — folded into the stock's cost basis below, not counted separately in Total P&L."
+                  >
                     <span className="text-muted-foreground">
                       ${p.parent.strike} put × {p.parent.contracts} — premium collected:
                     </span>
-                    <span className={parentColor}>
-                      {fmtMoney(parentPnl, true)}
+                    <span className={premiumColor}>
+                      {fmtMoney(premiumCollected, true)}
                     </span>
                   </div>
                 ) : (
                   <div className="flex justify-between gap-3 text-muted-foreground">
                     <span>Parent put — not found</span>
                     <span>—</span>
+                  </div>
+                )}
+                {p.parent && Math.abs(parentPnl) > 0.001 && (
+                  <div
+                    className="flex justify-between gap-3 text-[11px]"
+                    title="Left on the option row after the assignment split — from contracts closed separately from the assignment (e.g. a partial buyback), not part of the premium above."
+                  >
+                    <span className="text-muted-foreground">option leg residual:</span>
+                    <span className={parentPnl >= 0 ? "text-emerald-300/80" : "text-rose-300/80"}>
+                      {fmtMoney(parentPnl, true)}
+                    </span>
                   </div>
                 )}
                 <div className="flex justify-between gap-3">
@@ -1269,6 +1285,11 @@ function PairedAssignmentsPanel({ pairs }: { pairs: PairedAssignment[] }) {
             </div>
           );
         })}
+      </div>
+      <div className="mt-2 text-[10px] text-muted-foreground/70">
+        Each row is one assignment cycle, not a full campaign — a campaign can also include option
+        legs that were rolled or bought back without ever being assigned, so these totals are a
+        subset of the campaign figures above, not a reconciliation of them.
       </div>
     </div>
   );
