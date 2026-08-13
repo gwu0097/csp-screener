@@ -28,15 +28,21 @@ import type { ParsedCandidateObservation } from "@/lib/observation-dictionary";
 // FLAGS_NA, RECOMMENDATION, RECOMMENDED_STRIKE, DOWN_CATALYST,
 // DOWN_CATALYST_PLAUSIBILITY, and LEFT_TAIL_RISK are each required only
 // from the template version that introduced them onward (v3 for
-// FLAGS_NA; v6 for the other five) — checklistVersionNumber() plus each
-// field's own check below decides whether THIS paste's declared version
-// makes the field required, so a missing line is either silently
-// expected (older version, field didn't exist yet) or a noted parse
-// failure that downgrades status to "partial" (this version requires
-// it). Before 2026-08-13 these all used a single fixed "always
-// optional" rule, which meant a v6 paste silently missing a required
-// field (e.g. DOWN_CATALYST) looked identical to an old v1-v5 paste
-// that correctly never had it.
+// FLAGS_NA; v6 for the other five — NOT v5, despite four of them being
+// added while the template was still v5; see the RECOMMENDATION block
+// below for why) — checklistVersionNumber() plus each field's own check
+// below decides whether THIS paste's declared version makes the field
+// required, so a missing line is either silently expected (older
+// version, field didn't exist yet) or a noted parse failure that
+// downgrades status to "partial" (this version requires it). A present
+// value that doesn't match its expected shape (RECOMMENDATION: maybe)
+// downgrades status the same way — worse than absence, since the
+// analyst answered the field wrong rather than not answering it at all.
+// Before 2026-08-13 none of this existed: every field used a single
+// fixed "always optional, malformed never downgrades status" rule,
+// which meant a v6 paste silently missing DOWN_CATALYST, or answering
+// RECOMMENDATION with garbage, looked identical to a correctly-parsed
+// paste.
 //
 // v4 replaced the single-line CANDIDATE_FLAGS metadata field with a
 // multi-line CANDIDATE_OBSERVATIONS block that sits in the prose region
@@ -365,16 +371,20 @@ export function parseResearchAnalysisPaste(raw: string): ParsedResearchAnalysis 
   const checklistVersion = extractField(block, "CHECKLIST_VERSION");
   if (checklistVersion === null) notes.push("CHECKLIST_VERSION line missing or empty within the metadata block.");
   const versionNum = checklistVersionNumber(checklistVersion);
-  // True whenever a field required by this paste's OWN declared version
-  // is missing — distinct from a field that's optional at this version
-  // (no note, expected) and from a field that's present but malformed
-  // (already noted below, left null, does not set this). Drives the
-  // "partial" downgrade the same way obsResult.parseFailed does: a
-  // version-blind null (can't tell "old template, correctly absent"
-  // from "new template, silently missing") is exactly the failure mode
-  // downCatalyst had — required on v6, capable of returning null with
-  // no signal at all (2026-08-13 audit).
-  let requiredFieldMissing = false;
+  // True whenever a field either (a) is required by this paste's OWN
+  // declared version and missing, or (b) is present but doesn't match
+  // its expected shape (RECOMMENDATION not one of take/take_smaller/
+  // pass, etc). Distinct from a field that's simply optional at this
+  // version and absent — that's expected, no note, doesn't set this.
+  // (a) is the failure mode downCatalyst had — required on v6, capable
+  // of returning null with no signal at all (2026-08-13 audit). (b) is
+  // set alongside it, not separately, because a malformed value is a
+  // worse failure than an absent one: an analyst who writes
+  // `RECOMMENDATION: maybe` looked at the field and answered it wrong,
+  // which says less about whether the rest of the paste is trustworthy
+  // than a value that's simply missing — treating it as milder than a
+  // missing-required field had it backwards (2026-08-13 audit).
+  let fieldParseFailure = false;
 
   const flagsFiredRaw = extractField(block, "FLAGS_FIRED");
   if (flagsFiredRaw === null) notes.push("FLAGS_FIRED line missing within the metadata block — treated as empty.");
@@ -386,7 +396,7 @@ export function parseResearchAnalysisPaste(raw: string): ParsedResearchAnalysis 
   const flagsNaRaw = extractField(block, "FLAGS_NA");
   if (flagsNaRaw === null && versionNum !== null && versionNum >= 3) {
     notes.push(`FLAGS_NA line missing — required from v3 onward, this paste declares ${checklistVersion}.`);
-    requiredFieldMissing = true;
+    fieldParseFailure = true;
   }
   const flagsUnknownRaw = extractField(block, "FLAGS_UNKNOWN");
   if (flagsUnknownRaw === null) notes.push("FLAGS_UNKNOWN line missing within the metadata block — treated as empty.");
@@ -422,10 +432,11 @@ export function parseResearchAnalysisPaste(raw: string): ParsedResearchAnalysis 
       notes.push(
         `RECOMMENDATION "${recommendationRaw}" is not one of take/take_smaller/pass — left null.`,
       );
+      fieldParseFailure = true;
     }
   } else if (versionNum !== null && versionNum >= 6) {
     notes.push(`RECOMMENDATION line missing — required from v6 onward, this paste declares ${checklistVersion}.`);
-    requiredFieldMissing = true;
+    fieldParseFailure = true;
   }
 
   const recommendedStrikeRaw = extractField(block, "RECOMMENDED_STRIKE");
@@ -436,10 +447,11 @@ export function parseResearchAnalysisPaste(raw: string): ParsedResearchAnalysis 
       recommendedStrike = parsedNum;
     } else {
       notes.push(`RECOMMENDED_STRIKE "${recommendedStrikeRaw}" is not a number — left null.`);
+      fieldParseFailure = true;
     }
   } else if (versionNum !== null && versionNum >= 6) {
     notes.push(`RECOMMENDED_STRIKE line missing — required from v6 onward, this paste declares ${checklistVersion}.`);
-    requiredFieldMissing = true;
+    fieldParseFailure = true;
   }
 
   const downCatalyst = extractField(block, "DOWN_CATALYST");
@@ -447,7 +459,7 @@ export function parseResearchAnalysisPaste(raw: string): ParsedResearchAnalysis 
     notes.push(
       `DOWN_CATALYST line missing — required from v6 onward, this paste declares ${checklistVersion}. (Write "none" when LEFT_TAIL_RISK is no — a missing line is not the same as an intentional "none".)`,
     );
-    requiredFieldMissing = true;
+    fieldParseFailure = true;
   }
 
   const downCatalystPlausibilityRaw = extractField(block, "DOWN_CATALYST_PLAUSIBILITY");
@@ -460,12 +472,13 @@ export function parseResearchAnalysisPaste(raw: string): ParsedResearchAnalysis 
       notes.push(
         `DOWN_CATALYST_PLAUSIBILITY "${downCatalystPlausibilityRaw}" is not one of low/moderate/high/n/a — left null.`,
       );
+      fieldParseFailure = true;
     }
   } else if (versionNum !== null && versionNum >= 6) {
     notes.push(
       `DOWN_CATALYST_PLAUSIBILITY line missing — required from v6 onward, this paste declares ${checklistVersion}.`,
     );
-    requiredFieldMissing = true;
+    fieldParseFailure = true;
   }
 
   // Added 2026-08-11 (v6, commit 237e5c2) — this one's threshold is a
@@ -480,10 +493,11 @@ export function parseResearchAnalysisPaste(raw: string): ParsedResearchAnalysis 
       leftTailRisk = false;
     } else {
       notes.push(`LEFT_TAIL_RISK "${leftTailRiskRaw}" is not yes/no — left null.`);
+      fieldParseFailure = true;
     }
   } else if (versionNum !== null && versionNum >= 6) {
     notes.push(`LEFT_TAIL_RISK line missing — required from v6 onward, this paste declares ${checklistVersion}.`);
-    requiredFieldMissing = true;
+    fieldParseFailure = true;
   }
 
   const flagsFired = parseFlagList(flagsFiredRaw ?? "");
@@ -495,20 +509,21 @@ export function parseResearchAnalysisPaste(raw: string): ParsedResearchAnalysis 
   // (ticker/date, for the mismatch guard) plus checklist_version, to
   // be present and well-formed, the observations block (if any) to have
   // actually parsed, and every field this paste's OWN declared version
-  // requires to be present. A field that's optional at this version and
-  // simply absent does NOT downgrade status — an LLM correctly writing
-  // "none" is indistinguishable from a missing line at that point, and
-  // both are legitimately empty, not errors. A present-but-malformed
-  // value (left null with a note above) also doesn't downgrade status
-  // today — that's a separate, narrower gap than the one this pass
-  // fixes, noted but not changed here.
+  // requires to be present and well-formed (fieldParseFailure covers
+  // both). A field that's optional at this version and simply absent
+  // does NOT downgrade status — an LLM correctly writing "none" is
+  // indistinguishable from a missing line at that point, and both are
+  // legitimately empty, not errors. A malformed value (RECOMMENDATION:
+  // maybe) DOES downgrade status, same as a missing-required one — it's
+  // the worse failure of the two, since the analyst looked at the field
+  // and answered it wrong rather than simply not writing it.
   const dateWellFormed = earningsDate !== null && /^\d{4}-\d{2}-\d{2}$/.test(earningsDate);
   const status: ParseStatus =
     ticker !== null &&
     dateWellFormed &&
     checklistVersion !== null &&
     !obsResult.parseFailed &&
-    !requiredFieldMissing
+    !fieldParseFailure
       ? "parsed"
       : "partial";
 
