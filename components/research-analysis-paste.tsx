@@ -266,6 +266,7 @@ export function ResearchAnalysisPasteBack({
   async function handleSave() {
     if (!parsed) return;
     if (hasMismatch && !confirmedMismatch) return;
+    if (parsed.observationsParseFailed) return;
     if (parsed.observationsBlockFound && (observationsBlockedOnDictionary || !observationValidation.ok)) return;
     setSaving(true);
     setSaveError(null);
@@ -535,9 +536,17 @@ export function ResearchAnalysisPasteBack({
                   verified. Save is disabled until this loads; reload the page to retry.
                 </div>
               )}
-              {!dictionaryLoading && !dictionaryError && parsed.candidateObservations.length === 0 && (
-                <div className="text-muted-foreground">none</div>
+              {parsed.observationsParseFailed && (
+                <div className="flex items-start gap-1.5 rounded border border-rose-500/40 bg-rose-500/10 p-1.5 text-rose-200">
+                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  Block has content but nothing matched a term pattern — this is a parse failure, not an
+                  empty list. Save is disabled until the raw paste is fixed or re-pasted.
+                </div>
               )}
+              {!dictionaryLoading &&
+                !dictionaryError &&
+                !parsed.observationsParseFailed &&
+                parsed.candidateObservations.length === 0 && <div className="text-muted-foreground">none</div>}
 
               {!dictionaryLoading &&
                 !dictionaryError &&

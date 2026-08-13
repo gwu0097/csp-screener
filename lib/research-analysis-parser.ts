@@ -102,6 +102,13 @@ export type ParsedResearchAnalysis = {
   // paste (skip the pipeline entirely, leave candidate_flags/usages as
   // whatever they already were).
   observationsBlockFound: boolean;
+  // True only when the block was found, has real (non-blank, non-"none")
+  // content, and NONE of it matched a term pattern — distinct from a
+  // legitimately empty block (found + literal "none" + zero
+  // observations). Callers must not read candidateObservations.length
+  // === 0 as "nothing to do" without also checking this; a paste that
+  // hits this is broken and needs a human look, not a silent empty save.
+  observationsParseFailed: boolean;
   checklistVersion: string | null;
   prose: string;
   proseCharCount: number;
@@ -117,6 +124,19 @@ const METADATA_END = /^===\s*END METADATA\s*===\s*$/m;
 const OBSERVATIONS_HEADER = /^[ \t]*CANDIDATE_OBSERVATIONS:[ \t]*$/;
 const OBSERVATION_TERM_LINE = /^([a-z][a-z0-9_]*):\s*(.*)$/;
 const OBSERVATION_BARE_TERM_LINE = /^([a-z][a-z0-9_]*)$/;
+// Terminates the CANDIDATE_OBSERVATIONS span. Matches the response's own
+// section headers (`PART 1 — CHECKLIST`, in whatever wording that quarter's
+// template used — checked against every real paste on file: the em-dash
+// title varies, "PART <n>" never does) plus another `===...===` marker as
+// a defensive fallback. The leading `(#{1,6}\s*)?(\*\*)?` tolerates the
+// analyst rendering headers as markdown (`## PART 1 — CHECKLIST`, real
+// pastes through 2026-08-10) vs plain text (`PART 1 — CHECKLIST`, every
+// paste from 2026-08-11 on) — checked against both styles on file;
+// missing this cost one real paste (ASTS) its entire prose, swallowed
+// into the span because "## PART 1" didn't match a plain "PART 1" regex
+// and the span ran to end-of-input instead. Deliberately NOT a blank
+// line — see the comment on extractCandidateObservationsBlock below.
+const SECTION_MARKER_LINE = /^(#{1,6}\s*)?(\*\*)?(===.*===|PART\s+\d+\b.*)$/;
 
 function parseFlagList(raw: string): string[] {
   const trimmed = raw.trim();
@@ -141,73 +161,86 @@ function extractField(block: string, label: string): string | null {
 // the block would render duplicated at the top of every prose display
 // (Analysis Dump tab, the AI-badge modal, the History tab).
 //
-// The block is delimited structurally, not by a closing marker: every
-// line right after the CANDIDATE_OBSERVATIONS: header belongs to it,
-// up to (not including) the first blank line. A term line is
-// `term_name: definition text` (first use) or a bare `term_name`
-// (reuse of an already-known term, no colon).
+// History: the original version required every block line to be
+// indented to stay "inside" the block — broke silently once real pastes
+// went flush-left starting 2026-08-11 (see git blame). The next version
+// terminated on the first blank line instead — an improvement, but still
+// positional: a stray blank line mid-block, or a reordered response,
+// would truncate or miss the block the same way. This version doesn't
+// rely on position at all: it finds the header, then the span extends to
+// the next recognized section marker (SECTION_MARKER_LINE — a `PART <n>`
+// heading or another `===...===` line) or to the end of the input if
+// none follows. Blank lines inside that span are just gaps, not
+// terminators. Within the span, a term line is `term_name: definition
+// text` (first use) or a bare `term_name` (reuse), matched on the
+// trimmed line wherever it falls — indentation and surrounding blank
+// lines never affect whether a line matches.
 //
-// NOT gated on indentation, unlike an earlier version of this function.
-// The template's own response-format example shows indented entries
-// (lib/analysis-dump-template.ts), and real pastes matched that through
-// 2026-08-10 (confirmed: ASTS's 2026-08-10 paste has every
-// CANDIDATE_OBSERVATIONS line 2-space indented, and parsed correctly).
-// Starting with the next paste saved, 2026-08-11 15:11 (NBIS), every
-// real paste checked writes every entry flush-left instead — a drift in
-// how the external analyst formats its response, not a change to this
-// app's template or prompt (lib/analysis-dump-template.ts's format
-// section is unchanged across that window). The old, indentation-gated
-// loop required a line to be indented (or blank) to stay "inside" the
-// block, so once pastes went flush-left it broke on line 1 every time —
-// not a bare-reuse-specific bug (a definition line on line 1 fails
-// identically), and not v6-specific (v5 pastes from 2026-08-11 onward
-// hit it too; only the 2026-08-06 through 2026-08-10 window, coincident
-// with indented pastes, ever worked). It happened to look selective
-// because a dropped definition line still renders fine once
-// mis-classified as ordinary prose — it just never becomes a candidate
-// observation. Blank-line termination matches the template's own
-// structure exactly: CANDIDATE_OBSERVATIONS is always immediately
-// followed by one blank line then PART 1, in every real paste checked,
-// indented or not. A wrapped/continuation line (the template allows a
-// definition to wrap onto further lines) still works with no
-// indentation requirement here — the loop below already decides "is
-// this line a continuation of the currently-open term" by whether it
-// fails to match a term pattern while a term is open, not by whitespace.
+// A found-but-empty block is legitimate (the analyst wrote literal
+// `none`) and must be distinguishable from a found block that has real
+// content but where nothing matched a term pattern — the latter is a
+// parse failure, not a paste with zero observations, and silently
+// returning `[]` for both is exactly the failure mode that let 8 real
+// analyses lose their observations without any signal (2026-08-13
+// backfill). `parseFailed` below carries that distinction; the caller
+// pushes a note when it's true so it's visible in the preview, not just
+// inferred from an empty list.
 function extractCandidateObservationsBlock(proseRaw: string): {
   found: boolean;
   observations: ParsedCandidateObservation[];
   remainder: string;
   notes: string[];
+  parseFailed: boolean;
 } {
   const lines = proseRaw.split("\n");
   const headerIdx = lines.findIndex((l) => OBSERVATIONS_HEADER.test(l));
   if (headerIdx === -1) {
-    return { found: false, observations: [], remainder: proseRaw.trim(), notes: [] };
+    return { found: false, observations: [], remainder: proseRaw.trim(), notes: [], parseFailed: false };
   }
 
-  let i = headerIdx + 1;
-  const blockLines: string[] = [];
-  while (i < lines.length) {
-    const line = lines[i];
-    const trimmed = line.trim();
-    if (trimmed.length === 0) break;
-    blockLines.push(line);
-    i += 1;
+  let endIdx = lines.length;
+  let markerFound = false;
+  for (let i = headerIdx + 1; i < lines.length; i += 1) {
+    if (SECTION_MARKER_LINE.test(lines[i].trim())) {
+      endIdx = i;
+      markerFound = true;
+      break;
+    }
   }
-
-  const remainder = [...lines.slice(0, headerIdx), ...lines.slice(i)].join("\n").trim();
+  const blockLines = lines.slice(headerIdx + 1, endIdx);
+  const remainder = [...lines.slice(0, headerIdx), ...lines.slice(endIdx)].join("\n").trim();
 
   const observations: ParsedCandidateObservation[] = [];
   const seen = new Map<string, string | null>();
   const notes: string[] = [];
   let openTerm: string | null = null;
+  let sawContent = false;
+
+  // No recognized section marker anywhere after the header means the
+  // span ran to the end of the input — either this really is the last
+  // thing in the paste, or the response uses a heading style
+  // SECTION_MARKER_LINE doesn't recognize yet, in which case everything
+  // after CANDIDATE_OBSERVATIONS just got swallowed into this block
+  // (exactly what happened to ASTS's paste before this regex learned
+  // markdown `##` headers). Surfaced as a note rather than failing
+  // silently a second time.
+  if (!markerFound && endIdx - (headerIdx + 1) > 3) {
+    notes.push(
+      "CANDIDATE_OBSERVATIONS block ran to the end of the input with no PART-heading marker found after it — if the response has more sections below this, they were not detected and got swallowed into this block. Check for an unrecognized heading style.",
+    );
+  }
 
   for (const rawLine of blockLines) {
     const trimmed = rawLine.trim();
-    if (trimmed.length === 0 || trimmed.toLowerCase() === "none") {
+    if (trimmed.length === 0) {
       openTerm = null;
       continue;
     }
+    if (trimmed.toLowerCase() === "none") {
+      openTerm = null;
+      continue;
+    }
+    sawContent = true;
     const termMatch = OBSERVATION_TERM_LINE.exec(trimmed);
     if (termMatch) {
       const term = termMatch[1];
@@ -251,7 +284,14 @@ function extractCandidateObservationsBlock(proseRaw: string): {
     }
   }
 
-  return { found: true, observations, remainder, notes };
+  const parseFailed = sawContent && observations.length === 0;
+  if (parseFailed) {
+    notes.push(
+      "CANDIDATE_OBSERVATIONS block has content but no line matched a term pattern — this is a parse failure, not an empty list. Check the raw paste against the expected format.",
+    );
+  }
+
+  return { found: true, observations, remainder, notes, parseFailed };
 }
 
 export function parseResearchAnalysisPaste(raw: string): ParsedResearchAnalysis {
@@ -272,6 +312,7 @@ export function parseResearchAnalysisPaste(raw: string): ParsedResearchAnalysis 
       candidateFlags: [],
       candidateObservations: [],
       observationsBlockFound: false,
+      observationsParseFailed: false,
       checklistVersion: null,
       recommendation: null,
       recommendedStrike: null,
@@ -388,7 +429,10 @@ export function parseResearchAnalysisPaste(raw: string): ParsedResearchAnalysis 
   // indistinguishable from a missing line at this point, and both are
   // legitimately empty arrays, not errors.
   const dateWellFormed = earningsDate !== null && /^\d{4}-\d{2}-\d{2}$/.test(earningsDate);
-  const status: ParseStatus = ticker !== null && dateWellFormed && checklistVersion !== null ? "parsed" : "partial";
+  const status: ParseStatus =
+    ticker !== null && dateWellFormed && checklistVersion !== null && !obsResult.parseFailed
+      ? "parsed"
+      : "partial";
 
   return {
     status,
@@ -400,6 +444,7 @@ export function parseResearchAnalysisPaste(raw: string): ParsedResearchAnalysis 
     candidateFlags,
     candidateObservations: obsResult.observations,
     observationsBlockFound: obsResult.found,
+    observationsParseFailed: obsResult.parseFailed,
     checklistVersion,
     recommendation,
     recommendedStrike,
