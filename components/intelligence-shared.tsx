@@ -126,8 +126,15 @@ export type TickerPnl = {
   optionsNet: number;
   stockNet: number;
   totalNet: number;
+  // Campaigns fully contained in this window — winRate is scored only
+  // across these (see spanningCampaigns for why).
   campaignCount: number;
   winRate: number | null;
+  // Campaigns touching this ticker in-window whose full history
+  // extends outside it — their windowed contribution to this bar and
+  // their true all-time outcome can disagree (even in sign), so they're
+  // flagged instead of folded into winRate.
+  spanningCampaigns: Array<{ allTimeNet: number }>;
 };
 
 export type PairedAssignment = {
@@ -1187,6 +1194,7 @@ function TickerPnlPanel({ rows }: { rows: TickerPnl[] }) {
             totalNet: othersNet,
             campaignCount: rest.reduce((s, r) => s + r.campaignCount, 0),
             winRate: null,
+            spanningCampaigns: [],
             isOthers: true,
             othersCount: rest.length,
           },
@@ -1305,10 +1313,10 @@ function TickerPnlTooltip({
         <span className="text-muted-foreground">Total:</span>
         <span className={totalColor}>{fmtMoney(d.totalNet, true)}</span>
       </div>
-      {!d.isOthers && (
+      {!d.isOthers && d.campaignCount > 0 && (
         <>
           <div className="flex justify-between gap-3">
-            <span className="text-muted-foreground">Campaigns:</span>
+            <span className="text-muted-foreground">Campaigns (in window):</span>
             <span>{d.campaignCount}</span>
           </div>
           <div className="flex justify-between gap-3">
@@ -1316,6 +1324,16 @@ function TickerPnlTooltip({
             <span>{d.winRate !== null ? fmtPct(d.winRate, 0) : "—"}</span>
           </div>
         </>
+      )}
+      {!d.isOthers && d.spanningCampaigns.length > 0 && (
+        <div className="mt-1 text-[11px] text-amber-300/90">
+          {d.spanningCampaigns.length === 1
+            ? `1 campaign spans beyond this window (net ${fmtMoney(d.spanningCampaigns[0].allTimeNet, true)} all-time)`
+            : `${d.spanningCampaigns.length} campaigns span beyond this window (combined net ${fmtMoney(
+                Math.round(d.spanningCampaigns.reduce((s, c) => s + c.allTimeNet, 0) * 100) / 100,
+                true,
+              )} all-time)`}
+        </div>
       )}
     </div>
   );

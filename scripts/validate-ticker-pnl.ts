@@ -52,10 +52,19 @@ async function computeTickerPnl(
     ),
   );
 
-  const campaignMap = new Map<string, number>(); // key -> netPnl (all-time)
+  type CampaignAgg = { netPnl: number; firstCloseDate: string; terminalDate: string };
+  const campaignMap = new Map<string, CampaignAgg>();
   for (const p of allClosedRaw) {
     const key = campaignKey(p);
-    campaignMap.set(key, (campaignMap.get(key) ?? 0) + Number(p.realized_pnl ?? 0));
+    const cd = p.closed_date ?? "";
+    let agg = campaignMap.get(key);
+    if (!agg) {
+      agg = { netPnl: 0, firstCloseDate: cd, terminalDate: cd };
+      campaignMap.set(key, agg);
+    }
+    agg.netPnl += Number(p.realized_pnl ?? 0);
+    if (cd > agg.terminalDate) agg.terminalDate = cd;
+    if (cd < agg.firstCloseDate) agg.firstCloseDate = cd;
   }
 
   const windowed = allClosedRaw.filter(
@@ -88,20 +97,29 @@ async function computeTickerPnl(
 
   const ticker_pnl = Array.from(tickerMap.entries())
     .map(([symbol, t]) => {
-      let resolvedCount = 0;
+      let contained = 0;
       let wins = 0;
+      const spanningCampaigns: Array<{ allTimeNet: number }> = [];
       for (const key of Array.from(t.campaignKeys)) {
         if (openKeys.has(key)) continue;
-        resolvedCount++;
-        if ((campaignMap.get(key) ?? 0) > 0) wins++;
+        const camp = campaignMap.get(key);
+        if (!camp) continue;
+        const fullyContained = camp.firstCloseDate >= from && camp.terminalDate <= to;
+        if (fullyContained) {
+          contained++;
+          if (camp.netPnl > 0) wins++;
+        } else {
+          spanningCampaigns.push({ allTimeNet: Math.round(camp.netPnl * 100) / 100 });
+        }
       }
       return {
         symbol,
         optionsNet: Math.round(t.optionsNet * 100) / 100,
         stockNet: Math.round(t.stockNet * 100) / 100,
         totalNet: Math.round((t.optionsNet + t.stockNet) * 100) / 100,
-        campaignCount: resolvedCount,
-        winRate: resolvedCount > 0 ? wins / resolvedCount : null,
+        campaignCount: contained,
+        winRate: contained > 0 ? wins / contained : null,
+        spanningCampaigns,
       };
     })
     .sort((a, b) => Math.abs(b.totalNet) - Math.abs(a.totalNet));
@@ -138,6 +156,10 @@ async function main() {
   console.log(`concentration (top3/gross abs) = ${july.concentrationPct.toFixed(1)}%`);
   const tsla = july.ticker_pnl.find((t) => t.symbol === "TSLA");
   console.log(`TSLA July bar: ${JSON.stringify(tsla)}`);
+  const gwre = july.ticker_pnl.find((t) => t.symbol === "GWRE");
+  console.log(`GWRE July bar (spot-check a normal fully-contained case): ${JSON.stringify(gwre)}`);
+  const nke = july.ticker_pnl.find((t) => t.symbol === "NKE");
+  console.log(`NKE July bar: ${JSON.stringify(nke)}`);
 
   console.log("\n=== All-time (2000-01-01..2099-01-01) — tests the >30 cap path ===");
   const allTime = await computeTickerPnl(sb, userId, "2000-01-01", "2099-01-01");

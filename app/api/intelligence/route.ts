@@ -341,6 +341,12 @@ export async function GET(req: NextRequest) {
     symbol: string;
     netPnl: number;
     terminalDate: string;
+    // Earliest closed_date across all members — together with
+    // terminalDate, used to tell whether a campaign is fully contained
+    // in a given [from, to] window or extends outside it (ticker_pnl
+    // tooltip below relies on this to avoid claiming a windowed win
+    // rate for a campaign whose all-time outcome the window can't see).
+    firstCloseDate: string;
     optionLegs: Array<{ opened_date: string; closed_date: string | null; strike: number; total_contracts: number }>;
     unresolvedEarnings: boolean;
   };
@@ -355,6 +361,7 @@ export async function GET(req: NextRequest) {
         symbol: p.symbol,
         netPnl: 0,
         terminalDate: cd,
+        firstCloseDate: cd,
         optionLegs: [],
         unresolvedEarnings: p.campaign_id === null,
       };
@@ -362,6 +369,7 @@ export async function GET(req: NextRequest) {
     }
     agg.netPnl += Number(p.realized_pnl ?? 0);
     if (cd > agg.terminalDate) agg.terminalDate = cd;
+    if (cd < agg.firstCloseDate) agg.firstCloseDate = cd;
     if (p.campaign_id !== null) agg.unresolvedEarnings = false;
     if (p.position_type !== "stock_long" && p.position_type !== "stock_short") {
       agg.optionLegs.push({
@@ -492,26 +500,45 @@ export async function GET(req: NextRequest) {
     optionsNet: number;
     stockNet: number;
     totalNet: number;
+    // Only campaigns FULLY contained in [from, to] — every member row
+    // closed inside the window, so the campaign's all-time net exactly
+    // equals what this window sees for it. winRate is computed only
+    // over these; a campaign that extends outside the window can't be
+    // honestly scored a win or loss from this window's slice alone (its
+    // windowed contribution and all-time outcome can even have opposite
+    // signs — see TSLA/July), so it's reported separately instead.
     campaignCount: number;
     winRate: number | null;
+    // Campaigns touching this ticker in-window whose full history
+    // extends outside [from, to] — flagged with their true all-time net
+    // rather than folded into winRate above.
+    spanningCampaigns: Array<{ allTimeNet: number }>;
   };
   const ticker_pnl: TickerPnl[] = Array.from(tickerMap.entries())
     .map(([symbol, t]) => {
-      let resolvedCount = 0;
+      let contained = 0;
       let wins = 0;
+      const spanningCampaigns: Array<{ allTimeNet: number }> = [];
       for (const key of Array.from(t.campaignKeys)) {
-        if (openKeys.has(key)) continue; // no outcome yet — excluded from count and win rate
-        resolvedCount++;
+        if (openKeys.has(key)) continue; // no outcome yet — excluded entirely
         const camp = campaignMap.get(key);
-        if (camp && camp.netPnl > 0) wins++;
+        if (!camp) continue;
+        const fullyContained = camp.firstCloseDate >= from && camp.terminalDate <= to;
+        if (fullyContained) {
+          contained++;
+          if (camp.netPnl > 0) wins++;
+        } else {
+          spanningCampaigns.push({ allTimeNet: Math.round(camp.netPnl * 100) / 100 });
+        }
       }
       return {
         symbol,
         optionsNet: Math.round(t.optionsNet * 100) / 100,
         stockNet: Math.round(t.stockNet * 100) / 100,
         totalNet: Math.round((t.optionsNet + t.stockNet) * 100) / 100,
-        campaignCount: resolvedCount,
-        winRate: resolvedCount > 0 ? wins / resolvedCount : null,
+        campaignCount: contained,
+        winRate: contained > 0 ? wins / contained : null,
+        spanningCampaigns,
       };
     })
     .sort((a, b) => Math.abs(b.totalNet) - Math.abs(a.totalNet));
