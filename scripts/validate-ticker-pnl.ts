@@ -161,14 +161,14 @@ async function main() {
   const nke = july.ticker_pnl.find((t) => t.symbol === "NKE");
   console.log(`NKE July bar: ${JSON.stringify(nke)}`);
 
-  console.log("\n=== All-time (2000-01-01..2099-01-01) — tests the >30 cap path ===");
+  console.log("\n=== All-time (2000-01-01..2099-01-01) — tests the >25 cap path ===");
   const allTime = await computeTickerPnl(sb, userId, "2000-01-01", "2099-01-01");
-  console.log(`tickers=${allTime.tickerCount} (>${30} triggers others-bar: ${allTime.tickerCount > 30})`);
+  console.log(`tickers=${allTime.tickerCount} (>${25} triggers others-bar: ${allTime.tickerCount > 25})`);
   console.log(`combined=${allTime.combined} sum(bars)=${allTime.barSum} delta=${allTime.delta}`);
 
-  console.log("\n=== A short window likely <30 tickers: last 7 days ===");
+  console.log("\n=== A short window likely <30 tickers: last 7 days (tests <=25 renders all) ===");
   const week = await computeTickerPnl(sb, userId, "2026-08-06", "2026-08-13");
-  console.log(`tickers=${week.tickerCount} (<=30: ${week.tickerCount <= 30})`);
+  console.log(`tickers=${week.tickerCount} (<=25: ${week.tickerCount <= 25})`);
   console.log(`combined=${week.combined} sum(bars)=${week.barSum} delta=${week.delta}`);
 }
 

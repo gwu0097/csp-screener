@@ -26,6 +26,17 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import {
+  BarElement,
+  CategoryScale,
+  Chart as ChartJS,
+  LinearScale,
+  Tooltip as ChartJsTooltip,
+  type ChartData,
+  type ChartOptions,
+  type TooltipItem,
+} from "chart.js";
+import { Bar as ChartJsBar } from "react-chartjs-2";
 import { Button } from "@/components/ui/button";
 import {
   Table,
@@ -36,6 +47,8 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { BROKER_ORDER, BROKER_LABEL, type BrokerKey } from "@/lib/brokers";
+
+ChartJS.register(CategoryScale, LinearScale, BarElement, ChartJsTooltip);
 
 export type DateRange = { from: string; to: string };
 
@@ -1157,19 +1170,31 @@ export function PerformanceSection({
   );
 }
 
-const TICKER_PNL_MAX_BARS = 30;
+const TICKER_PNL_MAX_BARS = 25;
 
-type TickerBarDatum = TickerPnl & { isOthers: boolean; othersCount?: number };
+function spanningCampaignsNote(spanning: Array<{ allTimeNet: number }>): string | null {
+  if (spanning.length === 0) return null;
+  if (spanning.length === 1) {
+    return `1 campaign spans beyond this window (net ${fmtMoney(spanning[0].allTimeNet, true)} all-time)`;
+  }
+  const sum = Math.round(spanning.reduce((s, c) => s + c.allTimeNet, 0) * 100) / 100;
+  return `${spanning.length} campaigns span beyond this window (combined net ${fmtMoney(sum, true)} all-time)`;
+}
 
-// One horizontal bar per ticker, netting options + stock together —
+// One vertical column per ticker, netting options + stock together —
 // row-level windowed exactly like the Realized P&L card and equity
 // curve above it, so these always sum to combined_realized_pnl (rows
-// come pre-sorted by |totalNet| descending from the API). Above 30
-// tickers, the tail collapses into one "N others" bar that expands
-// in place into a small table — not a mode switch.
+// come pre-sorted by |totalNet| descending from the API, so both the
+// biggest winner and biggest loser land near the left). Zero sits on
+// the category axis so column height is always comparable — no
+// diverging-from-center layout, where a bar starting at -$3,700 and
+// one starting at $0 read as different scales. Above 25 tickers the
+// tail is excluded from the chart entirely (rendering it as an
+// aggregate column made the aggregate look like a real position) and
+// surfaced as a text line below instead, with the same expand-in-place
+// table the chart bar used to offer.
 function TickerPnlPanel({ rows }: { rows: TickerPnl[] }) {
   const [othersExpanded, setOthersExpanded] = useState(false);
-  if (rows.length === 0) return null;
 
   const shown = rows.length <= TICKER_PNL_MAX_BARS ? rows : rows.slice(0, TICKER_PNL_MAX_BARS);
   const rest = rows.length <= TICKER_PNL_MAX_BARS ? [] : rows.slice(TICKER_PNL_MAX_BARS);
@@ -1183,25 +1208,80 @@ function TickerPnlPanel({ rows }: { rows: TickerPnl[] }) {
   const top3Abs = top3.reduce((s, r) => s + Math.abs(r.totalNet), 0);
   const concentrationPct = grossAbs > 0 ? (top3Abs / grossAbs) * 100 : 0;
 
-  const chartData: TickerBarDatum[] = [
-    ...shown.map((r) => ({ ...r, isOthers: false })),
-    ...(rest.length > 0
-      ? [
-          {
-            symbol: `${rest.length} others`,
-            optionsNet: Math.round(rest.reduce((s, r) => s + r.optionsNet, 0) * 100) / 100,
-            stockNet: Math.round(rest.reduce((s, r) => s + r.stockNet, 0) * 100) / 100,
-            totalNet: othersNet,
-            campaignCount: rest.reduce((s, r) => s + r.campaignCount, 0),
-            winRate: null,
-            spanningCampaigns: [],
-            isOthers: true,
-            othersCount: rest.length,
+  const chartData: ChartData<"bar"> = useMemo(
+    () => ({
+      labels: shown.map((r) => r.symbol),
+      datasets: [
+        {
+          data: shown.map((r) => r.totalNet),
+          backgroundColor: shown.map((r) => (r.totalNet >= 0 ? "#10b981" : "#ef4444")),
+          borderRadius: 4,
+          maxBarThickness: 24,
+        },
+      ],
+    }),
+    [shown],
+  );
+
+  const chartOptions: ChartOptions<"bar"> = useMemo(
+    () => ({
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: "rgba(24,24,27,0.95)",
+          borderColor: "#3f3f46",
+          borderWidth: 1,
+          titleColor: "#fafafa",
+          bodyColor: "#d4d4d8",
+          padding: 8,
+          cornerRadius: 6,
+          titleFont: { size: 13, weight: "bold" as const },
+          bodyFont: { size: 11 },
+          displayColors: false,
+          callbacks: {
+            label: () => "",
+            title: (items: TooltipItem<"bar">[]) => (items[0]?.label as string) ?? "",
+            afterBody: (items: TooltipItem<"bar">[]) => {
+              const idx = items[0]?.dataIndex;
+              const d = idx !== undefined ? shown[idx] : undefined;
+              if (!d) return [];
+              const lines = [
+                `Options net: ${fmtMoney(d.optionsNet, true)}`,
+                `Stock net: ${fmtMoney(d.stockNet, true)}`,
+                `Total: ${fmtMoney(d.totalNet, true)}`,
+              ];
+              if (d.campaignCount > 0) {
+                lines.push(`Campaigns (in window): ${d.campaignCount}`);
+                lines.push(`Win rate: ${d.winRate !== null ? fmtPct(d.winRate, 0) : "—"}`);
+              }
+              const note = spanningCampaignsNote(d.spanningCampaigns);
+              if (note) lines.push(note);
+              return lines;
+            },
           },
-        ]
-      : []),
-  ];
-  const rowHeight = 26;
+        },
+      },
+      scales: {
+        x: {
+          grid: { display: false },
+          ticks: { color: "#71717a", font: { size: 11 } },
+        },
+        y: {
+          grid: { color: "#27272a" },
+          ticks: {
+            color: "#71717a",
+            font: { size: 11 },
+            callback: (value) => fmtMoney(Number(value)),
+          },
+        },
+      },
+    }),
+    [shown],
+  );
+
+  if (rows.length === 0) return null;
 
   return (
     <div className="rounded-md border border-border bg-background/40 p-3">
@@ -1214,47 +1294,21 @@ function TickerPnlPanel({ rows }: { rows: TickerPnl[] }) {
           </div>
         )}
       </div>
-      <div style={{ width: "100%", height: Math.max(160, chartData.length * rowHeight) }}>
-        <ResponsiveContainer width="100%" height="100%">
-          <BarChart data={chartData} layout="vertical" margin={{ top: 4, right: 48, bottom: 4, left: 4 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#27272a" horizontal={false} />
-            <XAxis
-              type="number"
-              stroke="#71717a"
-              tick={{ fontSize: 11 }}
-              tickFormatter={(v) => fmtMoney(Number(v))}
-            />
-            <YAxis
-              type="category"
-              dataKey="symbol"
-              stroke="#71717a"
-              tick={{ fontSize: 11 }}
-              width={64}
-            />
-            <Tooltip content={<TickerPnlTooltip />} cursor={{ fill: "#27272a", opacity: 0.4 }} />
-            <Bar dataKey="totalNet">
-              {chartData.map((d) => (
-                <Cell
-                  key={d.symbol}
-                  fill={d.isOthers ? (d.totalNet >= 0 ? "#10b98180" : "#ef444480") : d.totalNet >= 0 ? "#10b981" : "#ef4444"}
-                />
-              ))}
-            </Bar>
-          </BarChart>
-        </ResponsiveContainer>
+      <div style={{ width: "100%", height: 280 }}>
+        <ChartJsBar data={chartData} options={chartOptions} />
       </div>
       {rest.length > 0 && (
-        <div className="mt-1">
+        <div className="mt-2">
           <button
             type="button"
             onClick={() => setOthersExpanded((v) => !v)}
             className="text-[11px] text-muted-foreground underline decoration-dotted underline-offset-2 hover:text-foreground"
           >
-            {othersExpanded ? "Hide" : "Show"} {rest.length} others (
+            {rest.length} others:{" "}
             <span className={othersNet >= 0 ? "text-emerald-300" : "text-rose-300"}>
               {fmtMoney(othersNet, true)}
-            </span>
-            )
+            </span>{" "}
+            ({othersExpanded ? "hide" : "show"})
           </button>
           {othersExpanded && (
             <table className="mt-2 w-full text-[11px]">
@@ -1275,64 +1329,6 @@ function TickerPnlPanel({ rows }: { rows: TickerPnl[] }) {
               </tbody>
             </table>
           )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function TickerPnlTooltip({
-  active,
-  payload,
-}: {
-  active?: boolean;
-  payload?: Array<{ payload: TickerBarDatum }>;
-}) {
-  if (!active || !payload || payload.length === 0) return null;
-  const d = payload[0].payload;
-  const totalColor = d.totalNet >= 0 ? "text-emerald-300" : "text-rose-300";
-  const optionsColor = d.optionsNet >= 0 ? "text-emerald-300" : "text-rose-300";
-  const stockColor = d.stockNet >= 0 ? "text-emerald-300" : "text-rose-300";
-  return (
-    <div className="min-w-[200px] rounded border border-border bg-zinc-900/95 p-2 text-sm shadow-lg">
-      <div className="mb-1 font-medium text-foreground">{d.symbol}</div>
-      {!d.isOthers && (
-        <>
-          <div className="flex justify-between gap-3">
-            <span className="text-muted-foreground">Options net:</span>
-            <span className={optionsColor}>{fmtMoney(d.optionsNet, true)}</span>
-          </div>
-          <div className="flex justify-between gap-3">
-            <span className="text-muted-foreground">Stock net:</span>
-            <span className={stockColor}>{fmtMoney(d.stockNet, true)}</span>
-          </div>
-          <div className="my-1 border-t border-border/60" />
-        </>
-      )}
-      <div className="flex justify-between gap-3 font-semibold">
-        <span className="text-muted-foreground">Total:</span>
-        <span className={totalColor}>{fmtMoney(d.totalNet, true)}</span>
-      </div>
-      {!d.isOthers && d.campaignCount > 0 && (
-        <>
-          <div className="flex justify-between gap-3">
-            <span className="text-muted-foreground">Campaigns (in window):</span>
-            <span>{d.campaignCount}</span>
-          </div>
-          <div className="flex justify-between gap-3">
-            <span className="text-muted-foreground">Win rate:</span>
-            <span>{d.winRate !== null ? fmtPct(d.winRate, 0) : "—"}</span>
-          </div>
-        </>
-      )}
-      {!d.isOthers && d.spanningCampaigns.length > 0 && (
-        <div className="mt-1 text-[11px] text-amber-300/90">
-          {d.spanningCampaigns.length === 1
-            ? `1 campaign spans beyond this window (net ${fmtMoney(d.spanningCampaigns[0].allTimeNet, true)} all-time)`
-            : `${d.spanningCampaigns.length} campaigns span beyond this window (combined net ${fmtMoney(
-                Math.round(d.spanningCampaigns.reduce((s, c) => s + c.allTimeNet, 0) * 100) / 100,
-                true,
-              )} all-time)`}
         </div>
       )}
     </div>
