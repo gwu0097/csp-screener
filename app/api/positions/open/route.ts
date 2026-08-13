@@ -3,6 +3,8 @@ import { createServerClient } from "@/lib/supabase";
 import {
   getOptionsChain,
   getOptionsChainWide,
+  parseSchwabImpliedVol,
+  parseSchwabOptionDelta,
   SchwabOptionContract,
 } from "@/lib/schwab";
 import { getQuoteWithExtended, getHistoricalPrices } from "@/lib/yahoo";
@@ -653,10 +655,18 @@ export async function GET(req: NextRequest) {
     const mark = contract?.mark ?? null;
     const bid = contract?.bid ?? null;
     const ask = contract?.ask ?? null;
-    const delta = contract?.delta ?? null;
+    // parseSchwabOptionDelta/parseSchwabImpliedVol (lib/schwab.ts) reject
+    // Schwab's -999 "not computable" sentinel and its delta=1-regardless-
+    // of-side fallback — same fix as lib/screener.ts's runStageFour.
+    // Both null-check downstream already (position-card.tsx's/
+    // positions-view.tsx's own POP = 1-|delta| computations, and this
+    // route's own live-diag below), so a rejected value here correctly
+    // reads as "no delta"/"no IV" (a dash on the Positions screen)
+    // rather than the raw sentinel rendering as a wrong-looking-but-
+    // plausible number.
+    const delta = contract ? parseSchwabOptionDelta(contract.delta, contract.putCall) : null;
     const theta = contract?.theta ?? null;
-    const rawIv = contract?.volatility ?? null;
-    const iv = rawIv !== null ? (rawIv > 1 ? rawIv / 100 : rawIv) : null;
+    const iv = contract ? parseSchwabImpliedVol(contract.volatility) : null;
 
     const premiumSold = Number(p.avg_premium_sold ?? 0);
     // 'short' = sold-to-open / CSP credit; 'long' = bought-to-open.

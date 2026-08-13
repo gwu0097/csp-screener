@@ -14,6 +14,7 @@ import {
   getOptionsChain,
   isSchwabConnected,
   parseSchwabImpliedVol,
+  parseSchwabOptionDelta,
   type SchwabOptionContract,
   type SchwabOptionsChain,
 } from "@/lib/schwab";
@@ -150,7 +151,11 @@ function chainReadings(
     // (lib/screener.ts), all now sharing this one validator so a -999
     // divided by 100 can't quietly become entry_iv on a new position.
     out.contractIv = parseSchwabImpliedVol(own.volatility);
-    out.contractDelta = Number.isFinite(own.delta) ? own.delta : null;
+    // parseSchwabOptionDelta rejects Schwab's sentinel fallback
+    // (delta=1 regardless of put/call — a real put delta can never be
+    // +1) and anything outside a real delta's plausible range — same
+    // fix as lib/screener.ts's runStageFour.
+    out.contractDelta = parseSchwabOptionDelta(own.delta, own.putCall);
   }
   return out;
 }

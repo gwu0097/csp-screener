@@ -7,6 +7,8 @@
 import {
   getOptionsChain,
   getOptionsChainWide,
+  parseSchwabImpliedVol,
+  parseSchwabOptionDelta,
   type SchwabOptionContract,
   type SchwabOptionsChain,
 } from "@/lib/schwab";
@@ -319,12 +321,14 @@ export function buildSnapshotRow(
     pnlPct = diff / soldPremium;
   }
 
-  // Schwab returns volatility as a percent (193.2 = 193.2% IV). Store as
-  // decimal to match entry_em_pct / entry_iv_edge conventions.
-  const currentIv =
-    contract && Number.isFinite(contract.volatility) ? contract.volatility / 100 : null;
-  const currentDelta =
-    contract && Number.isFinite(contract.delta) ? contract.delta : null;
+  // parseSchwabImpliedVol/parseSchwabOptionDelta (lib/schwab.ts) reject
+  // Schwab's -999 "not computable" sentinel and its delta=1-regardless-
+  // of-side fallback — same fix as lib/screener.ts's runStageFour and
+  // lib/entry-context.ts. Both decimal-normalize internally (Schwab
+  // returns volatility as a percent, e.g. 193.2 = 193.2% IV — decimal
+  // to match entry_em_pct/entry_iv_edge conventions).
+  const currentIv = contract ? parseSchwabImpliedVol(contract.volatility) : null;
+  const currentDelta = contract ? parseSchwabOptionDelta(contract.delta, contract.putCall) : null;
   const currentTheta =
     contract && Number.isFinite(contract.theta) ? contract.theta : null;
 
