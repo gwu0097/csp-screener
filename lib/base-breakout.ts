@@ -326,7 +326,7 @@ export type BaseBreakoutLevels = {
 // level not tied to anything real), fall back to base-low instead — a
 // real, wider structural level. Same 3%-15% risk clamp bounds as RS
 // Pullback's computeStructuralLevels, independent constants.
-function computeBaseBreakoutLevels(
+export function computeBaseBreakoutLevels(
   q: Pass1Quote,
   atr14: number | null,
   base: BaseDetection,
