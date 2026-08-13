@@ -96,6 +96,15 @@ export type OpenPositionClientView = {
   // True when the stored expiry doesn't exist in Schwab's chain
   // within tolerance — drives the inline ⚠️ icon on the Expiry cell.
   expiryNotInChain?: boolean;
+  // True when there's no options chain at all for this symbol near
+  // the stored strike/expiry — a stronger signal than expiryNotInChain
+  // that the SYMBOL itself may be wrong (GLE/NNE, 2026-08-14 audit).
+  // Also drives the Expiry cell's ⚠️ icon, with its own tooltip.
+  chainNotFound?: boolean;
+  // True when distanceToStrikePct was computed but rejected as an
+  // implausible magnitude (>300%) and returned null instead — distinct
+  // from a null caused by no live price being available at all.
+  distanceImplausible?: boolean;
   entryFinalGrade: string | null;
   entryCrushGrade: string | null;
   entryOpportunityGrade: string | null;
@@ -604,6 +613,7 @@ export function PositionCard(props: Props) {
   // ticker sub-header in positions-view, so the row no longer renders
   // it directly.
   const distancePct = open ? open.distanceToStrikePct : null;
+  const distanceImplausible = open ? open.distanceImplausible : false;
   const iv = open ? open.currentIv : null;
 
   return (
@@ -639,13 +649,22 @@ export function PositionCard(props: Props) {
             </span>
           )}
         </div>
-        {/* 3. Expiry — hidden on mobile. ⚠️ when Schwab's chain
-              doesn't list this expiry within picker tolerance, so
-              the user knows P&L isn't computable until the date is
-              corrected. Center-aligned (label/text column, not
-              numeric). */}
+        {/* 3. Expiry — hidden on mobile. ⚠️ when Schwab's chain doesn't
+              list this expiry within picker tolerance (expiryNotInChain)
+              OR there's no chain at all for this symbol near the strike/
+              expiry (chainNotFound — a stronger signal the symbol itself
+              may be wrong, not just the date; see GLE/NNE, 2026-08-14).
+              Center-aligned (label/text column, not numeric). */}
         <div className="hidden truncate text-center font-mono text-muted-foreground sm:block">
-          {props.kind === "open" && props.position.expiryNotInChain && (
+          {props.kind === "open" && props.position.chainNotFound && (
+            <span
+              className="mr-1 cursor-help text-amber-300"
+              title="No options chain found for this symbol near this strike/expiry — verify the symbol is correct"
+            >
+              ⚠
+            </span>
+          )}
+          {props.kind === "open" && !props.position.chainNotFound && props.position.expiryNotInChain && (
             <span
               className="mr-1 cursor-help text-amber-300"
               title="Expiry not found in chain — verify strike/expiry date"
@@ -764,20 +783,33 @@ export function PositionCard(props: Props) {
           {optionsStale ? "—" : pop !== null ? `${Math.round(pop * 100)}%` : "—"}
         </div>
         {/* 7. % OTM — hidden on mobile. Danger zone (<5% breathing room or
-              already ITM) flips amber/red regardless of sign. */}
+              already ITM) flips amber/red regardless of sign. distanceImplausible
+              means the raw number was rejected (>300% magnitude, see
+              app/api/positions/open/route.ts) rather than simply
+              unavailable — shown as "⚠ —" instead of a plain dash so
+              it doesn't read as "no live price" (GLE/NNE, 2026-08-14). */}
         <div
           className={cn(
             "hidden text-right font-mono sm:block",
-            distancePct === null
-              ? "text-muted-foreground"
-              : distancePct < 0
-                ? "font-semibold text-rose-300"
-                : distancePct < 5
-                  ? "font-semibold text-amber-300"
-                  : "text-emerald-300",
+            distanceImplausible
+              ? "font-semibold text-amber-300"
+              : distancePct === null
+                ? "text-muted-foreground"
+                : distancePct < 0
+                  ? "font-semibold text-rose-300"
+                  : distancePct < 5
+                    ? "font-semibold text-amber-300"
+                    : "text-emerald-300",
           )}
+          title={distanceImplausible ? "Rejected implausible % OTM — verify the symbol is correct" : undefined}
         >
-          {distancePct !== null ? `${distancePct.toFixed(1)}%` : "—"}
+          {distanceImplausible ? (
+            <span className="cursor-help">⚠ —</span>
+          ) : distancePct !== null ? (
+            `${distancePct.toFixed(1)}%`
+          ) : (
+            "—"
+          )}
         </div>
         {/* 8. IV — lg-only. Hidden on tablet (sm–lg) for the same
               reason as Premium — keeps STATUS readable on iPad

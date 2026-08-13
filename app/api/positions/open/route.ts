@@ -117,6 +117,20 @@ type OpenPosition = {
   // Drives the ⚠️ badge on the row so the user can correct the
   // strike/expiry — see the SE 2026-05-26 vs 2026-05-22 case.
   expiryNotInChain: boolean;
+  // True when there's no options chain at all for this symbol near
+  // the stored strike/expiry — chain fetch failed, or came back with
+  // zero expiries on the relevant side. Distinct from expiryNotInChain
+  // (which means the expiry specifically drifted): no chain at all is
+  // a stronger signal the SYMBOL may be wrong, not just the date — see
+  // the GLE/NNE case (2026-08-14 audit): GLE has no listed options
+  // near a $21 strike, and this fell through with zero warning.
+  chainNotFound: boolean;
+  // True when distanceToStrikePct was computed but rejected as
+  // implausible (>300% magnitude) and returned null instead — distinct
+  // from a null caused by no live price being available at all. See
+  // the GLE/NNE case: a real (if wrong) $0.38 quote against a $21
+  // strike computed a mathematically valid but nonsensical 5442.4%.
+  distanceImplausible: boolean;
   // Entry snapshot — populated at position-open time from the screener's
   // three-layer grade. Used by the expanded position card for the
   // left-column "what did we see at entry" panel.
@@ -612,10 +626,23 @@ export async function GET(req: NextRequest) {
     // mark nor a stock-price fallback estimate would line up with
     // the actual position. Surface "—" instead, with a warning
     // badge so the user can see the row needs verification.
+    //
+    // no_chain included as of the GLE/NNE audit (2026-08-14): a
+    // symbol with NO listed options at all near this strike/expiry —
+    // whether the chain fetch outright failed or came back with zero
+    // expiries on the relevant side — used to fall straight through
+    // this gate with no signal, silently estimating P&L (or, on the
+    // % OTM side below, computing a mathematically valid but
+    // nonsensical distance) off a live price for a symbol that may
+    // not even be the one actually traded. GLE (a real $0.38 stock,
+    // unrelated to the covered call actually written on NNE) had
+    // exactly this shape: no chain, no pickerRejected, no warning,
+    // and a live price silently plugged in as if it meant something.
     const pickerRejected =
       pickResult.reason === "drift_too_large" ||
       pickResult.reason === "snap_too_large" ||
-      pickResult.reason === "drift_and_snap";
+      pickResult.reason === "drift_and_snap" ||
+      pickResult.reason === "no_chain";
     const expiryNotInChain =
       chain !== null &&
       (pickResult.reason === "drift_too_large" ||
@@ -624,6 +651,12 @@ export async function GET(req: NextRequest) {
         // tolerance — likely a wrong strike, but the expiry is fine.
         // Not surfaced as an expiry warning.
         false);
+    // Distinct from expiryNotInChain's specific "expiry drifted"
+    // wording — no_chain means there's no options chain to check
+    // AT ALL (chain fetch failed, or came back with zero expiries on
+    // this side), which is a stronger and differently-worded signal:
+    // the symbol itself may be wrong, not just the date.
+    const chainNotFound = pickResult.reason === "no_chain";
 
     // Stock-price source priority. Yahoo's extended-hours quote
     // (PRE/POST) takes precedence so % OTM reflects the latest
@@ -746,10 +779,36 @@ export async function GET(req: NextRequest) {
     // both recommendPosition()'s thresholds and the "% OTM" label on
     // the position card, so getting the sign wrong for calls breaks
     // both the urgency badge and the displayed number.
-    const distanceToStrikePct =
+    const rawDistanceToStrikePct =
       currentStockPrice !== null && currentStockPrice > 0
         ? (safetyNumerator(currentStockPrice, strike, positionOptionType) / currentStockPrice) * 100
         : null;
+    // Sanity bound (2026-08-14 audit, GLE/NNE): a strike and a live
+    // price can both be individually real and still be measuring two
+    // different companies, if the position was imported under the
+    // wrong symbol — GLE's $21 strike against its own real $0.38
+    // quote computed a mathematically correct 5442.4% OTM that was
+    // still not a real position. Calibrated the same way the Schwab
+    // sentinel parsers were (lib/schwab.ts's parseSchwabImpliedVol/
+    // parseSchwabOptionDelta): ~3x headroom above the largest
+    // magnitude ever seen on a real position in this account's whole
+    // history (SNDK at 92.9%, entry-time) rather than a round number
+    // picked with no reference point. Same reject-don't-pass-through
+    // convention as those parsers — null here reads downstream as "no
+    // data" (a dash on the card), not a wrong number; recommendPosition
+    // below already treats a null distance as 100 (assume safe when
+    // unknown), so an implausible reading falls into the same
+    // conservative default rather than feeding a wild number into the
+    // urgency calculation.
+    const MAX_PLAUSIBLE_DISTANCE_PCT = 300;
+    const distanceImplausible =
+      rawDistanceToStrikePct !== null && Math.abs(rawDistanceToStrikePct) > MAX_PLAUSIBLE_DISTANCE_PCT;
+    const distanceToStrikePct = distanceImplausible ? null : rawDistanceToStrikePct;
+    if (distanceImplausible) {
+      console.log(
+        `[positions] ${p.symbol} $${strike}${positionOptionType === "call" ? "C" : "P"} ${expiry}: rejected implausible distance ${rawDistanceToStrikePct?.toFixed(1)}% (stock=${currentStockPrice}, source=${priceSource ?? "none"}) — showing % OTM as null`,
+      );
+    }
 
     // Per-position mark/entry/pnl log — runs for every position on
     // every live request so server logs surface the math for any
@@ -879,6 +938,7 @@ export async function GET(req: NextRequest) {
       pnlPct,
       pnlSource,
       distanceToStrikePct,
+      distanceImplausible,
       thetaDecayTotal,
       momentum,
       urgency: rec.urgency,
@@ -893,6 +953,7 @@ export async function GET(req: NextRequest) {
       expiryPctFromStrike: expiryByPosition.get(p.id)?.pctFromStrike ?? null,
       expiryLastStockPrice: expiryByPosition.get(p.id)?.stockPrice ?? null,
       expiryNotInChain,
+      chainNotFound,
       fills: fills
         .slice()
         .sort((a, b) => a.fill_date.localeCompare(b.fill_date)),
