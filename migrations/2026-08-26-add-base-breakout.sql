@@ -1,0 +1,16 @@
+-- Base Breakout is a sixth setup tab (lib/base-breakout.ts), independent
+-- of RS Pullback, following the exact same append-only persistence
+-- pattern that migrations/2026-08-10-add-kind-to-swing-screen-results.sql
+-- and 2026-08-13-add-rs-pullback-diagnostics-to-swing-screen-results.sql
+-- set up for RS Pullback. `kind` already has no CHECK-constraint enum
+-- (plain `text not null default 'legacy'`), so `kind='base_breakout'`
+-- needs no schema change at all — this migration only adds the
+-- diagnostics column, mirroring rs_pullback_diagnostics exactly.
+--
+-- Carries this run's pregate/enrichment funnel counts (excludedBySector,
+-- excludedByInsufficientBars, excludedByEvalFailure,
+-- excludedByEarningsWindow, excludedByBaseRange, excludedByBaseLength,
+-- excludedByAtrContraction, excludedByNoValidTrigger, degradedCount) so a
+-- zero-candidate run still explains why. Nullable — only meaningful for
+-- kind='base_breakout'.
+alter table swing_screen_results add column if not exists base_breakout_diagnostics jsonb;

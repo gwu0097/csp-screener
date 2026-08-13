@@ -175,6 +175,69 @@ export function computeAvgDollarVolume(
   return n > 0 ? sum / n : null;
 }
 
+// Mean raw share volume over the trailing `period` bars — sibling of
+// computeAvgDollarVolume without the close multiply, for callers (RVOL)
+// that need a plain volume average pinned to an arbitrary historical
+// date rather than Yahoo's fixed 10-day avgVolume quote field.
+//   bars: daily OHLCV, OLDEST FIRST. Needs >= period bars.
+export function computeAvgVolume(
+  bars: Array<{ volume: number }>,
+  period = 20,
+): number | null {
+  if (!Array.isArray(bars) || bars.length < period) return null;
+  const window = bars.slice(-period);
+  let sum = 0;
+  let n = 0;
+  for (const b of window) {
+    if (!Number.isFinite(b.volume) || b.volume < 0) continue;
+    sum += b.volume;
+    n += 1;
+  }
+  return n > 0 ? sum / n : null;
+}
+
+// ATR(atrPeriod) computed as-of each of the trailing `trailingSessions`
+// sessions — a rolling series, not a single point value. Needed to test
+// whether TODAY's ATR sits in the lower half of its own recent range
+// (volatility contraction), which a single computeATR() call can't
+// answer on its own.
+//   bars: daily OHLC, OLDEST FIRST, index 0 = oldest.
+// Returns oldest-first, one value per trailing session (nulls where a
+// given as-of point doesn't have enough prior bars to seed ATR) — or
+// null if there aren't enough bars for even one point.
+export function rollingATRSeries(
+  bars: Array<{ high: number; low: number; close: number }>,
+  atrPeriod = 10,
+  trailingSessions = 60,
+): number[] | null {
+  if (!Array.isArray(bars) || bars.length < atrPeriod + 1) return null;
+  // Single forward pass, O(bars.length) — unrolls computeATR's own
+  // seed-then-Wilder-update loop and keeps every intermediate value
+  // instead of recomputing computeATR(bars.slice(0, end)) from scratch at
+  // each of the trailing sessions (that was O(bars.length x
+  // trailingSessions) and dominated backtest runtime across a full
+  // universe x weekly-checkpoint sweep). Numerically identical to the
+  // previous implementation — same seed, same per-step update — this is
+  // a pure performance fix.
+  const trueRanges: number[] = [];
+  for (let i = 1; i < bars.length; i += 1) {
+    const { high, low } = bars[i];
+    const prevClose = bars[i - 1].close;
+    if (!Number.isFinite(high) || !Number.isFinite(low) || !Number.isFinite(prevClose)) continue;
+    trueRanges.push(Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose)));
+  }
+  if (trueRanges.length < atrPeriod) return null;
+  const series: number[] = [];
+  let atr = trueRanges.slice(0, atrPeriod).reduce((a, b) => a + b, 0) / atrPeriod;
+  series.push(atr);
+  for (let i = atrPeriod; i < trueRanges.length; i += 1) {
+    atr = (atr * (atrPeriod - 1) + trueRanges[i]) / atrPeriod;
+    series.push(atr);
+  }
+  const out = series.slice(-trailingSessions);
+  return out.length > 0 ? out : null;
+}
+
 export type MACDPoint = { macd: number; signal: number; histogram: number };
 
 // Standard 12/26/9 MACD: fast EMA - slow EMA = MACD line, signal = EMA

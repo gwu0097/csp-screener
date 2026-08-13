@@ -202,6 +202,24 @@ type SwingCandidate = {
   // SMA50/ATR14/RS20/RS60/target/stop are still the full run's stale
   // values, so this row can never show Enter regardless of R:R.
   priceRefreshed?: boolean;
+  // Base Breakout tab only — null/undefined for every other tab's
+  // candidates. See lib/base-breakout.ts computeBaseBreakoutCandidates.
+  baseHigh?: number | null;
+  baseLow?: number | null;
+  baseSessions?: number | null;
+  baseRangePct?: number | null;
+  atr10?: number | null;
+  atr10Median60?: number | null;
+  rvol?: number | null;
+  sessionsSinceTrigger?: number | null;
+  extensionAtrMultiple?: number | null;
+  stopSource?: "base_high" | "base_low" | "base_low_clamped" | null;
+  baseBreakoutList?: "ready" | "leading_extended" | "in_zone_lagging" | "near_miss" | null;
+  // ---- Near-miss watch tier only — set iff baseBreakoutList === "near_miss". ----
+  bbNearMissGate?: "base_range" | "base_length" | "atr_contraction" | "rvol" | "adr_floor" | null;
+  bbNearMissValue?: number | null;
+  bbNearMissThreshold?: number | null;
+  bbNearMissGap?: number | null;
 };
 
 // Mirror of lib/swing-screener.ts ScoreComponent — the score IS the sum
@@ -225,7 +243,7 @@ type TabStats = {
   return1y: number | null;
 };
 
-type SetupTab = "capitulation" | "pullback" | "insider" | "options_flow" | "rs_pullback";
+type SetupTab = "capitulation" | "pullback" | "insider" | "options_flow" | "rs_pullback" | "base_breakout";
 
 const SETUP_TABS: Array<{ key: SetupTab; label: string; blurb: string }> = [
   {
@@ -258,6 +276,12 @@ const SETUP_TABS: Array<{ key: SetupTab; label: string; blurb: string }> = [
     blurb:
       "Trend (above a rising 50d/above the 200d) + volatility floor (ADR% >= min) + relative strength vs SPY, split into three lists by extension from the 50d in ADR-days: Ready (in the entry zone), Leading/extended (strong RS but too far from entry), and In-zone/lagging (a control group). No 0-10 score — pass/fail plus a list, not a ranking.",
   },
+  {
+    key: "base_breakout",
+    label: "Base Breakout",
+    blurb:
+      "A tight base (range compression + ATR(10) contraction, >=20 sessions) breaking out above its own high on RVOL >= 1.5, above the 200d. Same three-list shape as RS Pullback but keyed on trigger state, not extension: Ready (fresh trigger), Leading/extended (triggered but stale or extended), In-zone/lagging (base still forming, no trigger yet). Stop sits below the base, not a fixed ATR multiple off entry.",
+  },
 ];
 
 const TAB_LABEL: Record<SetupTab, string> = {
@@ -266,6 +290,7 @@ const TAB_LABEL: Record<SetupTab, string> = {
   insider: "Insider",
   options_flow: "Options Flow",
   rs_pullback: "RS Pullback",
+  base_breakout: "Base Breakout",
 };
 
 // Rows saved before the tab redesign carry tier1Signals but no
@@ -369,6 +394,27 @@ type RsPullbackRunDiagnostics = {
   // pass the other four gates without enriching a class of symbols that
   // never reaches enrichment today, which the near-miss spec explicitly
   // says to avoid rather than slow the run down.
+  excludedByAbove200d: number;
+};
+
+// Base Breakout's pregate/enrichment funnel counts for one run — same
+// role as RsPullbackRunDiagnostics above, persisted alongside the
+// base_breakout row (see /save). Mirrors the 12 counters
+// computeBaseBreakoutCandidates/pregateBaseBreakoutSymbols report; no
+// chunksDone/chunksTotal here either, same reason (UI-progress-only, not
+// persisted).
+type BaseBreakoutRunDiagnostics = {
+  pregatedCount: number;
+  needsEnrichmentCount: number;
+  excludedBySector: number;
+  excludedByInsufficientBars: number;
+  excludedByEvalFailure: number;
+  excludedByEarningsWindow: number;
+  excludedByBaseRange: number;
+  excludedByBaseLength: number;
+  excludedByAtrContraction: number;
+  excludedByNoValidTrigger: number;
+  degradedCount: number;
   excludedByAbove200d: number;
 };
 
@@ -484,6 +530,84 @@ const DEFAULT_RS_PULLBACK_EXIT_RULES: RsPullbackExitRules = {
 };
 
 const LS_RS_PULLBACK_EXIT_RULES = "swing-screen-rs-pullback-exit-rules";
+
+// Base Breakout thresholds — mirrors lib/base-breakout.ts's
+// BaseBreakoutThresholds/DEFAULT_BASE_BREAKOUT_THRESHOLDS, same
+// hand-mirrored-not-imported convention as RsPullbackThresholds above.
+// All provisional/editable, own independent localStorage key — never
+// shares state with RsPullbackThresholds even where a value (minAdrPct)
+// happens to match today.
+type BaseBreakoutThresholds = {
+  baseMinSessions: number;
+  baseRangeMaxPct: number;
+  atrContractionPercentile: number;
+  atrTrailingSessions: number;
+  rvolMin: number;
+  rvolLookbackSessions: number;
+  freshnessMaxSessions: number;
+  freshnessMaxAtrMultiple: number;
+  minAdrPct: number;
+};
+
+const DEFAULT_BASE_BREAKOUT_THRESHOLDS: BaseBreakoutThresholds = {
+  baseMinSessions: 20,
+  baseRangeMaxPct: 25,
+  atrContractionPercentile: 50,
+  atrTrailingSessions: 60,
+  rvolMin: 1.5,
+  rvolLookbackSessions: 20,
+  freshnessMaxSessions: 5,
+  freshnessMaxAtrMultiple: 1.5,
+  minAdrPct: 3.0,
+};
+
+const LS_BASE_BREAKOUT_THRESHOLDS = "swing-screen-base-breakout-thresholds";
+
+// Base Breakout's own "Extension" is in ATR-multiples (0 to
+// freshnessMaxAtrMultiple, a genuine unit difference from RS Pullback's
+// ADR-days-from-50MA — see gate 4 in lib/base-breakout.ts) — same
+// floor/green/yellow/orange band shape as RsPullbackColorBands, own
+// values, own localStorage key.
+type BaseBreakoutColorBands = {
+  extensionGreenMax: number; // [0, this]: green — right at the base high
+  extensionYellowMax: number;
+  extensionOrangeMax: number; // above: red (past the freshness ceiling)
+  rrGreenMin: number;
+  rrYellowMin: number;
+  rrOrangeMin: number;
+};
+
+const DEFAULT_BASE_BREAKOUT_COLOR_BANDS: BaseBreakoutColorBands = {
+  extensionGreenMax: 0.5,
+  extensionYellowMax: 1.0,
+  extensionOrangeMax: 1.5,
+  rrGreenMin: 2.0,
+  rrYellowMin: 1.5,
+  rrOrangeMin: 1.0,
+};
+
+const LS_BASE_BREAKOUT_COLOR_BANDS = "swing-screen-base-breakout-color-bands";
+
+// Same display-only guard shape as RsPullbackExitRules — carried over
+// unchanged values (target window 1.5-4.0 ADR-days, R:R floor 2.0),
+// independent copy/localStorage key. maxEntryExtensionAtrMultiple is
+// this tab's analog of maxEntryExtensionAdrDays, in ATR-multiples to
+// match the live freshness gate's own unit.
+type BaseBreakoutExitRules = {
+  targetMinAdrDays: number;
+  targetMaxAdrDays: number;
+  rrFloor: number;
+  maxEntryExtensionAtrMultiple: number;
+};
+
+const DEFAULT_BASE_BREAKOUT_EXIT_RULES: BaseBreakoutExitRules = {
+  targetMinAdrDays: 1.5,
+  targetMaxAdrDays: 4.0,
+  rrFloor: 2.0,
+  maxEntryExtensionAtrMultiple: 1.5,
+};
+
+const LS_BASE_BREAKOUT_EXIT_RULES = "swing-screen-base-breakout-exit-rules";
 
 type SortValue = number | string | null;
 
@@ -678,6 +802,102 @@ function canEnterIgnoringRefresh(c: SwingCandidate, rules: RsPullbackExitRules):
 function canEnterRsPullback(c: SwingCandidate, rules: RsPullbackExitRules): boolean {
   if (c.priceRefreshed) return false;
   return canEnterIgnoringRefresh(c, rules);
+}
+
+// ---- Base Breakout color bands / exit rules / target-window guard ----
+// Same display-only, never-gates-anything role as the RS Pullback trio
+// above (extensionBandCls/rrBandCls/classifyTargetWindow/canEnterRsPullback)
+// — duplicated rather than parameterized because their signatures are
+// pinned to BaseBreakoutColorBands/BaseBreakoutExitRules, structurally
+// different types from RsPullbackColorBands/RsPullbackExitRules (no
+// extensionFloor — Base Breakout's extensionAtrMultiple can be zero or
+// negative, e.g. a still-forming base or a retest below the trigger
+// level, so there's no "too close to the level" red zone the way RS
+// Pullback's floor encodes).
+function bbExtensionBandCls(ext: number | null | undefined, bands: BaseBreakoutColorBands): string {
+  if (ext === null || ext === undefined || !Number.isFinite(ext)) return "text-muted-foreground";
+  if (ext <= bands.extensionGreenMax) return "text-emerald-300";
+  if (ext <= bands.extensionYellowMax) return "text-amber-300";
+  if (ext <= bands.extensionOrangeMax) return "text-orange-300";
+  return "text-rose-300";
+}
+
+function bbRrBandCls(rr: number | null | undefined, bands: BaseBreakoutColorBands): string {
+  if (rr === null || rr === undefined || !Number.isFinite(rr)) return "text-muted-foreground";
+  if (rr >= bands.rrGreenMin) return "text-emerald-300";
+  if (rr >= bands.rrYellowMin) return "text-amber-300";
+  if (rr >= bands.rrOrangeMin) return "text-orange-300";
+  return "text-rose-300";
+}
+
+function bbExtensionBandCaption(bands: BaseBreakoutColorBands): string {
+  return `≤${bands.extensionGreenMax.toFixed(1)} green · ≤${bands.extensionYellowMax.toFixed(1)} yellow · ≤${bands.extensionOrangeMax.toFixed(1)} orange · above red`;
+}
+
+function bbRrBandCaption(bands: BaseBreakoutColorBands): string {
+  return `≥${bands.rrGreenMin.toFixed(1)} green · ≥${bands.rrYellowMin.toFixed(1)} yellow · ≥${bands.rrOrangeMin.toFixed(1)} orange · below red`;
+}
+
+// Reuses TargetWindowState/computeTargetAdrDays/targetWindowMessage above
+// — those are generic (SwingCandidate + a plain state union), not typed
+// to RsPullbackExitRules, so only the classifier itself (which reads
+// BaseBreakoutExitRules' field names) needs its own copy.
+function classifyBaseBreakoutTargetWindow(c: SwingCandidate, rules: BaseBreakoutExitRules): TargetWindowState {
+  const adrDays = computeTargetAdrDays(c);
+  if (adrDays === null) return { kind: "unknown" };
+  if (adrDays > rules.targetMaxAdrDays) return { kind: "beyond", adrDays };
+  if (adrDays < rules.targetMinAdrDays) return { kind: "at_resistance", adrDays };
+  return { kind: "within", adrDays };
+}
+
+function bbRrHelperText(rules: BaseBreakoutExitRules): string {
+  return `R:R only shows when the target sits ${rules.targetMinAdrDays.toFixed(1)}–${rules.targetMaxAdrDays.toFixed(1)} ADR-days from entry — outside that window the projection is a distant or already-exhausted level, not a validated trade. Enter requires R:R ≥ ${rules.rrFloor.toFixed(1)}:1 AND Extension ≤ ${rules.maxEntryExtensionAtrMultiple.toFixed(1)}× ATR10 AND not In zone/lagging (still forming, no trigger yet) — missing any of those, or when R:R is suppressed, Track stays but Enter doesn't.`;
+}
+
+function bbTargetHelperText(rules: BaseBreakoutExitRules): string {
+  return `Nearer of analyst consensus / 52-week high / 3×ATR projection — no floor or ceiling on distance from entry. R:R only shows when this lands ${rules.targetMinAdrDays.toFixed(1)}–${rules.targetMaxAdrDays.toFixed(1)} ADR-days out.`;
+}
+
+// Whether this row is allowed to show an Enter button — display only,
+// same role as canEnterRsPullback but no price-refresh flag to check
+// (Base Breakout has no price-only-refresh feature, see the module notes
+// where refreshRsPullbackPrices is defined) and no |abs| on the
+// extension check: the engine's own freshness gate (freshByExtension in
+// lib/base-breakout.ts) compares extensionAtrMultiple directly against
+// the ceiling, not its absolute value — a deep retest below the base
+// high is already excluded by other means (in_zone_lagging isn't
+// enterable at all) rather than by a symmetric extension bound.
+function canEnterBaseBreakout(c: SwingCandidate, rules: BaseBreakoutExitRules): boolean {
+  if (c.baseBreakoutList === "in_zone_lagging") return false;
+  if (
+    c.extensionAtrMultiple === null ||
+    c.extensionAtrMultiple === undefined ||
+    !Number.isFinite(c.extensionAtrMultiple) ||
+    c.extensionAtrMultiple > rules.maxEntryExtensionAtrMultiple
+  ) {
+    return false;
+  }
+  const window = classifyBaseBreakoutTargetWindow(c, rules);
+  if (window.kind !== "within") return false;
+  return c.rr !== null && c.rr !== undefined && Number.isFinite(c.rr) && c.rr >= rules.rrFloor;
+}
+
+// Same "gets old, maybe re-run" staleness window as RS Pullback's own
+// constant — independent literal, own tab, matching this file's
+// duplicate-not-share convention for provisional per-tab config.
+const BASE_BREAKOUT_RUN_STALE_THRESHOLD_MINUTES = 60;
+
+function stopSourceLabel(source: NonNullable<SwingCandidate["stopSource"]>): string {
+  switch (source) {
+    case "base_high":
+      return "stop: base high";
+    case "base_low":
+      return "stop: base low";
+    case "base_low_clamped":
+      return "stop: base low (clamped)";
+    default:
+      return "";
+  }
 }
 
 // Insider $ / buyer-count / recency for rows saved before those fields
@@ -945,6 +1165,9 @@ const TAB_COLUMNS: Record<SetupTab, MetricColumn[]> = {
   // three-section renderer (RsPullbackResults) rather than a single
   // flat sorted table. Empty on purpose.
   rs_pullback: [],
+  // Same reason as rs_pullback above — Base Breakout has its own
+  // three-section renderer (BaseBreakoutTabContent). Empty on purpose.
+  base_breakout: [],
 };
 
 // Mobile stays a fixed 5-col strip (Symbol/Price/Chg%/Score/Actions) —
@@ -968,6 +1191,8 @@ const ROW_GRID_DESKTOP: Record<SetupTab, string> = {
     "md:grid-cols-[minmax(60px,80px)_minmax(120px,1.5fr)_80px_70px_60px_90px_70px_70px_90px_70px_90px_70px_minmax(120px,1fr)_190px]",
   // Unused — RS Pullback never renders through ResultsTable/CandidateRow.
   rs_pullback: "",
+  // Unused — Base Breakout never renders through ResultsTable/CandidateRow either.
+  base_breakout: "",
 };
 
 function rowGridClass(tab: SetupTab): string {
@@ -1066,7 +1291,7 @@ function sortCandidates(
   });
 }
 
-type RunPhase = "idle" | "backfill" | "pass1" | "pass2" | "rs_pullback" | "pass3" | "saving";
+type RunPhase = "idle" | "backfill" | "pass1" | "pass2" | "rs_pullback" | "base_breakout" | "pass3" | "saving";
 
 // Fetch + parse defensively. Vercel kills a function that exceeds the
 // 60s production ceiling with a PLAIN-TEXT body ("An error occurred…"),
@@ -1121,6 +1346,11 @@ type Pass1Wire = {
     excludedByAbove200d: number;
     prefilterNearMiss: SwingCandidate[];
   };
+  baseBreakout: {
+    pregatedCount: number;
+    needsEnrichment: string[];
+    excludedByAbove200d: number;
+  };
 };
 
 // Universe & Themes, Phase B — resolves a selector's choice to the
@@ -1174,7 +1404,7 @@ export function SwingScreenView() {
   // legacy tabs have different enrichment costs and different Finnhub
   // exposure, so running only what's needed cuts throttling and
   // turnaround time. Not persisted — defaults back to "all" every visit.
-  const [runTarget, setRunTarget] = useState<"all" | "legacy" | "rs_pullback">("all");
+  const [runTarget, setRunTarget] = useState<"all" | "legacy" | "rs_pullback" | "base_breakout">("all");
   // Minimum ADR%% filter — restored from localStorage on mount (same
   // persistence convention screener-view.tsx uses for its own controls),
   // defaulting to 3.0 for a first-ever visit. Lazy initializer so SSR/first
@@ -1238,6 +1468,51 @@ export function SwingScreenView() {
   useEffect(() => {
     window.localStorage.setItem(LS_RS_PULLBACK_EXIT_RULES, JSON.stringify(rsPullbackExitRules));
   }, [rsPullbackExitRules]);
+  // Base Breakout thresholds/color-bands/exit-rules — same three-hook
+  // persistence convention as the RS Pullback trio directly above, own
+  // independent localStorage keys, never cross-read from RS Pullback's.
+  const [baseBreakoutThresholds, setBaseBreakoutThresholds] = useState<BaseBreakoutThresholds>(() => {
+    if (typeof window === "undefined") return DEFAULT_BASE_BREAKOUT_THRESHOLDS;
+    try {
+      const raw = window.localStorage.getItem(LS_BASE_BREAKOUT_THRESHOLDS);
+      if (!raw) return DEFAULT_BASE_BREAKOUT_THRESHOLDS;
+      const parsed = JSON.parse(raw) as Partial<BaseBreakoutThresholds>;
+      return { ...DEFAULT_BASE_BREAKOUT_THRESHOLDS, ...parsed };
+    } catch {
+      return DEFAULT_BASE_BREAKOUT_THRESHOLDS;
+    }
+  });
+  useEffect(() => {
+    window.localStorage.setItem(LS_BASE_BREAKOUT_THRESHOLDS, JSON.stringify(baseBreakoutThresholds));
+  }, [baseBreakoutThresholds]);
+  const [baseBreakoutColorBands, setBaseBreakoutColorBands] = useState<BaseBreakoutColorBands>(() => {
+    if (typeof window === "undefined") return DEFAULT_BASE_BREAKOUT_COLOR_BANDS;
+    try {
+      const raw = window.localStorage.getItem(LS_BASE_BREAKOUT_COLOR_BANDS);
+      if (!raw) return DEFAULT_BASE_BREAKOUT_COLOR_BANDS;
+      const parsed = JSON.parse(raw) as Partial<BaseBreakoutColorBands>;
+      return { ...DEFAULT_BASE_BREAKOUT_COLOR_BANDS, ...parsed };
+    } catch {
+      return DEFAULT_BASE_BREAKOUT_COLOR_BANDS;
+    }
+  });
+  useEffect(() => {
+    window.localStorage.setItem(LS_BASE_BREAKOUT_COLOR_BANDS, JSON.stringify(baseBreakoutColorBands));
+  }, [baseBreakoutColorBands]);
+  const [baseBreakoutExitRules, setBaseBreakoutExitRules] = useState<BaseBreakoutExitRules>(() => {
+    if (typeof window === "undefined") return DEFAULT_BASE_BREAKOUT_EXIT_RULES;
+    try {
+      const raw = window.localStorage.getItem(LS_BASE_BREAKOUT_EXIT_RULES);
+      if (!raw) return DEFAULT_BASE_BREAKOUT_EXIT_RULES;
+      const parsed = JSON.parse(raw) as Partial<BaseBreakoutExitRules>;
+      return { ...DEFAULT_BASE_BREAKOUT_EXIT_RULES, ...parsed };
+    } catch {
+      return DEFAULT_BASE_BREAKOUT_EXIT_RULES;
+    }
+  });
+  useEffect(() => {
+    window.localStorage.setItem(LS_BASE_BREAKOUT_EXIT_RULES, JSON.stringify(baseBreakoutExitRules));
+  }, [baseBreakoutExitRules]);
   // Universe & Themes, Phase B — which universe the screener runs
   // against. Persisted the same way minAdrPct/rsPullbackThresholds are;
   // defaults to the index universe only, matching pre-Phase-B behavior
@@ -1327,6 +1602,23 @@ export function SwingScreenView() {
     chunksDone: number;
     chunksTotal: number;
   } | null>(null);
+  const [baseBreakoutSettingsOpen, setBaseBreakoutSettingsOpen] = useState(false);
+  const [baseBreakoutDiagnostics, setBaseBreakoutDiagnostics] = useState<{
+    pregatedCount: number;
+    needsEnrichmentCount: number;
+    excludedBySector: number;
+    excludedByInsufficientBars: number;
+    excludedByEvalFailure: number;
+    excludedByEarningsWindow: number;
+    excludedByBaseRange: number;
+    excludedByBaseLength: number;
+    excludedByAtrContraction: number;
+    excludedByNoValidTrigger: number;
+    degradedCount: number;
+    excludedByAbove200d: number;
+    chunksDone: number;
+    chunksTotal: number;
+  } | null>(null);
   // Regime banner — independent of the scan pipeline, fetched once on
   // mount. Display-only; feeds market_regime on the journal's entry form,
   // never gates anything here.
@@ -1387,16 +1679,19 @@ export function SwingScreenView() {
   // structurally separate objects (never merged into one multi-tab
   // record), so splitting "legacy portion" / "rs_pullback portion" of
   // data.candidates by setupTabs is exact, not a heuristic.
-  async function runScreen(target: "all" | "legacy" | "rs_pullback" = "all") {
+  async function runScreen(target: "all" | "legacy" | "rs_pullback" | "base_breakout" = "all") {
     setRunError(null);
     setRunWarning(null);
     setPass1Count(null);
     const started = Date.now();
     const existingLegacyPortion = (data?.candidates ?? []).filter(
-      (c) => !(c.setupTabs ?? []).includes("rs_pullback"),
+      (c) => !(c.setupTabs ?? []).includes("rs_pullback") && !(c.setupTabs ?? []).includes("base_breakout"),
     );
     const existingRsPullbackPortion = (data?.candidates ?? []).filter((c) =>
       (c.setupTabs ?? []).includes("rs_pullback"),
+    );
+    const existingBaseBreakoutPortion = (data?.candidates ?? []).filter((c) =>
+      (c.setupTabs ?? []).includes("base_breakout"),
     );
     try {
       // Universe & Themes, Phase B — resolve the selected universe fresh
@@ -1683,7 +1978,149 @@ export function SwingScreenView() {
         };
       }
 
-      const candidates = [...legacyCandidates, ...rsPullbackCandidates];
+      let baseBreakoutCandidates: SwingCandidate[] = existingBaseBreakoutPortion;
+      let baseBreakoutDiagnosticsForSave:
+        | {
+            pregatedCount: number;
+            needsEnrichmentCount: number;
+            excludedBySector: number;
+            excludedByInsufficientBars: number;
+            excludedByEvalFailure: number;
+            excludedByEarningsWindow: number;
+            excludedByBaseRange: number;
+            excludedByBaseLength: number;
+            excludedByAtrContraction: number;
+            excludedByNoValidTrigger: number;
+            degradedCount: number;
+            excludedByAbove200d: number;
+          }
+        | undefined;
+      if (target === "all" || target === "base_breakout") {
+        // Base Breakout enrichment — chunked, sequential calls over
+        // pass1's baseBreakout.needsEnrichment, called AFTER both /pass2
+        // and RS Pullback's enrichment above have fully finished, never
+        // concurrently with either (same Finnhub-rate-limit discipline —
+        // see pass2-base-breakout/route.ts's own comment). NON-FATAL as a
+        // whole, same treatment as RS Pullback and pass 3.
+        setPhase("base_breakout");
+        const needsEnrichment = p1.baseBreakout?.needsEnrichment ?? [];
+        const BASE_BREAKOUT_CHUNK_SIZE = 100;
+        let freshBaseBreakoutCandidates: SwingCandidate[] = [];
+        let excludedBySector = 0;
+        let excludedByInsufficientBars = 0;
+        let excludedByEvalFailure = 0;
+        let excludedByEarningsWindow = 0;
+        let excludedByBaseRange = 0;
+        let excludedByBaseLength = 0;
+        let excludedByAtrContraction = 0;
+        let excludedByNoValidTrigger = 0;
+        let degradedCount = 0;
+        let baseBreakoutChunkFailed = false;
+        let queue = [...needsEnrichment];
+        let chunksDone = 0;
+        let chunksTotalEstimate = Math.ceil(queue.length / BASE_BREAKOUT_CHUNK_SIZE);
+        setBaseBreakoutDiagnostics({
+          pregatedCount: p1.baseBreakout?.pregatedCount ?? 0,
+          needsEnrichmentCount: needsEnrichment.length,
+          excludedBySector: 0,
+          excludedByInsufficientBars: 0,
+          excludedByEvalFailure: 0,
+          excludedByEarningsWindow: 0,
+          excludedByBaseRange: 0,
+          excludedByBaseLength: 0,
+          excludedByAtrContraction: 0,
+          excludedByNoValidTrigger: 0,
+          degradedCount: 0,
+          excludedByAbove200d: p1.baseBreakout?.excludedByAbove200d ?? 0,
+          chunksDone: 0,
+          chunksTotal: chunksTotalEstimate,
+        });
+        while (queue.length > 0) {
+          const chunk = queue.slice(0, BASE_BREAKOUT_CHUNK_SIZE);
+          queue = queue.slice(BASE_BREAKOUT_CHUNK_SIZE);
+          try {
+            const res = await fetchPassJson<{
+              candidates?: SwingCandidate[];
+              excludedBySector?: number;
+              excludedByInsufficientBars?: number;
+              excludedByEvalFailure?: number;
+              excludedByEarningsWindow?: number;
+              excludedByBaseRange?: number;
+              excludedByBaseLength?: number;
+              excludedByAtrContraction?: number;
+              excludedByNoValidTrigger?: number;
+              degradedCount?: number;
+              deadlineSkipped?: string[];
+            }>(
+              `Base Breakout enrichment (chunk ${chunksDone + 1})`,
+              "/api/swings/screen/pass2-base-breakout",
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ ...p1, symbols: chunk, forceFresh, baseBreakoutThresholds }),
+              },
+            );
+            freshBaseBreakoutCandidates = [...freshBaseBreakoutCandidates, ...(res.candidates ?? [])];
+            excludedBySector += res.excludedBySector ?? 0;
+            excludedByInsufficientBars += res.excludedByInsufficientBars ?? 0;
+            excludedByEvalFailure += res.excludedByEvalFailure ?? 0;
+            excludedByEarningsWindow += res.excludedByEarningsWindow ?? 0;
+            excludedByBaseRange += res.excludedByBaseRange ?? 0;
+            excludedByBaseLength += res.excludedByBaseLength ?? 0;
+            excludedByAtrContraction += res.excludedByAtrContraction ?? 0;
+            excludedByNoValidTrigger += res.excludedByNoValidTrigger ?? 0;
+            degradedCount += res.degradedCount ?? 0;
+            if (res.deadlineSkipped && res.deadlineSkipped.length > 0) {
+              queue = [...queue, ...res.deadlineSkipped];
+              chunksTotalEstimate = chunksDone + 1 + Math.ceil(queue.length / BASE_BREAKOUT_CHUNK_SIZE);
+            }
+          } catch (e) {
+            console.warn(`[swing-screen] Base Breakout chunk ${chunksDone + 1} failed:`, e);
+            baseBreakoutChunkFailed = true;
+          }
+          chunksDone += 1;
+          setBaseBreakoutDiagnostics({
+            pregatedCount: p1.baseBreakout?.pregatedCount ?? 0,
+            needsEnrichmentCount: needsEnrichment.length,
+            excludedBySector,
+            excludedByInsufficientBars,
+            excludedByEvalFailure,
+            excludedByEarningsWindow,
+            excludedByBaseRange,
+            excludedByBaseLength,
+            excludedByAtrContraction,
+            excludedByNoValidTrigger,
+            degradedCount,
+            excludedByAbove200d: p1.baseBreakout?.excludedByAbove200d ?? 0,
+            chunksDone,
+            chunksTotal: chunksTotalEstimate,
+          });
+        }
+        if (baseBreakoutChunkFailed) {
+          setRunWarning(
+            (prev) =>
+              prev ??
+              "Base Breakout enrichment failed partway through — its lists may be incomplete for this run. The other tabs are unaffected.",
+          );
+        }
+        baseBreakoutCandidates = freshBaseBreakoutCandidates.map(normalizeCandidate);
+        baseBreakoutDiagnosticsForSave = {
+          pregatedCount: p1.baseBreakout?.pregatedCount ?? 0,
+          needsEnrichmentCount: needsEnrichment.length,
+          excludedBySector,
+          excludedByInsufficientBars,
+          excludedByEvalFailure,
+          excludedByEarningsWindow,
+          excludedByBaseRange,
+          excludedByBaseLength,
+          excludedByAtrContraction,
+          excludedByNoValidTrigger,
+          degradedCount,
+          excludedByAbove200d: p1.baseBreakout?.excludedByAbove200d ?? 0,
+        };
+      }
+
+      const candidates = [...legacyCandidates, ...rsPullbackCandidates, ...baseBreakoutCandidates];
 
       const result: CachedResult = {
         candidates,
@@ -1718,6 +2155,7 @@ export function SwingScreenView() {
               mode: target,
               universe: universeDescriptor,
               rsPullbackDiagnostics: rsPullbackDiagnosticsForSave,
+              baseBreakoutDiagnostics: baseBreakoutDiagnosticsForSave,
             }),
           },
         );
@@ -1797,6 +2235,7 @@ export function SwingScreenView() {
       insider: 0,
       options_flow: 0,
       rs_pullback: 0,
+      base_breakout: 0,
     };
     for (const c of data?.candidates ?? []) {
       for (const t of candidateTabs(c)) {
@@ -1804,6 +2243,7 @@ export function SwingScreenView() {
         // from the tab badge so it keeps reading as a qualifying count,
         // not a scope/gating change (near-miss is purely additive).
         if (t === "rs_pullback" && c.rsPullbackList === "near_miss") continue;
+        if (t === "base_breakout" && c.baseBreakoutList === "near_miss") continue;
         counts[t] += 1;
       }
     }
@@ -1837,6 +2277,14 @@ export function SwingScreenView() {
   // the live run's data or a past run selected from history (see
   // RsPullbackHistoryPicker) — null means "live".
   const [rsPullbackHistoryView, setRsPullbackHistoryView] = useState<SwingCandidate[] | null>(
+    null,
+  );
+  // Same "live run vs. a past run picked from history" role as
+  // rsPullbackHistoryView above, own independent state — Base Breakout
+  // has no price-only-refresh overlay to interact with (see the module
+  // notes on refreshRsPullbackPrices), so this is simpler: just live vs.
+  // a frozen snapshot, nothing else derives from it.
+  const [baseBreakoutHistoryView, setBaseBreakoutHistoryView] = useState<SwingCandidate[] | null>(
     null,
   );
 
@@ -1886,6 +2334,33 @@ export function SwingScreenView() {
       .sort((a, b) => (a.nearMissGap ?? Infinity) - (b.nearMissGap ?? Infinity));
     return { ready, leadingExtended, inZoneLagging, nearMiss };
   }, [rsPullbackHistoryView, data, rsPullbackPriceRefresh]);
+
+  // Same three-list-plus-near-miss partition as rsPullbackLists above,
+  // own field names, no price-refresh overlay step (Base Breakout has
+  // none — see baseBreakoutHistoryView's own comment). Sort order per
+  // list matches each BaseBreakoutListSection's defaultSort prop below,
+  // so a first render (before any header click) already reads
+  // closest-to-actionable first.
+  const baseBreakoutLists = useMemo(() => {
+    const source = baseBreakoutHistoryView ?? data?.candidates ?? [];
+    const all = source.filter((c) => (c.setupTabs ?? []).includes("base_breakout"));
+    const ready = all
+      .filter((c) => c.baseBreakoutList === "ready")
+      .sort((a, b) => (a.extensionAtrMultiple ?? Infinity) - (b.extensionAtrMultiple ?? Infinity));
+    const leadingExtended = all
+      .filter((c) => c.baseBreakoutList === "leading_extended")
+      .sort((a, b) => (a.sessionsSinceTrigger ?? Infinity) - (b.sessionsSinceTrigger ?? Infinity));
+    const inZoneLagging = all
+      .filter((c) => c.baseBreakoutList === "in_zone_lagging")
+      .sort(
+        (a, b) =>
+          (a.baseHigh ?? Infinity) - a.currentPrice - ((b.baseHigh ?? Infinity) - b.currentPrice),
+      );
+    const nearMiss = all
+      .filter((c) => c.baseBreakoutList === "near_miss")
+      .sort((a, b) => (a.bbNearMissGap ?? Infinity) - (b.bbNearMissGap ?? Infinity));
+    return { ready, leadingExtended, inZoneLagging, nearMiss };
+  }, [baseBreakoutHistoryView, data]);
 
   // A real full run (new candidates) makes any in-flight refresh stale
   // by definition — the "last full run" the refresh was computed against
@@ -2079,6 +2554,7 @@ export function SwingScreenView() {
           phase={phase}
           pass1Count={pass1Count}
           rsPullbackDiagnostics={rsPullbackDiagnostics}
+          baseBreakoutDiagnostics={baseBreakoutDiagnostics}
           resolvedUniverse={resolvedUniverse}
         />
       )}
@@ -2137,6 +2613,29 @@ export function SwingScreenView() {
               refreshingPrices={refreshingPrices}
               refreshPricesError={refreshPricesError}
               onRefreshPrices={refreshRsPullbackPrices}
+            />
+          ) : activeTab === "base_breakout" ? (
+            <BaseBreakoutTabContent
+              lists={baseBreakoutLists}
+              diagnostics={baseBreakoutDiagnostics}
+              thresholds={baseBreakoutThresholds}
+              onThresholdsChange={setBaseBreakoutThresholds}
+              colorBands={baseBreakoutColorBands}
+              onColorBandsChange={setBaseBreakoutColorBands}
+              exitRules={baseBreakoutExitRules}
+              onExitRulesChange={setBaseBreakoutExitRules}
+              settingsOpen={baseBreakoutSettingsOpen}
+              onSettingsOpenChange={setBaseBreakoutSettingsOpen}
+              viewingHistory={baseBreakoutHistoryView !== null}
+              onSelectRun={setBaseBreakoutHistoryView}
+              onEnterTrade={(symbol) => {
+                setImportSymbol(symbol);
+                setImportOpen(true);
+              }}
+              onTrack={(c) => handleTrack(c, "base_breakout")}
+              trackedSymbols={trackedSymbols}
+              trackingSymbol={trackingSymbol}
+              screenedAt={data.screenedAt}
             />
           ) : sortedCandidates.length === 0 ? (
             data.candidates.length === 0 ? (
@@ -2280,8 +2779,8 @@ function ControlsBar({
   loading: boolean;
   running: boolean;
   onRun: () => void;
-  runTarget: "all" | "legacy" | "rs_pullback";
-  onRunTargetChange: (v: "all" | "legacy" | "rs_pullback") => void;
+  runTarget: "all" | "legacy" | "rs_pullback" | "base_breakout";
+  onRunTargetChange: (v: "all" | "legacy" | "rs_pullback" | "base_breakout") => void;
   forceFresh: boolean;
   onForceFreshChange: (v: boolean) => void;
   minAdrPct: number;
@@ -2289,7 +2788,13 @@ function ControlsBar({
   activeTab: SetupTab;
 }) {
   const runLabel =
-    runTarget === "legacy" ? "Run Legacy Tabs" : runTarget === "rs_pullback" ? "Run RS Pullback" : "Run Screen";
+    runTarget === "legacy"
+      ? "Run Legacy Tabs"
+      : runTarget === "rs_pullback"
+        ? "Run RS Pullback"
+        : runTarget === "base_breakout"
+          ? "Run Base Breakout"
+          : "Run Screen";
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border bg-background/40 p-3">
       <div className="flex flex-col gap-0.5">
@@ -2320,27 +2825,31 @@ function ControlsBar({
           Run:
           <select
             value={runTarget}
-            onChange={(e) => onRunTargetChange(e.target.value as "all" | "legacy" | "rs_pullback")}
+            onChange={(e) =>
+              onRunTargetChange(e.target.value as "all" | "legacy" | "rs_pullback" | "base_breakout")
+            }
             disabled={running}
             className="rounded border border-border bg-background px-2 py-1 text-sm"
           >
             <option value="all">All tabs</option>
             <option value="legacy">Legacy tabs only</option>
             <option value="rs_pullback">RS Pullback only</option>
+            <option value="base_breakout">Base Breakout only</option>
           </select>
         </label>
-        {activeTab === "rs_pullback" ? (
-          // RS Pullback bypasses this generic filter entirely — its ADR%
-          // floor is a hard gate in rsPullbackThresholds.minAdrPct, edited
-          // via "Edit thresholds" below, not this control. Showing both
-          // under the same "Min ADR%" label produced two different numbers
-          // claiming to be the same gate (see the near-miss row fix this
-          // note accompanies) — hidden here rather than synced, since
-          // syncing would make this input silently start controlling a
-          // gate threshold it was never meant to.
+        {activeTab === "rs_pullback" || activeTab === "base_breakout" ? (
+          // RS Pullback and Base Breakout both bypass this generic filter
+          // entirely — each has its own ADR% floor as a hard gate in its
+          // own thresholds object, edited via that tab's own "Edit
+          // thresholds" panel, not this control. Showing both under the
+          // same "Min ADR%" label produced two different numbers claiming
+          // to be the same gate (see the near-miss row fix this note
+          // accompanies) — hidden here rather than synced, since syncing
+          // would make this input silently start controlling a gate
+          // threshold it was never meant to.
           <span
             className="text-sm text-muted-foreground"
-            title="This tab's ADR% floor is set in the RS Pullback tab's own 'Edit thresholds' panel, not here — this control only filters the four legacy tabs."
+            title="This tab's ADR% floor is set in its own 'Edit thresholds' panel, not here — this control only filters the four legacy tabs."
           >
             Min ADR% set per-tab below
           </span>
@@ -2403,11 +2912,16 @@ function RunningBanner({
   phase,
   pass1Count,
   rsPullbackDiagnostics,
+  baseBreakoutDiagnostics,
   resolvedUniverse,
 }: {
   phase: RunPhase;
   pass1Count: number | null;
   rsPullbackDiagnostics: { chunksDone: number; chunksTotal: number; needsEnrichmentCount: number } | null;
+  // Same shape as rsPullbackDiagnostics above — additive prop, only read
+  // by the new phase === "base_breakout" branch below. The rs_pullback
+  // branch is untouched.
+  baseBreakoutDiagnostics: { chunksDone: number; chunksTotal: number; needsEnrichmentCount: number } | null;
   resolvedUniverse: ResolvedUniverse | null;
 }) {
   const universeLabel = resolvedUniverse
@@ -2442,6 +2956,15 @@ function RunningBanner({
         title: `RS Pullback — enriching ${d?.needsEnrichmentCount ?? "—"} survivors (${chunkText})`,
         detail:
           "Sequential chunked calls (bars + earnings + sector per symbol) so every pre-filtered survivor gets evaluated without racing Pass 2 for the same Finnhub rate limit. ~10-20 seconds per chunk.",
+      };
+    }
+    if (phase === "base_breakout") {
+      const d = baseBreakoutDiagnostics;
+      const chunkText = d ? `chunk ${Math.min(d.chunksDone + 1, d.chunksTotal)} of ${d.chunksTotal}` : "starting";
+      return {
+        title: `Base Breakout — enriching ${d?.needsEnrichmentCount ?? "—"} survivors (${chunkText})`,
+        detail:
+          "Sequential chunked calls (bars + earnings + sector per symbol), run after Pass 2 and RS Pullback finish so nothing races Finnhub's rate limit. ~10-20 seconds per chunk.",
       };
     }
     if (phase === "pass3") {
@@ -2861,6 +3384,114 @@ function RsPullbackSettingsPanel({
   );
 }
 
+function BaseBreakoutSettingsPanel({
+  thresholds,
+  onChange,
+  colorBands,
+  onColorBandsChange,
+  exitRules,
+  onExitRulesChange,
+}: {
+  thresholds: BaseBreakoutThresholds;
+  onChange: (t: BaseBreakoutThresholds) => void;
+  colorBands: BaseBreakoutColorBands;
+  onColorBandsChange: (b: BaseBreakoutColorBands) => void;
+  exitRules: BaseBreakoutExitRules;
+  onExitRulesChange: (r: BaseBreakoutExitRules) => void;
+}) {
+  function field(key: keyof BaseBreakoutThresholds, label: string, step = 0.5) {
+    return (
+      <label className="grid gap-1 text-xs">
+        <span className="text-muted-foreground">{label}</span>
+        <input
+          type="number"
+          step={step}
+          value={thresholds[key]}
+          onChange={(e) => {
+            const n = Number(e.target.value);
+            if (Number.isFinite(n)) onChange({ ...thresholds, [key]: n });
+          }}
+          className="w-24 rounded border border-border bg-background px-2 py-1 text-sm"
+        />
+      </label>
+    );
+  }
+  function colorField(key: keyof BaseBreakoutColorBands, label: string, step = 0.1) {
+    return (
+      <label className="grid gap-1 text-xs">
+        <span className="text-muted-foreground">{label}</span>
+        <input
+          type="number"
+          step={step}
+          value={colorBands[key]}
+          onChange={(e) => {
+            const n = Number(e.target.value);
+            if (Number.isFinite(n)) onColorBandsChange({ ...colorBands, [key]: n });
+          }}
+          className="w-24 rounded border border-border bg-background px-2 py-1 text-sm"
+        />
+      </label>
+    );
+  }
+  function exitRuleField(key: keyof BaseBreakoutExitRules, label: string, step = 0.1) {
+    return (
+      <label className="grid gap-1 text-xs">
+        <span className="text-muted-foreground">{label}</span>
+        <input
+          type="number"
+          step={step}
+          value={exitRules[key]}
+          onChange={(e) => {
+            const n = Number(e.target.value);
+            if (Number.isFinite(n)) onExitRulesChange({ ...exitRules, [key]: n });
+          }}
+          className="w-24 rounded border border-border bg-background px-2 py-1 text-sm"
+        />
+      </label>
+    );
+  }
+  return (
+    <div className="space-y-3 rounded-md border border-border bg-background/40 p-3">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-5">
+        {field("baseMinSessions", "Base min sessions", 1)}
+        {field("baseRangeMaxPct", "Base range max %")}
+        {field("atrContractionPercentile", "ATR contraction percentile", 5)}
+        {field("atrTrailingSessions", "ATR trailing sessions", 1)}
+        {field("rvolMin", "RVOL min", 0.1)}
+        {field("rvolLookbackSessions", "RVOL lookback sessions", 1)}
+        {field("freshnessMaxSessions", "Freshness max sessions", 1)}
+        {field("freshnessMaxAtrMultiple", "Freshness max ATR-mult", 0.1)}
+        {field("minAdrPct", "Min ADR%")}
+      </div>
+      <div className="border-t border-border/60 pt-3">
+        <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+          Exit rules — guards around the target derivation, display only. Does not change the
+          target/stop calculation, gating, or which list a name lands in.
+        </div>
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+          {exitRuleField("targetMinAdrDays", "Target window min (ADR-days)")}
+          {exitRuleField("targetMaxAdrDays", "Target window max (ADR-days)")}
+          {exitRuleField("rrFloor", "R:R floor for Enter")}
+          {exitRuleField("maxEntryExtensionAtrMultiple", "Max extension for Enter (ATR-mult)")}
+        </div>
+      </div>
+      <div className="border-t border-border/60 pt-3">
+        <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+          Display color bands — Extension &amp; R:R only, provisional, does not affect gating
+        </div>
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 md:grid-cols-6">
+          {colorField("extensionGreenMax", "Ext green max")}
+          {colorField("extensionYellowMax", "Ext yellow max")}
+          {colorField("extensionOrangeMax", "Ext orange max (red above)")}
+          {colorField("rrOrangeMin", "R:R orange min")}
+          {colorField("rrYellowMin", "R:R yellow min")}
+          {colorField("rrGreenMin", "R:R green min")}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function RsPullbackHistoryPicker({
   onSelect,
 }: {
@@ -2885,6 +3516,76 @@ function RsPullbackHistoryPicker({
           candidates: SwingCandidate[];
           universe: UniverseDescriptor | null;
           rsPullbackDiagnostics: RsPullbackRunDiagnostics | null;
+        }>;
+      };
+      setRuns(json.runs ?? []);
+    } catch {
+      setRuns([]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return (
+    <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+      Run:
+      <select
+        value={selected}
+        disabled={loading}
+        onChange={(e) => {
+          const v = e.target.value;
+          setSelected(v);
+          if (v === "live") {
+            onSelect(null);
+            return;
+          }
+          const run = runs?.find((r) => r.screenedAt === v);
+          onSelect(run?.candidates ?? []);
+        }}
+        className="rounded border border-border bg-background px-2 py-1 text-sm"
+      >
+        <option value="live">Live (current run)</option>
+        {(runs ?? []).map((r) => (
+          <option key={r.screenedAt} value={r.screenedAt}>
+            {fmtRelDate(r.screenedAt)}
+            {r.universe?.label ? ` — ${r.universe.label}` : ""}
+            {` (${r.candidates.length})`}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+function BaseBreakoutHistoryPicker({
+  onSelect,
+}: {
+  onSelect: (candidates: SwingCandidate[] | null) => void;
+}) {
+  const [runs, setRuns] = useState<Array<{
+    screenedAt: string;
+    candidates: SwingCandidate[];
+    universe: UniverseDescriptor | null;
+    baseBreakoutDiagnostics: BaseBreakoutRunDiagnostics | null;
+  }> | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [selected, setSelected] = useState<string>("live");
+
+  async function load() {
+    setLoading(true);
+    try {
+      const res = await fetch("/api/swings/screen/base-breakout/history", { cache: "no-store" });
+      const json = (await res.json()) as {
+        runs?: Array<{
+          screenedAt: string;
+          candidates: SwingCandidate[];
+          universe: UniverseDescriptor | null;
+          baseBreakoutDiagnostics: BaseBreakoutRunDiagnostics | null;
         }>;
       };
       setRuns(json.runs ?? []);
@@ -3157,6 +3858,215 @@ function RsPullbackTabContent({
   );
 }
 
+function BaseBreakoutTabContent({
+  lists,
+  diagnostics,
+  thresholds,
+  onThresholdsChange,
+  colorBands,
+  onColorBandsChange,
+  exitRules,
+  onExitRulesChange,
+  settingsOpen,
+  onSettingsOpenChange,
+  viewingHistory,
+  onSelectRun,
+  onEnterTrade,
+  onTrack,
+  trackedSymbols,
+  trackingSymbol,
+  screenedAt,
+}: {
+  lists: {
+    ready: SwingCandidate[];
+    leadingExtended: SwingCandidate[];
+    inZoneLagging: SwingCandidate[];
+    nearMiss: SwingCandidate[];
+  };
+  diagnostics: {
+    pregatedCount: number;
+    needsEnrichmentCount: number;
+    excludedBySector: number;
+    excludedByInsufficientBars: number;
+    excludedByEvalFailure: number;
+    excludedByEarningsWindow: number;
+    excludedByBaseRange: number;
+    excludedByBaseLength: number;
+    excludedByAtrContraction: number;
+    excludedByNoValidTrigger: number;
+    degradedCount: number;
+    excludedByAbove200d: number;
+    chunksDone: number;
+    chunksTotal: number;
+  } | null;
+  thresholds: BaseBreakoutThresholds;
+  onThresholdsChange: (t: BaseBreakoutThresholds) => void;
+  colorBands: BaseBreakoutColorBands;
+  onColorBandsChange: (b: BaseBreakoutColorBands) => void;
+  exitRules: BaseBreakoutExitRules;
+  onExitRulesChange: (r: BaseBreakoutExitRules) => void;
+  settingsOpen: boolean;
+  onSettingsOpenChange: (v: boolean) => void;
+  viewingHistory: boolean;
+  onSelectRun: (candidates: SwingCandidate[] | null) => void;
+  onEnterTrade: (symbol: string) => void;
+  onTrack: (c: SwingCandidate) => void;
+  trackedSymbols: Set<string>;
+  trackingSymbol: string | null;
+  // No price-only-refresh feature for this tab (see the module notes on
+  // refreshRsPullbackPrices) — screenedAt only backs the "gates and
+  // prices from run at HH:MM" staleness banner below, nothing more.
+  screenedAt: string | null;
+}) {
+  const total = lists.ready.length + lists.leadingExtended.length + lists.inZoneLagging.length;
+  const runAge = minutesAgo(screenedAt ? new Date(screenedAt) : null, Date.now());
+  const runStale = isChainStale(
+    screenedAt ? new Date(screenedAt) : null,
+    Date.now(),
+    BASE_BREAKOUT_RUN_STALE_THRESHOLD_MINUTES,
+  );
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-muted-foreground">
+          <span>{total} qualifying</span>
+          {diagnostics && (
+            <>
+              <span>
+                · {diagnostics.pregatedCount} pre-gated → {diagnostics.needsEnrichmentCount} needed real
+                enrichment
+              </span>
+              <span>
+                · {diagnostics.excludedBySector} excluded by sector, {diagnostics.excludedByInsufficientBars}{" "}
+                by insufficient bar history, {diagnostics.excludedByEarningsWindow} inside the earnings
+                window
+              </span>
+              <span>
+                · {diagnostics.excludedByBaseRange} failed base range, {diagnostics.excludedByBaseLength}{" "}
+                failed base length, {diagnostics.excludedByAtrContraction} failed ATR contraction,{" "}
+                {diagnostics.excludedByNoValidTrigger} valid base but no trigger found
+              </span>
+              {diagnostics.excludedByEvalFailure > 0 && (
+                <span className="text-amber-300">
+                  · {diagnostics.excludedByEvalFailure} could not be evaluated (bad ADR/volume data)
+                </span>
+              )}
+              {diagnostics.degradedCount > 0 && (
+                <span className="text-amber-300">
+                  · {diagnostics.degradedCount} enriched with incomplete data (sector/earnings check
+                  failed)
+                </span>
+              )}
+              {diagnostics.excludedByAbove200d > 0 && (
+                <span title="Dropped before any bars fetch — can't confirm these would also pass the base/ATR/RVOL gates without enriching a class of symbols that never reaches enrichment today, so they aren't near-miss rows.">
+                  · {diagnostics.excludedByAbove200d} more sit at/below their 200MA (other gates
+                  unverified — not shown in Watch, near miss)
+                </span>
+              )}
+            </>
+          )}
+        </div>
+        <div className="flex items-center gap-3">
+          <BaseBreakoutHistoryPicker onSelect={onSelectRun} />
+          <button
+            type="button"
+            onClick={() => onSettingsOpenChange(!settingsOpen)}
+            className="text-xs text-muted-foreground underline decoration-dotted hover:text-foreground"
+          >
+            {settingsOpen ? "Hide thresholds" : "Edit thresholds"}
+          </button>
+        </div>
+      </div>
+
+      {!viewingHistory && screenedAt && (
+        <div
+          className={`flex flex-wrap items-center gap-2 rounded border px-2 py-1.5 text-xs ${
+            runStale
+              ? "border-amber-500/40 bg-amber-500/10 text-amber-200"
+              : "border-border bg-background/40 text-muted-foreground"
+          }`}
+        >
+          <span>
+            Gates and prices from run at <span className="font-medium text-foreground">{fmtShortTime(screenedAt)}</span>
+            {runAge !== null && ` (${runAge} min ago)`}
+          </span>
+          {runStale && <span>— this run is getting old, consider re-running Base Breakout</span>}
+        </div>
+      )}
+
+      {settingsOpen && (
+        <BaseBreakoutSettingsPanel
+          thresholds={thresholds}
+          onChange={onThresholdsChange}
+          colorBands={colorBands}
+          onColorBandsChange={onColorBandsChange}
+          exitRules={exitRules}
+          onExitRulesChange={onExitRulesChange}
+        />
+      )}
+
+      {viewingHistory && (
+        <div className="rounded border border-sky-500/40 bg-sky-500/5 px-3 py-1.5 text-xs text-sky-200">
+          Viewing a past run — read-only snapshot, not live prices.
+        </div>
+      )}
+
+      <BaseBreakoutListSection
+        title="Ready"
+        subtitle="Fresh breakout: triggered on volume, still within the entry window."
+        candidates={lists.ready}
+        emptyText="No names currently have a fresh, in-window breakout trigger."
+        defaultSort={{ key: "extension", dir: "asc" }}
+        onEnterTrade={onEnterTrade}
+        onTrack={onTrack}
+        trackedSymbols={trackedSymbols}
+        trackingSymbol={trackingSymbol}
+        colorBands={colorBands}
+        exitRules={exitRules}
+        thresholds={thresholds}
+      />
+      <BaseBreakoutListSection
+        title="Leading, extended"
+        subtitle="Triggered, but stale or extended — sorted closest-to-fresh first."
+        candidates={lists.leadingExtended}
+        emptyText="No names are currently leading-but-extended."
+        defaultSort={{ key: "sessionsSinceTrigger", dir: "asc" }}
+        onEnterTrade={onEnterTrade}
+        onTrack={onTrack}
+        trackedSymbols={trackedSymbols}
+        trackingSymbol={trackingSymbol}
+        colorBands={colorBands}
+        exitRules={exitRules}
+        thresholds={thresholds}
+      />
+      <BaseBreakoutListSection
+        title="In zone, lagging"
+        subtitle="Base still forming — no breakout yet, not a buy list."
+        candidates={lists.inZoneLagging}
+        emptyText="Nothing is currently sitting inside a valid, still-forming base."
+        defaultSort={{ key: "proximity", dir: "asc" }}
+        renderCap={50}
+        onEnterTrade={onEnterTrade}
+        onTrack={onTrack}
+        trackedSymbols={trackedSymbols}
+        trackingSymbol={trackingSymbol}
+        colorBands={colorBands}
+        exitRules={exitRules}
+        thresholds={thresholds}
+      />
+      <BaseBreakoutNearMissSection
+        candidates={lists.nearMiss}
+        onTrack={onTrack}
+        trackedSymbols={trackedSymbols}
+        trackingSymbol={trackingSymbol}
+        colorBands={colorBands}
+        exitRules={exitRules}
+        thresholds={thresholds}
+      />
+    </div>
+  );
+}
+
 // Column keys the three RS Pullback lists can sort on. "extensionAbs" is
 // synthetic (not a real field) — it's the default so all three lists open
 // sorted closest-to-entry first; clicking the "Ext" header switches to
@@ -3422,6 +4332,277 @@ function useRsPullbackChart(
   }, [expanded, symbol]);
 
   return { chartData, chartLoading, chartError };
+}
+
+// Column keys the three Base Breakout lists can sort on — same
+// per-section local-sort shape as RsPullbackSortKey above, own field
+// set. "proximity" is synthetic (baseHigh - currentPrice, ascending =
+// closest to breaking out first) — the In zone/lagging list's default,
+// mirroring how extensionAbs anchors RS Pullback's three lists.
+type BaseBreakoutSortKey =
+  | "symbol"
+  | "sector"
+  | "price"
+  | "baseRangePct"
+  | "baseSessions"
+  | "atrRatio"
+  | "rvol"
+  | "extension"
+  | "sessionsSinceTrigger"
+  | "proximity"
+  | "rr";
+
+const BASE_BREAKOUT_SORT_VALUE: Record<
+  BaseBreakoutSortKey,
+  { get: (c: SwingCandidate) => number | string | null; defaultDir: "asc" | "desc" }
+> = {
+  symbol: { get: (c) => c.symbol, defaultDir: "asc" },
+  sector: { get: (c) => c.sector ?? "", defaultDir: "asc" },
+  price: { get: (c) => c.currentPrice, defaultDir: "desc" },
+  baseRangePct: { get: (c) => c.baseRangePct ?? null, defaultDir: "asc" },
+  baseSessions: { get: (c) => c.baseSessions ?? null, defaultDir: "desc" },
+  atrRatio: {
+    get: (c) =>
+      c.atr10 !== null &&
+      c.atr10 !== undefined &&
+      c.atr10Median60 !== null &&
+      c.atr10Median60 !== undefined &&
+      c.atr10Median60 > 0
+        ? c.atr10 / c.atr10Median60
+        : null,
+    defaultDir: "asc",
+  },
+  rvol: { get: (c) => c.rvol ?? null, defaultDir: "desc" },
+  extension: { get: (c) => c.extensionAtrMultiple ?? null, defaultDir: "asc" },
+  sessionsSinceTrigger: { get: (c) => c.sessionsSinceTrigger ?? null, defaultDir: "asc" },
+  proximity: {
+    get: (c) => (c.baseHigh !== null && c.baseHigh !== undefined ? c.baseHigh - c.currentPrice : null),
+    defaultDir: "asc",
+  },
+  rr: { get: (c) => c.rr, defaultDir: "desc" },
+};
+
+function sortBaseBreakoutCandidates(
+  candidates: SwingCandidate[],
+  sort: { key: BaseBreakoutSortKey; dir: "asc" | "desc" },
+): SwingCandidate[] {
+  const desc = BASE_BREAKOUT_SORT_VALUE[sort.key];
+  return [...candidates].sort((a, b) => {
+    const primary = compareSortValues(desc.get(a), desc.get(b), sort.dir);
+    if (primary !== 0) return primary;
+    return a.symbol.localeCompare(b.symbol);
+  });
+}
+
+function BaseBreakoutSortTh({
+  label,
+  sortKey,
+  sort,
+  onSort,
+  align = "right",
+  titleOverride,
+}: {
+  label: string;
+  sortKey: BaseBreakoutSortKey;
+  sort: { key: BaseBreakoutSortKey; dir: "asc" | "desc" };
+  onSort: (k: BaseBreakoutSortKey) => void;
+  align?: "left" | "right" | "center";
+  titleOverride?: string;
+}) {
+  const isActive = sort.key === sortKey;
+  const justify = align === "right" ? "justify-end" : align === "center" ? "justify-center" : "justify-start";
+  return (
+    <th className={`px-2 py-1.5 text-${align}`} title={titleOverride}>
+      <button
+        type="button"
+        onClick={() => onSort(sortKey)}
+        className={`flex w-full items-center gap-1 ${justify} ${isActive ? "text-foreground" : "hover:text-foreground"}`}
+      >
+        {label}
+        {isActive && <span className="text-[9px]">{sort.dir === "asc" ? "▲" : "▼"}</span>}
+      </button>
+    </th>
+  );
+}
+
+// Same chart-fetch mechanics as useRsPullbackChart above — generic in
+// body, kept as its own named hook per this file's per-tab convention.
+function useBaseBreakoutChart(
+  symbol: string,
+  expanded: boolean,
+): { chartData: ChartPoint[] | null; chartLoading: boolean; chartError: string | null } {
+  const [chartData, setChartData] = useState<ChartPoint[] | null>(null);
+  const [chartLoading, setChartLoading] = useState(false);
+  const [chartError, setChartError] = useState<string | null>(null);
+  const fetchedSymbolRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!expanded) return;
+    if (fetchedSymbolRef.current === symbol) return;
+    fetchedSymbolRef.current = symbol;
+    let cancelled = false;
+    setChartLoading(true);
+    setChartError(null);
+    setChartData(null);
+    (async () => {
+      try {
+        const res = await fetch(`/api/swings/screen/chart?symbol=${encodeURIComponent(symbol)}`, {
+          cache: "no-store",
+        });
+        const json = (await res.json().catch(() => ({}))) as { data?: ChartPoint[]; error?: string };
+        if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+        if (!cancelled) setChartData(json.data ?? []);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : "Chart load failed";
+        if (!cancelled) setChartError(msg);
+        fetchedSymbolRef.current = null;
+      } finally {
+        setChartLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [expanded, symbol]);
+
+  return { chartData, chartLoading, chartError };
+}
+
+function BaseBreakoutListSection({
+  title,
+  subtitle,
+  candidates,
+  emptyText,
+  defaultSort,
+  renderCap,
+  onEnterTrade,
+  onTrack,
+  trackedSymbols,
+  trackingSymbol,
+  colorBands,
+  exitRules,
+  thresholds,
+}: {
+  title: string;
+  subtitle: string;
+  candidates: SwingCandidate[];
+  emptyText: string;
+  defaultSort: { key: BaseBreakoutSortKey; dir: "asc" | "desc" };
+  // In zone/lagging has no natural size ceiling (a compressed market can
+  // leave hundreds of names still consolidating) — cap what actually
+  // renders and say so, rather than paint an unbounded table. The header
+  // count and section title always report the true total regardless.
+  renderCap?: number;
+  onEnterTrade: (symbol: string) => void;
+  onTrack: (c: SwingCandidate) => void;
+  trackedSymbols: Set<string>;
+  trackingSymbol: string | null;
+  colorBands: BaseBreakoutColorBands;
+  exitRules: BaseBreakoutExitRules;
+  thresholds: BaseBreakoutThresholds;
+}) {
+  const [sort, setSort] = useState<{ key: BaseBreakoutSortKey; dir: "asc" | "desc" }>(defaultSort);
+  function onSort(key: BaseBreakoutSortKey) {
+    setSort((cur) => {
+      if (cur.key !== key) return { key, dir: BASE_BREAKOUT_SORT_VALUE[key].defaultDir };
+      return { key, dir: cur.dir === "asc" ? "desc" : "asc" };
+    });
+  }
+  const sorted = useMemo(() => sortBaseBreakoutCandidates(candidates, sort), [candidates, sort]);
+  const capped = renderCap !== undefined && sorted.length > renderCap ? sorted.slice(0, renderCap) : sorted;
+  const hiddenCount = sorted.length - capped.length;
+
+  return (
+    <div className="space-y-2">
+      <div>
+        <div className="flex items-baseline gap-2">
+          <h3 className="text-sm font-semibold text-foreground">{title}</h3>
+          <span className="text-xs text-muted-foreground">({candidates.length})</span>
+        </div>
+        <div className="text-xs text-muted-foreground">{subtitle}</div>
+      </div>
+      {candidates.length === 0 ? (
+        <div className="rounded border border-border/60 bg-background/30 px-3 py-2 text-xs text-muted-foreground">
+          {emptyText}
+        </div>
+      ) : (
+        <div className="overflow-x-auto rounded border border-border">
+          <table className="w-full min-w-[980px] text-sm">
+            <thead className="border-b border-border/60 text-left text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+              <tr>
+                <BaseBreakoutSortTh label="Symbol" sortKey="symbol" sort={sort} onSort={onSort} align="left" />
+                <BaseBreakoutSortTh label="Sector" sortKey="sector" sort={sort} onSort={onSort} align="left" />
+                <BaseBreakoutSortTh label="Price" sortKey="price" sort={sort} onSort={onSort} />
+                <BaseBreakoutSortTh
+                  label="Base range %"
+                  sortKey="baseRangePct"
+                  sort={sort}
+                  onSort={onSort}
+                  titleOverride="Range compression is what separates a base from a slow drift — a tight, sideways structure the market actually drew, not just a stock going nowhere with high volatility intact."
+                />
+                <BaseBreakoutSortTh
+                  label="Base sessions"
+                  sortKey="baseSessions"
+                  sort={sort}
+                  onSort={onSort}
+                  titleOverride="How long the compression has held — a base shorter than the minimum is a pause, not a base the market has actually accepted."
+                />
+                <BaseBreakoutSortTh
+                  label="ATR10/med"
+                  sortKey="atrRatio"
+                  sort={sort}
+                  onSort={onSort}
+                  titleOverride="Price can go quiet while true range stays wide (bigger gaps, more overnight risk) — requiring ATR itself to contract too is a second, independent confirmation the base is real."
+                />
+                <BaseBreakoutSortTh
+                  label="RVOL"
+                  sortKey="rvol"
+                  sort={sort}
+                  onSort={onSort}
+                  titleOverride="A breakout with no participation reverses into the whole base with nothing beneath it — the asymmetry favors requiring volume even at a worse entry price."
+                />
+                <BaseBreakoutSortTh
+                  label="Ext (ATR-mult)"
+                  sortKey="extension"
+                  sort={sort}
+                  onSort={onSort}
+                  titleOverride="This is the extension-equivalent — it excludes names weeks past their trigger, the same way RS Pullback excludes a stock that's already run too far from its 50-day."
+                />
+                <BaseBreakoutSortTh label="Sessions since trigger" sortKey="sessionsSinceTrigger" sort={sort} onSort={onSort} />
+                <th className="px-2 py-1.5 text-right">Entry</th>
+                <th className="px-2 py-1.5 text-right" title={bbTargetHelperText(exitRules)}>
+                  Target
+                </th>
+                <th className="px-2 py-1.5 text-right">Stop</th>
+                <BaseBreakoutSortTh label="R:R" sortKey="rr" sort={sort} onSort={onSort} titleOverride={bbRrHelperText(exitRules)} />
+                <th className="px-2 py-1.5 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {capped.map((c) => (
+                <BaseBreakoutRow
+                  key={c.symbol}
+                  candidate={c}
+                  onEnterTrade={() => onEnterTrade(c.symbol)}
+                  onTrack={() => onTrack(c)}
+                  tracked={trackedSymbols.has(c.symbol)}
+                  tracking={trackingSymbol === c.symbol}
+                  colorBands={colorBands}
+                  exitRules={exitRules}
+                  thresholds={thresholds}
+                />
+              ))}
+            </tbody>
+          </table>
+          {hiddenCount > 0 && (
+            <div className="border-t border-border/60 px-3 py-1.5 text-center text-xs text-muted-foreground">
+              +{hiddenCount} more not shown
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function RsPullbackRow({
@@ -3804,6 +4985,384 @@ function RsPullbackExpandedPanel({
   );
 }
 
+function BaseBreakoutRow({
+  candidate: c,
+  onEnterTrade,
+  onTrack,
+  tracked,
+  tracking,
+  colorBands,
+  exitRules,
+  thresholds,
+}: {
+  candidate: SwingCandidate;
+  onEnterTrade: () => void;
+  onTrack: () => void;
+  tracked: boolean;
+  tracking: boolean;
+  colorBands: BaseBreakoutColorBands;
+  exitRules: BaseBreakoutExitRules;
+  thresholds: BaseBreakoutThresholds;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const { chartData, chartLoading, chartError } = useBaseBreakoutChart(c.symbol, expanded);
+
+  const rr = fmtRr(c.rr);
+  const rrCls = bbRrBandCls(c.rr, colorBands);
+  const extCls = bbExtensionBandCls(c.extensionAtrMultiple, colorBands);
+  const targetWindow = classifyBaseBreakoutTargetWindow(c, exitRules);
+  const rrSuppressed = targetWindow.kind === "beyond" || targetWindow.kind === "at_resistance";
+  const canEnter = canEnterBaseBreakout(c, exitRules);
+  const atrRatio =
+    c.atr10 !== null &&
+    c.atr10 !== undefined &&
+    c.atr10Median60 !== null &&
+    c.atr10Median60 !== undefined &&
+    c.atr10Median60 > 0
+      ? c.atr10 / c.atr10Median60
+      : null;
+
+  return (
+    <>
+      <tr
+        className="cursor-pointer border-b border-border/40 last:border-0 hover:bg-white/[0.02]"
+        onClick={() => setExpanded((v) => !v)}
+      >
+        <td className="px-2 py-1.5 font-mono font-medium text-foreground">
+          <span className="inline-flex items-center gap-1">
+            <ChevronRight
+              className={`h-3 w-3 shrink-0 text-muted-foreground transition-transform ${expanded ? "rotate-90" : ""}`}
+            />
+            {c.symbol}
+            {c.dataQualityDegraded && (
+              <span
+                title={`Enriched with incomplete data: ${(c.dataQualityIssues ?? []).join(", ") || "unknown issue"} — this candidate's sector or earnings check failed rather than returning a real answer.`}
+                className="cursor-help text-amber-400"
+              >
+                ⚠
+              </span>
+            )}
+          </span>
+        </td>
+        <td className="px-2 py-1.5 text-xs text-muted-foreground">{c.sector ?? "—"}</td>
+        <td className="px-2 py-1.5 text-right font-mono">{fmtMoney(c.currentPrice)}</td>
+        <td className="px-2 py-1.5 text-right">
+          {c.baseRangePct !== null && c.baseRangePct !== undefined ? `${c.baseRangePct.toFixed(1)}%` : "—"}
+        </td>
+        <td className="px-2 py-1.5 text-right">
+          {c.baseSessions !== null && c.baseSessions !== undefined ? c.baseSessions : "—"}
+        </td>
+        <td className="px-2 py-1.5 text-right font-mono text-muted-foreground">
+          {atrRatio !== null ? atrRatio.toFixed(2) : "—"}
+        </td>
+        <td className="px-2 py-1.5 text-right font-mono">
+          {c.rvol !== null && c.rvol !== undefined ? fmtRatio(c.rvol, 2) : "—"}
+        </td>
+        <td className={`px-2 py-1.5 text-right font-mono font-semibold ${extCls}`}>
+          {fmtSigned(c.extensionAtrMultiple, 2)}
+        </td>
+        <td className="px-2 py-1.5 text-right font-mono text-muted-foreground">
+          {c.sessionsSinceTrigger !== null && c.sessionsSinceTrigger !== undefined ? c.sessionsSinceTrigger : "—"}
+        </td>
+        <td className="px-2 py-1.5 text-right">{fmtMoney(c.entryPrice)}</td>
+        <td className="px-2 py-1.5 text-right text-emerald-300" title={bbTargetHelperText(exitRules)}>
+          {fmtMoney(c.targetPrice)}
+        </td>
+        <td className="px-2 py-1.5 text-right text-rose-300">
+          {fmtMoney(c.stopPrice)}
+          {c.stopSource && (
+            <div className="text-[9px] font-sans font-normal text-muted-foreground">
+              {stopSourceLabel(c.stopSource)}
+            </div>
+          )}
+        </td>
+        <td
+          className={
+            rrSuppressed
+              ? "px-2 py-1.5 text-right text-[10px] font-normal text-amber-300/80"
+              : `px-2 py-1.5 text-right font-semibold ${rrCls}`
+          }
+          title={bbRrHelperText(exitRules)}
+        >
+          {rrSuppressed ? targetWindowMessage(targetWindow) : rr.text}
+        </td>
+        <td className="px-2 py-1.5" onClick={(e) => e.stopPropagation()}>
+          <div className="flex items-center justify-end gap-1">
+            {canEnter && (
+              <button
+                type="button"
+                onClick={onEnterTrade}
+                className="rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-white/5 hover:text-foreground"
+              >
+                Enter
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onTrack}
+              disabled={tracked || tracking}
+              className={`rounded border px-1.5 py-0.5 text-[10px] font-medium ${
+                tracked
+                  ? "cursor-default border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
+                  : "border-border text-muted-foreground hover:bg-white/5 hover:text-foreground"
+              }`}
+            >
+              {tracked ? "Tracked" : "Track"}
+            </button>
+          </div>
+        </td>
+      </tr>
+      {expanded && (
+        <BaseBreakoutExpandedPanel
+          c={c}
+          colorBands={colorBands}
+          exitRules={exitRules}
+          thresholds={thresholds}
+          chartData={chartData}
+          chartLoading={chartLoading}
+          chartError={chartError}
+          colSpan={14}
+        />
+      )}
+    </>
+  );
+}
+
+// Shared by BaseBreakoutRow and BaseBreakoutNearMissRow — same
+// expand/collapse + chart treatment as RsPullbackExpandedPanel, own
+// field set (base structure, ATR contraction, trigger, trade levels).
+// thresholds is threaded through (unlike RsPullbackExpandedPanel, which
+// never receives RsPullbackThresholds) so every gate's pass/fail mark is
+// derived from the actual live threshold, not inferred from list
+// membership.
+function BaseBreakoutExpandedPanel({
+  c,
+  colorBands,
+  exitRules,
+  thresholds,
+  chartData,
+  chartLoading,
+  chartError,
+  colSpan,
+}: {
+  c: SwingCandidate;
+  colorBands: BaseBreakoutColorBands;
+  exitRules: BaseBreakoutExitRules;
+  thresholds: BaseBreakoutThresholds;
+  chartData: ChartPoint[] | null;
+  chartLoading: boolean;
+  chartError: string | null;
+  colSpan: number;
+}) {
+  const rr = fmtRr(c.rr);
+  const rrCls = bbRrBandCls(c.rr, colorBands);
+  const extCls = bbExtensionBandCls(c.extensionAtrMultiple, colorBands);
+  const targetWindow = classifyBaseBreakoutTargetWindow(c, exitRules);
+  const rrSuppressed = targetWindow.kind === "beyond" || targetWindow.kind === "at_resistance";
+  const riskPerShare = c.entryPrice - c.stopPrice;
+  const rewardPerShare = c.targetPrice - c.entryPrice;
+  const atrMultiple = c.atr14 && c.atr14 > 0 ? riskPerShare / c.atr14 : null;
+
+  const baseRangePass =
+    c.baseRangePct !== null && c.baseRangePct !== undefined && c.baseRangePct <= thresholds.baseRangeMaxPct;
+  const baseLengthPass =
+    c.baseSessions !== null && c.baseSessions !== undefined && c.baseSessions >= thresholds.baseMinSessions;
+  const atrContractionPass =
+    c.atr10 !== null && c.atr10 !== undefined && c.atr10Median60 !== null && c.atr10Median60 !== undefined
+      ? c.atr10 <= c.atr10Median60
+      : false;
+  const rvolPass = c.rvol !== null && c.rvol !== undefined && c.rvol >= thresholds.rvolMin;
+  const adrFloorPass = c.adr20Pct !== null && c.adr20Pct !== undefined && c.adr20Pct >= thresholds.minAdrPct;
+  const atrRatio =
+    c.atr10 !== null &&
+    c.atr10 !== undefined &&
+    c.atr10Median60 !== null &&
+    c.atr10Median60 !== undefined &&
+    c.atr10Median60 > 0
+      ? c.atr10 / c.atr10Median60
+      : null;
+
+  return (
+    <tr className="border-b border-border/40 bg-background/40 last:border-0">
+      <td colSpan={colSpan} className="px-3 py-3">
+        <div className="grid gap-4 lg:grid-cols-[1fr_260px]">
+          <div className="space-y-3">
+            <div>
+              <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                Base structure (the level this setup is built on)
+              </div>
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                <DetailStat
+                  label="Base high"
+                  value={fmtMoney(c.baseHigh ?? null)}
+                  helper="The level that just flipped from resistance to support — the primary stop reference and the price this setup broke above."
+                />
+                <DetailStat
+                  label="Base low"
+                  value={fmtMoney(c.baseLow ?? null)}
+                  helper="The wider structural floor — the fallback stop when base-high sits too close to entry to clear the risk floor."
+                />
+                <DetailStat
+                  label={
+                    <span className="inline-flex items-center">
+                      Base sessions
+                      <GateMark pass={baseLengthPass} label="Base length" />
+                    </span>
+                  }
+                  value={c.baseSessions !== null && c.baseSessions !== undefined ? String(c.baseSessions) : "—"}
+                  helper="A compression shorter than the minimum is a pause, not a base the market has actually accepted."
+                />
+                <DetailStat
+                  label={
+                    <span className="inline-flex items-center">
+                      Base range %
+                      <GateMark pass={baseRangePass} label="Base range" />
+                    </span>
+                  }
+                  value={c.baseRangePct !== null && c.baseRangePct !== undefined ? `${c.baseRangePct.toFixed(1)}%` : "—"}
+                  sub={`(high − low) / midpoint, threshold ≤ ${thresholds.baseRangeMaxPct.toFixed(1)}%`}
+                  helper="Range compression is what separates a base from a slow drift — a tight, sideways structure the market actually drew, not just a stock going nowhere with high volatility intact."
+                />
+              </div>
+            </div>
+            <div>
+              <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                Volatility contraction
+              </div>
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+                <DetailStat
+                  label="ATR(10) now"
+                  value={fmtMoney(c.atr10 ?? null)}
+                  helper="Today's 10-day average true range — the numerator of the contraction check."
+                />
+                <DetailStat
+                  label={`ATR(10) median (${thresholds.atrTrailingSessions}d)`}
+                  value={fmtMoney(c.atr10Median60 ?? null)}
+                  helper="The trailing-window benchmark ATR(10) now must sit at or below — a rolling median, not a fixed number."
+                />
+                <DetailStat
+                  label={
+                    <span className="inline-flex items-center">
+                      Contraction ratio
+                      <GateMark pass={atrContractionPass} label="ATR contraction" />
+                    </span>
+                  }
+                  value={atrRatio !== null ? atrRatio.toFixed(2) : "—"}
+                  sub="ATR10 now ÷ ATR10 median — passes at ≤ 1.00"
+                  helper="Price can go quiet while true range stays wide (bigger gaps, more overnight risk) — requiring ATR itself to contract too is a second, independent confirmation the base is real."
+                />
+              </div>
+            </div>
+            <div>
+              <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                Trigger
+              </div>
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                <DetailStat
+                  label={
+                    <span className="inline-flex items-center">
+                      RVOL
+                      <GateMark pass={rvolPass} label="RVOL" />
+                    </span>
+                  }
+                  value={c.rvol !== null && c.rvol !== undefined ? fmtRatio(c.rvol, 2) : "—"}
+                  sub={`threshold ≥ ${thresholds.rvolMin.toFixed(2)}x`}
+                  helper="A breakout with no participation reverses into the whole base with nothing beneath it — the asymmetry favors requiring volume even at a worse entry price."
+                />
+                <DetailStat
+                  label="Sessions since trigger"
+                  value={
+                    c.sessionsSinceTrigger !== null && c.sessionsSinceTrigger !== undefined
+                      ? String(c.sessionsSinceTrigger)
+                      : "—"
+                  }
+                  helper="How many sessions ago the first-cross trigger fired — the clock the freshness gate runs against."
+                />
+                <DetailStat
+                  label="Extension (ATR-mult)"
+                  value={fmtSigned(c.extensionAtrMultiple, 2)}
+                  valueCls={extCls}
+                  sub={bbExtensionBandCaption(colorBands)}
+                  helper="This is the extension-equivalent — it excludes names weeks past their trigger, the same way RS Pullback excludes a stock that's already run too far from its 50-day."
+                />
+                <DetailStat
+                  label={
+                    <span className="inline-flex items-center">
+                      ADR% floor
+                      <GateMark pass={adrFloorPass} label="ADR floor" />
+                    </span>
+                  }
+                  value={c.adr20Pct !== null && c.adr20Pct !== undefined ? `${c.adr20Pct.toFixed(1)}%` : "—"}
+                  sub={`threshold ≥ ${thresholds.minAdrPct.toFixed(1)}%`}
+                  helper="Below this, a base-low stop and a multi-week target both sit inside the stock's normal daily noise — the setup's geometry can't work regardless of how tight the base is."
+                />
+              </div>
+            </div>
+            <div>
+              <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                Trade levels
+              </div>
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                <DetailStat
+                  label="Entry"
+                  value={fmtMoney(c.entryPrice)}
+                  helper="Where the order would go in — today's reference price for the plan below."
+                />
+                <DetailStat
+                  label="Target"
+                  value={fmtMoney(c.targetPrice)}
+                  sub={
+                    targetWindow.kind !== "unknown"
+                      ? `${targetWindow.adrDays.toFixed(1)} ADR-days from entry — reward ${fmtMoney(rewardPerShare)}/sh`
+                      : `reward ${fmtMoney(rewardPerShare)}/sh`
+                  }
+                  helper={bbTargetHelperText(exitRules)}
+                />
+                <DetailStat
+                  label={
+                    <span className="inline-flex items-center">
+                      Stop
+                      {c.stopSource && (
+                        <span className="ml-1.5 rounded bg-white/5 px-1 py-0.5 text-[9px] normal-case text-muted-foreground">
+                          {stopSourceLabel(c.stopSource)}
+                        </span>
+                      )}
+                    </span>
+                  }
+                  value={fmtMoney(c.stopPrice)}
+                  sub={`risk ${fmtMoney(riskPerShare)}/sh${atrMultiple !== null ? ` (${atrMultiple.toFixed(2)}× ATR14)` : ""}`}
+                  helper="Base-high first — the level that just flipped from resistance to support. Falls back to base-low (sometimes clamped to the 3-15% risk band) only when base-high sits inside the risk floor, i.e. too close to entry to be a real stop."
+                />
+                <DetailStat
+                  label="R:R"
+                  value={rrSuppressed ? targetWindowMessage(targetWindow) : rr.text}
+                  valueCls={rrSuppressed ? "text-amber-300/80 text-xs font-normal" : rrCls}
+                  sub={rrSuppressed ? undefined : bbRrBandCaption(colorBands)}
+                  helper={bbRrHelperText(exitRules)}
+                />
+              </div>
+              <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                <DetailStat
+                  label="Earnings"
+                  value={c.nextEarningsDate ?? "unknown"}
+                  sub={c.daysToEarnings !== null ? `${c.daysToEarnings}d away` : undefined}
+                  helper="An earnings date inside the hold period adds event risk this setup isn't designed to price in."
+                />
+              </div>
+            </div>
+          </div>
+          <div>
+            <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+              6-month chart
+            </div>
+            <PriceChart candidate={c} data={chartData} loading={chartLoading} error={chartError} />
+          </div>
+        </div>
+      </td>
+    </tr>
+  );
+}
+
 const NEAR_MISS_GATE_LABEL: Record<
   NonNullable<SwingCandidate["nearMissGate"]>,
   string
@@ -4034,6 +5593,255 @@ function RsPullbackNearMissSection({
                   tracking={trackingSymbol === c.symbol}
                   colorBands={colorBands}
                   exitRules={exitRules}
+                />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const BB_NEAR_MISS_GATE_LABEL: Record<
+  NonNullable<SwingCandidate["bbNearMissGate"]>,
+  string
+> = {
+  base_range: "Base range %",
+  base_length: "Base length",
+  atr_contraction: "ATR contraction",
+  rvol: "RVOL",
+  adr_floor: "ADR% floor",
+};
+
+// base_range/atr_contraction pass at value <= threshold (tighter is
+// better); base_length/rvol/adr_floor pass at value >= threshold — see
+// lib/base-breakout.ts evaluateBaseBreakout's gates array.
+function bbNearMissOperator(gate: NonNullable<SwingCandidate["bbNearMissGate"]>): string {
+  return gate === "base_range" || gate === "atr_contraction" ? "≤" : "≥";
+}
+
+// Each gate's value/threshold/gap live in different units (see
+// BaseBreakoutGateStatus in lib/base-breakout.ts) — percent, session
+// count, dollars (ATR is a price-scale number), or a bare ratio.
+function bbFormatGateValue(
+  gate: NonNullable<SwingCandidate["bbNearMissGate"]>,
+  value: number | null | undefined,
+): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return "—";
+  switch (gate) {
+    case "base_range":
+    case "adr_floor":
+      return `${value.toFixed(1)}%`;
+    case "base_length":
+      return `${value.toFixed(0)} sessions`;
+    case "atr_contraction":
+      return `$${value.toFixed(2)}`;
+    case "rvol":
+      return `${value.toFixed(2)}x`;
+    default:
+      return String(value);
+  }
+}
+
+function bbFormatGap(
+  gate: NonNullable<SwingCandidate["bbNearMissGate"]>,
+  gap: number | null | undefined,
+): string {
+  if (gap === null || gap === undefined || !Number.isFinite(gap)) return "—";
+  switch (gate) {
+    case "base_range":
+    case "adr_floor":
+      return `${fmtGap(gap)}%`;
+    case "base_length":
+      return `${fmtGap(gap)} sessions`;
+    case "atr_contraction":
+      return `$${fmtGap(gap)}`;
+    case "rvol":
+      return `${fmtGap(gap)}x`;
+    default:
+      return fmtGap(gap);
+  }
+}
+
+// Near-miss watch tier — same expand/collapse + chart + expanded-panel
+// treatment as BaseBreakoutRow, collapsed row shows which gate failed
+// and the gap to passing in that gate's own units. No 5-session
+// trend/direction columns — Base Breakout's near-miss tier doesn't track
+// one (see the bbNearMiss* fields on SwingCandidate — no
+// value5SessionsAgo/trend the way RS Pullback's nearMiss* fields have).
+// No Enter button, track-only per spec.
+function BaseBreakoutNearMissRow({
+  candidate: c,
+  onTrack,
+  tracked,
+  tracking,
+  colorBands,
+  exitRules,
+  thresholds,
+}: {
+  candidate: SwingCandidate;
+  onTrack: () => void;
+  tracked: boolean;
+  tracking: boolean;
+  colorBands: BaseBreakoutColorBands;
+  exitRules: BaseBreakoutExitRules;
+  thresholds: BaseBreakoutThresholds;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const { chartData, chartLoading, chartError } = useBaseBreakoutChart(c.symbol, expanded);
+
+  const gate = c.bbNearMissGate ?? null;
+  const gateLabel = gate ? BB_NEAR_MISS_GATE_LABEL[gate] : "—";
+  const op = gate ? bbNearMissOperator(gate) : "";
+  const rrCls = bbRrBandCls(c.rr, colorBands);
+  const extCls = bbExtensionBandCls(c.extensionAtrMultiple, colorBands);
+  const rr = fmtRr(c.rr);
+  const targetWindow = classifyBaseBreakoutTargetWindow(c, exitRules);
+  const rrSuppressed = targetWindow.kind === "beyond" || targetWindow.kind === "at_resistance";
+
+  return (
+    <>
+      <tr
+        className="cursor-pointer border-b border-border/40 last:border-0 hover:bg-white/[0.02]"
+        onClick={() => setExpanded((v) => !v)}
+      >
+        <td className="px-2 py-1.5 font-mono font-medium text-foreground">
+          <span className="inline-flex items-center gap-1">
+            <ChevronRight
+              className={`h-3 w-3 shrink-0 text-muted-foreground transition-transform ${expanded ? "rotate-90" : ""}`}
+            />
+            {c.symbol}
+            {c.dataQualityDegraded && (
+              <span
+                title={`Enriched with incomplete data: ${(c.dataQualityIssues ?? []).join(", ") || "unknown issue"} — this candidate's sector or earnings check failed rather than returning a real answer.`}
+                className="cursor-help text-amber-400"
+              >
+                ⚠
+              </span>
+            )}
+          </span>
+        </td>
+        <td className="px-2 py-1.5 text-xs text-muted-foreground">{c.sector ?? "—"}</td>
+        <td className="px-2 py-1.5 text-right font-mono">{fmtMoney(c.currentPrice)}</td>
+        <td className="px-2 py-1.5 text-left text-xs text-muted-foreground">{gateLabel}</td>
+        <td className="px-2 py-1.5 text-right font-mono text-rose-300">
+          {gate ? bbFormatGateValue(gate, c.bbNearMissValue) : "—"}
+          {gate && (
+            <div className="text-[10px] font-sans text-muted-foreground">
+              needs {op} {bbFormatGateValue(gate, c.bbNearMissThreshold)}, gap {bbFormatGap(gate, c.bbNearMissGap)}
+            </div>
+          )}
+        </td>
+        <td className={`px-2 py-1.5 text-right font-mono ${extCls}`}>
+          {fmtSigned(c.extensionAtrMultiple, 2)}
+        </td>
+        <td
+          className={
+            rrSuppressed
+              ? "px-2 py-1.5 text-right text-[10px] font-normal text-amber-300/80"
+              : `px-2 py-1.5 text-right font-semibold ${rrCls}`
+          }
+          title={bbRrHelperText(exitRules)}
+        >
+          {rrSuppressed ? targetWindowMessage(targetWindow) : rr.text}
+        </td>
+        <td className="px-2 py-1.5" onClick={(e) => e.stopPropagation()}>
+          <div className="flex items-center justify-end gap-1">
+            <button
+              type="button"
+              onClick={onTrack}
+              disabled={tracked || tracking}
+              className={`rounded border px-1.5 py-0.5 text-[10px] font-medium ${
+                tracked
+                  ? "cursor-default border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
+                  : "border-border text-muted-foreground hover:bg-white/5 hover:text-foreground"
+              }`}
+            >
+              {tracked ? "Tracked" : "Track"}
+            </button>
+          </div>
+        </td>
+      </tr>
+      {expanded && (
+        <BaseBreakoutExpandedPanel
+          c={c}
+          colorBands={colorBands}
+          exitRules={exitRules}
+          thresholds={thresholds}
+          chartData={chartData}
+          chartLoading={chartLoading}
+          chartError={chartError}
+          colSpan={8}
+        />
+      )}
+    </>
+  );
+}
+
+function BaseBreakoutNearMissSection({
+  candidates,
+  onTrack,
+  trackedSymbols,
+  trackingSymbol,
+  colorBands,
+  exitRules,
+  thresholds,
+}: {
+  candidates: SwingCandidate[];
+  onTrack: (c: SwingCandidate) => void;
+  trackedSymbols: Set<string>;
+  trackingSymbol: string | null;
+  colorBands: BaseBreakoutColorBands;
+  exitRules: BaseBreakoutExitRules;
+  thresholds: BaseBreakoutThresholds;
+}) {
+  // Already sorted ascending by gap in the baseBreakoutLists useMemo — no
+  // interactive re-sort here, same convention as RsPullbackNearMissSection.
+  return (
+    <div className="space-y-2">
+      <div>
+        <div className="flex items-baseline gap-2">
+          <h3 className="text-sm font-semibold text-foreground">Watch, near miss</h3>
+          <span className="text-xs text-muted-foreground">({candidates.length})</span>
+        </div>
+        <div className="text-xs text-muted-foreground">
+          Fails exactly one of the five evaluable gates — sorted closest-to-passing first. Track only, not
+          actionable.
+        </div>
+      </div>
+      {candidates.length === 0 ? (
+        <div className="rounded border border-border/60 bg-background/30 px-3 py-2 text-xs text-muted-foreground">
+          Nothing is currently one gate away from qualifying.
+        </div>
+      ) : (
+        <div className="overflow-x-auto rounded border border-border">
+          <table className="w-full min-w-[760px] text-sm">
+            <thead className="border-b border-border/60 text-left text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+              <tr>
+                <th className="px-2 py-1.5 text-left">Symbol</th>
+                <th className="px-2 py-1.5 text-left">Sector</th>
+                <th className="px-2 py-1.5 text-right">Price</th>
+                <th className="px-2 py-1.5 text-left">Failed gate</th>
+                <th className="px-2 py-1.5 text-right">Value (gap)</th>
+                <th className="px-2 py-1.5 text-right">Ext (ATR-mult)</th>
+                <th className="px-2 py-1.5 text-right" title={bbRrHelperText(exitRules)}>
+                  R:R
+                </th>
+                <th className="px-2 py-1.5 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {candidates.map((c) => (
+                <BaseBreakoutNearMissRow
+                  key={c.symbol}
+                  candidate={c}
+                  onTrack={() => onTrack(c)}
+                  tracked={trackedSymbols.has(c.symbol)}
+                  tracking={trackingSymbol === c.symbol}
+                  colorBands={colorBands}
+                  exitRules={exitRules}
+                  thresholds={thresholds}
                 />
               ))}
             </tbody>

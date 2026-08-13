@@ -88,7 +88,11 @@ export type CatalystType =
 // 0-10 ranked score (see RsPullbackList/computeRsPullbackCandidates
 // below) — rs_pullback candidates carry setupScore 0 and empty
 // tabScores/tabScoreComponents/tabNarrative by design, not by omission.
-export type SetupTab = "capitulation" | "pullback" | "insider" | "options_flow" | "rs_pullback";
+// base_breakout (lib/base-breakout.ts) is the same shape as rs_pullback
+// (pass/fail, own list partition, setupScore 0, empty tabScores/
+// tabScoreComponents/tabNarrative) — a sixth, independent vertical slice,
+// not a variant of RS Pullback's own logic.
+export type SetupTab = "capitulation" | "pullback" | "insider" | "options_flow" | "rs_pullback" | "base_breakout";
 
 // Snapshot-derived stats for the technical tabs. Computed in pass 1
 // from symbol_market_snapshot (rsi14 + price_history_5d + sma20 +
@@ -336,6 +340,27 @@ export type SwingCandidate = {
   nearMissGap?: number | null;
   nearMissValue5SessionsAgo?: number | null;
   nearMissTrend?: "improving" | "deteriorating" | "flat" | null;
+
+  // ---- Base Breakout tab only (see lib/base-breakout.ts). All
+  // null/undefined for every other tab's candidates. Independent of every
+  // RS Pullback field above — a different tab's own geometry, not a
+  // variant of RS Pullback's. ----
+  baseHigh?: number | null;
+  baseLow?: number | null;
+  baseSessions?: number | null;
+  baseRangePct?: number | null;
+  atr10?: number | null;
+  atr10Median60?: number | null;
+  rvol?: number | null;
+  sessionsSinceTrigger?: number | null;
+  extensionAtrMultiple?: number | null; // (currentPrice - baseHigh) / ATR10
+  stopSource?: "base_high" | "base_low" | "base_low_clamped" | null;
+  baseBreakoutList?: BaseBreakoutList | null;
+  // ---- Near-miss watch tier only — set iff baseBreakoutList === "near_miss". ----
+  bbNearMissGate?: BaseBreakoutGateKey | null;
+  bbNearMissValue?: number | null;
+  bbNearMissThreshold?: number | null;
+  bbNearMissGap?: number | null;
 };
 
 // "near_miss" — see computeRsPullbackCandidates/evaluateRsPullback below.
@@ -346,6 +371,15 @@ export type SwingCandidate = {
 // changes what qualifies or which of the other three lists a passing
 // name lands in.
 export type RsPullbackList = "ready" | "leading_extended" | "in_zone_lagging" | "near_miss";
+
+// Base Breakout's own list/gate-key types — defined here (not in
+// lib/base-breakout.ts) purely to break what would otherwise be a
+// circular import: SwingCandidate references them, and lib/base-
+// breakout.ts already needs to import SwingCandidate. No shared logic
+// with RsPullbackList/RsPullbackGateKey, just co-located to avoid the
+// cycle. See lib/base-breakout.ts for what each list/gate actually means.
+export type BaseBreakoutList = "ready" | "leading_extended" | "in_zone_lagging" | "near_miss";
+export type BaseBreakoutGateKey = "base_range" | "base_length" | "atr_contraction" | "rvol" | "adr_floor";
 
 // The near-miss watch tier evaluates four of the five gates a candidate
 // must clear: 50MA-rising, RS20, RS60, ADR% floor. above-200d is
@@ -619,7 +653,7 @@ async function batchGetOrFetchQuotes(
 
 // Concurrency-limited map. Used everywhere in this file so Yahoo, Finnhub,
 // and Schwab don't get hammered (and so a slow symbol doesn't block all).
-async function mapWithConcurrency<T, R>(
+export async function mapWithConcurrency<T, R>(
   items: T[],
   limit: number,
   worker: (item: T, index: number) => Promise<R>,
@@ -1042,7 +1076,7 @@ async function fetchAtrAndAdr(
 // call) no longer gets half of it thrown away. Previously this upserted
 // `sector` alone even when `industry` was sitting right there in the
 // same response.
-async function getOrFetchSector(symbol: string): Promise<{ sector: string | null; failed: boolean }> {
+export async function getOrFetchSector(symbol: string): Promise<{ sector: string | null; failed: boolean }> {
   const sb = createServerClient();
   try {
     const cached = await sb
@@ -2172,6 +2206,15 @@ export async function pass1Filter(
     // produce identically-shaped SwingCandidate rows.
     prefilterNearMiss: SwingCandidate[];
   };
+  // Base Breakout's own pregate (lib/base-breakout.ts pregateBaseBreakoutSymbols)
+  // — no cache-only prefilter stage exists for this tab (see that file's
+  // module comment), so needsEnrichment is just the pregated set itself;
+  // every pregated symbol goes straight to /pass2-base-breakout.
+  baseBreakout: {
+    pregatedCount: number;
+    needsEnrichment: string[];
+    excludedByAbove200d: number;
+  };
 }> {
   const routeStarted = Date.now();
   const errors: string[] = [];
@@ -2290,15 +2333,37 @@ export async function pass1Filter(
     rsPullbackThresholds,
   );
 
+  // Base Breakout's own pregate — inlined here (not imported from
+  // lib/base-breakout.ts) purely to avoid a circular module dependency
+  // (base-breakout.ts already imports Pass1Quote/SwingCandidate/
+  // getOrFetchSector/etc. from this file). Independent literal copy of
+  // BASE_BREAKOUT_MIN_PRICE/BASE_BREAKOUT_MIN_MARKET_CAP, same convention
+  // RS Pullback's own pregate constants already use — see that file for
+  // the canonical thresholds this must stay in sync with by hand.
+  let baseBreakoutExcludedByAbove200d = 0;
+  const baseBreakoutPregated: string[] = [];
+  for (const q of Array.from(quotes.values())) {
+    if (q.currentPrice < 10) continue;
+    if (q.marketCap < 500_000_000) continue;
+    if (!(q.ma200 > 0)) continue;
+    if (q.currentPrice <= q.ma200) {
+      baseBreakoutExcludedByAbove200d += 1;
+      continue;
+    }
+    baseBreakoutPregated.push(q.symbol);
+  }
+
   // Survivors = union of the legacy funnel (insider/options path), the
-  // tab-qualified symbols, and the RS Pullback pregate, so pass 2
-  // enriches (and earnings-gates) everything. Tab symbols that didn't
-  // clear the legacy R/R funnel get swing-sized fallback levels.
+  // tab-qualified symbols, the RS Pullback pregate, and the Base Breakout
+  // pregate, so pass 2 enriches (and earnings-gates) everything. Tab
+  // symbols that didn't clear the legacy R/R funnel get swing-sized
+  // fallback levels.
   const survivorSet = new Set<string>(funnelSurvivors);
   for (const sym of [
     ...Object.keys(capitulation),
     ...Object.keys(pullback),
     ...rsPullbackPregated,
+    ...baseBreakoutPregated,
   ]) {
     survivorSet.add(sym);
     if (!trades.has(sym)) {
@@ -2324,6 +2389,11 @@ export async function pass1Filter(
       excludedBySma50RisingPrefilter: rsPullbackPrefilter.excludedBySma50RisingPrefilter,
       excludedByAbove200d: rsPullbackPregate.excludedByAbove200d,
       prefilterNearMiss: rsPullbackPrefilter.prefilterNearMiss,
+    },
+    baseBreakout: {
+      pregatedCount: baseBreakoutPregated.length,
+      needsEnrichment: baseBreakoutPregated,
+      excludedByAbove200d: baseBreakoutExcludedByAbove200d,
     },
   };
 }
@@ -2473,7 +2543,7 @@ function isoDaysAhead(days: number): string {
   return d.toISOString().slice(0, 10);
 }
 
-function daysFromTodayUtc(dateIso: string): number | null {
+export function daysFromTodayUtc(dateIso: string): number | null {
   const [y, m, d] = dateIso.split("-").map(Number);
   if (!y || !m || !d) return null;
   const today = new Date();
@@ -2642,6 +2712,9 @@ const TAB_THESIS_LABEL: Record<SetupTab, string> = {
   // tabScores/buildNarrative machinery) — entry present only to satisfy
   // Record<SetupTab, string> exhaustiveness.
   rs_pullback: "RS pullback",
+  // Same as rs_pullback above — base_breakout candidates are built
+  // independently of buildNarrative too (see lib/base-breakout.ts).
+  base_breakout: "base breakout",
 };
 
 function pctStr(n: number, digits = 1): string {
@@ -2719,6 +2792,10 @@ function thesisIntro(n: NarrativeInput): string {
       // candidates (see computeRsPullbackCandidates). Present only so
       // this switch stays exhaustive over SetupTab.
       return `${n.symbol} — RS pullback (no narrative generated for this tab).`;
+    case "base_breakout":
+      // Unreachable — same reason as rs_pullback above (see
+      // lib/base-breakout.ts). Present only for exhaustiveness.
+      return `${n.symbol} — base breakout (no narrative generated for this tab).`;
   }
 }
 
@@ -3542,6 +3619,11 @@ export type Pass1Wire = {
     excludedByAbove200d: number;
     prefilterNearMiss: SwingCandidate[];
   };
+  baseBreakout: {
+    pregatedCount: number;
+    needsEnrichment: string[];
+    excludedByAbove200d: number;
+  };
 };
 
 export function serializePass1(
@@ -3571,6 +3653,7 @@ export function serializePass1(
     capitulation: result.capitulation,
     pullback: result.pullback,
     rsPullback: result.rsPullback,
+    baseBreakout: result.baseBreakout,
   };
 }
 

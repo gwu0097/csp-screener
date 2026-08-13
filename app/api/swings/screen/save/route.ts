@@ -34,7 +34,7 @@ type SaveBody = {
   pass1Survivors: number;
   pass2Results: number;
   durationMs: number;
-  mode?: "all" | "legacy" | "rs_pullback";
+  mode?: "all" | "legacy" | "rs_pullback" | "base_breakout";
   // Universe & Themes, Phase B — which universe this run was screened
   // against (see app/api/swings/universe/resolve's response shape).
   // Stamped on whichever row(s) this call actually writes so a saved run
@@ -46,6 +46,9 @@ type SaveBody = {
   // rs_pullback row so a zero-candidate run still explains why: nothing
   // pregated, vs. pregated-but-excluded, vs. evaluated-and-disqualified.
   rsPullbackDiagnostics?: unknown;
+  // Same idea as rsPullbackDiagnostics, independent field, own tab (see
+  // lib/base-breakout.ts's BaseBreakoutComputeResult attrition counters).
+  baseBreakoutDiagnostics?: unknown;
 };
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
@@ -73,6 +76,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const rsPullbackDiagnostics =
     body.rsPullbackDiagnostics && typeof body.rsPullbackDiagnostics === "object"
       ? body.rsPullbackDiagnostics
+      : null;
+  const baseBreakoutDiagnostics =
+    body.baseBreakoutDiagnostics && typeof body.baseBreakoutDiagnostics === "object"
+      ? body.baseBreakoutDiagnostics
       : null;
 
   try {
@@ -132,6 +139,29 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     });
     if (rsIns.error) {
       console.warn(`[swings/screen/save] rs_pullback append failed: ${rsIns.error.message}`);
+    }
+  }
+
+  if (mode === "all" || mode === "base_breakout") {
+    // Same insert-only, always-insert-even-if-empty semantics as
+    // rs_pullback above, own independent kind/scope — see lib/base-
+    // breakout.ts's module comment for why this tab exists.
+    const baseBreakoutCandidates = body.candidates.filter((c) =>
+      (c.setupTabs ?? []).includes("base_breakout"),
+    );
+    const bbIns = await sb.from("swing_screen_results").insert({
+      user_id: userId,
+      kind: "base_breakout",
+      screened: body.screened,
+      pass1_survivors: body.pass1Survivors,
+      pass2_results: body.pass2Results,
+      duration_ms: body.durationMs,
+      candidates: baseBreakoutCandidates,
+      universe,
+      base_breakout_diagnostics: baseBreakoutDiagnostics,
+    });
+    if (bbIns.error) {
+      console.warn(`[swings/screen/save] base_breakout append failed: ${bbIns.error.message}`);
     }
   }
 
