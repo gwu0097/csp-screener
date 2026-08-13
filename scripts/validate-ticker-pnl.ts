@@ -137,6 +137,24 @@ async function computeTickerPnl(
   return { from, to, combined, barSum, delta: Math.round((barSum - combined) * 100) / 100, tickerCount: ticker_pnl.length, top3, concentrationPct, ticker_pnl };
 }
 
+const CAP = 25;
+function reportCapSplit(label: string, result: Awaited<ReturnType<typeof computeTickerPnl>>) {
+  const shown = result.ticker_pnl.slice(0, CAP);
+  const rest = result.ticker_pnl.slice(CAP);
+  const displayed = Math.round(shown.reduce((s, t) => s + t.totalNet, 0) * 100) / 100;
+  const othersSum = Math.round(rest.reduce((s, t) => s + t.totalNet, 0) * 100) / 100;
+  const reconciled = Math.abs(displayed + othersSum - result.combined) < 0.01;
+  if (rest.length > 0) {
+    console.log(
+      `${label}: Displayed ${shown.length}: ${displayed >= 0 ? "+" : ""}$${displayed} · ${rest.length} others: ${othersSum >= 0 ? "+" : ""}$${othersSum} · Total: ${result.combined >= 0 ? "+" : ""}$${result.combined} — reconciled=${reconciled}`,
+    );
+  } else {
+    console.log(
+      `${label}: Displayed ${shown.length}: ${displayed >= 0 ? "+" : ""}$${displayed} (no others; all tickers shown) — reconciled=${reconciled}`,
+    );
+  }
+}
+
 async function main() {
   loadEnvLocal();
   const { createServerClient } = await import("../lib/supabase");
@@ -170,6 +188,12 @@ async function main() {
   const week = await computeTickerPnl(sb, userId, "2026-08-06", "2026-08-13");
   console.log(`tickers=${week.tickerCount} (<=25: ${week.tickerCount <= 25})`);
   console.log(`combined=${week.combined} sum(bars)=${week.barSum} delta=${week.delta}`);
+
+  console.log("\n=== Displayed/others/total line, matching the new UI exactly ===");
+  reportCapSplit("Q3", q3);
+  reportCapSplit("July", july);
+  reportCapSplit("All-time", allTime);
+  reportCapSplit("Week", week);
 }
 
 main().catch((e) => {

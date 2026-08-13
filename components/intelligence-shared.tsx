@@ -1234,7 +1234,7 @@ export function PerformanceSection({
         })()}
       </div>
 
-      <TickerPnlPanel rows={data.ticker_pnl ?? []} />
+      <TickerPnlPanel rows={data.ticker_pnl ?? []} realizedTotal={combinedRealized} />
       <PartialClosesPanel
         rows={data.partial_closes ?? []}
         total={data.total_partial_pnl ?? 0}
@@ -1267,7 +1267,17 @@ function spanningCampaignsNote(spanning: Array<{ allTimeNet: number }>): string 
 // aggregate column made the aggregate look like a real position) and
 // surfaced as a text line below instead, with the same expand-in-place
 // table the chart bar used to offer.
-function TickerPnlPanel({ rows }: { rows: TickerPnl[] }) {
+function TickerPnlPanel({
+  rows,
+  realizedTotal,
+}: {
+  rows: TickerPnl[];
+  // Independent ground truth (the Realized/Total P&L card's own
+  // figure) to reconcile against — see the displayed/others/total line
+  // below. Passed in rather than re-derived so a bug that made this
+  // panel disagree with the headline can actually be caught.
+  realizedTotal: number;
+}) {
   const [othersExpanded, setOthersExpanded] = useState(false);
 
   const shown = rows.length <= TICKER_PNL_MAX_BARS ? rows : rows.slice(0, TICKER_PNL_MAX_BARS);
@@ -1296,6 +1306,17 @@ function TickerPnlPanel({ rows }: { rows: TickerPnl[] }) {
     }),
     [shown],
   );
+
+  // Summed from the chart's OWN data array (what's actually on
+  // screen), not derived as realizedTotal − othersNet — a subtraction
+  // would always "reconcile" by construction and catch nothing. Summing
+  // independently means a bug that drops or double-counts a ticker
+  // between `rows` and what got rendered actually shows up as a
+  // mismatch below instead of being silently masked.
+  const displayedTotalRaw =
+    (chartData.datasets[0]?.data as number[] | undefined)?.reduce((s, v) => s + (v ?? 0), 0) ?? 0;
+  const displayedTotal = Math.round(displayedTotalRaw * 100) / 100;
+  const reconciled = Math.abs(displayedTotal + othersNet - realizedTotal) < 0.01;
 
   const chartOptions: ChartOptions<"bar"> = useMemo(
     () => ({
@@ -1371,39 +1392,62 @@ function TickerPnlPanel({ rows }: { rows: TickerPnl[] }) {
       <div style={{ width: "100%", height: 280 }}>
         <ChartJsBar data={chartData} options={chartOptions} />
       </div>
-      {rest.length > 0 && (
-        <div className="mt-2">
-          <button
-            type="button"
-            onClick={() => setOthersExpanded((v) => !v)}
-            className="text-[11px] text-muted-foreground underline decoration-dotted underline-offset-2 hover:text-foreground"
-          >
-            {rest.length} others:{" "}
-            <span className={othersNet >= 0 ? "text-emerald-300" : "text-rose-300"}>
-              {fmtMoney(othersNet, true, true)}
-            </span>{" "}
-            ({othersExpanded ? "hide" : "show"})
-          </button>
-          {othersExpanded && (
-            <table className="mt-2 w-full text-[11px]">
-              <tbody>
-                {rest.map((r) => (
-                  <tr key={r.symbol} className="border-t border-border/40">
-                    <td className="py-1 text-muted-foreground">{r.symbol}</td>
-                    <td className="py-1 text-right text-muted-foreground">
-                      {r.campaignCount} {r.campaignCount === 1 ? "campaign" : "campaigns"}
-                    </td>
-                    <td
-                      className={`py-1 text-right font-mono ${r.totalNet >= 0 ? "text-emerald-300" : "text-rose-300"}`}
-                    >
-                      {fmtMoney(r.totalNet, true, true)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
+      <div className="mt-2 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[11px] text-muted-foreground">
+        <span>
+          Displayed {shown.length}:{" "}
+          <span className={displayedTotal >= 0 ? "text-emerald-300" : "text-rose-300"}>
+            {fmtMoney(displayedTotal, true, true)}
+          </span>
+        </span>
+        {rest.length > 0 && (
+          <>
+            <span aria-hidden="true">·</span>
+            <button
+              type="button"
+              onClick={() => setOthersExpanded((v) => !v)}
+              className="underline decoration-dotted underline-offset-2 hover:text-foreground"
+            >
+              {rest.length} others:{" "}
+              <span className={othersNet >= 0 ? "text-emerald-300" : "text-rose-300"}>
+                {fmtMoney(othersNet, true, true)}
+              </span>{" "}
+              ({othersExpanded ? "hide" : "show"})
+            </button>
+            <span aria-hidden="true">·</span>
+            <span>
+              Total:{" "}
+              <span className={realizedTotal >= 0 ? "text-emerald-300" : "text-rose-300"}>
+                {fmtMoney(realizedTotal, true, true)}
+              </span>
+            </span>
+          </>
+        )}
+      </div>
+      {!reconciled && (
+        <div className="mt-1 text-[11px] font-medium text-amber-400">
+          ⚠ Displayed + others ({fmtMoney(displayedTotal + othersNet, true, true)}) doesn&apos;t
+          match Realized P&L ({fmtMoney(realizedTotal, true, true)}) — a ticker may be dropped or
+          double-counted.
         </div>
+      )}
+      {rest.length > 0 && othersExpanded && (
+        <table className="mt-2 w-full text-[11px]">
+          <tbody>
+            {rest.map((r) => (
+              <tr key={r.symbol} className="border-t border-border/40">
+                <td className="py-1 text-muted-foreground">{r.symbol}</td>
+                <td className="py-1 text-right text-muted-foreground">
+                  {r.campaignCount} {r.campaignCount === 1 ? "campaign" : "campaigns"}
+                </td>
+                <td
+                  className={`py-1 text-right font-mono ${r.totalNet >= 0 ? "text-emerald-300" : "text-rose-300"}`}
+                >
+                  {fmtMoney(r.totalNet, true, true)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       )}
     </div>
   );
