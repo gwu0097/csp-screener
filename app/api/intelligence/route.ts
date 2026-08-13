@@ -299,13 +299,11 @@ export async function GET(req: NextRequest) {
       worst: null as { symbol: string; pnl: number; roc: number | null } | null,
     },
   );
-  const totalTrades = windowed.length;
-  const win_rate = totalTrades > 0 ? totals.wins / totalTrades : 0;
-  const avg_roc = totals.rocCount > 0 ? totals.rocSum / totals.rocCount : 0;
-  const avgWinPnl = totals.wins > 0 ? totals.sumWinPnl / totals.wins : 0;
-  const avgLossPnl = totals.losses > 0 ? totals.sumLossPnl / totals.losses : 0;
-  const expectancy =
-    totalTrades > 0 ? win_rate * avgWinPnl + (1 - win_rate) * avgLossPnl : 0;
+  // win_rate / avg_roc / expectancy / best / worst used to be derived
+  // from `totals` here (row-level, option-only). That's now entirely
+  // superseded by the campaign-level block below — `totals` itself is
+  // still used for total_pnl (the row-level Total P&L card, which must
+  // not move), just not for outcome scoring anymore.
 
   // ---------- Campaign-level outcome stats ----------
   // Win rate / expectancy / avg ROC / best-worst move from "one row =

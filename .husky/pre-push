@@ -1,17 +1,29 @@
 # Builds a clean `git worktree` of HEAD — not the working tree — and
-# type-checks it with `npx tsc --noEmit`. A worktree only contains what's
-# committed, so an import (or a fetch("/api/...") target) that exists on
-# disk but was never `git add`ed still fails here exactly like it fails
-# on Vercel's clean clone — that's the bug this hook exists for, and a
-# clean checkout is what catches it, independent of whether the check
-# itself is a typecheck or a full build.
+# checks it with `npx tsc --noEmit` + `npx next lint`. A worktree only
+# contains what's committed, so an import (or a fetch("/api/...")
+# target) that exists on disk but was never `git add`ed still fails
+# here exactly like it fails on Vercel's clean clone — that's the bug
+# this hook exists for, and a clean checkout is what catches it,
+# independent of which check is running.
 #
 # Was previously a full `npm ci && npm run build` (Vercel's own
-# pipeline) — changed 2026-08-13: both real failures this hook has
+# pipeline) — changed 2026-08-13: both real failures this hook had
 # caught were TypeScript errors surfaced in `next build`'s own typecheck
 # phase, not bundling failures, and Vercel catches a bundling failure on
 # its own in under a minute anyway. This drops that bundling
 # verification — a real gap, accepted deliberately for the runtime win.
+#
+# `next lint` added same day: an ESLint error (e.g.
+# @typescript-eslint/no-unused-vars) is not a TypeScript error, so
+# `tsc --noEmit` passes it straight through — but `next build` runs
+# lint too, and Vercel fails the deploy on it regardless. This hook had
+# a blind spot for the entire lint category until this line existed.
+# Deliberately `next lint`, not bare `eslint .`: `next lint` scopes to
+# Next's default directories (app/pages/components/lib/src), matching
+# what `next build` actually checks. Bare `eslint .` also flags
+# pre-existing errors in scripts/ and tailwind.config.ts that Vercel
+# has never failed on — that's a stricter, different check, not this
+# hook's job.
 #
 # Reuses this checkout's own node_modules (symlinked, no npm ci) instead
 # of a fresh install — node_modules isn't part of what "committed but
@@ -29,7 +41,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "[pre-push] Type-checking a clean worktree of HEAD..."
+echo "[pre-push] Checking a clean worktree of HEAD..."
 git worktree add "$WORKTREE_DIR" HEAD --quiet
 
 ln -s "$(pwd)/node_modules" "$WORKTREE_DIR/node_modules"
@@ -37,6 +49,7 @@ ln -s "$(pwd)/node_modules" "$WORKTREE_DIR/node_modules"
 (
   cd "$WORKTREE_DIR"
   npx tsc --noEmit
+  npx next lint
 )
 
-echo "[pre-push] Clean-worktree typecheck passed."
+echo "[pre-push] Clean-worktree typecheck + lint passed."
