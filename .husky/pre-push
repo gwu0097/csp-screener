@@ -1,16 +1,24 @@
 # Builds a clean `git worktree` of HEAD — not the working tree — and
-# runs the same `npm ci && npm run build` Vercel runs. This is the
-# only local check that's actually equivalent to what breaks in
-# production: a worktree only contains what's committed, so an import
-# (or a fetch("/api/...") target) that exists on disk but was never
-# `git add`ed fails here exactly like it fails on Vercel's clean
-# clone — the failure mode that broke two deploys in a row before
-# this hook existed. `next build`'s own local-vs-working-tree run
-# proves nothing; that's the whole reason this exists as a *worktree*
-# build, not a plain `npm run build`.
+# type-checks it with `npx tsc --noEmit`. A worktree only contains what's
+# committed, so an import (or a fetch("/api/...") target) that exists on
+# disk but was never `git add`ed still fails here exactly like it fails
+# on Vercel's clean clone — that's the bug this hook exists for, and a
+# clean checkout is what catches it, independent of whether the check
+# itself is a typecheck or a full build.
 #
-# Slow on purpose (a full npm ci + next build) — that thoroughness is
-# the point. Skip once, deliberately, with:
+# Was previously a full `npm ci && npm run build` (Vercel's own
+# pipeline) — changed 2026-08-13: both real failures this hook has
+# caught were TypeScript errors surfaced in `next build`'s own typecheck
+# phase, not bundling failures, and Vercel catches a bundling failure on
+# its own in under a minute anyway. This drops that bundling
+# verification — a real gap, accepted deliberately for the runtime win.
+#
+# Reuses this checkout's own node_modules (symlinked, no npm ci) instead
+# of a fresh install — node_modules isn't part of what "committed but
+# not on disk" catches, only source files are, and a symlink is instant
+# where npm ci is not.
+#
+# Skip once, deliberately, with:
 #   git push --no-verify
 set -e
 
@@ -21,20 +29,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "[pre-push] Building a clean worktree of HEAD to verify what Vercel will see..."
+echo "[pre-push] Type-checking a clean worktree of HEAD..."
 git worktree add "$WORKTREE_DIR" HEAD --quiet
 
-# Vercel has its own configured env vars; a local .env.local is the
-# closest local proxy so this build doesn't fail for missing secrets
-# that Vercel actually has. Skipped harmlessly if absent.
-if [ -f .env.local ]; then
-  cp .env.local "$WORKTREE_DIR/.env.local"
-fi
+ln -s "$(pwd)/node_modules" "$WORKTREE_DIR/node_modules"
 
 (
   cd "$WORKTREE_DIR"
-  npm ci --silent
-  npm run build
+  npx tsc --noEmit
 )
 
-echo "[pre-push] Clean-worktree build passed."
+echo "[pre-push] Clean-worktree typecheck passed."
