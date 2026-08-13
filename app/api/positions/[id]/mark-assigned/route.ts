@@ -8,22 +8,27 @@ export const dynamic = "force-dynamic";
 // Manual early-assignment for an open short put OR short call. Schwab
 // doesn't always emit a fill the import catches when an option is
 // assigned before expiry, so the user marks it by hand:
-//   1. $0.00 close fill on the option (assignment date) — full premium
-//      stays as realized P&L, matching the expiry-day Option A
-//      accounting in lib/expire-positions.recordAssignment. Direction-
-//      only math, identical for puts and calls.
-//   2. Option status → 'assigned', closed_date = assignment date.
-//   3. Put: a NEW stock_long position is created at strike (shares =
-//      remaining × 100) — the assignment means BUYING shares. Same
-//      shape as /api/positions/create-from-assignment.
+//   1. $0.00 close fill on the option (assignment date).
+//   2. Option status → 'assigned', realized_pnl → 0. The premium isn't
+//      lost — it moves onto the stock leg's cost basis (put) or sale
+//      proceeds (call), so the stock round-trip carries the whole
+//      economic result of the assignment cycle in one interpretable
+//      number instead of splitting it arbitrarily across two rows.
+//   3. Put: a NEW stock_long position is created (shares = remaining ×
+//      100) at strike MINUS the per-share premium collected — the
+//      assignment means BUYING shares at an effective cost reduced by
+//      the premium banked. Same shape as
+//      /api/positions/create-from-assignment.
 //      Call: shares are CALLED AWAY — the opposite direction. There is
 //      no new stock position to create; instead an existing open
 //      stock_long lot for the same symbol (if one is tracked, any
 //      broker — covered calls are written against shares held wherever
-//      they actually live) gets a close fill for `shares` at `strike`,
-//      reusing recalculatePositionFromFills' already-correct stock P&L
-//      math. If no matching lot exists, the option leg still closes
-//      correctly; there's just nothing to reduce.
+//      they actually live) gets a close fill for `shares` at strike
+//      PLUS the per-share premium collected (the premium raises the
+//      effective sale proceeds), reusing recalculatePositionFromFills'
+//      already-correct stock P&L math. If no matching lot exists, the
+//      option leg still closes correctly; there's just nothing to
+//      reduce.
 
 type Body = { assignmentDate?: unknown };
 
@@ -166,9 +171,11 @@ export async function POST(
     );
   }
 
-  // 2. Option → assigned. realized_pnl = full premium retained (the $0
-  // close adds nothing to the buy-back side). Direction-only, correct
-  // for both puts and calls.
+  // 2. Option → assigned, realized_pnl → 0. The premium collected (the
+  // $0 close adds nothing to the buy-back side, so `realized` here is
+  // exactly the premium banked) moves onto the stock leg below instead
+  // of staying on this row. Direction-only, correct for both puts and
+  // calls.
   const allFills: Fill[] = [
     ...priorFills,
     { fill_type: "close", contracts: remaining, premium: 0, fill_date: assignmentDate },
@@ -176,6 +183,7 @@ export async function POST(
   const realized = Math.round(realizedPnl(allFills, "short") * 100) / 100;
   const strike = Number(pos.strike);
   const shares = remaining * 100;
+  const premiumPerShare = shares > 0 ? realized / shares : 0;
   const noteAdd =
     optionType === "call"
       ? `Called away early (${remaining} contract${remaining === 1 ? "" : "s"}) on ${assignmentDate}. Shares sold at $${strike.toFixed(2)} strike.`
@@ -184,7 +192,7 @@ export async function POST(
     .from("positions")
     .update({
       status: "assigned",
-      realized_pnl: realized,
+      realized_pnl: 0,
       closed_date: assignmentDate,
       notes: pos.notes ? `${pos.notes} | ${noteAdd}` : noteAdd,
       updated_at: new Date().toISOString(),
@@ -199,9 +207,12 @@ export async function POST(
   }
 
   if (optionType === "put") {
-    // 3a. Put: stock_long at strike — Option A cost basis. Same row
+    // 3a. Put: stock_long at strike minus the premium banked — the
+    // premium reduces the cost basis of the assigned shares, so the
+    // stock round-trip carries the whole economic result. Same row
     // shape as create-from-assignment (strike=0 + position_type is how
     // stock rows are modelled; entry_stock_price carries the basis).
+    const costBasis = Math.round((strike - premiumPerShare) * 10000) / 10000;
     const stockInsert = await sb
       .from("positions")
       .insert({
@@ -217,7 +228,7 @@ export async function POST(
         notes: `Assigned early from ${pos.symbol} $${strike.toFixed(2)}P ${pos.expiry}`,
         position_type: "stock_long",
         assignment_source_id: pos.id,
-        entry_stock_price: strike,
+        entry_stock_price: costBasis,
         user_id: userId,
       })
       .select("id")
@@ -239,7 +250,7 @@ export async function POST(
       user_id: userId,
       fill_type: "open",
       contracts: shares,
-      premium: strike,
+      premium: costBasis,
       fill_date: assignmentDate,
     });
     if (openFill.error) {
@@ -251,10 +262,10 @@ export async function POST(
 
     return NextResponse.json({
       ok: true,
-      message: `${pos.symbol}: ${remaining} put${remaining === 1 ? "" : "s"} assigned → ${shares} shares @ $${strike.toFixed(2)}`,
+      message: `${pos.symbol}: ${remaining} put${remaining === 1 ? "" : "s"} assigned → ${shares} shares @ $${strike.toFixed(2)} (cost basis $${costBasis.toFixed(2)} after premium)`,
       stockPositionId: stockId,
       shares,
-      costBasis: strike,
+      costBasis,
       putRealizedPnl: realized,
     });
   }
@@ -274,6 +285,7 @@ export async function POST(
     shares,
     strike,
     assignmentDate,
+    premiumPerShare,
   );
   if (!reduced.ok) {
     const reasonMsg =

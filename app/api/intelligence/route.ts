@@ -28,6 +28,8 @@ type PositionRow = {
   entry_stock_price: number | null;
   direction: "short" | "long" | null;
   entry_dte: number | null;
+  campaign_id: string | null;
+  trade_chain_id: string | null;
 };
 
 type RecRow = {
@@ -181,7 +183,7 @@ export async function GET(req: NextRequest) {
   let query = sb
     .from("positions")
     .select(
-      "id,symbol,strike,expiry,total_contracts,avg_premium_sold,opened_date,closed_date,realized_pnl,entry_final_grade,entry_crush_grade,entry_opportunity_grade,entry_iv_edge,entry_em_pct,entry_vix,status,broker,position_type,assignment_source_id,entry_stock_price,direction,entry_dte",
+      "id,symbol,strike,expiry,total_contracts,avg_premium_sold,opened_date,closed_date,realized_pnl,entry_final_grade,entry_crush_grade,entry_opportunity_grade,entry_iv_edge,entry_em_pct,entry_vix,status,broker,position_type,assignment_source_id,entry_stock_price,direction,entry_dte,campaign_id,trade_chain_id",
     )
     .eq("user_id", userId)
     .in("status", ["closed", "expired_worthless", "assigned"])
@@ -218,7 +220,7 @@ export async function GET(req: NextRequest) {
   let stillOpenQuery = sb
     .from("positions")
     .select(
-      "id,symbol,strike,expiry,total_contracts,avg_premium_sold,opened_date,closed_date,realized_pnl,entry_final_grade,entry_crush_grade,entry_opportunity_grade,entry_iv_edge,entry_em_pct,entry_vix,status,broker,position_type,assignment_source_id,entry_stock_price,direction,entry_dte,updated_at",
+      "id,symbol,strike,expiry,total_contracts,avg_premium_sold,opened_date,closed_date,realized_pnl,entry_final_grade,entry_crush_grade,entry_opportunity_grade,entry_iv_edge,entry_em_pct,entry_vix,status,broker,position_type,assignment_source_id,entry_stock_price,direction,entry_dte,campaign_id,trade_chain_id,updated_at",
     )
     .eq("user_id", userId)
     .eq("status", "open");
@@ -304,6 +306,159 @@ export async function GET(req: NextRequest) {
   const avgLossPnl = totals.losses > 0 ? totals.sumLossPnl / totals.losses : 0;
   const expectancy =
     totalTrades > 0 ? win_rate * avgWinPnl + (1 - win_rate) * avgLossPnl : 0;
+
+  // ---------- Campaign-level outcome stats ----------
+  // Win rate / expectancy / avg ROC / best-worst move from "one row =
+  // one trade" to "one campaign = one outcome" — a campaign (unbroken
+  // exposure from an earnings event to flat, spanning rolls,
+  // assignments, and added strikes) nets ALL its legs, option and
+  // stock, into one number before it's scored a win or a loss. Row-
+  // level totals above (total_pnl / stock_total_pnl /
+  // combined_realized_pnl) are untouched — those stay windowed sums
+  // over individual rows so period totals never move.
+  //
+  // Grouping key mirrors lib/screener.ts's personalStats precedent:
+  // campaign_id when resolved, else trade_chain_id, else the position
+  // is its own solo group. ~15 chains account-wide have no resolvable
+  // earnings event (campaign_id stays NULL forever for those, see
+  // migrations/2026-08-21-add-campaign-layer.sql) — they fall back to
+  // trade_chain_id here rather than disappearing from the stats, but
+  // are additionally surfaced in unresolved_campaigns below.
+  const campaignKey = (p: { campaign_id: string | null; trade_chain_id: string | null; id: string }): string =>
+    p.campaign_id ?? p.trade_chain_id ?? `solo:${p.id}`;
+
+  // A campaign is only a resolved "outcome" once every leg across its
+  // whole history — not just the ones in this window — has closed.
+  // Matches the user's own definition: a campaign ends when size
+  // returns to zero across all legs. One still-open leg means the
+  // campaign hasn't happened yet.
+  const openKeys = new Set(
+    ((stillOpenRes.data ?? []) as PositionRow[])
+      .filter((p) => !broker || p.broker === broker)
+      .map((p) => campaignKey(p)),
+  );
+
+  type CampaignAgg = {
+    key: string;
+    symbol: string;
+    netPnl: number;
+    terminalDate: string;
+    optionLegs: Array<{ opened_date: string; closed_date: string | null; strike: number; total_contracts: number }>;
+    unresolvedEarnings: boolean;
+  };
+  const campaignMap = new Map<string, CampaignAgg>();
+  for (const p of allClosedRaw) {
+    const key = campaignKey(p);
+    const cd = p.closed_date ?? "";
+    let agg = campaignMap.get(key);
+    if (!agg) {
+      agg = {
+        key,
+        symbol: p.symbol,
+        netPnl: 0,
+        terminalDate: cd,
+        optionLegs: [],
+        unresolvedEarnings: p.campaign_id === null,
+      };
+      campaignMap.set(key, agg);
+    }
+    agg.netPnl += Number(p.realized_pnl ?? 0);
+    if (cd > agg.terminalDate) agg.terminalDate = cd;
+    if (p.campaign_id !== null) agg.unresolvedEarnings = false;
+    if (p.position_type !== "stock_long" && p.position_type !== "stock_short") {
+      agg.optionLegs.push({
+        opened_date: p.opened_date,
+        closed_date: p.closed_date,
+        strike: Number(p.strike),
+        total_contracts: Number(p.total_contracts),
+      });
+    }
+  }
+
+  // Peak concurrent option capital across a campaign's whole life —
+  // handles same-day rolls (old leg closes, new leg opens: both count
+  // as deployed that day) and multi-strike scale-ins (several legs
+  // open at once) the way a single position's strike×contracts×100
+  // never could. Capital is freed the day AFTER a leg's closed_date
+  // (it was still at risk through the close itself).
+  function peakCampaignCapital(
+    legs: Array<{ opened_date: string; closed_date: string | null; strike: number; total_contracts: number }>,
+  ): number {
+    const deltas = new Map<string, number>();
+    for (const leg of legs) {
+      const capital = leg.strike * leg.total_contracts * 100;
+      if (!Number.isFinite(capital) || capital <= 0) continue;
+      const start = leg.opened_date;
+      const endExclusive = leg.closed_date ? addDaysIso(leg.closed_date, 1) : start;
+      deltas.set(start, (deltas.get(start) ?? 0) + capital);
+      deltas.set(endExclusive, (deltas.get(endExclusive) ?? 0) - capital);
+    }
+    const dates = Array.from(deltas.keys()).sort();
+    let running = 0;
+    let peak = 0;
+    for (const d of dates) {
+      running += deltas.get(d) ?? 0;
+      if (running > peak) peak = running;
+    }
+    return peak;
+  }
+
+  const resolvedCampaigns = Array.from(campaignMap.values()).filter(
+    (c) => !openKeys.has(c.key),
+  );
+  const windowedCampaigns = resolvedCampaigns.filter(
+    (c) => c.terminalDate >= from && c.terminalDate <= to,
+  );
+  const unresolvedEarningsCampaigns = resolvedCampaigns.filter((c) => c.unresolvedEarnings);
+
+  const campaignTotals = windowedCampaigns.reduce(
+    (acc, c) => {
+      const pnl = c.netPnl;
+      if (pnl > 0) {
+        acc.wins += 1;
+        acc.sumWinPnl += pnl;
+      } else if (pnl < 0) {
+        acc.losses += 1;
+        acc.sumLossPnl += pnl;
+      }
+      const peakCapital = peakCampaignCapital(c.optionLegs);
+      const roc = peakCapital > 0 ? pnl / peakCapital : null;
+      if (roc !== null) {
+        acc.rocSum += roc;
+        acc.rocCount += 1;
+      }
+      if (acc.best === null || pnl > acc.best.pnl) acc.best = { symbol: c.symbol, pnl, roc };
+      if (acc.worst === null || pnl < acc.worst.pnl) acc.worst = { symbol: c.symbol, pnl, roc };
+      return acc;
+    },
+    {
+      wins: 0,
+      losses: 0,
+      sumWinPnl: 0,
+      sumLossPnl: 0,
+      rocSum: 0,
+      rocCount: 0,
+      best: null as { symbol: string; pnl: number; roc: number | null } | null,
+      worst: null as { symbol: string; pnl: number; roc: number | null } | null,
+    },
+  );
+  const campaignTotalCount = windowedCampaigns.length;
+  const campaignWinRate = campaignTotalCount > 0 ? campaignTotals.wins / campaignTotalCount : 0;
+  const campaignAvgRoc = campaignTotals.rocCount > 0 ? campaignTotals.rocSum / campaignTotals.rocCount : 0;
+  const campaignAvgWinPnl = campaignTotals.wins > 0 ? campaignTotals.sumWinPnl / campaignTotals.wins : 0;
+  const campaignAvgLossPnl = campaignTotals.losses > 0 ? campaignTotals.sumLossPnl / campaignTotals.losses : 0;
+  const campaignExpectancy =
+    campaignTotalCount > 0
+      ? campaignWinRate * campaignAvgWinPnl + (1 - campaignWinRate) * campaignAvgLossPnl
+      : 0;
+  const windowedUnresolvedCampaigns = windowedCampaigns.filter((c) => c.unresolvedEarnings);
+  const unresolvedCampaignsPnlInWindow =
+    Math.round(windowedUnresolvedCampaigns.reduce((s, c) => s + c.netPnl, 0) * 100) / 100;
+  // All-time (not window-scoped) — for the account-wide "how much P&L
+  // sits in unresolved campaigns" question, independent of any date
+  // filter the user happens to have selected.
+  const unresolvedCampaignsPnlAllTime =
+    Math.round(unresolvedEarningsCampaigns.reduce((s, c) => s + c.netPnl, 0) * 100) / 100;
 
   // Equity curve is bucketed so multiple trades on the same date collapse
   // into a single data point. Granularity stretches with range length so
@@ -1044,20 +1199,36 @@ export async function GET(req: NextRequest) {
     stats: {
       total_pnl: totals.total_pnl,
       // Combined headline includes closed stock_long realized so the
-      // Realized P&L card reflects actual book P&L. Option-only
-      // metrics (win_rate, avg_roc, expectancy, best/worst) stay
-      // option-only — stocks have a different shape and would skew
-      // them.
+      // Realized P&L card reflects actual book P&L. These three stay
+      // row-level and windowed exactly as before — period totals must
+      // not move regardless of how outcomes below get grouped.
       stock_total_pnl: stockTotalPnl,
       combined_realized_pnl:
         Math.round((totals.total_pnl + stockTotalPnl) * 100) / 100,
-      win_rate,
-      wins: totals.wins,
-      total_trades: totalTrades,
-      avg_roc,
-      expectancy,
-      best_trade: totals.best,
-      worst_trade: totals.worst,
+      // Win rate / expectancy / avg ROC / best-worst are campaign-level:
+      // one outcome per unbroken earnings-to-flat exposure (all legs,
+      // option and stock, netted), not one per row. A campaign counts
+      // toward this window if its LAST leg closed in [from, to] — see
+      // the campaign-level computation above. total_trades here means
+      // total campaigns, not total rows.
+      win_rate: campaignWinRate,
+      wins: campaignTotals.wins,
+      total_trades: campaignTotalCount,
+      avg_roc: campaignAvgRoc,
+      expectancy: campaignExpectancy,
+      best_trade: campaignTotals.best,
+      worst_trade: campaignTotals.worst,
+      // ~15 chains account-wide have no resolvable earnings event and
+      // fall back to chain-level grouping above rather than vanishing
+      // from win_rate/expectancy — this reports how many of the
+      // in-window campaigns are really unresolved single chains, and
+      // how much of the window's outcome P&L sits in them.
+      unresolved_campaigns: {
+        count: windowedUnresolvedCampaigns.length,
+        pnl: unresolvedCampaignsPnlInWindow,
+        all_time_count: unresolvedEarningsCampaigns.length,
+        all_time_pnl: unresolvedCampaignsPnlAllTime,
+      },
     },
     equity_curve,
     // Total-mode series: same bucketing, but still-open positions'

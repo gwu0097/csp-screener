@@ -16,8 +16,10 @@ export const maxDuration = 30;
 // Body: { items: [{ assignedPositionId: string }] }
 //
 // For each item we look up the parent (status='assigned') put,
-// compute cost basis = strike − avg_premium_per_share, then INSERT a
-// new row:
+// compute cost basis = strike − avg_premium_per_share (the premium
+// reduces the assigned shares' cost basis, so the stock round-trip
+// carries the whole economic result), zero the parent's realized_pnl,
+// then INSERT a new row:
 //   position_type='stock_long'
 //   symbol, broker copied from the put
 //   total_contracts = original_contracts × 100  (= share count)
@@ -171,12 +173,14 @@ export async function POST(req: NextRequest) {
       });
       continue;
     }
-    // Option A accounting: cost basis = strike. The put already
-    // captured the premium as realized_pnl; the stock carries the
-    // raw strike outlay. Unrealized on the stock = (spot − strike)
-    // × shares accounts for all assignment-side market loss without
-    // overlapping with the put's P&L.
-    const costBasis = strike;
+    // Premium reduces cost basis: the put's realized_pnl gets zeroed
+    // below (in the same request as this insert, so the two rows never
+    // go out of sync) and its collected premium is folded into the
+    // stock's cost basis instead. The stock round-trip then carries the
+    // whole economic result of the assignment cycle.
+    const avgPremiumSold =
+      p.avg_premium_sold !== null ? Number(p.avg_premium_sold) : 0;
+    const costBasis = Math.round((strike - avgPremiumSold) * 10000) / 10000;
     const shares = contracts * 100;
 
     const insert = await sb
@@ -228,6 +232,21 @@ export async function POST(req: NextRequest) {
         reason: `open-fill insert failed: ${openFill.error.message}`,
       });
       continue;
+    }
+    // Zero the parent put's realized_pnl now that its premium lives on
+    // the stock leg's cost basis instead — done only after the stock
+    // row + open fill succeed, so the two rows never go out of sync
+    // (an option can't end up zeroed with no stock leg to carry the
+    // economics, and vice versa).
+    const zeroParent = await sb
+      .from("positions")
+      .update({ realized_pnl: 0, updated_at: new Date().toISOString() })
+      .eq("id", p.id)
+      .eq("user_id", userId);
+    if (zeroParent.error) {
+      console.warn(
+        `[create-from-assignment] zeroing parent ${p.id} failed: ${zeroParent.error.message}`,
+      );
     }
     created.push({
       parentId: p.id,

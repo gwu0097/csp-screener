@@ -301,6 +301,7 @@ export async function reduceStockLotForCallAssignment(
   shares: number,
   strike: number,
   assignmentDate: string,
+  premiumPerShare = 0,
 ): Promise<
   | { ok: true; stockPositionId: string }
   | { ok: false; reason: "no_lot" | "ambiguous_lot" | "insert_failed"; detail?: string }
@@ -321,12 +322,16 @@ export async function reduceStockLotForCallAssignment(
   if (eligible.length > 1) return { ok: false, reason: "ambiguous_lot" };
 
   const lot = eligible[0];
+  // Sale proceeds = strike + the option premium collected on the call
+  // that got exercised — the premium belongs to this closing trade,
+  // not the (already-zeroed) option row. See mark-assigned/route.ts and
+  // confirm-expire/route.ts callers.
   const closeFill = await sb.from("fills").insert({
     position_id: lot.id,
     user_id: userId,
     fill_type: "close",
     contracts: shares,
-    premium: strike,
+    premium: Math.round((strike + premiumPerShare) * 10000) / 10000,
     fill_date: assignmentDate,
   });
   if ((closeFill as { error: { message: string } | null }).error) {

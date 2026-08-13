@@ -158,6 +158,12 @@ export type IntelligenceResponse = {
     expectancy: number;
     best_trade: { symbol: string; pnl: number; roc: number | null } | null;
     worst_trade: { symbol: string; pnl: number; roc: number | null } | null;
+    unresolved_campaigns: {
+      count: number;
+      pnl: number;
+      all_time_count: number;
+      all_time_pnl: number;
+    };
   };
   equity_curve: EquityPoint[];
   // Total-mode series — same bucketing as equity_curve, but includes
@@ -919,25 +925,36 @@ export function PerformanceSection({
               </span>
             </span>
             <div className="text-[10px] text-muted-foreground/70">
-              realized trades
+              resolved campaigns
+              {stats.unresolved_campaigns.count > 0 && (
+                <>
+                  {" — "}
+                  <span
+                    title="These chains have no resolvable earnings event, so they're scored individually here instead of merged into a multi-leg campaign."
+                  >
+                    {stats.unresolved_campaigns.count} unresolved (
+                    {fmtMoney(stats.unresolved_campaigns.pnl, true)})
+                  </span>
+                </>
+              )}
             </div>
           </div>
         </StatCard>
-        <StatCard label="Avg ROC / trade">
+        <StatCard label="Avg ROC / campaign">
           <div className="space-y-0.5">
             <span>{fmtPct(stats.avg_roc, 2)}</span>
             <div className="text-[10px] text-muted-foreground/70">
-              realized trades
+              resolved campaigns
             </div>
           </div>
         </StatCard>
-        <StatCard label="Expectancy / trade">
+        <StatCard label="Expectancy / campaign">
           <div className="space-y-0.5">
             <span className={stats.expectancy >= 0 ? "text-emerald-300" : "text-rose-300"}>
               {fmtMoney(stats.expectancy, true)}
             </span>
             <div className="text-[10px] text-muted-foreground/70">
-              realized trades
+              resolved campaigns
             </div>
           </div>
         </StatCard>

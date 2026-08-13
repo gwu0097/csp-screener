@@ -238,6 +238,8 @@ export async function POST(req: NextRequest) {
       const contracts = contractsByPosition.get(row.id) ?? 0;
       const shares = contracts * 100;
       const optionType = optionTypeByPosition.get(row.id) ?? "put";
+      const avgPremium =
+        row.avg_premium_sold !== null ? Number(row.avg_premium_sold) : null;
       if (optionType === "call") {
         const reduced = await reduceStockLotForCallAssignment(
           sb,
@@ -246,6 +248,7 @@ export async function POST(req: NextRequest) {
           shares,
           strike,
           row.expiry,
+          avgPremium ?? 0,
         );
         calledAway.push({
           positionId: row.id,
@@ -265,12 +268,16 @@ export async function POST(req: NextRequest) {
         });
         continue;
       }
-      const avgPremium =
-        row.avg_premium_sold !== null ? Number(row.avg_premium_sold) : null;
-      // Option A: cost basis = strike. Premium is realized on the
-      // put; market loss lives on the stock as (spot − strike) ×
-      // shares. Don't deduct premium here — that would double-count
-      // it against the put's realized_pnl.
+      // Display-only preview of what create-from-assignment will
+      // actually store: premium reduces cost basis. The put's
+      // realized_pnl doesn't get zeroed until create-from-assignment
+      // runs (the user may dismiss this modal without creating the
+      // stock row, and the put should keep its full-premium P&L until
+      // there's a stock leg to carry it instead).
+      const costBasis =
+        avgPremium !== null
+          ? Math.round((strike - avgPremium) * 100) / 100
+          : strike;
       assignments.push({
         positionId: row.id,
         symbol: row.symbol,
@@ -278,7 +285,7 @@ export async function POST(req: NextRequest) {
         strike,
         contracts,
         avgPremiumSold: avgPremium,
-        costBasis: strike,
+        costBasis,
         shares,
         expiry: row.expiry,
       });
