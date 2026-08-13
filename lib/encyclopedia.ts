@@ -1713,6 +1713,34 @@ function earliestChainExpiryOnOrAfter(
   return dates[0] ?? null;
 }
 
+// Schwab returns -999 as a "not computable" sentinel across several
+// options-analytics fields when a contract has no real market to derive
+// them from — confirmed live on TECH's Aug-2026 weekly chain (near-zero
+// volume, empty/near-empty markets): both volatility AND
+// theoreticalOptionValue read exactly -999 on the same illiquid strike,
+// and delta/gamma/theta/vega separately default to 1/0/0/0 regardless of
+// put-vs-call (a real put delta can never be +1) — a second, distinct
+// "no data" encoding on the same response. A raw value merely passing
+// Number.isFinite() lets -999 through disguised as real data — divided
+// by 100 as this function does, it becomes iv_before=-9.99, a corrupted
+// baseline that no retry can ever fix (every subsequent T1 attempt
+// measures the same -999 sentinel, so iv_crush_magnitude computes to
+// exactly 0 forever and the row is stuck failing too_early_capture).
+//
+// Bounds: reject anything <= 0 (IV is a variance-derived quantity, never
+// zero or negative for a real quote) and anything > 10.0 (1000%) — the
+// full observed history in this table's iv_before/iv_after tops out
+// around 3.0-3.6 (300-360%, this app's most extreme real earnings-crush
+// captures), so 1000% is ~3x headroom above anything ever genuinely
+// captured while still comfortably catching -999 and any similarly
+// out-of-range garbage.
+function parseSchwabImpliedVol(raw: number | null | undefined): number | null {
+  if (raw === null || raw === undefined || !Number.isFinite(raw)) return null;
+  const decimal = raw / 100;
+  if (decimal <= 0 || decimal > 10) return null;
+  return decimal;
+}
+
 // ---------- T0: pre-earnings capture ----------
 
 export type T0Result =
@@ -1809,14 +1837,30 @@ export async function captureEarningsT0(
   const implied_move_pct = straddle / price_before;
   // Schwab returns volatility as a percent (e.g. 45.6). Store decimal to
   // match every other *_pct / iv field convention in the project.
-  const callIv = Number.isFinite(legs.call.volatility) ? legs.call.volatility / 100 : null;
-  const putIv = Number.isFinite(legs.put.volatility) ? legs.put.volatility / 100 : null;
+  // parseSchwabImpliedVol also rejects the -999 "not computable"
+  // sentinel and any other implausible value — see its own comment.
+  const callIvRaw = legs.call.volatility;
+  const putIvRaw = legs.put.volatility;
+  const callIv = parseSchwabImpliedVol(callIvRaw);
+  const putIv = parseSchwabImpliedVol(putIvRaw);
   const iv_before =
     callIv !== null && putIv !== null
       ? (callIv + putIv) / 2
       : callIv ?? putIv ?? null;
   if (iv_before === null) {
-    return { captured: false, skipped: true, reason: "no_iv_data" };
+    // Distinguish "Schwab returned a value but it was rejected as
+    // implausible" (a caught sentinel — worth surfacing on its own,
+    // since silently lumping it in with ordinary missing data is
+    // exactly how a poisoned baseline goes unnoticed) from "Schwab
+    // returned nothing at all" (routine, e.g. a contract not yet
+    // quoted).
+    const sawRejectedValue =
+      (Number.isFinite(callIvRaw) && callIv === null) || (Number.isFinite(putIvRaw) && putIv === null);
+    return {
+      captured: false,
+      skipped: true,
+      reason: sawRejectedValue ? "invalid_volatility_quote" : "no_iv_data",
+    };
   }
   const two_x_em_strike = price_before * (1 - 2 * implied_move_pct);
 
@@ -1979,14 +2023,28 @@ export async function captureEarningsT1(
     return { captured: false, skipped: true, reason: "no_options_data" };
   }
   const price_after = legs.spot;
-  const callIv = Number.isFinite(legs.call.volatility) ? legs.call.volatility / 100 : null;
-  const putIv = Number.isFinite(legs.put.volatility) ? legs.put.volatility / 100 : null;
+  // parseSchwabImpliedVol rejects the -999 "not computable" sentinel and
+  // any other implausible value — see its own comment (defined above
+  // captureEarningsT0).
+  const callIvRaw = legs.call.volatility;
+  const putIvRaw = legs.put.volatility;
+  const callIv = parseSchwabImpliedVol(callIvRaw);
+  const putIv = parseSchwabImpliedVol(putIvRaw);
   const iv_after =
     callIv !== null && putIv !== null
       ? (callIv + putIv) / 2
       : callIv ?? putIv ?? null;
   if (iv_after === null) {
-    return { captured: false, skipped: true, reason: "no_iv_data" };
+    // Same distinction as captureEarningsT0 — a rejected sentinel is
+    // worth surfacing on its own, not silently folded into ordinary
+    // missing data.
+    const sawRejectedValue =
+      (Number.isFinite(callIvRaw) && callIv === null) || (Number.isFinite(putIvRaw) && putIv === null);
+    return {
+      captured: false,
+      skipped: true,
+      reason: sawRejectedValue ? "invalid_volatility_quote" : "no_iv_data",
+    };
   }
 
   const price_before = row.price_before;
