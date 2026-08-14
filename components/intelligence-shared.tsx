@@ -1253,7 +1253,6 @@ export function PerformanceSection({
         rows={data.partial_closes ?? []}
         total={data.total_partial_pnl ?? 0}
       />
-      <PairedAssignmentsPanel pairs={data.paired_assignments ?? []} />
     </section>
   );
 }
@@ -1589,93 +1588,17 @@ function PartialClosesPanel({
   );
 }
 
-// Lists each closed stock_long alongside its parent put — the linked
-// trade view. Renders nothing when there are no closed assignments
-// yet, so the panel only shows up when there's something to surface.
-function PairedAssignmentsPanel({ pairs }: { pairs: PairedAssignment[] }) {
-  if (pairs.length === 0) return null;
-  return (
-    <div className="rounded-md border border-border bg-background/40 p-3">
-      <div className="mb-2 text-base font-medium">Paired assignments</div>
-      <div className="space-y-3">
-        {pairs.map((p) => {
-          const parentPnl = p.parent?.realizedPnl ?? 0;
-          const premiumCollected = p.parent?.premiumCollected ?? 0;
-          const stockPnl = p.stock.realizedPnl;
-          const totalColor =
-            p.totalPnl >= 0 ? "text-emerald-300" : "text-rose-300";
-          const premiumColor =
-            premiumCollected >= 0 ? "text-emerald-300" : "text-rose-300";
-          const stockColor =
-            stockPnl >= 0 ? "text-emerald-300" : "text-rose-300";
-          return (
-            <div
-              key={p.stock.positionId}
-              className="rounded border border-border/60 bg-background/40 p-3 text-base"
-            >
-              <div className="mb-1 flex items-baseline justify-between">
-                <span className="text-base font-semibold">{p.symbol}</span>
-                <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
-                  {p.broker ?? ""}
-                </span>
-              </div>
-              <div className="space-y-0.5 font-mono">
-                {p.parent ? (
-                  <div
-                    className="flex justify-between gap-3"
-                    title="Premium collected on the assigned shares — folded into the stock's cost basis below, not counted separately in Total P&L."
-                  >
-                    <span className="text-muted-foreground">
-                      ${p.parent.strike} put × {p.parent.contracts} — premium collected:
-                    </span>
-                    <span className={premiumColor}>
-                      {fmtMoney(premiumCollected, true)}
-                    </span>
-                  </div>
-                ) : (
-                  <div className="flex justify-between gap-3 text-muted-foreground">
-                    <span>Parent put — not found</span>
-                    <span>—</span>
-                  </div>
-                )}
-                {p.parent && Math.abs(parentPnl) > 0.001 && (
-                  <div
-                    className="flex justify-between gap-3 text-[11px]"
-                    title="Left on the option row after the assignment split — from contracts closed separately from the assignment (e.g. a partial buyback), not part of the premium above."
-                  >
-                    <span className="text-muted-foreground">option leg residual:</span>
-                    <span className={parentPnl >= 0 ? "text-emerald-300/80" : "text-rose-300/80"}>
-                      {fmtMoney(parentPnl, true)}
-                    </span>
-                  </div>
-                )}
-                <div className="flex justify-between gap-3">
-                  <span className="text-muted-foreground">
-                    {p.stock.shares} shares
-                    {p.stock.costBasis !== null
-                      ? ` @ $${p.stock.costBasis.toFixed(2)} cost — stock P&L:`
-                      : " — stock P&L:"}
-                  </span>
-                  <span className={stockColor}>{fmtMoney(stockPnl, true)}</span>
-                </div>
-                <div className="my-1 border-t border-border/60" />
-                <div className="flex justify-between gap-3 text-base font-semibold">
-                  <span>Total {p.symbol} P&L:</span>
-                  <span className={totalColor}>{fmtMoney(p.totalPnl, true)}</span>
-                </div>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-      <div className="mt-2 text-[10px] text-muted-foreground/70">
-        Each row is one assignment cycle, not a full campaign — a campaign can also include option
-        legs that were rolled or bought back without ever being assigned, so these totals are a
-        subset of the campaign figures above, not a reconciliation of them.
-      </div>
-    </div>
-  );
-}
+// PairedAssignmentsPanel was removed from the Performance page — it
+// answered a per-trade question on a page that answers a period
+// question, and the detail it showed (premium collected, cost basis,
+// stock P&L per assignment cycle) is now reachable through the ticker
+// P&L chart's per-campaign tooltip rows instead. The underlying data
+// this rendered — paired_assignments[] in IntelligenceResponse, built
+// in app/api/intelligence/route.ts — is intentionally left in place
+// and still computed/returned; nothing else in the codebase consumes
+// it (confirmed by search), so it's dormant rather than deleted. If a
+// future page wants the per-assignment-cycle view back, the data is
+// already there.
 
 // Augmented chart-point type — the synthetic "Now" point in Total mode
 // carries an extra `nowDetails` payload so the tooltip can render the
