@@ -724,10 +724,17 @@ export function ScreenerView({ connected }: Props) {
   const [dailyContext, setDailyContext] = useState<
     { market: MarketContext; openPositions: number } | null
   >(null);
-  // Refresh-token expiry status. Drives the header badge color/text.
+  // Refresh-token expiry status. Drives the header badge color/text —
+  // shouldWarn/warningClause/warningMessage come from the shared
+  // lib/schwab-token-warning check (via /api/schwab/token-status), the
+  // same source of truth the dashboard banner uses. This component
+  // does not compute its own days-remaining threshold.
   const [tokenStatus, setTokenStatus] = useState<{
-    status: "missing" | "expired" | "warning" | "soft_warn" | "ok";
+    status: "missing" | "expired" | "refresh_failed" | "ok";
     expiresInDays: number | null;
+    shouldWarn: boolean;
+    warningClause: 1 | 2 | 3 | 4 | null;
+    warningMessage: string;
   } | null>(null);
 
   useEffect(() => {
@@ -744,6 +751,9 @@ export function ScreenerView({ connected }: Props) {
           setTokenStatus({
             status: j.status,
             expiresInDays: j.expiresInDays ?? null,
+            shouldWarn: j.shouldWarn ?? false,
+            warningClause: j.warningClause ?? null,
+            warningMessage: j.warningMessage ?? "",
           }),
         )
         .catch(() => {
@@ -2228,48 +2238,59 @@ export function ScreenerView({ connected }: Props) {
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-3 text-base">
             {(() => {
-              // Tier the badge by refresh-token age. Click-through to
-              // /api/auth/schwab is the same surface as the
-              // SchwabTokenBanner reconnect button.
+              // Trigger AND badge tone come from the shared
+              // lib/schwab-token-warning check (via tokenStatus.
+              // shouldWarn/warningClause), the same source of truth
+              // the dashboard banner uses — no local days-remaining
+              // threshold here. Click-through to /api/auth/schwab is
+              // the same surface as the SchwabTokenBanner reconnect
+              // button.
               let cls =
                 "border-transparent bg-emerald-500/90 text-white hover:bg-emerald-500";
               let text = "connected";
               let reconnect = false;
+              let title: string | undefined;
               if (!connected) {
                 cls =
                   "border-transparent bg-rose-500/90 text-white hover:bg-rose-500";
                 text = "disconnected";
                 reconnect = true;
               } else if (tokenStatus) {
-                if (tokenStatus.status === "expired") {
+                if (tokenStatus.status === "expired" || tokenStatus.status === "refresh_failed") {
                   cls =
                     "border-transparent bg-rose-500/90 text-white hover:bg-rose-500";
-                  text = "expired";
+                  text = tokenStatus.status === "expired" ? "expired" : "refresh failed";
                   reconnect = true;
-                } else if (tokenStatus.status === "warning") {
-                  cls =
-                    "border-transparent bg-orange-500/90 text-white hover:bg-orange-500";
-                  text =
-                    tokenStatus.expiresInDays !== null &&
-                    tokenStatus.expiresInDays < 1
-                      ? "expires today"
-                      : "expires soon";
+                  title = tokenStatus.warningMessage || undefined;
+                } else if (tokenStatus.shouldWarn) {
+                  title = tokenStatus.warningMessage;
                   reconnect = true;
-                } else if (tokenStatus.status === "soft_warn") {
-                  cls =
-                    "border-transparent bg-amber-400/90 text-black hover:bg-amber-400";
-                  text = "expires soon";
-                  reconnect = true;
+                  if (tokenStatus.warningClause === 4) {
+                    cls =
+                      "border-transparent bg-rose-500/90 text-white hover:bg-rose-500";
+                    text =
+                      tokenStatus.expiresInDays !== null && tokenStatus.expiresInDays <= 0
+                        ? "expired"
+                        : "expires <24h";
+                  } else if (tokenStatus.warningClause === 2) {
+                    cls =
+                      "border-transparent bg-orange-500/90 text-white hover:bg-orange-500";
+                    text = "desynced";
+                  } else {
+                    cls =
+                      "border-transparent bg-amber-400/90 text-black hover:bg-amber-400";
+                    text = "reconnect this weekend";
+                  }
                 }
               }
               const badge = (
-                <Badge className={cls}>Schwab: {text}</Badge>
+                <Badge className={cls} title={title}>Schwab: {text}</Badge>
               );
               if (!reconnect) return badge;
               return (
                 <a
                   href="/api/auth/schwab"
-                  title="Reconnect Schwab"
+                  title={title ?? "Reconnect Schwab"}
                   className="cursor-pointer"
                 >
                   {badge}

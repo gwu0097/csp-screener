@@ -2,10 +2,10 @@
 
 // Proactive Schwab refresh-token expiry banner. Pulls
 // /api/schwab/token-status on mount and renders a colored strip when
-// the refresh token is within ~3 days of expiring. Expired or
-// missing tokens get the red strip — same surface as the existing
-// auth-error path but fired BEFORE the next options call fails, not
-// after.
+// the shared lib/schwab-token-warning check says to warn (or the token
+// is missing/refresh-failed). Trigger AND copy both come from the
+// route's shouldWarn/warningClause/warningMessage fields — this
+// component does not compute its own days-remaining threshold.
 //
 // The Reconnect link points at /api/auth/schwab which redirects into
 // Schwab's OAuth flow; the existing callback persists the new
@@ -15,13 +15,7 @@
 import { useEffect, useState } from "react";
 import { AlertTriangle, RefreshCw } from "lucide-react";
 
-type Status =
-  | "missing"
-  | "expired"
-  | "refresh_failed"
-  | "warning"
-  | "soft_warn"
-  | "ok";
+type Status = "missing" | "expired" | "refresh_failed" | "ok";
 
 type TokenStatus = {
   valid: boolean;
@@ -33,18 +27,10 @@ type TokenStatus = {
   accessExpired?: boolean;
   refreshAttempted?: boolean;
   refreshError?: string | null;
+  shouldWarn: boolean;
+  warningClause: 1 | 2 | 3 | 4 | null;
+  warningMessage: string;
 };
-
-function fmtDays(d: number | null): string {
-  if (d === null || !Number.isFinite(d)) return "—";
-  if (d < 0) return "expired";
-  if (d < 1) {
-    const hrs = Math.max(0, Math.round(d * 24));
-    return `${hrs} hour${hrs === 1 ? "" : "s"}`;
-  }
-  const days = Math.floor(d);
-  return `${days} day${days === 1 ? "" : "s"}`;
-}
 
 export function SchwabTokenBanner() {
   const [status, setStatus] = useState<TokenStatus | null>(null);
@@ -78,19 +64,21 @@ export function SchwabTokenBanner() {
   }, []);
 
   if (!status || dismissed) return null;
-  if (status.status === "ok" || status.status === "missing") return null;
-  // Note: "missing" is hidden because the rest of the app already
-  // surfaces "Connect Schwab to run analysis" at the action sites.
-  // The banner is for the in-between cases where the user IS
-  // connected but about to lose access.
+  // "missing" is hidden because the rest of the app already surfaces
+  // "Connect Schwab to run analysis" at the action sites. The banner is
+  // for the in-between cases where the user IS connected but either
+  // has an active failure or is approaching/inside a reconnect window.
+  if (status.status === "missing") return null;
+  const isFailure = status.status === "refresh_failed";
+  if (!isFailure && !status.shouldWarn) return null;
 
-  const { status: kind, expiresInDays, refreshError } = status;
-  const tone =
-    kind === "expired" || kind === "refresh_failed"
+  const tone: "red" | "orange" | "amber" = isFailure
+    ? "red"
+    : status.warningClause === 4
       ? "red"
-      : kind === "warning"
+      : status.warningClause === 2
         ? "orange"
-        : "yellow";
+        : "amber";
 
   const palette =
     tone === "red"
@@ -100,18 +88,12 @@ export function SchwabTokenBanner() {
         : "border-amber-500/40 bg-amber-500/10 text-amber-100";
 
   const title = !isAdmin
-    ? kind === "expired" || kind === "refresh_failed"
+    ? isFailure
       ? "Live market data unavailable — the admin's broker connection is down."
-      : `Live market data may pause soon (broker token expires in ~${fmtDays(expiresInDays)}).`
-    : kind === "expired"
-      ? "Schwab token expired — reconnect to restore options data."
-      : kind === "refresh_failed"
-        ? `Schwab auto-refresh failed${refreshError ? ` (${refreshError})` : ""}. Reconnect to restore live data.`
-        : kind === "warning" && expiresInDays !== null && expiresInDays < 1
-          ? "Schwab token expires within 24 hours. Reconnect now."
-          : kind === "warning"
-            ? `Schwab token expires in ~${fmtDays(expiresInDays)}. Reconnect now.`
-            : `Schwab token expires in ~${fmtDays(expiresInDays)}. Reconnect soon to avoid interruption.`;
+      : "Live market data may pause soon — the admin's broker token needs reconnecting."
+    : isFailure
+      ? `Schwab auto-refresh failed${status.refreshError ? ` (${status.refreshError})` : ""}. Reconnect to restore live data.`
+      : status.warningMessage;
 
   return (
     <div

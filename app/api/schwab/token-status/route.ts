@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
 import { getValidAccessToken, forceRefreshToken } from "@/lib/schwab";
 import { requireAdmin, authErrorResponse } from "@/lib/auth";
+import { evaluateSchwabTokenWarning } from "@/lib/schwab-token-warning";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -30,19 +31,27 @@ export const revalidate = 0;
 //   "missing"          no row in schwab_tokens — never connected
 //   "expired"          refresh_token_expires_at <= now
 //   "refresh_failed"   live refresh attempted and failed
-//   "warning"          < 2 days remaining on refresh
-//   "soft_warn"        < 3 days remaining on refresh
-//   "ok"               > 3 days remaining
+//   "ok"               none of the above (may still have shouldWarn=true —
+//                      see below)
+//
+// shouldWarn/warningClause/warningMessage: the SINGLE source of truth
+// for whether/why/what to tell the user about reconnecting, computed by
+// lib/schwab-token-warning.evaluateSchwabTokenWarning — every frontend
+// surface (dashboard banner, screener badge) renders these directly
+// instead of re-deriving its own days-remaining threshold. Only
+// evaluated when the token is otherwise valid (missing/refresh_failed
+// stay their own always-shown failure states, independent of the
+// weekend-cycle clauses).
 
-type StatusKind =
-  | "missing"
-  | "expired"
-  | "refresh_failed"
-  | "warning"
-  | "soft_warn"
-  | "ok";
+type StatusKind = "missing" | "expired" | "refresh_failed" | "ok";
 
-const DAY_MS = 86_400_000;
+type WarningFields = {
+  shouldWarn: boolean;
+  warningClause: 1 | 2 | 3 | 4 | null;
+  warningMessage: string;
+};
+
+const NO_WARNING: WarningFields = { shouldWarn: false, warningClause: null, warningMessage: "" };
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
   // Admin-only, like every other Schwab route: the response carries
@@ -67,25 +76,33 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
         refreshError: result.error,
         liveVerified: false,
         liveVerifiedAt: null,
+        ...NO_WARNING,
       });
     }
-    const now = Date.now();
-    const expiry = new Date(result.newRefreshExpiresAt).getTime();
-    const expiresInDays = (expiry - now) / DAY_MS;
-    let status: StatusKind;
-    if (expiresInDays < 2) status = "warning";
-    else if (expiresInDays < 3) status = "soft_warn";
-    else status = "ok";
+    const now = new Date();
+    // A verify success just refreshed the token this instant — pass
+    // `now` as lastRefreshedAt so clause 3's 24h suppression correctly
+    // treats this as freshly reconnected (nothing to warn about right
+    // after a successful reconnect).
+    const warning = evaluateSchwabTokenWarning({
+      expiresAt: result.newRefreshExpiresAt,
+      lastRefreshedAt: now,
+      now,
+    });
+    const expiresInDays = (new Date(result.newRefreshExpiresAt).getTime() - now.getTime()) / DAY_MS;
     return NextResponse.json({
       valid: true,
-      status,
+      status: "ok" as StatusKind,
       expiresAt: result.newRefreshExpiresAt,
       expiresInDays: Number(expiresInDays.toFixed(2)),
       ageHours: 0,
       refreshAttempted: true,
       refreshError: null,
       liveVerified: true,
-      liveVerifiedAt: new Date(now).toISOString(),
+      liveVerifiedAt: now.toISOString(),
+      shouldWarn: warning.shouldWarn,
+      warningClause: warning.clause,
+      warningMessage: warning.message,
     });
   }
   const sb = createServerClient();
@@ -103,6 +120,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
         expiresAt: null,
         expiresInDays: null,
         ageHours: null,
+        ...NO_WARNING,
       },
       { status: 200 },
     );
@@ -120,22 +138,27 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       expiresAt: null,
       expiresInDays: null,
       ageHours: null,
+      ...NO_WARNING,
     });
   }
 
-  const now = Date.now();
+  const now = new Date();
+  const nowMs = now.getTime();
   const expiry = new Date(row.refresh_token_expires_at).getTime();
   const refreshedAt = new Date(row.updated_at).getTime();
-  const expiresInMs = expiry - now;
+  const expiresInMs = expiry - nowMs;
   const expiresInDays = expiresInMs / DAY_MS;
-  const ageHours = (now - refreshedAt) / (60 * 60 * 1000);
+  const ageHours = (nowMs - refreshedAt) / (60 * 60 * 1000);
 
-  let status: StatusKind;
-  if (expiresInMs <= 0) status = "expired";
-  else if (expiresInDays < 1) status = "warning"; // < 24 hrs
-  else if (expiresInDays < 2) status = "warning"; // 1-2 days (orange)
-  else if (expiresInDays < 3) status = "soft_warn"; // 2-3 days (yellow)
-  else status = "ok";
+  let status: StatusKind = expiresInMs <= 0 ? "expired" : "ok";
+  // evaluateSchwabTokenWarning already treats "already expired" as
+  // clause 4 — no special-casing needed here, it's called
+  // unconditionally and produces the right message either way.
+  const warning = evaluateSchwabTokenWarning({
+    expiresAt: row.refresh_token_expires_at,
+    lastRefreshedAt: row.updated_at,
+    now,
+  });
 
   // Access-side check. Schwab access tokens are 30-minute TTL; the
   // normal lifecycle is "expired most of the time, refreshed on
@@ -144,7 +167,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   // calling getValidAccessToken throws. That's the "auto-refresh
   // is broken" signal the banner needs to flag.
   const accessExpiry = new Date(row.access_token_expires_at).getTime();
-  const accessExpired = accessExpiry <= now;
+  const accessExpired = accessExpiry <= nowMs;
   let refreshAttempted = false;
   let refreshError: string | null = null;
   if (accessExpired && status !== "expired") {
@@ -169,5 +192,14 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     refreshError,
     liveVerified: false,
     liveVerifiedAt: null,
+    // status can flip to "refresh_failed" above, after `warning` was
+    // already computed — deliberate: a live refresh_failed always wins
+    // in the UI (each component checks status first), so a stale
+    // clause-based message alongside it is harmless, never shown.
+    shouldWarn: warning.shouldWarn,
+    warningClause: warning.clause,
+    warningMessage: warning.message,
   });
 }
+
+const DAY_MS = 86_400_000;

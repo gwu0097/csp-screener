@@ -10,14 +10,23 @@ import { AlertTriangle } from "lucide-react";
 // check comes back healthy; landing back on /dashboard after the
 // OAuth redirect does not clear it on its own, only the next
 // successful verify does. Renders nothing for members (the route is
-// admin-only; a 401/403 here is expected and silent) and nothing
-// while the connection is genuinely healthy on a weekday.
+// admin-only; a 401/403 here is expected and silent).
+//
+// Trigger AND copy come from the route's shouldWarn/warningClause/
+// warningMessage — computed server-side by
+// lib/schwab-token-warning.evaluateSchwabTokenWarning in
+// America/Los_Angeles, not from the browser's own clock/timezone (the
+// previous version read `new Date().getDay()` client-side, which used
+// whichever timezone the visitor's OS happened to be set to).
 type StatusResp = {
   valid: boolean;
-  status: "missing" | "expired" | "refresh_failed" | "warning" | "soft_warn" | "ok";
+  status: "missing" | "expired" | "refresh_failed" | "ok";
   expiresAt: string | null;
   expiresInDays: number | null;
   liveVerified: boolean;
+  shouldWarn: boolean;
+  warningClause: 1 | 2 | 3 | 4 | null;
+  warningMessage: string;
 };
 
 export function SchwabStatusBanner() {
@@ -44,31 +53,18 @@ export function SchwabStatusBanner() {
 
   if (!checked || !resp) return null;
 
-  const day = new Date().getDay(); // 0=Sun..6=Sat
-  const isWeekend = day === 0 || day === 6;
   const isFailure =
     resp.status === "expired" || resp.status === "refresh_failed" || resp.status === "missing";
-  const weekdayUrgent =
-    !isWeekend && !isFailure && resp.expiresInDays !== null && resp.expiresInDays < 2;
-
-  // Show on: any failure (any day), any weekend (regardless of time
-  // remaining — nothing touches the token over a weekend until next
-  // Saturday's health check), or a weekday within ~2 days of expiry.
-  // Healthy weekday with >2 days left: no banner.
-  const shouldShow = isFailure || isWeekend || weekdayUrgent;
+  const shouldShow = isFailure || resp.shouldWarn;
   if (!shouldShow) return null;
-
-  const expiresLabel = resp.expiresAt
-    ? new Date(resp.expiresAt).toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" })
-    : "unknown";
 
   const message = isFailure
     ? `Schwab connection is down (live check just now: ${resp.status}). Reconnect to restore live chains and capture.`
-    : isWeekend
-      ? `Schwab token expires ${expiresLabel} — reconnect now to reset the clock to next Saturday's check instead of risking a weekday failure.`
-      : `Schwab token expires ${expiresLabel} (${resp.expiresInDays?.toFixed(1)} days) — reconnect soon.`;
+    : resp.warningMessage;
 
-  const urgent = isFailure || weekdayUrgent;
+  // Clause 4 (expired/<24h) reads as urgent regardless of what fired
+  // it; clauses 1-3 are the routine weekend-cycle reminders.
+  const urgent = isFailure || resp.warningClause === 4;
 
   return (
     <div
