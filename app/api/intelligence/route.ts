@@ -1330,16 +1330,29 @@ export async function GET(req: NextRequest) {
   if (thinGrades.length > 0 && reliableGrades.length >= 2) {
     calibrationSummary += ` (${thinGrades.map((g) => `${g.key}: ${Math.round(g.win_rate * 100)}% on n=${g.trades} — too few to include`).join("; ")}.)`;
   }
-  // A grade winning most of the time but losing money on average is a
+  // A bucket winning most of the time but losing money on average is a
   // real red flag (a few large losses outweighing many small wins) —
-  // general check across whichever grade shows the pattern, not
+  // general check across whichever bucket shows the pattern, not
   // hardcoded to whichever one happens to show it in current data.
-  const negativeRocWarnings = presentGrades
-    .filter((g) => g.win_rate > 0.5 && g.avg_roc !== null && g.avg_roc < 0)
-    .map(
-      (g) =>
-        `⚠ Grade ${g.key}: ${Math.round(g.win_rate * 100)}% win rate but ${(g.avg_roc! * 100).toFixed(2)}% avg ROC (n=${g.trades}) — high win rate, negative expectancy: losses are outsized relative to wins.`,
-    );
+  // Shared by every bucket dimension that wants this warning (grade,
+  // %OTM, ...) so the threshold can't drift between them — same
+  // win_rate > 50% / avg_roc < 0 condition, same wording shape.
+  function findNegativeRocWarnings(
+    buckets: Array<{ key: string; trades: number; win_rate: number; avg_roc: number | null }>,
+    label: string,
+  ): string[] {
+    return buckets
+      .filter((b) => b.trades > 0 && b.win_rate > 0.5 && b.avg_roc !== null && b.avg_roc < 0)
+      .map(
+        (b) =>
+          `⚠ ${label} ${b.key}: ${Math.round(b.win_rate * 100)}% win rate but ${(b.avg_roc! * 100).toFixed(2)}% avg ROC (n=${b.trades}) — high win rate, negative expectancy: losses are outsized relative to wins.`,
+      );
+  }
+  const negativeRocWarnings = findNegativeRocWarnings(presentGrades, "Grade");
+  const otmNegativeRocWarnings = findNegativeRocWarnings(
+    by_otm.filter((b) => b.key !== "Unknown"),
+    "% OTM bucket",
+  );
 
   // Windowed positionIds — deliberately NOT allPositionIds (all-time,
   // shared with Section 2's ticker-rankings recsBySymbol below, which
@@ -1812,6 +1825,7 @@ export async function GET(req: NextRequest) {
       by_dte,
       by_industry,
       by_otm,
+      otm_warnings: otmNegativeRocWarnings,
       calibration: {
         drift: calibrationDrift,
         summary: calibrationSummary,

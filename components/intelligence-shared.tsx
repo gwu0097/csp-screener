@@ -251,6 +251,7 @@ export type IntelligenceResponse = {
     by_dte: PatternBucket[];
     by_industry: PatternBucket[];
     by_otm: PatternBucket[];
+    otm_warnings: string[];
     calibration: { drift: boolean; summary: string; warnings: string[] };
     rec_accuracy: {
       close_correct: number;
@@ -2214,7 +2215,7 @@ export function PatternIntelligenceSection({
           <DayOfWeekPanel buckets={patterns.by_day_of_week} />
           <VixRegimePanel buckets={patterns.by_vix_regime} />
           <DtePanel buckets={patterns.by_dte} />
-          <OtmPanel buckets={patterns.by_otm} />
+          <OtmPanel buckets={patterns.by_otm} warnings={patterns.otm_warnings} />
           <IndustryPanel buckets={patterns.by_industry} />
           <CalibrationPanel buckets={patterns.by_grade} calibration={patterns.calibration} />
           {patterns.rec_accuracy && <RecAccuracyPanel accuracy={patterns.rec_accuracy} />}
@@ -2428,7 +2429,7 @@ function DtePanel({ buckets }: { buckets: PatternBucket[] }) {
 // IndustryPanel/CalibrationPanel already do. % OTM is derived
 // (entry_stock_price vs strike), not a stored field — see otmPct in
 // route.ts for the put/call sign handling.
-function OtmPanel({ buckets }: { buckets: PatternBucket[] }) {
+function OtmPanel({ buckets, warnings }: { buckets: PatternBucket[]; warnings: string[] }) {
   const nonEmpty = buckets.filter((b) => b.trades > 0);
   const best = bucketInterpBest(buckets.filter((b) => b.key !== "Unknown"));
   const interp =
@@ -2467,6 +2468,11 @@ function OtmPanel({ buckets }: { buckets: PatternBucket[] }) {
             </tbody>
           </table>
           <div className="mt-2 text-sm text-muted-foreground">{interp}</div>
+          {warnings.map((w) => (
+            <div key={w} className="mt-1 text-sm font-medium text-amber-400">
+              {w}
+            </div>
+          ))}
         </>
       )}
       <div className="mt-2 text-[10px] text-muted-foreground/70">
