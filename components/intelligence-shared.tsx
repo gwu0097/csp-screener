@@ -148,6 +148,20 @@ export type TickerPnl = {
   // their true all-time outcome can disagree (even in sign), so they're
   // flagged instead of folded into winRate.
   spanningCampaigns: Array<{ allTimeNet: number }>;
+  // Full per-campaign breakdown of this ticker's windowed contribution
+  // — every campaign touching it in-window, sorted by |pnl| descending.
+  // Sums to totalNet exactly. Capped to a legible tail in the tooltip,
+  // not here.
+  campaigns: Array<{
+    key: string;
+    date: string;
+    dateIsEarnings: boolean;
+    strikes: number[];
+    contracts: number;
+    collateral: number;
+    pnl: number;
+    roc: number | null;
+  }>;
 };
 
 export type PairedAssignment = {
@@ -1255,6 +1269,44 @@ function spanningCampaignsNote(spanning: Array<{ allTimeNet: number }>): string 
   return `${spanning.length} campaigns span beyond this window (combined net ${fmtMoney(sum, true, true)} all-time)`;
 }
 
+// Beyond this, "+N more campaigns: $X" instead of another row — a
+// ticker traded ten times in a window shouldn't produce a ten-line
+// tooltip. Rows are pre-sorted by |pnl| descending from the API.
+const CAMPAIGN_DETAIL_CAP = 5;
+
+function fmtCampaignDate(iso: string, isEarnings: boolean): string {
+  const label = new Date(iso + "T00:00:00Z").toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC",
+  });
+  // "~" marks a campaign with no resolvable earnings event — the date
+  // shown is the earliest opened leg, an approximation, not the actual
+  // earnings print (matches the "unresolved campaigns" framing used
+  // elsewhere on this page rather than presenting a guess as fact).
+  return isEarnings ? label : `~${label}`;
+}
+
+// A campaign with a strike ladder (scaled entry across several
+// strikes) has no single strike — shown as a range ("$140-150") rather
+// than a blended average, which would imply a strike that was never
+// actually traded. Collateral/ROC below are computed from the real
+// per-leg strikes regardless of how this label renders.
+function fmtStrikes(strikes: number[]): string {
+  if (strikes.length === 0) return "—";
+  if (strikes.length === 1) return `$${strikes[0]}`;
+  return `$${strikes[0]}-${strikes[strikes.length - 1]}`;
+}
+
+function formatCampaignDetailRow(c: TickerPnl["campaigns"][number]): string {
+  const date = fmtCampaignDate(c.date, c.dateIsEarnings);
+  const strikePart = `${fmtStrikes(c.strikes)} x ${c.contracts}`;
+  const collateralPart = c.collateral > 0 ? fmtMoney(c.collateral, false, true) : "—";
+  const pnlPart = fmtMoney(c.pnl, true, true);
+  const rocPart = c.roc !== null ? ` (${fmtPct(c.roc, 1)})` : "";
+  return `${date} · ${strikePart} · ${collateralPart} · ${pnlPart}${rocPart}`;
+}
+
 // One vertical column per ticker, netting options + stock together —
 // row-level windowed exactly like the Realized P&L card and equity
 // curve above it, so these always sum to combined_realized_pnl (rows
@@ -1353,6 +1405,22 @@ function TickerPnlPanel({
               }
               const note = spanningCampaignsNote(d.spanningCampaigns);
               if (note) lines.push(note);
+              if (d.campaigns.length > 0) {
+                lines.push("");
+                lines.push(
+                  d.campaigns.length === 1 ? "Campaign:" : `Campaigns (${d.campaigns.length}):`,
+                );
+                const shownCampaigns = d.campaigns.slice(0, CAMPAIGN_DETAIL_CAP);
+                const restCampaigns = d.campaigns.slice(CAMPAIGN_DETAIL_CAP);
+                for (const c of shownCampaigns) lines.push(formatCampaignDetailRow(c));
+                if (restCampaigns.length > 0) {
+                  const restSum =
+                    Math.round(restCampaigns.reduce((s, c) => s + c.pnl, 0) * 100) / 100;
+                  lines.push(
+                    `+${restCampaigns.length} more campaign${restCampaigns.length === 1 ? "" : "s"}: ${fmtMoney(restSum, true, true)}`,
+                  );
+                }
+              }
               return lines;
             },
           },

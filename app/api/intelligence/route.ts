@@ -477,6 +477,19 @@ export async function GET(req: NextRequest) {
   // spans outside the window; campaignCount/winRate in the tooltip
   // still look up each touching campaign's true all-time net via
   // campaignMap, independent of the bar's own windowed dollar value.
+  // earnings_date per resolved campaign, for the per-campaign tooltip
+  // breakdown below — campaignMap/CampaignAgg never needed this before
+  // (it only groups/nets positions, which don't carry the campaigns
+  // table's own earnings_date column).
+  const campaignsRes = await sb
+    .from("campaigns")
+    .select("id,earnings_date")
+    .eq("user_id", userId);
+  const earningsDateByCampaignId = new Map<string, string>();
+  for (const c of (campaignsRes.data ?? []) as Array<{ id: string; earnings_date: string }>) {
+    earningsDateByCampaignId.set(c.id, c.earnings_date);
+  }
+
   type TickerAgg = { optionsNet: number; stockNet: number; campaignKeys: Set<string> };
   const tickerMap = new Map<string, TickerAgg>();
   const addToTicker = (symbol: string, key: string, isStock: boolean, pnl: number) => {
@@ -489,12 +502,67 @@ export async function GET(req: NextRequest) {
     else t.optionsNet += pnl;
     t.campaignKeys.add(key);
   };
+  // Per (symbol, campaignKey): windowed P&L (option+stock, same rows
+  // counted into tickerMap above — a campaign row's pnl always sums
+  // exactly to its ticker's totalNet by construction, since both come
+  // from the identical windowed row set, just grouped differently) plus
+  // the windowed OPTION legs, which feed the tooltip's strike/contracts/
+  // collateral/ROC fields. Stock legs don't contribute a strike or
+  // collateral figure — options are what "collateral deployed" means
+  // for a CSP campaign.
+  type TickerCampaignAgg = {
+    pnl: number;
+    optionLegs: Array<{ opened_date: string; closed_date: string | null; strike: number; total_contracts: number }>;
+  };
+  const tickerCampaignMap = new Map<string, Map<string, TickerCampaignAgg>>();
+  const addToTickerCampaign = (
+    symbol: string,
+    key: string,
+    pnl: number,
+    optionLeg: TickerCampaignAgg["optionLegs"][number] | null,
+  ) => {
+    let bySymbol = tickerCampaignMap.get(symbol);
+    if (!bySymbol) {
+      bySymbol = new Map<string, TickerCampaignAgg>();
+      tickerCampaignMap.set(symbol, bySymbol);
+    }
+    let agg = bySymbol.get(key);
+    if (!agg) {
+      agg = { pnl: 0, optionLegs: [] };
+      bySymbol.set(key, agg);
+    }
+    agg.pnl += pnl;
+    if (optionLeg) agg.optionLegs.push(optionLeg);
+  };
   for (const p of windowed) {
-    addToTicker(p.symbol, campaignKey(p), false, Number(p.realized_pnl ?? 0));
+    const key = campaignKey(p);
+    addToTicker(p.symbol, key, false, Number(p.realized_pnl ?? 0));
+    addToTickerCampaign(p.symbol, key, Number(p.realized_pnl ?? 0), {
+      opened_date: p.opened_date,
+      closed_date: p.closed_date,
+      strike: Number(p.strike),
+      total_contracts: Number(p.total_contracts),
+    });
   }
   for (const p of windowedStocks) {
-    addToTicker(p.symbol, campaignKey(p), true, Number(p.realized_pnl ?? 0));
+    const key = campaignKey(p);
+    addToTicker(p.symbol, key, true, Number(p.realized_pnl ?? 0));
+    addToTickerCampaign(p.symbol, key, Number(p.realized_pnl ?? 0), null);
   }
+  type TickerCampaignRow = {
+    key: string;
+    // Earnings date when the campaign resolved to a real earnings
+    // event; otherwise the earliest opened_date among this row's
+    // windowed option legs, with dateIsEarnings=false so the frontend
+    // can mark it as approximate instead of presenting a guess as fact.
+    date: string;
+    dateIsEarnings: boolean;
+    strikes: number[];
+    contracts: number;
+    collateral: number;
+    pnl: number;
+    roc: number | null;
+  };
   type TickerPnl = {
     symbol: string;
     optionsNet: number;
@@ -513,6 +581,14 @@ export async function GET(req: NextRequest) {
     // extends outside [from, to] — flagged with their true all-time net
     // rather than folded into winRate above.
     spanningCampaigns: Array<{ allTimeNet: number }>;
+    // Full per-campaign breakdown for this ticker's windowed
+    // contribution — sorted by |pnl| descending. Unlike campaignCount/
+    // winRate above (fully-contained campaigns only), this includes
+    // EVERY campaign touching the ticker in-window, spanning or not —
+    // each row's pnl is that campaign's windowed slice, so the full
+    // list always sums to totalNet exactly. Capping to a legible tail
+    // ("+N more") is a display concern, done client-side.
+    campaigns: TickerCampaignRow[];
   };
   const ticker_pnl: TickerPnl[] = Array.from(tickerMap.entries())
     .map(([symbol, t]) => {
@@ -531,6 +607,30 @@ export async function GET(req: NextRequest) {
           spanningCampaigns.push({ allTimeNet: Math.round(camp.netPnl * 100) / 100 });
         }
       }
+      const campaignAggs = tickerCampaignMap.get(symbol) ?? new Map<string, TickerCampaignAgg>();
+      const campaigns: TickerCampaignRow[] = Array.from(campaignAggs.entries())
+        .map(([key, agg]) => {
+          const earningsDate = earningsDateByCampaignId.get(key) ?? null;
+          const fallbackDate =
+            agg.optionLegs.length > 0
+              ? agg.optionLegs.reduce((min, l) => (l.opened_date < min ? l.opened_date : min), agg.optionLegs[0].opened_date)
+              : from;
+          const strikes = Array.from(new Set(agg.optionLegs.map((l) => l.strike))).sort((a, b) => a - b);
+          const contracts = agg.optionLegs.reduce((s, l) => s + l.total_contracts, 0);
+          const collateral = peakCampaignCapital(agg.optionLegs);
+          const pnl = Math.round(agg.pnl * 100) / 100;
+          return {
+            key,
+            date: earningsDate ?? fallbackDate,
+            dateIsEarnings: earningsDate !== null,
+            strikes,
+            contracts,
+            collateral,
+            pnl,
+            roc: collateral > 0 ? pnl / collateral : null,
+          };
+        })
+        .sort((a, b) => Math.abs(b.pnl) - Math.abs(a.pnl));
       return {
         symbol,
         optionsNet: Math.round(t.optionsNet * 100) / 100,
@@ -539,6 +639,7 @@ export async function GET(req: NextRequest) {
         campaignCount: contained,
         winRate: contained > 0 ? wins / contained : null,
         spanningCampaigns,
+        campaigns,
       };
     })
     .sort((a, b) => Math.abs(b.totalNet) - Math.abs(a.totalNet));
