@@ -30,6 +30,7 @@ type PositionRow = {
   entry_dte: number | null;
   campaign_id: string | null;
   trade_chain_id: string | null;
+  option_type: "put" | "call" | null;
 };
 
 type RecRow = {
@@ -146,6 +147,52 @@ function dteBucket(p: {
   return ">10d";
 }
 
+// % out-of-the-money at entry, derived from entry_stock_price and
+// strike — not a stored field. Chosen over entry_delta as the risk
+// axis for this chart because coverage is far better (60% of all-time
+// closed positions have entry_stock_price vs 17% for entry_delta,
+// which was only added in the same July 2026 migration as entry_iv).
+// Rough axis, not a normalized one: it doesn't account for the
+// underlying's volatility, so 10% OTM on a low-vol name and 10% OTM on
+// a high-vol name land in the same bucket despite carrying different
+// real risk — delta would fix that once its coverage grows.
+type OtmBucketKey = "<5%" | "5-10%" | "10-15%" | "15-20%" | "20%+";
+function otmPct(p: {
+  entry_stock_price: number | null;
+  strike: number;
+  option_type: "put" | "call" | null;
+}): number | null {
+  if (p.entry_stock_price === null || !Number.isFinite(p.entry_stock_price) || p.entry_stock_price <= 0) {
+    return null;
+  }
+  // Puts are OTM below spot, calls OTM above spot — sign flips
+  // accordingly so "distance" is always positive for a normal OTM
+  // entry regardless of side. NULL option_type (pre-migration rows)
+  // defaults to put, matching this codebase's existing convention.
+  const isCall = p.option_type === "call";
+  const distance = isCall
+    ? (p.strike - p.entry_stock_price) / p.entry_stock_price
+    : (p.entry_stock_price - p.strike) / p.entry_stock_price;
+  return distance * 100;
+}
+function otmBucket(p: {
+  entry_stock_price: number | null;
+  strike: number;
+  option_type: "put" | "call" | null;
+}): OtmBucketKey | null {
+  const pct = otmPct(p);
+  if (pct === null) return null;
+  // Entered ITM (negative distance) is rare for a CSP screener and has
+  // no bucket of its own in the suggested boundaries — folded into the
+  // nearest ("<5%") rather than given a separate bucket, since at this
+  // account's scale it's an edge case, not a pattern worth its own bar.
+  if (pct < 5) return "<5%";
+  if (pct < 10) return "5-10%";
+  if (pct < 15) return "10-15%";
+  if (pct < 20) return "15-20%";
+  return "20%+";
+}
+
 // ISO YYYY-MM-DD validation — anything else is ignored and we fall back.
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 function validIsoDate(s: string | null): string | null {
@@ -183,7 +230,7 @@ export async function GET(req: NextRequest) {
   let query = sb
     .from("positions")
     .select(
-      "id,symbol,strike,expiry,total_contracts,avg_premium_sold,opened_date,closed_date,realized_pnl,entry_final_grade,entry_crush_grade,entry_opportunity_grade,entry_iv_edge,entry_em_pct,entry_vix,status,broker,position_type,assignment_source_id,entry_stock_price,direction,entry_dte,campaign_id,trade_chain_id",
+      "id,symbol,strike,expiry,total_contracts,avg_premium_sold,opened_date,closed_date,realized_pnl,entry_final_grade,entry_crush_grade,entry_opportunity_grade,entry_iv_edge,entry_em_pct,entry_vix,status,broker,position_type,assignment_source_id,entry_stock_price,direction,entry_dte,campaign_id,trade_chain_id,option_type",
     )
     .eq("user_id", userId)
     .in("status", ["closed", "expired_worthless", "assigned"])
@@ -1131,6 +1178,13 @@ export async function GET(req: NextRequest) {
     });
 
   // ---------- Section 3: pattern intelligence (10+ trade threshold) ----------
+  // Cards below are windowed by closed_date, same [from, to] the rest
+  // of the page uses (`windowed`, defined in Section 1) - previously
+  // this whole section silently ignored the date-range picker and
+  // always read allClosed (all-time). totalClosedAllTime/patternsEnabled
+  // stay all-time on purpose: whether the feature has enough history to
+  // ever be worth showing is a different question from what a specific
+  // window's cards should display.
   const totalClosedAllTime = allClosed.length;
   const patternsEnabled = totalClosedAllTime >= 10;
 
@@ -1158,27 +1212,46 @@ export async function GET(req: NextRequest) {
     return out;
   }
 
+  // bucket()'s keys array is exhaustive by construction — any row whose
+  // key function returns something outside it (including null) is
+  // silently absent from every bucket, not just uncounted from the one
+  // it would've matched. entry_final_grade is null on 55% of all-time
+  // closed positions (165/300) and was disappearing entirely; the same
+  // structural gap exists for entry_vix/entry_dte even though real
+  // coverage there is close to complete (0 and 1 missing of 300
+  // all-time, respectively) — mapping every key function through an
+  // explicit "Ungraded"/"Unknown" fallback closes the hole for all
+  // three rather than relying on coverage staying good.
   const by_grade = bucket(
-    allClosed,
-    (p) => p.entry_final_grade as "A" | "B" | "C" | "F" | null,
-    ["A", "B", "C", "F"],
+    windowed,
+    (p) => (p.entry_final_grade ?? "Ungraded") as "A" | "B" | "C" | "F" | "Ungraded",
+    ["A", "B", "C", "F", "Ungraded"],
   );
   const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
   const by_day_of_week = bucket(
-    allClosed.filter((p) => p.closed_date !== null),
+    windowed.filter((p) => p.closed_date !== null),
     (p) => DOW_LABELS[dayOfWeek(p.closed_date as string)] as (typeof DOW_LABELS)[number],
     ["Mon", "Tue", "Wed", "Thu", "Fri"],
   );
   const by_vix_regime = bucket(
-    allClosed,
-    (p) => vixBucket(p.entry_vix),
-    ["calm", "15-20", "20-25", "panic"],
+    windowed,
+    (p) => vixBucket(p.entry_vix) ?? "Unknown",
+    ["calm", "15-20", "20-25", "panic", "Unknown"],
   );
-  const by_dte = bucket(allClosed, (p) => dteBucket(p), [
+  const by_dte = bucket(windowed, (p) => dteBucket(p) ?? "Unknown", [
     "0-2d",
     "3-5d",
     "6-10d",
     ">10d",
+    "Unknown",
+  ]);
+  const by_otm = bucket(windowed, (p) => otmBucket(p) ?? "Unknown", [
+    "<5%",
+    "5-10%",
+    "10-15%",
+    "15-20%",
+    "20%+",
+    "Unknown",
   ]);
 
   // Win rate / ROC by industry via stock_profiles (shared table, 689
@@ -1186,7 +1259,7 @@ export async function GET(req: NextRequest) {
   // dropped — one trade tells you nothing about the industry.
   const industryBySymbol = new Map<string, string>();
   {
-    const symbols = Array.from(new Set(allClosed.map((p) => p.symbol)));
+    const symbols = Array.from(new Set(windowed.map((p) => p.symbol)));
     if (symbols.length > 0) {
       const profRes = await sb
         .from("stock_profiles")
@@ -1199,13 +1272,13 @@ export async function GET(req: NextRequest) {
   }
   const industryKeys = Array.from(
     new Set(
-      allClosed
+      windowed
         .map((p) => industryBySymbol.get(p.symbol) ?? null)
         .filter((v): v is string => v !== null),
     ),
   );
   const by_industry = bucket(
-    allClosed,
+    windowed,
     (p) => (industryBySymbol.get(p.symbol) ?? null) as string | null,
     industryKeys,
   )
@@ -1213,38 +1286,110 @@ export async function GET(req: NextRequest) {
     .sort((x, y) => y.trades - x.trades)
     .slice(0, 10);
 
+  // Calibration: does win rate actually decrease as grade quality
+  // decreases (A >= B >= C >= F)? Previously this only ever compared A
+  // vs B — a two-tier check that let "screener is calibrated" print
+  // even when C or F broke the ordering (observed: A=90.9/B=80.5/
+  // C=100/F=90.0 — F essentially ties A despite being the "skip" tier,
+  // and the old check never looked at either). Checks the FULL order
+  // now, restricted to tiers that actually have trades (an empty tier
+  // has nothing to compare). Below MIN_SAMPLE, a tier's rate is
+  // reported but excluded from the calibration claim itself — n=8
+  // isn't evidence either way.
+  const CALIBRATION_MIN_SAMPLE = 20;
+  const GRADE_ORDER = ["A", "B", "C", "F"] as const;
   const gradeLookup = new Map(by_grade.map((g) => [g.key, g]));
-  const a = gradeLookup.get("A");
-  const b = gradeLookup.get("B");
-  const calibrationDrift =
-    !!a && !!b && a.trades > 0 && b.trades > 0 && a.win_rate < b.win_rate;
+  const presentGrades = GRADE_ORDER.map((k) => gradeLookup.get(k)).filter(
+    (g): g is NonNullable<typeof g> => !!g && g.trades > 0,
+  );
+  const reliableGrades = presentGrades.filter((g) => g.trades >= CALIBRATION_MIN_SAMPLE);
+  const thinGrades = presentGrades.filter((g) => g.trades < CALIBRATION_MIN_SAMPLE);
+  const violations: string[] = [];
+  for (let i = 1; i < reliableGrades.length; i++) {
+    if (reliableGrades[i].win_rate > reliableGrades[i - 1].win_rate) {
+      violations.push(
+        `${reliableGrades[i].key} (${Math.round(reliableGrades[i].win_rate * 100)}%, n=${reliableGrades[i].trades}) sits above ${reliableGrades[i - 1].key} (${Math.round(reliableGrades[i - 1].win_rate * 100)}%, n=${reliableGrades[i - 1].trades})`,
+      );
+    }
+  }
+  const calibrationMonotonic = violations.length === 0;
+  // Kept for the frontend's existing drift-styled warning path — now
+  // means "the reliable-sample ordering is broken", not "A vs B only".
+  const calibrationDrift = !calibrationMonotonic;
+  let calibrationSummary: string;
+  if (reliableGrades.length < 2) {
+    calibrationSummary =
+      thinGrades.length > 0
+        ? `Not enough graded trades at n≥${CALIBRATION_MIN_SAMPLE} to assess calibration (${thinGrades.map((g) => `${g.key}: n=${g.trades}`).join(", ")}).`
+        : "Need more graded trades to assess calibration.";
+  } else if (!calibrationMonotonic) {
+    calibrationSummary = `⚠ Not calibrated: win rate doesn't decrease from A to F — ${violations.join("; ")}.`;
+  } else {
+    calibrationSummary = `Screener is calibrated: win rate decreases monotonically (${reliableGrades.map((g) => `${g.key} ${Math.round(g.win_rate * 100)}% n=${g.trades}`).join(" ≥ ")}).`;
+  }
+  if (thinGrades.length > 0 && reliableGrades.length >= 2) {
+    calibrationSummary += ` (${thinGrades.map((g) => `${g.key}: ${Math.round(g.win_rate * 100)}% on n=${g.trades} — too few to include`).join("; ")}.)`;
+  }
+  // A grade winning most of the time but losing money on average is a
+  // real red flag (a few large losses outweighing many small wins) —
+  // general check across whichever grade shows the pattern, not
+  // hardcoded to whichever one happens to show it in current data.
+  const negativeRocWarnings = presentGrades
+    .filter((g) => g.win_rate > 0.5 && g.avg_roc !== null && g.avg_roc < 0)
+    .map(
+      (g) =>
+        `⚠ Grade ${g.key}: ${Math.round(g.win_rate * 100)}% win rate but ${(g.avg_roc! * 100).toFixed(2)}% avg ROC (n=${g.trades}) — high win rate, negative expectancy: losses are outsized relative to wins.`,
+    );
 
+  // Windowed positionIds — deliberately NOT allPositionIds (all-time,
+  // shared with Section 2's ticker-rankings recsBySymbol below, which
+  // must stay all-time). This is the Patterns-page card, so it follows
+  // the same [from, to] every other card in this section now does.
+  const windowedPositionIds = windowed.map((p) => p.id);
   let rec_accuracy: {
     close_correct: number;
     close_total: number;
     hold_correct: number;
     hold_total: number;
-    overall_pct: number;
+    // Renamed in spirit from the old "overall_pct": scored_pct is
+    // explicitly scoped to recs that got a verdict (CLOSE + HOLD with
+    // was_system_aligned set), never presented as covering everything.
+    scored_correct: number;
+    scored_total: number;
+    scored_pct: number;
+    // MONITOR/PARTIAL are excluded from scoring by design (too
+    // ambiguous to grade cleanly) — surfaced explicitly rather than
+    // silently vanishing from the denominator. total_recommendations
+    // is scored_total + these.
+    excluded_monitor: number;
+    excluded_partial: number;
+    total_recommendations: number;
   } | null = null;
-  if (allPositionIds.length > 0) {
+  if (windowedPositionIds.length > 0) {
     const recsRes = await sb
       .from("post_earnings_recommendations")
       .select("recommendation,was_system_aligned")
-      .in("position_id", allPositionIds);
-    const allRecs = ((recsRes.data ?? []) as Array<{
+      .in("position_id", windowedPositionIds);
+    const allRecs = (recsRes.data ?? []) as Array<{
       recommendation: string;
       was_system_aligned: boolean | null;
-    }>).filter((r) => r.was_system_aligned !== null);
-    if (allRecs.length >= 5) {
-      const close = allRecs.filter((r) => r.recommendation === "CLOSE");
-      const hold = allRecs.filter((r) => r.recommendation === "HOLD");
-      const correct = allRecs.filter((r) => r.was_system_aligned === true).length;
+    }>;
+    const scored = allRecs.filter((r) => r.was_system_aligned !== null);
+    if (scored.length >= 5) {
+      const close = scored.filter((r) => r.recommendation === "CLOSE");
+      const hold = scored.filter((r) => r.recommendation === "HOLD");
+      const correct = scored.filter((r) => r.was_system_aligned === true).length;
       rec_accuracy = {
         close_correct: close.filter((r) => r.was_system_aligned === true).length,
         close_total: close.length,
         hold_correct: hold.filter((r) => r.was_system_aligned === true).length,
         hold_total: hold.length,
-        overall_pct: correct / allRecs.length,
+        scored_correct: correct,
+        scored_total: scored.length,
+        scored_pct: correct / scored.length,
+        excluded_monitor: allRecs.filter((r) => r.recommendation === "MONITOR").length,
+        excluded_partial: allRecs.filter((r) => r.recommendation === "PARTIAL").length,
+        total_recommendations: allRecs.length,
       };
     }
   }
@@ -1666,13 +1811,11 @@ export async function GET(req: NextRequest) {
       by_vix_regime,
       by_dte,
       by_industry,
+      by_otm,
       calibration: {
         drift: calibrationDrift,
-        summary: calibrationDrift
-          ? "⚠ Calibration drift: Grade B outperforming Grade A. Review your A-grade selection criteria."
-          : a && b && a.trades > 0
-            ? "Screener is calibrated: higher grades are winning at higher rates."
-            : "Need more A/B trades to assess calibration.",
+        summary: calibrationSummary,
+        warnings: negativeRocWarnings,
       },
       rec_accuracy,
     },

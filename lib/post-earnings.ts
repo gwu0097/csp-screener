@@ -409,7 +409,20 @@ export async function recordPositionOutcome(positionId: string): Promise<void> {
     // so closing at that point was a meaningful save.
     was_system_aligned = actual_pnl_pct !== null ? actual_pnl_pct < 0.3 : null;
   } else if (rec.recommendation === "HOLD") {
-    if (position_outcome === "HELD_TO_PROFIT" || position_outcome === "HELD_TO_EXPIRY") {
+    if (
+      position_outcome === "HELD_TO_PROFIT" ||
+      position_outcome === "HELD_TO_EXPIRY" ||
+      position_outcome === "CLOSED_EARLY"
+    ) {
+      // CLOSED_EARLY was previously excluded here — every HOLD rec in
+      // the account's history has this outcome (the user overrode the
+      // HOLD and closed anyway), so was_system_aligned stayed null for
+      // 100% of HOLD recs and the "HOLD accuracy" metric was never
+      // actually measurable. Scored the same way as HELD_TO_PROFIT/
+      // HELD_TO_EXPIRY: aligned if the position ended up profitable,
+      // regardless of how or when it closed — the simplest reading
+      // that doesn't require guessing whether an early exit was a
+      // defensive save or leaving value on the table.
       was_system_aligned = realizedPnl > 0;
     } else if (position_outcome === "HELD_TO_LOSS") {
       was_system_aligned = false;

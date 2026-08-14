@@ -250,13 +250,19 @@ export type IntelligenceResponse = {
     by_vix_regime: PatternBucket[];
     by_dte: PatternBucket[];
     by_industry: PatternBucket[];
-    calibration: { drift: boolean; summary: string };
+    by_otm: PatternBucket[];
+    calibration: { drift: boolean; summary: string; warnings: string[] };
     rec_accuracy: {
       close_correct: number;
       close_total: number;
       hold_correct: number;
       hold_total: number;
-      overall_pct: number;
+      scored_correct: number;
+      scored_total: number;
+      scored_pct: number;
+      excluded_monitor: number;
+      excluded_partial: number;
+      total_recommendations: number;
     } | null;
   };
   export_payload: unknown;
@@ -2208,6 +2214,7 @@ export function PatternIntelligenceSection({
           <DayOfWeekPanel buckets={patterns.by_day_of_week} />
           <VixRegimePanel buckets={patterns.by_vix_regime} />
           <DtePanel buckets={patterns.by_dte} />
+          <OtmPanel buckets={patterns.by_otm} />
           <IndustryPanel buckets={patterns.by_industry} />
           <CalibrationPanel buckets={patterns.by_grade} calibration={patterns.calibration} />
           {patterns.rec_accuracy && <RecAccuracyPanel accuracy={patterns.rec_accuracy} />}
@@ -2217,15 +2224,26 @@ export function PatternIntelligenceSection({
   );
 }
 
-function bucketInterpBest(buckets: PatternBucket[]): PatternBucket | null {
+const CAPTION_MIN_SAMPLE = 20;
+
+type BucketInterp = { bucket: PatternBucket; reliable: boolean };
+
+// Always returns the actual best/worst bucket by win rate — never
+// silently substitutes a larger-sample bucket instead. `reliable`
+// tells the caller whether n meets the bar for stating this as a
+// finding ("well-calibrated at that tier") versus a caveated number
+// ("100% on 8 trades — too few to conclude").
+function bucketInterpBest(buckets: PatternBucket[], minSample = CAPTION_MIN_SAMPLE): BucketInterp | null {
   const valid = buckets.filter((b) => b.trades > 0);
   if (valid.length === 0) return null;
-  return valid.reduce((best, b) => (b.win_rate > best.win_rate ? b : best));
+  const bucket = valid.reduce((best, b) => (b.win_rate > best.win_rate ? b : best));
+  return { bucket, reliable: bucket.trades >= minSample };
 }
-function bucketInterpWorst(buckets: PatternBucket[]): PatternBucket | null {
+function bucketInterpWorst(buckets: PatternBucket[], minSample = CAPTION_MIN_SAMPLE): BucketInterp | null {
   const valid = buckets.filter((b) => b.trades > 0);
   if (valid.length === 0) return null;
-  return valid.reduce((worst, b) => (b.win_rate < worst.win_rate ? b : worst));
+  const bucket = valid.reduce((worst, b) => (b.win_rate < worst.win_rate ? b : worst));
+  return { bucket, reliable: bucket.trades >= minSample };
 }
 
 function PanelShell({
@@ -2251,21 +2269,30 @@ function GradePanel({
   calibration,
 }: {
   buckets: PatternBucket[];
-  calibration: { drift: boolean; summary: string };
+  calibration: { drift: boolean; summary: string; warnings: string[] };
 }) {
   const chartData = buckets.map((b) => ({
     key: b.key,
     winPct: b.win_rate * 100,
     trades: b.trades,
   }));
-  const best = bucketInterpBest(buckets);
-  const interp = calibration.drift
-    ? "⚠ Grade B outperforms A — review what's different about your A-grade trades."
-    : best
-      ? `Grade ${best.key} setups are winning at ${Math.round(best.win_rate * 100)}% — screener is well-calibrated at that tier.`
-      : "Not enough grade data yet.";
+  // calibration.summary is the authoritative claim — computed
+  // server-side against ALL grades with data (not just A vs B) and
+  // already gated on sample size, so it's used directly rather than
+  // re-derived here from a single "best" bucket.
+  const interp = [calibration.summary, ...calibration.warnings].join(" ");
+  // Ungraded isn't a failing grade, it's an absence of grading — must
+  // not fall into the same red as F.
   const colorFor = (k: string) =>
-    k === "A" ? "#10b981" : k === "B" ? "#3b82f6" : k === "C" ? "#f59e0b" : "#ef4444";
+    k === "A"
+      ? "#10b981"
+      : k === "B"
+        ? "#3b82f6"
+        : k === "C"
+          ? "#f59e0b"
+          : k === "F"
+            ? "#ef4444"
+            : "#71717a";
   return (
     <PanelShell title="Win rate by screener grade" interp={interp}>
       <ResponsiveContainer width="100%" height="100%">
@@ -2297,8 +2324,8 @@ function DayOfWeekPanel({ buckets }: { buckets: PatternBucket[] }) {
   const best = bucketInterpBest(buckets);
   const worst = bucketInterpWorst(buckets);
   const interp =
-    best && worst && best.key !== worst.key
-      ? `${best.key} closes win at ${Math.round(best.win_rate * 100)}%. ${worst.key} closes at ${Math.round(worst.win_rate * 100)}% — consider your day-of-week exposure.`
+    best && worst && best.bucket.key !== worst.bucket.key
+      ? `${best.bucket.key} (n=${best.bucket.trades}) closes win at ${Math.round(best.bucket.win_rate * 100)}%${best.reliable ? "" : " — too few to conclude"}. ${worst.bucket.key} (n=${worst.bucket.trades}) closes at ${Math.round(worst.bucket.win_rate * 100)}%${worst.reliable ? "" : " — too few to conclude"} — consider your day-of-week exposure.`
       : "Need more varied-day closes to identify patterns.";
   return (
     <PanelShell title="Win rate by day of week (close)" interp={interp}>
@@ -2331,6 +2358,8 @@ function VixRegimePanel({ buckets }: { buckets: PatternBucket[] }) {
   } else if (panic && panic.trades >= 5 && panic.win_rate < 0.5) {
     interp = `⚠ VIX Panic: ${Math.round(panic.win_rate * 100)}% win rate over ${panic.trades} trades — you underperform in panic regimes.`;
   }
+  // Unknown (missing entry_vix) isn't panic — must not fall into the
+  // same red as the panic bucket.
   const colorFor = (k: string) =>
     k === "calm"
       ? "#10b981"
@@ -2338,7 +2367,9 @@ function VixRegimePanel({ buckets }: { buckets: PatternBucket[] }) {
         ? "#a3e635"
         : k === "20-25"
           ? "#f59e0b"
-          : "#ef4444";
+          : k === "panic"
+            ? "#ef4444"
+            : "#71717a";
   return (
     <PanelShell title="Win rate by VIX regime (entry)" interp={interp}>
       <ResponsiveContainer width="100%" height="100%">
@@ -2369,7 +2400,7 @@ function DtePanel({ buckets }: { buckets: PatternBucket[] }) {
   }));
   const best = bucketInterpBest(buckets.filter((b) => b.trades >= 3));
   const interp = best
-    ? `${best.key} entries win at ${Math.round(best.win_rate * 100)}% (${best.trades} trades, avg ROC ${best.avg_roc !== null ? (best.avg_roc * 100).toFixed(2) + "%" : "—"}). Shorter DTE = faster theta but tighter margin for error.`
+    ? `${best.bucket.key} entries win at ${Math.round(best.bucket.win_rate * 100)}% (n=${best.bucket.trades}, avg ROC ${best.bucket.avg_roc !== null ? (best.bucket.avg_roc * 100).toFixed(2) + "%" : "—"})${best.reliable ? "" : " — too few trades to conclude"}. Shorter DTE = faster theta but tighter margin for error.`
     : "Need 3+ trades in a DTE bucket to compare.";
   return (
     <PanelShell title="Win rate by days-to-expiry (entry)" interp={interp}>
@@ -2392,14 +2423,71 @@ function DtePanel({ buckets }: { buckets: PatternBucket[] }) {
   );
 }
 
+// Table, not a bar chart — n needs to be visible on every bucket, not
+// just in a hover tooltip, and a table makes that trivial the same way
+// IndustryPanel/CalibrationPanel already do. % OTM is derived
+// (entry_stock_price vs strike), not a stored field — see otmPct in
+// route.ts for the put/call sign handling.
+function OtmPanel({ buckets }: { buckets: PatternBucket[] }) {
+  const nonEmpty = buckets.filter((b) => b.trades > 0);
+  const best = bucketInterpBest(buckets.filter((b) => b.key !== "Unknown"));
+  const interp =
+    nonEmpty.length === 0
+      ? "No positions with a recorded entry stock price yet."
+      : best
+        ? `${best.bucket.key} entries win at ${Math.round(best.bucket.win_rate * 100)}% (n=${best.bucket.trades}, avg ROC ${best.bucket.avg_roc !== null ? (best.bucket.avg_roc * 100).toFixed(2) + "%" : "—"})${best.reliable ? "" : " — too few to conclude"}.`
+        : "Need more trades with a recorded entry stock price to compare.";
+  return (
+    <div className="rounded-md border border-border bg-background/40 p-3">
+      <div className="mb-2 text-base font-medium">Win rate by % OTM at entry</div>
+      {nonEmpty.length === 0 ? (
+        <div className="py-8 text-center text-sm text-muted-foreground">{interp}</div>
+      ) : (
+        <>
+          <table className="w-full text-sm">
+            <thead className="text-muted-foreground">
+              <tr>
+                <th className="text-left">% OTM</th>
+                <th className="text-right">Trades</th>
+                <th className="text-right">Win Rate</th>
+                <th className="text-right">Avg ROC</th>
+              </tr>
+            </thead>
+            <tbody>
+              {buckets.map((b) => (
+                <tr key={b.key}>
+                  <td className={b.key === "Unknown" ? "text-muted-foreground" : ""}>{b.key}</td>
+                  <td className="text-right">{b.trades}</td>
+                  <td className={`text-right ${b.trades > 0 ? winRateColor(b.win_rate) : ""}`}>
+                    {b.trades > 0 ? `${Math.round(b.win_rate * 100)}%` : "—"}
+                  </td>
+                  <td className="text-right">{fmtPct(b.avg_roc, 2)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="mt-2 text-sm text-muted-foreground">{interp}</div>
+        </>
+      )}
+      <div className="mt-2 text-[10px] text-muted-foreground/70">
+        % OTM is distance from spot at entry (entry_stock_price vs strike), not a
+        volatility-normalized measure — 10% OTM on a low-vol name and 10% OTM on a high-vol name
+        land in the same bucket despite carrying different real risk. Delta would normalize for
+        that but only covers ~17% of history right now vs ~60% for this; worth revisiting once
+        delta coverage grows.
+      </div>
+    </div>
+  );
+}
+
 function IndustryPanel({ buckets }: { buckets: PatternBucket[] }) {
   // Industry names are long — a compact table reads better than a
   // squeezed bar chart.
   const best = bucketInterpBest(buckets.filter((b) => b.trades >= 3));
   const worst = bucketInterpWorst(buckets.filter((b) => b.trades >= 3));
   const interp =
-    best && worst && best.key !== worst.key
-      ? `${best.key} is your strongest industry (${Math.round(best.win_rate * 100)}% over ${best.trades}); ${worst.key} is weakest (${Math.round(worst.win_rate * 100)}% over ${worst.trades}).`
+    best && worst && best.bucket.key !== worst.bucket.key
+      ? `${best.bucket.key} is your strongest industry (${Math.round(best.bucket.win_rate * 100)}% over n=${best.bucket.trades}${best.reliable ? "" : ", too few to conclude"}); ${worst.bucket.key} is weakest (${Math.round(worst.bucket.win_rate * 100)}% over n=${worst.bucket.trades}${worst.reliable ? "" : ", too few to conclude"}).`
       : "Need 3+ trades in two industries to compare.";
   return (
     <div className="rounded-md border border-border bg-background/40 p-3">
@@ -2567,9 +2655,15 @@ function CalibrationPanel({
   calibration,
 }: {
   buckets: PatternBucket[];
-  calibration: { drift: boolean; summary: string };
+  calibration: { drift: boolean; summary: string; warnings: string[] };
 }) {
-  const expected: Record<string, string> = { A: "High", B: "Medium", C: "Low", F: "Skip" };
+  const expected: Record<string, string> = {
+    A: "High",
+    B: "Medium",
+    C: "Low",
+    F: "Skip",
+    Ungraded: "—",
+  };
   return (
     <div className="rounded-md border border-border bg-background/40 p-3">
       <div className="mb-2 text-base font-medium">Was the screener right?</div>
@@ -2587,15 +2681,22 @@ function CalibrationPanel({
           </thead>
           <tbody>
             {buckets.map((b) => {
+              // Ungraded has no expected performance to check against —
+              // no mark, not a silent "✓" (the old fallback treated
+              // anything not A/B/C as passing, which included Ungraded).
+              const isGraded = b.key === "A" || b.key === "B" || b.key === "C" || b.key === "F";
+              const tooFewToMark = b.trades > 0 && b.trades < CAPTION_MIN_SAMPLE;
               const mark =
-                b.trades === 0
+                b.trades === 0 || !isGraded
                   ? ""
-                  : (b.key === "A" && b.win_rate >= 0.75) ||
-                      (b.key === "B" && b.win_rate >= 0.6) ||
-                      (b.key === "C" && b.win_rate >= 0.4) ||
-                      b.key === "F"
-                    ? "✓"
-                    : "⚠";
+                  : tooFewToMark
+                    ? `n=${b.trades}, too few`
+                    : (b.key === "A" && b.win_rate >= 0.75) ||
+                        (b.key === "B" && b.win_rate >= 0.6) ||
+                        (b.key === "C" && b.win_rate >= 0.4) ||
+                        b.key === "F"
+                      ? "✓"
+                      : "⚠";
               return (
                 <tr key={b.key}>
                   <td>{b.key}</td>
@@ -2606,7 +2707,7 @@ function CalibrationPanel({
                   </td>
                   <td className="text-right">{fmtPct(b.avg_roc, 2)}</td>
                   <td className="text-muted-foreground">
-                    {expected[b.key]} {mark}
+                    {expected[b.key] ?? "—"} {mark}
                   </td>
                 </tr>
               );
@@ -2615,6 +2716,11 @@ function CalibrationPanel({
         </table>
       </div>
       <div className="mt-3 text-sm text-muted-foreground">{calibration.summary}</div>
+      {calibration.warnings.map((w) => (
+        <div key={w} className="mt-1 text-sm font-medium text-amber-400">
+          {w}
+        </div>
+      ))}
     </div>
   );
 }
@@ -2624,6 +2730,7 @@ function RecAccuracyPanel({
 }: {
   accuracy: NonNullable<IntelligenceResponse["patterns"]["rec_accuracy"]>;
 }) {
+  const excludedTotal = accuracy.excluded_monitor + accuracy.excluded_partial;
   return (
     <div className="rounded-md border border-border bg-background/40 p-3">
       <div className="mb-2 text-base font-medium">Post-earnings recommendation accuracy</div>
@@ -2640,10 +2747,22 @@ function RecAccuracyPanel({
             {accuracy.hold_correct}/{accuracy.hold_total} correct
           </span>
         </div>
-        <div>
-          Overall:{" "}
-          <span className="text-foreground">{Math.round(accuracy.overall_pct * 100)}%</span>
+        <div
+          title="Scored = CLOSE + HOLD recs with a clean verdict. Not 'Overall' — MONITOR/PARTIAL recs are never scored (too ambiguous to grade cleanly) and are excluded from this figure, not folded in."
+        >
+          Scored:{" "}
+          <span className="text-foreground">
+            {accuracy.scored_correct}/{accuracy.scored_total} correct (
+            {Math.round(accuracy.scored_pct * 100)}%)
+          </span>
         </div>
+        {excludedTotal > 0 && (
+          <div className="text-[11px] text-muted-foreground/70">
+            Excluded from scoring ({excludedTotal} of {accuracy.total_recommendations} total
+            recommendations): {accuracy.excluded_monitor} MONITOR, {accuracy.excluded_partial}{" "}
+            PARTIAL — no clean correct/incorrect verdict for these.
+          </div>
+        )}
       </div>
     </div>
   );
