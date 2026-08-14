@@ -1,11 +1,17 @@
 "use client";
 
-// Proactive Schwab refresh-token expiry banner. Pulls
-// /api/schwab/token-status on mount and renders a colored strip when
-// the shared lib/schwab-token-warning check says to warn (or the token
-// is missing/refresh-failed). Trigger AND copy both come from the
-// route's shouldWarn/warningClause/warningMessage fields — this
-// component does not compute its own days-remaining threshold.
+// Proactive Schwab refresh-token expiry banner. Polls
+// /api/schwab/token-status on mount and every 5 minutes thereafter,
+// and renders a colored strip when the shared lib/schwab-token-warning
+// check says to warn (or the token is missing/refresh-failed). Trigger
+// AND copy both come from the route's shouldWarn/warningClause/
+// warningMessage fields — this component does not compute its own
+// days-remaining threshold.
+//
+// Dismissal is in-memory only (no persistence — resets on remount),
+// and is not offered at all for clause 4 (expired or under 24 hours):
+// that condition cannot be dismissed away, and a poll that escalates
+// to clause 4 clears any prior dismissal of a lower-severity clause.
 //
 // The Reconnect link points at /api/auth/schwab which redirects into
 // Schwab's OAuth flow; the existing callback persists the new
@@ -41,25 +47,48 @@ export function SchwabTokenBanner() {
 
   useEffect(() => {
     let cancelled = false;
+
     (async () => {
       try {
-        const [res, meRes] = await Promise.all([
-          fetch("/api/schwab/token-status", { cache: "no-store" }),
-          fetch("/api/auth/me", { cache: "no-store" }),
-        ]);
+        const meRes = await fetch("/api/auth/me", { cache: "no-store" });
         if (!cancelled && meRes.ok) {
           const me = (await meRes.json()) as { user?: { role?: string } };
           setIsAdmin(me.user?.role === "admin");
         }
-        if (!res.ok) return;
+      } catch {
+        /* network blip — silent; role check is informational */
+      }
+    })();
+
+    // Polled on mount and every 5 minutes below, so a long-lived open
+    // tab picks up an expiry crossing the clause-4 24-hour line, or a
+    // refresh starting to fail, without a manual reload. 5 minutes
+    // surfaces a clause-4 transition well within a session while
+    // adding only a handful of extra cheap DB reads per hour — access
+    // tokens already refresh on their own 30-min cycle regardless of
+    // this interval, so it doesn't add meaningful extra load on Schwab.
+    const pollTokenStatus = async () => {
+      try {
+        const res = await fetch("/api/schwab/token-status", { cache: "no-store" });
+        if (!res.ok || cancelled) return;
         const json = (await res.json()) as TokenStatus;
-        if (!cancelled) setStatus(json);
+        if (cancelled) return;
+        setStatus(json);
+        // Clause 4 has no dismiss control (see render below) — if a
+        // poll escalates to clause 4 while a lower-severity clause was
+        // previously dismissed, clear that dismissal so it reappears.
+        if (json.warningClause === 4) setDismissed(false);
       } catch {
         /* network blip — silent; the route is informational */
       }
-    })();
+    };
+
+    pollTokenStatus();
+    const intervalId = setInterval(pollTokenStatus, 5 * 60 * 1000);
+
     return () => {
       cancelled = true;
+      clearInterval(intervalId);
     };
   }, []);
 
@@ -119,14 +148,16 @@ export function SchwabTokenBanner() {
             Reconnect Schwab
           </a>
         )}
-        <button
-          type="button"
-          onClick={() => setDismissed(true)}
-          className="text-sm opacity-70 hover:opacity-100"
-          aria-label="Dismiss"
-        >
-          ✕
-        </button>
+        {status.warningClause !== 4 && (
+          <button
+            type="button"
+            onClick={() => setDismissed(true)}
+            className="text-sm opacity-70 hover:opacity-100"
+            aria-label="Dismiss"
+          >
+            ✕
+          </button>
+        )}
       </div>
     </div>
   );
