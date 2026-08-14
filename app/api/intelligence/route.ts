@@ -475,7 +475,15 @@ export async function GET(req: NextRequest) {
   type RiskLeg = { opened_date: string; closed_date: string | null; strike: number; total_contracts: number };
   const allOptionLegsAnyStatus: RiskLeg[] = [];
   let legsMissingDates = 0;
+  // Covered calls are collateralized by shares already owned — they
+  // don't consume buying power, so strike × contracts × 100 measures
+  // nothing real for them. Excluded from the collateral series
+  // entirely, independent of whatever broker filter is active (so
+  // "All" never silently folds a non-cash-secured number into a real
+  // one). collateralApplicable below governs the covered_calls-filter
+  // card display.
   for (const p of allClosed) {
+    if (p.broker === "covered_calls") continue;
     // Every row here is closed/expired_worthless/assigned by query
     // construction, so a null closed_date here is a genuine anomaly
     // (terminal status with no close recorded), not an expected null —
@@ -492,7 +500,7 @@ export async function GET(req: NextRequest) {
     });
   }
   const stillOpenOptions = ((stillOpenRes.data ?? []) as StillOpenRow[]).filter(
-    (p) => p.position_type !== "stock_long" && p.position_type !== "stock_short",
+    (p) => p.position_type !== "stock_long" && p.position_type !== "stock_short" && p.broker !== "covered_calls",
   );
   for (const p of stillOpenOptions) {
     if (!p.opened_date) {
@@ -506,6 +514,7 @@ export async function GET(req: NextRequest) {
       total_contracts: Number(p.total_contracts),
     });
   }
+  const collateralApplicable = broker !== "covered_calls";
 
   function buildDailyCollateralSeries(
     legs: RiskLeg[],
@@ -516,13 +525,25 @@ export async function GET(req: NextRequest) {
     for (const leg of legs) {
       const capital = leg.strike * leg.total_contracts * 100;
       if (!Number.isFinite(capital) || capital <= 0) continue;
-      const legEnd = leg.closed_date ?? toDate;
-      if (leg.opened_date > toDate || legEnd < fromDate) continue; // no overlap with the window
+      // End-of-day snapshot: a leg counts on day D iff it was open at
+      // D's close — opened_date <= D AND (closed_date > D OR still
+      // open). Contributing interval is the half-open [opened_date,
+      // closed_date), so closed_date itself never counts and a
+      // same-day open+close leg correctly contributes on zero days
+      // (previously: inclusive-through-closed_date, which double-
+      // counted any same-day close/reopen pair — 70% of Q3 2026's
+      // closes had one, inflating the combined peak ~36%).
+      const rawEnd = leg.closed_date;
+      if (rawEnd !== null && rawEnd <= leg.opened_date) continue; // zero days deployed
+      if (leg.opened_date > toDate) continue;
+      if (rawEnd !== null && rawEnd <= fromDate) continue; // fully closed before the window
       const start = leg.opened_date < fromDate ? fromDate : leg.opened_date;
-      const cappedEnd = legEnd > toDate ? toDate : legEnd;
-      const endExclusive = addDaysIso(cappedEnd, 1);
       deltas.set(start, (deltas.get(start) ?? 0) + capital);
-      deltas.set(endExclusive, (deltas.get(endExclusive) ?? 0) - capital);
+      if (rawEnd !== null && rawEnd <= toDate) {
+        deltas.set(rawEnd, (deltas.get(rawEnd) ?? 0) - capital);
+      }
+      // else: still open (or closes after `to`) — keeps contributing
+      // through the end of the walked range, no removal delta needed.
     }
     const sortedDeltaDates = Array.from(deltas.keys()).sort();
     const series: Array<{ date: string; collateral: number }> = [];
@@ -538,7 +559,9 @@ export async function GET(req: NextRequest) {
     return series;
   }
 
-  const dailyCollateralSeries = buildDailyCollateralSeries(allOptionLegsAnyStatus, from, to);
+  const dailyCollateralSeries = collateralApplicable
+    ? buildDailyCollateralSeries(allOptionLegsAnyStatus, from, to)
+    : [];
   let peakCollateral = 0;
   let peakCollateralDate: string | null = null;
   let sumCollateral = 0;
@@ -1599,6 +1622,12 @@ export async function GET(req: NextRequest) {
       },
     },
     risk: {
+      // false only when the broker filter is 'covered_calls' — those
+      // legs are collateralized by shares already owned, not cash/
+      // margin, so no collateral figure applies. peak/avg/return below
+      // are 0/0/null in that case; the frontend shows N/A rather than
+      // a real-looking $0.
+      collateral_applicable: collateralApplicable,
       peak_collateral: peakCollateral,
       peak_collateral_date: peakCollateralDate,
       avg_deployed: Math.round(avgDeployed * 100) / 100,

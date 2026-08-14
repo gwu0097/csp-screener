@@ -210,6 +210,11 @@ export type IntelligenceResponse = {
     };
   };
   risk?: {
+    // false when the broker filter is 'covered_calls' — those legs
+    // are collateralized by owned shares, not cash/margin, so no
+    // collateral figure applies. peak/avg/return are 0/0/null then;
+    // the panel shows N/A instead of a real-looking $0.
+    collateral_applicable: boolean;
     peak_collateral: number;
     peak_collateral_date: string | null;
     avg_deployed: number;
@@ -1540,7 +1545,9 @@ function TickerPnlPanel({
 // than rendering four dashes.
 function RiskPanel({ risk }: { risk: IntelligenceResponse["risk"] }) {
   if (!risk) return null;
-  const hasData = risk.peak_collateral > 0 || risk.campaign_histogram.some((b) => b.count > 0);
+  const hasData =
+    (risk.collateral_applicable && risk.peak_collateral > 0) ||
+    risk.campaign_histogram.some((b) => b.count > 0);
   if (!hasData) return null;
 
   const peakDateLabel = risk.peak_collateral_date
@@ -1553,6 +1560,8 @@ function RiskPanel({ risk }: { risk: IntelligenceResponse["risk"] }) {
     : "—";
   const returnOnPeakColor =
     risk.return_on_peak !== null && risk.return_on_peak >= 0 ? "text-emerald-300" : "text-rose-300";
+  const collateralNaTitle =
+    "Covered calls are collateralized by shares already owned, not cash or margin — strike × contracts × 100 doesn't measure real buying power for them.";
 
   return (
     <div className="rounded-md border border-border bg-background/40 p-3">
@@ -1560,31 +1569,54 @@ function RiskPanel({ risk }: { risk: IntelligenceResponse["risk"] }) {
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard label="Peak collateral">
           <div className="space-y-0.5">
-            <span className="font-mono">{fmtMoney(risk.peak_collateral, false, true)}</span>
-            <div className="text-[10px] text-muted-foreground/70">{peakDateLabel}</div>
+            {risk.collateral_applicable ? (
+              <>
+                <span className="font-mono">{fmtMoney(risk.peak_collateral, false, true)}</span>
+                <div className="text-[10px] text-muted-foreground/70">{peakDateLabel}</div>
+              </>
+            ) : (
+              <>
+                <span className="font-mono text-muted-foreground">N/A</span>
+                <div className="text-[10px] text-muted-foreground/70" title={collateralNaTitle}>
+                  covered calls don&apos;t consume buying power
+                </div>
+              </>
+            )}
           </div>
         </StatCard>
         <StatCard label="Avg deployed">
           <div className="space-y-0.5">
-            <span className="font-mono">{fmtMoney(risk.avg_deployed, false, true)}</span>
-            <div className="text-[10px] text-muted-foreground/70">
-              {risk.avg_deployed_pct_of_peak !== null
-                ? `${Math.round(risk.avg_deployed_pct_of_peak * 100)}% of peak`
-                : "—"}
-            </div>
+            {risk.collateral_applicable ? (
+              <>
+                <span className="font-mono">{fmtMoney(risk.avg_deployed, false, true)}</span>
+                <div className="text-[10px] text-muted-foreground/70">
+                  {risk.avg_deployed_pct_of_peak !== null
+                    ? `${Math.round(risk.avg_deployed_pct_of_peak * 100)}% of peak`
+                    : "—"}
+                </div>
+              </>
+            ) : (
+              <span className="font-mono text-muted-foreground">N/A</span>
+            )}
           </div>
         </StatCard>
         <StatCard label="Return on peak">
           <div className="space-y-0.5">
-            <span className={`font-mono ${returnOnPeakColor}`}>
-              {risk.return_on_peak !== null ? fmtPct(risk.return_on_peak, 2) : "—"}
-            </span>
-            <div
-              className="text-[10px] text-muted-foreground/70"
-              title="Period realized P&L ÷ peak collateral — peak, not average, because peak is the capital that had to be available."
-            >
-              realized ÷ peak collateral
-            </div>
+            {risk.collateral_applicable ? (
+              <>
+                <span className={`font-mono ${returnOnPeakColor}`}>
+                  {risk.return_on_peak !== null ? fmtPct(risk.return_on_peak, 2) : "—"}
+                </span>
+                <div
+                  className="text-[10px] text-muted-foreground/70"
+                  title="Period realized P&L ÷ peak collateral — peak, not average, because peak is the capital that had to be available."
+                >
+                  realized ÷ peak collateral
+                </div>
+              </>
+            ) : (
+              <span className="font-mono text-muted-foreground">N/A</span>
+            )}
           </div>
         </StatCard>
         <StatCard label="Worst loss">
