@@ -466,6 +466,155 @@ export async function GET(req: NextRequest) {
   const unresolvedCampaignsPnlAllTime =
     Math.round(unresolvedEarningsCampaigns.reduce((s, c) => s + c.netPnl, 0) * 100) / 100;
 
+  // ---------- Risk panel: peak collateral, return on peak, loss tail ----------
+  // Portfolio-wide day-by-day collateral walk needs EVERY option leg —
+  // any status, open or closed — whose deployment interval overlaps
+  // [from, to], not just windowedCampaigns' resolved/terminal-in-window
+  // set. An open position is deploying real capital right now and must
+  // count if `to` reaches today.
+  type RiskLeg = { opened_date: string; closed_date: string | null; strike: number; total_contracts: number };
+  const allOptionLegsAnyStatus: RiskLeg[] = [];
+  let legsMissingDates = 0;
+  for (const p of allClosed) {
+    // Every row here is closed/expired_worthless/assigned by query
+    // construction, so a null closed_date here is a genuine anomaly
+    // (terminal status with no close recorded), not an expected null —
+    // excluded from the walk and counted so it can be reported.
+    if (!p.opened_date || p.closed_date === null) {
+      legsMissingDates++;
+      continue;
+    }
+    allOptionLegsAnyStatus.push({
+      opened_date: p.opened_date,
+      closed_date: p.closed_date,
+      strike: Number(p.strike),
+      total_contracts: Number(p.total_contracts),
+    });
+  }
+  const stillOpenOptions = ((stillOpenRes.data ?? []) as StillOpenRow[]).filter(
+    (p) => p.position_type !== "stock_long" && p.position_type !== "stock_short",
+  );
+  for (const p of stillOpenOptions) {
+    if (!p.opened_date) {
+      legsMissingDates++;
+      continue;
+    }
+    allOptionLegsAnyStatus.push({
+      opened_date: p.opened_date,
+      closed_date: null, // still open — deployed through `to` in the walk below
+      strike: Number(p.strike),
+      total_contracts: Number(p.total_contracts),
+    });
+  }
+
+  function buildDailyCollateralSeries(
+    legs: RiskLeg[],
+    fromDate: string,
+    toDate: string,
+  ): Array<{ date: string; collateral: number }> {
+    const deltas = new Map<string, number>();
+    for (const leg of legs) {
+      const capital = leg.strike * leg.total_contracts * 100;
+      if (!Number.isFinite(capital) || capital <= 0) continue;
+      const legEnd = leg.closed_date ?? toDate;
+      if (leg.opened_date > toDate || legEnd < fromDate) continue; // no overlap with the window
+      const start = leg.opened_date < fromDate ? fromDate : leg.opened_date;
+      const cappedEnd = legEnd > toDate ? toDate : legEnd;
+      const endExclusive = addDaysIso(cappedEnd, 1);
+      deltas.set(start, (deltas.get(start) ?? 0) + capital);
+      deltas.set(endExclusive, (deltas.get(endExclusive) ?? 0) - capital);
+    }
+    const sortedDeltaDates = Array.from(deltas.keys()).sort();
+    const series: Array<{ date: string; collateral: number }> = [];
+    let running = 0;
+    let di = 0;
+    for (let d = fromDate; d <= toDate; d = addDaysIso(d, 1)) {
+      while (di < sortedDeltaDates.length && sortedDeltaDates[di] <= d) {
+        running += deltas.get(sortedDeltaDates[di]) ?? 0;
+        di++;
+      }
+      series.push({ date: d, collateral: Math.round(running) });
+    }
+    return series;
+  }
+
+  const dailyCollateralSeries = buildDailyCollateralSeries(allOptionLegsAnyStatus, from, to);
+  let peakCollateral = 0;
+  let peakCollateralDate: string | null = null;
+  let sumCollateral = 0;
+  for (const pt of dailyCollateralSeries) {
+    sumCollateral += pt.collateral;
+    if (pt.collateral > peakCollateral) {
+      peakCollateral = pt.collateral;
+      peakCollateralDate = pt.date;
+    }
+  }
+  const avgDeployed = dailyCollateralSeries.length > 0 ? sumCollateral / dailyCollateralSeries.length : 0;
+  const avgDeployedPctOfPeak = peakCollateral > 0 ? avgDeployed / peakCollateral : null;
+  // Row-level period total — same figure the response exposes as
+  // combined_realized_pnl below. Peak is the honest denominator: it's
+  // the capital that had to be available, not what was on average tied
+  // up (avgDeployed) or what a single campaign happened to risk.
+  const periodRealizedForRisk = Math.round((totals.total_pnl + stockTotalPnl) * 100) / 100;
+  const returnOnPeak = peakCollateral > 0 ? periodRealizedForRisk / peakCollateral : null;
+
+  // Worst loss reuses campaignTotals.worst (already the most negative
+  // windowedCampaigns member) rather than recomputing — only counts if
+  // it's actually a loss; if every campaign in the window won, there's
+  // no loss tail to report.
+  const worstLossCampaign =
+    campaignTotals.worst && campaignTotals.worst.pnl < 0
+      ? { symbol: campaignTotals.worst.symbol, pnl: campaignTotals.worst.pnl }
+      : null;
+  const winPnls = windowedCampaigns
+    .filter((c) => c.netPnl > 0)
+    .map((c) => c.netPnl)
+    .sort((a, b) => a - b);
+  const medianWin =
+    winPnls.length === 0
+      ? null
+      : winPnls.length % 2 === 1
+        ? winPnls[(winPnls.length - 1) / 2]
+        : (winPnls[winPnls.length / 2 - 1] + winPnls[winPnls.length / 2]) / 2;
+  const worstLossToMedianWinRatio =
+    worstLossCampaign && medianWin && medianWin > 0
+      ? Math.round((Math.abs(worstLossCampaign.pnl) / medianWin) * 100) / 100
+      : null;
+
+  // Campaign P&L histogram — buckets are [min, max), except the two
+  // open-ended tails.
+  const HISTOGRAM_BUCKETS = [
+    { label: "< -$2k" },
+    { label: "-$2k to -$500" },
+    { label: "-$500 to $0" },
+    { label: "$0 to $500" },
+    { label: "$500 to $2k" },
+    { label: "> $2k" },
+  ];
+  function histogramBucketIndex(pnl: number): number {
+    if (pnl < -2000) return 0;
+    if (pnl < -500) return 1;
+    if (pnl < 0) return 2;
+    if (pnl < 500) return 3;
+    if (pnl < 2000) return 4;
+    return 5;
+  }
+  const histBuckets = HISTOGRAM_BUCKETS.map((b) => ({
+    label: b.label,
+    count: 0,
+    symbols: new Set<string>(),
+  }));
+  for (const c of windowedCampaigns) {
+    const idx = histogramBucketIndex(c.netPnl);
+    histBuckets[idx].count += 1;
+    histBuckets[idx].symbols.add(c.symbol);
+  }
+  const campaignHistogram = histBuckets.map((b) => ({
+    label: b.label,
+    count: b.count,
+    symbols: Array.from(b.symbols).sort(),
+  }));
+
   // ---------- P&L by ticker (row-level window, options+stock netted) ----------
   // Deliberately row-level closed_date attribution — the same window
   // filter behind `windowed`/`windowedStocks` above — so these bars
@@ -1448,6 +1597,18 @@ export async function GET(req: NextRequest) {
         all_time_count: unresolvedEarningsCampaigns.length,
         all_time_pnl: unresolvedCampaignsPnlAllTime,
       },
+    },
+    risk: {
+      peak_collateral: peakCollateral,
+      peak_collateral_date: peakCollateralDate,
+      avg_deployed: Math.round(avgDeployed * 100) / 100,
+      avg_deployed_pct_of_peak: avgDeployedPctOfPeak,
+      return_on_peak: returnOnPeak,
+      worst_loss: worstLossCampaign,
+      median_win: medianWin,
+      worst_loss_to_median_win_ratio: worstLossToMedianWinRatio,
+      legs_missing_dates: legsMissingDates,
+      campaign_histogram: campaignHistogram,
     },
     equity_curve,
     // Total-mode series: same bucketing, but still-open positions'

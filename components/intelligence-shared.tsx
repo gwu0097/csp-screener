@@ -209,6 +209,18 @@ export type IntelligenceResponse = {
       all_time_pnl: number;
     };
   };
+  risk?: {
+    peak_collateral: number;
+    peak_collateral_date: string | null;
+    avg_deployed: number;
+    avg_deployed_pct_of_peak: number | null;
+    return_on_peak: number | null;
+    worst_loss: { symbol: string; pnl: number } | null;
+    median_win: number | null;
+    worst_loss_to_median_win_ratio: number | null;
+    legs_missing_dates: number;
+    campaign_histogram: Array<{ label: string; count: number; symbols: string[] }>;
+  };
   equity_curve: EquityPoint[];
   // Total-mode series — same bucketing as equity_curve, but includes
   // still-open positions' already-banked partial-close fills on their
@@ -1253,6 +1265,7 @@ export function PerformanceSection({
         rows={data.partial_closes ?? []}
         total={data.total_partial_pnl ?? 0}
       />
+      <RiskPanel risk={data.risk} />
     </section>
   );
 }
@@ -1516,6 +1529,170 @@ function TickerPnlPanel({
           </tbody>
         </table>
       )}
+    </div>
+  );
+}
+
+// Four risk metrics plus a campaign-outcome histogram, all read off
+// the campaign totals /api/intelligence already computes — no new
+// P&L logic here. Hidden entirely when there's nothing to show (no
+// collateral ever deployed and no campaigns in the window), rather
+// than rendering four dashes.
+function RiskPanel({ risk }: { risk: IntelligenceResponse["risk"] }) {
+  if (!risk) return null;
+  const hasData = risk.peak_collateral > 0 || risk.campaign_histogram.some((b) => b.count > 0);
+  if (!hasData) return null;
+
+  const peakDateLabel = risk.peak_collateral_date
+    ? new Date(risk.peak_collateral_date + "T00:00:00Z").toLocaleDateString("en-US", {
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+        timeZone: "UTC",
+      })
+    : "—";
+  const returnOnPeakColor =
+    risk.return_on_peak !== null && risk.return_on_peak >= 0 ? "text-emerald-300" : "text-rose-300";
+
+  return (
+    <div className="rounded-md border border-border bg-background/40 p-3">
+      <div className="mb-2 text-base font-medium">Risk</div>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <StatCard label="Peak collateral">
+          <div className="space-y-0.5">
+            <span className="font-mono">{fmtMoney(risk.peak_collateral, false, true)}</span>
+            <div className="text-[10px] text-muted-foreground/70">{peakDateLabel}</div>
+          </div>
+        </StatCard>
+        <StatCard label="Avg deployed">
+          <div className="space-y-0.5">
+            <span className="font-mono">{fmtMoney(risk.avg_deployed, false, true)}</span>
+            <div className="text-[10px] text-muted-foreground/70">
+              {risk.avg_deployed_pct_of_peak !== null
+                ? `${Math.round(risk.avg_deployed_pct_of_peak * 100)}% of peak`
+                : "—"}
+            </div>
+          </div>
+        </StatCard>
+        <StatCard label="Return on peak">
+          <div className="space-y-0.5">
+            <span className={`font-mono ${returnOnPeakColor}`}>
+              {risk.return_on_peak !== null ? fmtPct(risk.return_on_peak, 2) : "—"}
+            </span>
+            <div
+              className="text-[10px] text-muted-foreground/70"
+              title="Period realized P&L ÷ peak collateral — peak, not average, because peak is the capital that had to be available."
+            >
+              realized ÷ peak collateral
+            </div>
+          </div>
+        </StatCard>
+        <StatCard label="Worst loss">
+          <div className="space-y-0.5">
+            {risk.worst_loss ? (
+              <span className="font-mono text-rose-300">
+                {risk.worst_loss.symbol} {fmtMoney(risk.worst_loss.pnl, true, true)}
+              </span>
+            ) : (
+              <span className="text-muted-foreground">No losses</span>
+            )}
+            <div
+              className="text-[10px] text-muted-foreground/70"
+              title="Worst single-campaign loss as a multiple of the median win — whether the loss tail can eat the win rate."
+            >
+              {risk.worst_loss_to_median_win_ratio !== null
+                ? `${risk.worst_loss_to_median_win_ratio.toFixed(1)}x median win`
+                : risk.worst_loss
+                  ? "no wins to compare against"
+                  : "—"}
+            </div>
+          </div>
+        </StatCard>
+      </div>
+      {risk.legs_missing_dates > 0 && (
+        <div className="mt-2 text-[10px] text-amber-400">
+          {risk.legs_missing_dates} option position{risk.legs_missing_dates === 1 ? "" : "s"} excluded
+          from the collateral walk — missing an opened or closed date.
+        </div>
+      )}
+      <div className="mt-3 mb-1 text-[11px] text-muted-foreground">Campaign outcome distribution</div>
+      <CampaignHistogramChart buckets={risk.campaign_histogram} />
+    </div>
+  );
+}
+
+function CampaignHistogramChart({
+  buckets,
+}: {
+  buckets: Array<{ label: string; count: number; symbols: string[] }>;
+}) {
+  const chartData: ChartData<"bar"> = useMemo(
+    () => ({
+      labels: buckets.map((b) => b.label),
+      datasets: [
+        {
+          // First 3 buckets are the negative ranges, last 3 positive —
+          // fixed by the bucket definition, not derived from sign at
+          // render time.
+          data: buckets.map((b) => b.count),
+          backgroundColor: buckets.map((_, i) => (i < 3 ? "#ef4444" : "#10b981")),
+          borderRadius: 4,
+          maxBarThickness: 56,
+        },
+      ],
+    }),
+    [buckets],
+  );
+
+  const chartOptions: ChartOptions<"bar"> = useMemo(
+    () => ({
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: "rgba(24,24,27,0.95)",
+          borderColor: "#3f3f46",
+          borderWidth: 1,
+          titleColor: "#fafafa",
+          bodyColor: "#d4d4d8",
+          padding: 8,
+          cornerRadius: 6,
+          titleFont: { size: 13, weight: "bold" as const },
+          bodyFont: { size: 11 },
+          displayColors: false,
+          callbacks: {
+            label: () => "",
+            title: (items: TooltipItem<"bar">[]) => (items[0]?.label as string) ?? "",
+            afterBody: (items: TooltipItem<"bar">[]) => {
+              const idx = items[0]?.dataIndex;
+              const b = idx !== undefined ? buckets[idx] : undefined;
+              if (!b) return [];
+              const lines = [`${b.count} campaign${b.count === 1 ? "" : "s"}`];
+              if (b.symbols.length > 0) lines.push(b.symbols.join(", "));
+              return lines;
+            },
+          },
+        },
+      },
+      scales: {
+        x: {
+          grid: { display: false },
+          ticks: { color: "#71717a", font: { size: 11 } },
+        },
+        y: {
+          beginAtZero: true,
+          grid: { color: "#27272a" },
+          ticks: { color: "#71717a", font: { size: 11 }, precision: 0 },
+        },
+      },
+    }),
+    [buckets],
+  );
+
+  return (
+    <div style={{ width: "100%", height: 220 }}>
+      <ChartJsBar data={chartData} options={chartOptions} />
     </div>
   );
 }
