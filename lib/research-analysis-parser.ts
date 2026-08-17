@@ -213,6 +213,15 @@ function extractField(block: string, label: string): string | null {
 // backfill). `parseFailed` below carries that distinction; the caller
 // pushes a note when it's true so it's visible in the preview, not just
 // inferred from an empty list.
+//
+// CANDIDATE_OBSERVATIONS is NOT always immediately followed by PART 1.
+// That was true of every real paste as of 2026-08-13 (see the prior
+// version of this comment) and the end-of-input tripwire below was
+// built on it, but real v6 pastes have since drifted: some still put
+// the block right after === END METADATA ===, others write it as the
+// very last section, after PART 6 — both match the template's own
+// RESPONSE FORMAT text, which never pins the block to one position.
+// The tripwire below accounts for this — see its own comment.
 function extractCandidateObservationsBlock(proseRaw: string): {
   found: boolean;
   observations: ParsedCandidateObservation[];
@@ -245,16 +254,25 @@ function extractCandidateObservationsBlock(proseRaw: string): {
   let sawContent = false;
 
   // No recognized section marker anywhere after the header means the
-  // span ran to the end of the input — either this really is the last
-  // thing in the paste, or the response uses a heading style
-  // SECTION_MARKER_LINE doesn't recognize yet, in which case everything
-  // after CANDIDATE_OBSERVATIONS just got swallowed into this block
-  // (exactly what happened to ASTS's paste before this regex learned
-  // markdown `##` headers). Surfaced as a note rather than failing
-  // silently a second time.
-  if (!markerFound && endIdx - (headerIdx + 1) > 3) {
+  // span ran to the end of the input. That alone isn't suspicious any
+  // more — a well-formed v6 paste can legitimately end with this block
+  // (see the comment above the function). What IS still a real signal:
+  // no section marker existing anywhere in the response, before the
+  // header either. If PART headings appear before the header, the real
+  // analysis content is already safely in `remainder` regardless of
+  // where the block sits, and nothing was lost. If none exist anywhere,
+  // that means either the response's Part sections never made it into
+  // this paste at all, or (the original failure this guards against)
+  // they got swallowed into this block because the response used a
+  // heading style SECTION_MARKER_LINE doesn't recognize yet — exactly
+  // what happened to ASTS's paste before this regex learned markdown
+  // `##` headers. Surfaced as a note rather than failing silently again.
+  const markerFoundBeforeHeader = lines
+    .slice(0, headerIdx)
+    .some((l) => SECTION_MARKER_LINE.test(l.trim()));
+  if (!markerFound && !markerFoundBeforeHeader && endIdx - (headerIdx + 1) > 3) {
     notes.push(
-      "CANDIDATE_OBSERVATIONS block ran to the end of the input with no PART-heading marker found after it — if the response has more sections below this, they were not detected and got swallowed into this block. Check for an unrecognized heading style.",
+      "CANDIDATE_OBSERVATIONS block ran to the end of the input and no PART-heading marker was found anywhere else in the response — its Part sections appear to be missing entirely, which usually means they were swallowed into this block by an unrecognized heading style, or the paste was cut short. Check the raw paste against the expected format.",
     );
   }
 
