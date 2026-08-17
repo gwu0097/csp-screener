@@ -34,7 +34,7 @@ type TokenStatus = {
   refreshAttempted?: boolean;
   refreshError?: string | null;
   shouldWarn: boolean;
-  warningClause: 1 | 2 | 3 | 4 | null;
+  warningClause: 2 | 3 | 4 | null;
   warningMessage: string;
 };
 

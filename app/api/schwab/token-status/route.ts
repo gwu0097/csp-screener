@@ -47,7 +47,7 @@ type StatusKind = "missing" | "expired" | "refresh_failed" | "ok";
 
 type WarningFields = {
   shouldWarn: boolean;
-  warningClause: 1 | 2 | 3 | 4 | null;
+  warningClause: 2 | 3 | 4 | null;
   warningMessage: string;
 };
 

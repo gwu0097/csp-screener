@@ -25,7 +25,7 @@ type StatusResp = {
   expiresInDays: number | null;
   liveVerified: boolean;
   shouldWarn: boolean;
-  warningClause: 1 | 2 | 3 | 4 | null;
+  warningClause: 2 | 3 | 4 | null;
   warningMessage: string;
 };
 

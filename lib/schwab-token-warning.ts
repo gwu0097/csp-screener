@@ -11,8 +11,18 @@
 // forever after (Sat + 7d = Sat). Reconnecting on a weekday breaks that
 // cycle and means every future expiry lands on a weekday too, each one
 // silently interrupting a trading day, until a weekend reconnect resets
-// it. The four clauses below are not day-count tiers — they're the
-// specific situations that call for a nudge under that model.
+// it. The clauses below are not day-count tiers — they're the specific
+// situations that call for a nudge under that model.
+//
+// Clause 1 was retired and folded into clause 2: it used to be a
+// separate "expiry falls on a weekend" check with its own anchor-date
+// formula, while clause 2 fired unconditionally, every single day, the
+// instant an expiry fell on a weekday — even when a full weekend still
+// stood between today and expiry. Clause 2 is now "warn starting at the
+// last Saturday on/before the expiry date," computed generically for
+// any expiry weekday; a weekend expiry's anchor is trivially itself (or
+// the day before, for Sunday), so the old clause 1 case falls out of
+// the same formula and needed no separate code path.
 //
 // ALL date math is anchored to America/Los_Angeles regardless of where
 // this runs (Vercel's server clock is UTC; a browser's clock is
@@ -65,14 +75,28 @@ function addDaysToDateString(dateStr: string, days: number): string {
   return d.toISOString().slice(0, 10);
 }
 
-export type SchwabTokenWarningClause = 1 | 2 | 3 | 4;
+// A short label for a plain YYYY-MM-DD calendar-date string, e.g.
+// "Aug 15 (Sat)". Deliberately does NOT go through laDateLabel/Intl
+// timezone conversion — dateStr is already an LA calendar date with no
+// associated instant, and formatting it via a UTC-midnight Date through
+// an LA-timezone Intl formatter would shift it back a day.
+const MONTH_NAMES = [
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+function dateStringLabel(dateStr: string): string {
+  const [, m, d] = dateStr.split("-").map(Number);
+  return `${MONTH_NAMES[m - 1]} ${d} (${DAY_NAMES[weekdayOf(dateStr)].slice(0, 3)})`;
+}
+
+export type SchwabTokenWarningClause = 2 | 3 | 4;
 
 export type SchwabTokenWarning = {
   shouldWarn: boolean;
   // Which clause fired — null when none did. If multiple clauses would
   // independently justify a warning, the most specific/urgent one wins
-  // (4 checked first and unsuppressible, then 2, then 1, then 3) rather
-  // than reporting all of them; there's one message to show, not a list.
+  // (4 checked first and unsuppressible, then 2, then 3) rather than
+  // reporting all of them; there's one message to show, not a list.
   clause: SchwabTokenWarningClause | null;
   message: string;
 };
@@ -116,28 +140,30 @@ export function evaluateSchwabTokenWarning({
   const todayStr = laDateString(now);
   const expiryStr = laDateString(expiresAtDate);
   const expiryWeekday = weekdayOf(expiryStr); // 0=Sun..6=Sat
-  const isWeekendExpiry = expiryWeekday === 0 || expiryWeekday === 6;
 
-  // Clause 2 — expiry lands on a weekday: the cycle is desynced (some
-  // past reconnect happened mid-week). Not suppressible, fires every
-  // day the desync persists.
-  if (!isWeekendExpiry) {
+  // Clause 2 — warn starting at the last Saturday on/before the expiry
+  // date, for ANY expiry weekday. A Saturday expiry anchors to itself
+  // (0 days back); a Sunday expiry anchors to the day before; a weekday
+  // expiry anchors to the most recent Saturday before it — e.g. a
+  // Wednesday expiry anchors 4 days back. Formula: (expiryWeekday+1)%7
+  // days back from expiryStr always lands on the preceding (or same)
+  // Saturday. Not suppressible.
+  const daysBackToAnchorSaturday = (expiryWeekday + 1) % 7;
+  const anchorSaturdayStr = addDaysToDateString(expiryStr, -daysBackToAnchorSaturday);
+  if (todayStr >= anchorSaturdayStr) {
+    const anchorSundayStr = addDaysToDateString(anchorSaturdayStr, 1);
+    // Still within the qualifying weekend itself → "reconnect this
+    // weekend" is accurate. Once today has moved past that weekend
+    // (e.g. a Wednesday expiry whose anchor Saturday came and went),
+    // there is no weekend left before expiry — say so instead of
+    // pointing at a weekend that's already gone.
+    const withinAnchorWeekend = todayStr <= anchorSundayStr;
     return {
       shouldWarn: true,
       clause: 2,
-      message: `Schwab token is desynced from the weekend cycle — it expires ${expiryLabel}, a weekday. Reconnect this weekend to move the expiry back onto a weekend.`,
-    };
-  }
-
-  // Clause 1 — expiry lands on a weekend, and today is on/after the
-  // Saturday that starts that weekend (Saturday expiry: that Saturday
-  // itself; Sunday expiry: the day before). Not suppressible.
-  const weekendAnchorStr = expiryWeekday === 6 ? expiryStr : addDaysToDateString(expiryStr, -1);
-  if (todayStr >= weekendAnchorStr) {
-    return {
-      shouldWarn: true,
-      clause: 1,
-      message: `Schwab token expires ${expiryLabel} — reconnect this weekend to keep the expiry landing on a weekend.`,
+      message: withinAnchorWeekend
+        ? `Schwab token expires ${expiryLabel} — reconnect this weekend to keep the expiry landing on a weekend.`
+        : `Schwab token expires ${expiryLabel} — the weekend to reconnect without desyncing (${dateStringLabel(anchorSaturdayStr)}–${dateStringLabel(anchorSundayStr)}) has passed. Reconnect now.`,
     };
   }
 

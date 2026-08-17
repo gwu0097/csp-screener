@@ -733,7 +733,7 @@ export function ScreenerView({ connected }: Props) {
     status: "missing" | "expired" | "refresh_failed" | "ok";
     expiresInDays: number | null;
     shouldWarn: boolean;
-    warningClause: 1 | 2 | 3 | 4 | null;
+    warningClause: 2 | 3 | 4 | null;
     warningMessage: string;
   } | null>(null);
 
