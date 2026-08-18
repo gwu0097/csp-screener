@@ -919,8 +919,18 @@ export async function updateEncyclopedia(symbol: string): Promise<UpdateSummary>
       analyst_sentiment: null,
       news_summary: null,
       perplexity_pulled_at: null,
-      data_source: "finnhub",
-      date_confidence: dateUntrusted ? "low" : "confirmed",
+      // 2026-08-19 Phase A fix: "finnhub"/"low"/"confirmed" were retired
+      // by the earnings_history date/data provenance migration (Step 1)
+      // and rejected by the CHECK constraints ever since — this upsert
+      // has been failing unconditionally, every call, since that
+      // migration landed. Remapped to the values Step 1 already
+      // reserved for this exact path: encyclopedia_phase1_finnhub is
+      // this route's own data_source slot; vendor_derived/inferred is
+      // the direct successor of confirmed/low (Step 1's own backfill
+      // classified this exact row shape — real calendar match vs
+      // quarter-end fallback — the same way).
+      data_source: "encyclopedia_phase1_finnhub",
+      date_confidence: dateUntrusted ? "inferred" : "vendor_derived",
       is_complete,
     };
     const up = await sb
@@ -1436,7 +1446,11 @@ export async function reingestHistoricalDates(
         // used to compute price.price_before/price_after.
         timing: preserveNewerTiming ? newerRow.timing : match.hour,
         timing_source: preserveNewerTiming ? newerRow.timing_source : "yahoo_timestamp_heuristic",
-        data_source: "finnhub+calendar-rekey",
+        // 2026-08-19 Phase A fix: "finnhub+calendar-rekey" was retired
+        // by Step 1's provenance migration — this upsert has been
+        // failing unconditionally since. Remapped to the value Step 1
+        // already reserved for this exact path.
+        data_source: "encyclopedia_phase2c_rekey",
         // match.fiscalYear/fiscalQuarter/periodEnd are null unless
         // Yahoo's own fiscalQuarter string was present (never the
         // calendarQuarter fallback — see CalendarEntry's doc comment).
@@ -1505,7 +1519,8 @@ export async function reingestHistoricalDates(
       // used to compute price.price_before/price_after.
       timing: preserveRowTiming ? row.timing : match.hour,
       timing_source: preserveRowTiming ? row.timing_source : "yahoo_timestamp_heuristic",
-      data_source: "finnhub+calendar-rekey",
+      // 2026-08-19 Phase A fix — see the merge branch's identical note above.
+      data_source: "encyclopedia_phase2c_rekey",
       // Same non-null-only guard as the merge branch above — row may
       // already have fiscal data from another source.
       ...(match.fiscalQuarter !== null ? { fiscal_quarter: match.fiscalQuarter } : {}),
@@ -1560,7 +1575,7 @@ export type HistoryRow = {
   earnings_date: string;
   timing: "amc" | "bmo" | "unknown" | null;
   timing_source: string | null;
-  date_confidence: "confirmed" | "low" | null;
+  date_confidence: "human_verified" | "edgar_derived" | "vendor_derived" | "inferred" | "unknown" | null;
   price_before: number | null;
   price_after: number | null;
   implied_move_pct: number | null;
@@ -1630,13 +1645,24 @@ export async function upsertHistoryStub(
     );
     return;
   }
-  await sb
+  // 2026-08-19 Phase A fix: "encyclopedia-live" was retired by Step 1's
+  // provenance migration — this upsert has been failing unconditionally
+  // since (remapped to the value Step 1 already reserved for this
+  // path). It also had NO .error check at all, unlike every other
+  // writer in this file — silent failure, which is exactly why this
+  // went unnoticed. T0 capture calls this first for any first-time
+  // event (see captureEarningsT0 below); when it silently failed,
+  // readHistoryRow then found nothing and T0 short-circuited with
+  // reason:"row_not_found" before ever reaching its own update —
+  // first-time captures were being dropped with no visible signal.
+  const up = await sb
     .from("earnings_history")
     .upsert(
       {
         symbol: symbol.toUpperCase(),
         earnings_date: writeDate,
-        data_source: "encyclopedia-live",
+        data_source: "encyclopedia_live_stub",
+        date_confidence: "unknown",
         is_complete: false,
         timing,
         // "unknown" isn't a real determination — nothing to attribute.
@@ -1644,6 +1670,11 @@ export async function upsertHistoryStub(
       },
       { onConflict: "symbol,earnings_date" },
     );
+  if (up.error) {
+    console.warn(
+      `[encyclopedia] upsertHistoryStub(${symbol}, ${writeDate}) failed: ${up.error.message}`,
+    );
+  }
 }
 
 // Picks the strike closest to spot and returns the ATM call + ATM put

@@ -37,7 +37,7 @@ export type CrushHistoryEvent = {
   // Whether earningsDate itself is trusted — see lib/encyclopedia.ts's
   // date_confidence write path. Not read by any scoring; surfaced for
   // the Analysis Dump export's per-row provenance.
-  dateConfidence: "confirmed" | "low" | null;
+  dateConfidence: "human_verified" | "edgar_derived" | "vendor_derived" | "inferred" | "unknown" | null;
   // Phantom too-early T1 capture (see lib/earnings-capture-attempts.ts) —
   // price_after/actual_move_pct on a flagged row were captured before
   // the real post-earnings settlement, so ratio/breach math derived
@@ -139,7 +139,7 @@ export async function getCrushHistory(
     implied_move_source: string | null;
     implied_move_expiry: string | null;
     implied_move_read_date: string | null;
-    date_confidence: "confirmed" | "low" | null;
+    date_confidence: "human_verified" | "edgar_derived" | "vendor_derived" | "inferred" | "unknown" | null;
     fiscal_quarter: number | null;
     fiscal_year: number | null;
     period_end: string | null;
@@ -639,6 +639,15 @@ export async function persistLiveImpliedMove(
         `${protectedByT0 ? "T0 already captured" : "manual entry"} takes precedence; capture still appended.`,
     );
   } else {
+    // 2026-08-19 Phase A fix: this upsert never set data_source/
+    // date_confidence at all, which was silently fine pre-migration
+    // (DB defaults covered it) but fails NOT NULL on data_source for
+    // any genuinely new symbol+date since Step 1's provenance migration
+    // dropped that default. Only supplied on a real insert (existingRes
+    // above, read moments ago) — omitted on an update so an existing
+    // row's tier/source is never touched by this path, which only ever
+    // records an implied move, not a date claim.
+    const isNewRow = existingRes.data === null;
     const upsert = await sb
       .from("earnings_history")
       .upsert(
@@ -647,6 +656,7 @@ export async function persistLiveImpliedMove(
           earnings_date: writeDate,
           implied_move_pct: emPct,
           implied_move_source: source,
+          ...(isNewRow ? { data_source: "live_em_tracker", date_confidence: "unknown" } : {}),
         },
         { onConflict: "symbol,earnings_date" },
       );
@@ -680,6 +690,18 @@ export async function persistFlowSnapshot(
     note: u.note,
   }));
   const sb = createServerClient();
+  // 2026-08-19 Phase A fix: same gap and same fix as persistLiveImpliedMove
+  // above — data_source is NOT NULL with no default since Step 1's
+  // provenance migration, so a genuinely new symbol+date row needs it
+  // explicitly; an existing row's tier/source is left untouched (this
+  // path never makes a date claim, only records a flow snapshot).
+  const existingRes = await sb
+    .from("earnings_history")
+    .select("symbol")
+    .eq("symbol", symbol.toUpperCase())
+    .eq("earnings_date", earningsDate)
+    .maybeSingle();
+  const isNewRow = existingRes.data === null;
   const upsert = await sb
     .from("earnings_history")
     .upsert(
@@ -693,6 +715,7 @@ export async function persistFlowSnapshot(
         ),
         flow_unusual_top3: top3,
         flow_captured_at: new Date().toISOString(),
+        ...(isNewRow ? { data_source: "live_flow_snapshot", date_confidence: "unknown" } : {}),
       },
       { onConflict: "symbol,earnings_date" },
     );

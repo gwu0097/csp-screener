@@ -189,11 +189,17 @@ async function linkEarningsEvent(
   if (!eventId) {
     const cal = upcomingBySymbol.get(symbol);
     if (cal && cal.date >= openedDate && cal.date <= expiry) {
+      // 2026-08-19 Phase A fix: "entry-context" was retired by Step 1's
+      // provenance migration — this upsert has been failing
+      // unconditionally since (remapped to the value Step 1 already
+      // reserved for this path). This branch only ever runs when no
+      // existing row was found above, so it's always a real insert.
       await sb.from("earnings_history").upsert(
         {
           symbol,
           earnings_date: cal.date,
-          data_source: "entry-context",
+          data_source: "entry_context_stub",
+          date_confidence: "unknown",
           is_complete: false,
         },
         { onConflict: "symbol,earnings_date" },

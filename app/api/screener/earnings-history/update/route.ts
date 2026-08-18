@@ -238,7 +238,20 @@ export async function POST(req: NextRequest) {
         implied_move_read_date: impliedMoveReadDate.value,
         timing: timing.value,
         is_complete: em.value !== null && actualMovePct !== null,
-        ...(placeholderMatch ? { date_confidence: "low" } : {}),
+        // 2026-08-19 Phase A fix: data_source was never set at all here
+        // (NOT NULL violation on any brand-new symbol+date since Step
+        // 1's provenance migration dropped the default), and
+        // date_confidence:"low" was retired by that same migration
+        // (this save has been failing unconditionally on every
+        // placeholder-slot date since). data_source is always this
+        // route's own reserved value regardless of which field changed
+        // — every save through this route is a manual-editor touch by
+        // definition. date_confidence stays untouched (preserved on
+        // update, defaults to 'unknown' on insert) except the
+        // placeholder-match case, where "inferred" is the direct
+        // successor to the old "low".
+        data_source: "manual_em_editor",
+        ...(placeholderMatch ? { date_confidence: "inferred" } : {}),
         ...(autoComputedActual
           ? { price_before: priceBefore, price_after: priceAfter, price_at_expiry: priceAtExpiry }
           : {}),
@@ -280,7 +293,7 @@ export async function POST(req: NextRequest) {
     impliedMoveSource: "manual",
     impliedMoveExpiry: impliedMoveExpiry.value,
     impliedMoveReadDate: impliedMoveReadDate.value,
-    dateConfidence: placeholderMatch ? "low" : null,
+    dateConfidence: placeholderMatch ? "inferred" : null,
     // Unknown here without a re-read (see comment above) — same
     // fallback rationale as fiscalQuarter.
     t1Unrecoverable: false,

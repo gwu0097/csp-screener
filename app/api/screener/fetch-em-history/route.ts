@@ -227,7 +227,7 @@ export async function POST(req: NextRequest) {
     implied_move_source: string | null;
     implied_move_expiry: string | null;
     implied_move_read_date: string | null;
-    date_confidence: "confirmed" | "low" | null;
+    date_confidence: "human_verified" | "edgar_derived" | "vendor_derived" | "inferred" | "unknown" | null;
     fiscal_quarter: number | null;
     fiscal_year: number | null;
     period_end: string | null;
