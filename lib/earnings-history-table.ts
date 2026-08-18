@@ -258,6 +258,73 @@ export async function getPopulationPriorMoveRatio(opts?: { forceFresh?: boolean 
   return { median, n: ratios.length };
 }
 
+// ---------- Manual implied-move entry: per-symbol plausibility check ----------
+//
+// The blanket >=40% absolute warning (components/crush-history-table.tsx's
+// EditableMoveCell, warnAbovePct) catches a value that's implausible for
+// ANY name — nobody's ATM straddle runs 40%+. It does NOT catch a value
+// that's implausible for THIS symbol specifically: KEYS's stored implied
+// moves cluster at 9.28%-10.73% across 7 quarters, and a hand-typed 15.13%
+// (almost certainly the Implied Volatility % misread off ThinkorSwim
+// instead of the ATM Straddle %) sailed through untouched because 15.13
+// is nowhere near 40 (audit: 2026-08-18). This check closes that gap:
+// compare a new value against the SAME symbol's own other stored implied
+// moves, not a universal constant.
+//
+// Deliberately relative (percent deviation from the symbol's own median),
+// not absolute-point, so it self-scales — a genuinely high-vol name with a
+// wide natural spread (e.g. a small-cap biotech running 25%-45% quarter to
+// quarter) doesn't get flagged for being wide in absolute terms, only for
+// deviating sharply from ITS OWN pattern. Median, not mean, so a single
+// prior outlier (this exact failure mode, on an earlier quarter) doesn't
+// drag the comparison point toward itself.
+const IMPLIED_MOVE_PLAUSIBILITY_MIN_SAMPLES = 3;
+const IMPLIED_MOVE_PLAUSIBILITY_THRESHOLD = 0.35; // 35% relative deviation from the symbol's own median
+
+export type ImpliedMovePlausibility = {
+  plausible: boolean;
+  // null when there weren't enough OTHER stored quarters for this symbol
+  // to judge — never treated as implausible in that case (a thin-history
+  // name shouldn't be blocked from its first few real entries).
+  median: number | null;
+  n: number;
+  deviationPct: number | null;
+};
+
+export async function checkImpliedMovePlausibility(
+  symbol: string,
+  earningsDate: string,
+  candidateValue: number,
+): Promise<ImpliedMovePlausibility> {
+  const sb = createServerClient();
+  const res = await sb
+    .from("earnings_history")
+    .select("earnings_date,implied_move_pct")
+    .eq("symbol", symbol);
+  if (res.error) {
+    console.warn(
+      `[earnings-history-table] checkImpliedMovePlausibility(${symbol}) query failed: ${res.error.message}`,
+    );
+    return { plausible: true, median: null, n: 0, deviationPct: null };
+  }
+  type Row = { earnings_date: string; implied_move_pct: number | null };
+  const others = ((res.data ?? []) as Row[])
+    .filter((r) => r.earnings_date !== earningsDate)
+    .map((r) => r.implied_move_pct)
+    .filter((v): v is number => typeof v === "number" && Number.isFinite(v) && v > 0);
+
+  if (others.length < IMPLIED_MOVE_PLAUSIBILITY_MIN_SAMPLES) {
+    return { plausible: true, median: null, n: others.length, deviationPct: null };
+  }
+
+  const sorted = others.slice().sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  const median = sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  const deviationPct = Math.abs(candidateValue - median) / median;
+  const plausible = deviationPct <= IMPLIED_MOVE_PLAUSIBILITY_THRESHOLD;
+  return { plausible, median, n: others.length, deviationPct };
+}
+
 // ---------- Fix B: empirical E[loss|breach] shrinkage ladder ----------
 //
 // Reads (implied_move_pct, actual_move_pct) pairs directly — NOT the

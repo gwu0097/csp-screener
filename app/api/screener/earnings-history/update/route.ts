@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
-import { gradeFromRatio, recordImpliedMoveCapture, type CrushHistoryEvent } from "@/lib/earnings-history-table";
+import {
+  gradeFromRatio,
+  recordImpliedMoveCapture,
+  checkImpliedMovePlausibility,
+  type CrushHistoryEvent,
+} from "@/lib/earnings-history-table";
 import { quarterLabel, isRepresentativeDateSlot, isWeekend } from "@/lib/quarter-label";
 
 export const dynamic = "force-dynamic";
@@ -15,6 +20,15 @@ export const revalidate = 0;
 // the automated fetch path never overwrites a hand-entered value. No
 // auth gate, matching this route's closest sibling (fetch-em-history) —
 // earnings_history is shared market data, not a per-user table.
+//
+// A new/changing impliedMovePct is checked against the SAME symbol's
+// other stored implied moves (checkImpliedMovePlausibility, in
+// lib/earnings-history-table.ts) before saving — catches a value that's
+// implausible for THIS symbol even when it's nowhere near the client's
+// blanket >=40% warning (KEYS's 15.13% against a 9.28%-10.73% history,
+// audit: 2026-08-18). Warn-and-confirm, not a block: returns
+// {requiresConfirmation, message} WITHOUT saving; the caller re-submits
+// with confirmImplausibleImplied:true to save anyway.
 export const maxDuration = 10;
 
 type Body = {
@@ -22,6 +36,11 @@ type Body = {
   earningsDate?: unknown;
   impliedMovePct?: unknown; // null clears the value
   actualMovePct?: unknown; // null clears the value
+  // Set true to re-submit after the user confirmed a per-symbol
+  // plausibility warning (see checkImpliedMovePlausibility below) — skips
+  // straight to saving instead of re-computing and re-flagging the same
+  // warning a second time.
+  confirmImplausibleImplied?: unknown;
 };
 
 // Accepts a finite number, or null/undefined -> null (explicit clear).
@@ -67,6 +86,43 @@ export async function POST(req: NextRequest) {
   const actual = parseNullableNumber(body.actualMovePct, "actualMovePct");
   if (!actual.ok) return NextResponse.json({ error: actual.error }, { status: 400 });
 
+  const sb = createServerClient();
+
+  // Per-symbol plausibility check — warn-and-confirm, never a block (a
+  // real vol-regime shift is still enterable). Only worth running when
+  // the implied value is actually new/changing on this save: the client
+  // always re-sends the row's CURRENT impliedMovePct unchanged when only
+  // the "actual" field is being edited (commitSave in
+  // components/crush-history-table.tsx), so gating on "did this exact
+  // value change" avoids re-prompting confirmation on every unrelated
+  // actual-move edit to a row whose implied value was already accepted.
+  if (em.value !== null && body.confirmImplausibleImplied !== true) {
+    const existingRow = await sb
+      .from("earnings_history")
+      .select("implied_move_pct")
+      .eq("symbol", symbol)
+      .eq("earnings_date", earningsDate)
+      .limit(1);
+    const existingImplied =
+      !existingRow.error && existingRow.data && existingRow.data.length > 0
+        ? ((existingRow.data[0] as { implied_move_pct: number | null }).implied_move_pct)
+        : null;
+    const impliedIsChanging = existingImplied === null || Math.abs(existingImplied - em.value) > 1e-9;
+    if (impliedIsChanging) {
+      const plausibility = await checkImpliedMovePlausibility(symbol, earningsDate, em.value);
+      if (!plausibility.plausible) {
+        return NextResponse.json({
+          requiresConfirmation: true,
+          message:
+            `${(em.value * 100).toFixed(2)}% is ${(plausibility.deviationPct! * 100).toFixed(0)}% away from ` +
+            `${symbol}'s own median implied move (${(plausibility.median! * 100).toFixed(2)}% across ` +
+            `${plausibility.n} other stored quarter${plausibility.n === 1 ? "" : "s"}) — this looks off relative ` +
+            `to ${symbol}'s own history, not just large in absolute terms. Save it anyway?`,
+        });
+      }
+    }
+  }
+
   // Same ratio formula as everywhere else that computes it
   // (fetch-em-history, getCrushHistory, calculateBreachAnalysis):
   // |actual| / implied, magnitude-only — direction is already carried
@@ -93,7 +149,6 @@ export async function POST(req: NextRequest) {
       `saved, but marked low-confidence until the real date is confirmed against a source like ThinkorSwim.`
     : null;
 
-  const sb = createServerClient();
   const up = await sb
     .from("earnings_history")
     .upsert(

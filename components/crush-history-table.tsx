@@ -726,8 +726,9 @@ export function CrushHistoryTable({
       field === "em" ? (rawPercent === null ? null : rawPercent / 100) : sourceEvent.impliedMovePct;
     const actualMovePct =
       field === "actual" ? (rawPercent === null ? null : rawPercent / 100) : sourceEvent.actualMovePct;
-    try {
-      const res = await fetch("/api/screener/earnings-history/update", {
+
+    const post = (confirmImplausibleImplied: boolean) =>
+      fetch("/api/screener/earnings-history/update", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -735,10 +736,34 @@ export function CrushHistoryTable({
           earningsDate: targetEarningsDate,
           impliedMovePct,
           actualMovePct,
+          confirmImplausibleImplied,
         }),
         cache: "no-store",
       });
-      const json = (await res.json()) as { event: CrushHistoryEvent } | { error: string };
+
+    try {
+      let res = await post(false);
+      let json = (await res.json()) as
+        | { event: CrushHistoryEvent }
+        | { error: string }
+        | { requiresConfirmation: true; message: string };
+      // Server-side per-symbol plausibility check (checkImpliedMovePlausibility
+      // in lib/earnings-history-table.ts) — distinct from EditableMoveCell's
+      // client-side blanket >=40% check above: this one compares against
+      // the SAME symbol's own stored history, so it can catch a value
+      // that's implausible for THIS name even when nowhere near 40%. Never
+      // saved on the first attempt when flagged; re-submits with the
+      // confirm flag only if the user proceeds.
+      if (res.ok && "requiresConfirmation" in json) {
+        const proceed = window.confirm(json.message);
+        if (!proceed) {
+          const msg = "Not saved — implied move looked off vs this symbol's own history, confirmation declined.";
+          setEditErrors((prev) => ({ ...prev, [sourceEvent.earningsDate]: msg }));
+          return msg;
+        }
+        res = await post(true);
+        json = (await res.json()) as { event: CrushHistoryEvent } | { error: string };
+      }
       if (!res.ok || !("event" in json)) {
         const msg = "error" in json ? json.error : `HTTP ${res.status}`;
         setEditErrors((prev) => ({ ...prev, [sourceEvent.earningsDate]: msg }));
