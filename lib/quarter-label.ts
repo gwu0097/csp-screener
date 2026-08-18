@@ -109,6 +109,68 @@ export function isWeekend(iso: string): boolean {
   return day === 0 || day === 6;
 }
 
+// Calendar-quarter SLOT bucketing (report-date, ~1-month-lag heuristic) —
+// a separate concern from quarterLabel's DISPLAYED label above. Used to
+// decide which of N padded row slots an event belongs in, and (new) to
+// compute the real-world date range a missing slot's suggestion should be
+// matched against. Moved here from components/crush-history-table.tsx
+// (2026-08-19) so the fetch-history route's server-side gap detection and
+// the table's client-side placeholder rendering can't independently drift
+// on what "the missing quarter" means — they now share one implementation.
+export type QuarterYear = { q: 1 | 2 | 3 | 4; y: number };
+
+export function quarterOfDate(dateIso: string): QuarterYear {
+  const [y, m] = dateIso.split("-").map(Number);
+  if (m <= 3) return { q: 4, y: y - 1 };
+  if (m <= 6) return { q: 1, y };
+  if (m <= 9) return { q: 2, y };
+  return { q: 3, y };
+}
+
+export function quarterYearLabel(qy: QuarterYear): string {
+  return `Q${qy.q} ${qy.y}`;
+}
+
+export function previousQuarter(qy: QuarterYear): QuarterYear {
+  return qy.q === 1 ? { q: 4, y: qy.y - 1 } : { q: (qy.q - 1) as 1 | 2 | 3, y: qy.y };
+}
+
+// A stable, deterministic report-date for a quarter with no real event
+// yet — used as the placeholder row's key (and the date a manual entry
+// lands on if filled in before a real fetch ever finds the actual date).
+// Mirrors quarterLabel's own date->label mapping in reverse (Q1 reports
+// Apr-Jun, Q2 Jul-Sep, Q3 Oct-Dec, Q4 Jan-Mar of the following year) so
+// quarterLabel(representativeDate(qy)) always round-trips back to qy.
+export function representativeDate(qy: QuarterYear): string {
+  const byQuarter: Record<1 | 2 | 3 | 4, { y: number; m: number }> = {
+    1: { y: qy.y, m: 5 },
+    2: { y: qy.y, m: 8 },
+    3: { y: qy.y, m: 11 },
+    4: { y: qy.y + 1, m: 2 },
+  };
+  const { y, m } = byQuarter[qy.q];
+  return `${y}-${String(m).padStart(2, "0")}-15`;
+}
+
+// The real-world date range a quarter slot's actual announcement could
+// fall in — quarterOfDate's own month buckets (Q1=Apr-Jun, Q2=Jul-Sep,
+// Q3=Oct-Dec, Q4=Jan-Mar of the following year), used to test whether a
+// suggested date from an external source actually belongs to THIS slot
+// rather than an adjacent one.
+export function quarterDateRange(qy: QuarterYear): { start: string; end: string } {
+  const bounds: Record<1 | 2 | 3 | 4, { startY: number; startM: number; endY: number; endM: number; endD: number }> = {
+    1: { startY: qy.y, startM: 4, endY: qy.y, endM: 6, endD: 30 },
+    2: { startY: qy.y, startM: 7, endY: qy.y, endM: 9, endD: 30 },
+    3: { startY: qy.y, startM: 10, endY: qy.y, endM: 12, endD: 31 },
+    4: { startY: qy.y + 1, startM: 1, endY: qy.y + 1, endM: 3, endD: 31 },
+  };
+  const b = bounds[qy.q];
+  return {
+    start: `${b.startY}-${String(b.startM).padStart(2, "0")}-01`,
+    end: `${b.endY}-${String(b.endM).padStart(2, "0")}-${String(b.endD).padStart(2, "0")}`,
+  };
+}
+
 export function quarterLabel(input: QuarterLabelInput): QuarterLabelResult {
   const periodEnd = input.periodEnd;
   const calendarSource: QuarterLabelResult["calendarSource"] =

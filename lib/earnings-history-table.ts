@@ -44,6 +44,12 @@ export type CrushHistoryEvent = {
   // from them is unreliable. Read by buildQuarterlyMoveRatio to exclude
   // these rows from the live per-symbol grading ratio (audit: 2026-08-11).
   t1Unrecoverable: boolean;
+  // BMO/AMC/unknown, or null if never determined. actual-move
+  // computation needs a real date AND a real session — "unknown" is a
+  // distinct DB value from null (see earnings_history's timing CHECK
+  // constraint) but both block computation the same way; neither is
+  // ever guessed.
+  timing: "bmo" | "amc" | "unknown" | null;
 };
 
 // Per-event grade from ratio (matches the global crush bands the user
@@ -114,7 +120,7 @@ export async function getCrushHistory(
   const res = await sb
     .from("earnings_history")
     .select(
-      "earnings_date,implied_move_pct,actual_move_pct,move_ratio,implied_move_source,implied_move_expiry,implied_move_read_date,date_confidence,fiscal_quarter,fiscal_year,period_end,t1_unrecoverable",
+      "earnings_date,implied_move_pct,actual_move_pct,move_ratio,implied_move_source,implied_move_expiry,implied_move_read_date,date_confidence,fiscal_quarter,fiscal_year,period_end,t1_unrecoverable,timing",
     )
     .eq("symbol", symbol.toUpperCase())
     .order("earnings_date", { ascending: false })
@@ -138,6 +144,7 @@ export async function getCrushHistory(
     fiscal_year: number | null;
     period_end: string | null;
     t1_unrecoverable: boolean | null;
+    timing: "bmo" | "amc" | "unknown" | null;
   };
   const rows = (res.data ?? []) as Row[];
   return rows.map((r) => {
@@ -170,6 +177,7 @@ export async function getCrushHistory(
       impliedMoveReadDate: r.implied_move_read_date,
       dateConfidence: r.date_confidence,
       t1Unrecoverable: r.t1_unrecoverable === true,
+      timing: r.timing,
     };
   });
 }

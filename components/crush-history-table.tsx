@@ -20,7 +20,13 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { quarterLabel as computeQuarterLabel } from "@/lib/quarter-label";
+import {
+  quarterLabel as computeQuarterLabel,
+  quarterOfDate,
+  quarterYearLabel,
+  previousQuarter,
+  representativeDate,
+} from "@/lib/quarter-label";
 
 // Advisory-only research analysis (research_analyses table) — pasted
 // back from an external LLM conversation seeded by the Analysis Dump
@@ -152,56 +158,50 @@ type CrushHistoryEvent = {
   // entry (see the provenance dialog below) but never required.
   impliedMoveExpiry: string | null;
   impliedMoveReadDate: string | null;
+  // BMO/AMC/unknown, or null if never determined. Required (along with
+  // a real earningsDate) for actual-move computation — a wrong session
+  // picks the wrong close pair and produces a plausible-looking wrong
+  // number, so this is never guessed, only ever set by an explicit
+  // confirm (manual or a confirmed suggestion — see the fetch-history
+  // suggestion flow below).
+  timing: "bmo" | "amc" | "unknown" | null;
+};
+
+// One suggestion per missing-date quarter slot in the 8-quarter window,
+// returned by POST /api/screener/fetch-em-history. Single source
+// (Yahoo's earningsChart.quarterly, read via lib/encyclopedia.ts's
+// fetchFinnhubEarningsCalendar — despite that function's name, it's
+// Yahoo-backed, not an independent Finnhub read; labeled "yahoo" here
+// deliberately, not "finnhub") — no second source to compare against,
+// so no agreement indicator. `hour` is a UTC-timestamp heuristic
+// (>=20:00 UTC -> amc, else bmo), never a reported session — always
+// shown as inferred, always requires explicit confirmation.
+type DateSuggestionStatus = "suggested" | "outside_coverage" | "no_match" | "source_error";
+type DateSuggestion = {
+  quarterLabel: string;
+  rangeStart: string;
+  rangeEnd: string;
+  status: DateSuggestionStatus;
+  date: string | null;
+  hour: "bmo" | "amc" | null;
+};
+
+// Same source, narrower question: for a row that already has a real
+// date but no session, does the same Yahoo calendar entry for that
+// EXACT date carry an hour? Keyed by earningsDate, not quarterLabel.
+type SessionSuggestionStatus = "suggested" | "not_found" | "source_error";
+type SessionSuggestion = {
+  earningsDate: string;
+  status: SessionSuggestionStatus;
+  hour: "bmo" | "amc" | null;
 };
 
 const SIMILAR_EM_TOLERANCE = 0.02; // ±2pp from today's EM
 
-// Calendar-quarter SLOT bucketing (report-date, ~1-month-lag heuristic)
-// used only to decide which of the 8 padded row slots an event belongs
-// in — a separate concern from the DISPLAYED label, which comes from
-// lib/quarter-label.ts's fiscal-aware quarterLabel (imported above as
-// computeQuarterLabel). quarterYearLabel(quarterOfDate(dateIso)) is
-// byte-identical to the old local quarterLabel(dateIso) this replaced,
-// so slot matching is unchanged.
-// working backward from today regardless of whether any event exists
-// for them yet. {q,y} arithmetic, not string parsing, so "one quarter
-// back" is exact at year boundaries (Q1 -> prior year's Q4).
-type QuarterYear = { q: 1 | 2 | 3 | 4; y: number };
-
-function quarterOfDate(dateIso: string): QuarterYear {
-  const [y, m] = dateIso.split("-").map(Number);
-  if (m <= 3) return { q: 4, y: y - 1 };
-  if (m <= 6) return { q: 1, y };
-  if (m <= 9) return { q: 2, y };
-  return { q: 3, y };
-}
-
-function quarterYearLabel(qy: QuarterYear): string {
-  return `Q${qy.q} ${qy.y}`;
-}
-
-function previousQuarter(qy: QuarterYear): QuarterYear {
-  return qy.q === 1 ? { q: 4, y: qy.y - 1 } : { q: ((qy.q - 1) as 1 | 2 | 3), y: qy.y };
-}
-
-// A stable, deterministic report-date for a quarter with no real event
-// yet — used only as the placeholder row's key (and the date a manual
-// entry lands on if the user fills it in before a real fetch ever
-// finds the actual date). Mirrors quarterLabel's own date->label
-// mapping in reverse (Q1 reports Apr-Jun, Q2 Jul-Sep, Q3 Oct-Dec, Q4
-// Jan-Mar of the following year) so quarterLabel(representativeDate(qy))
-// always round-trips back to qy — the placeholder always lands in the
-// slot it was built for.
-function representativeDate(qy: QuarterYear): string {
-  const byQuarter: Record<1 | 2 | 3 | 4, { y: number; m: number }> = {
-    1: { y: qy.y, m: 5 },
-    2: { y: qy.y, m: 8 },
-    3: { y: qy.y, m: 11 },
-    4: { y: qy.y + 1, m: 2 },
-  };
-  const { y, m } = byQuarter[qy.q];
-  return `${y}-${String(m).padStart(2, "0")}-15`;
-}
+// quarterOfDate/quarterYearLabel/previousQuarter/representativeDate now
+// live in lib/quarter-label.ts (imported above) — shared with the
+// fetch-em-history route's server-side gap detection, so "which quarter
+// is this" can't independently drift between client and server.
 
 function todayEasternIso(): string {
   return new Intl.DateTimeFormat("en-CA", {
@@ -451,11 +451,12 @@ export function CrushHistoryTable({
 }) {
   const [refreshed, setRefreshed] = useState<CrushHistoryEvent[] | null>(null);
   const [fetchStatus, setFetchStatus] = useState<"idle" | "fetching" | "done" | "error">("idle");
-  // Two-count tracking: actual moves come from the seed step (Finnhub /
-  // Yahoo backfill). Implied moves are live-only (stamped by screener
+  // Coverage tracking: implied moves are live-only (stamped by screener
   // runs from the Schwab chain) — the historical backfill source was
-  // discontinued, so coverage is surfaced rather than fetched.
-  const [actualPopulated, setActualPopulated] = useState(0);
+  // discontinued, so EM coverage is surfaced rather than fetched.
+  // Actual moves ARE fetchable (Yahoo price history), but only ever via
+  // an explicitly-confirmed date+session — see the suggestion flow
+  // below, not a silent seed step.
   const [eventsWithEm, setEventsWithEm] = useState(0);
   const [eventsWithActual, setEventsWithActual] = useState(0);
   const [fetchError, setFetchError] = useState<string | null>(null);
@@ -475,12 +476,31 @@ export function CrushHistoryTable({
   // in a real dialog can't produce a malformed value at all.
   const [pendingResolve, setPendingResolve] = useState<{
     event: CrushHistoryEvent;
-    field: "em" | "actual";
+    field: "em" | "actual" | "session";
     rawPercent: number | null;
     dateInput: string;
+    // false only for the "session" trigger on a row that already has a
+    // real date — the date input is shown read-only, only the session
+    // selector is live.
+    dateEditable: boolean;
+    sessionInput: "" | "bmo" | "amc";
+    // The fetched suggestion for this exact slot/date, if any — drives
+    // the "Yahoo suggests..." banner and its distinct outside-coverage/
+    // no-match/error copy. Null until a fetch has run this session.
+    suggestion: DateSuggestion | SessionSuggestion | null;
     error: string | null;
     saving: boolean;
   } | null>(null);
+
+  // Per-quarter (missing-date slots) and per-date (dated-but-sessionless
+  // rows) suggestions from the last Fetch EM History run — see
+  // handleFetchEmHistory. Empty until a fetch has actually run; nothing
+  // is inferred or shown before that.
+  const [dateSuggestions, setDateSuggestions] = useState<Record<string, DateSuggestion>>({});
+  const [sessionSuggestions, setSessionSuggestions] = useState<Record<string, SessionSuggestion>>({});
+  // Quarters the last fetch could not resolve, surfaced explicitly
+  // rather than folded into a generic "done" — see handleFetchEmHistory.
+  const [unresolvedAfterFetch, setUnresolvedAfterFetch] = useState<string[] | null>(null);
 
   // Prompted on every new/changed EM entry — optional provenance (which
   // expiry the straddle was read from, and the date it was read) that
@@ -499,6 +519,10 @@ export function CrushHistoryTable({
     rawPercent: number;
     impliedMoveExpiry: string;
     impliedMoveReadDate: string;
+    // Carried over from a placeholder-date resolution that also
+    // collected a session in the same dialog — undefined when this EM
+    // save didn't touch the date/session (the row was already real).
+    timingOverride?: "bmo" | "amc" | null;
     error: string | null;
     saving: boolean;
   } | null>(null);
@@ -660,6 +684,7 @@ export function CrushHistoryTable({
             impliedMoveSource: null,
             impliedMoveExpiry: null,
             impliedMoveReadDate: null,
+            timing: null,
           },
         );
       }
@@ -676,9 +701,9 @@ export function CrushHistoryTable({
     console.log("[fetch-em] starting for:", todaySymbol);
     setFetchStatus("fetching");
     setFetchError(null);
-    setActualPopulated(0);
     setEventsWithEm(0);
     setEventsWithActual(0);
+    setUnresolvedAfterFetch(null);
     try {
       const res = await fetch("/api/screener/fetch-em-history", {
         method: "POST",
@@ -688,11 +713,12 @@ export function CrushHistoryTable({
       });
       const json = (await res.json()) as
         | {
-            seedAdded: number;
             eventsWithActual: number;
             eventsWithEm: number;
             events: CrushHistoryEvent[];
-            messages: string[];
+            dateSuggestions: DateSuggestion[];
+            sessionSuggestions: SessionSuggestion[];
+            unresolvedQuarters: Array<{ quarterLabel: string; reason: "no_date" | "no_session"; detail: string }>;
           }
         | { error: string };
       console.log("[fetch-em] response:", { status: res.status, json });
@@ -703,10 +729,17 @@ export function CrushHistoryTable({
         setFetchError(`Failed to fetch history — ${msg}`);
         return;
       }
-      setActualPopulated(json.seedAdded);
       setEventsWithActual(json.eventsWithActual);
       setEventsWithEm(json.eventsWithEm);
       setRefreshed(json.events);
+      setDateSuggestions(Object.fromEntries(json.dateSuggestions.map((s) => [s.quarterLabel, s])));
+      setSessionSuggestions(Object.fromEntries(json.sessionSuggestions.map((s) => [s.earningsDate, s])));
+      // Surfaced explicitly, not folded into "done" — a quarter this
+      // fetch couldn't resolve stays visible in the row itself (see the
+      // per-row blocked-state rendering below), but this list is what
+      // makes the immediate post-fetch outcome legible without having
+      // to scan all 8 rows by eye.
+      setUnresolvedAfterFetch(json.unresolvedQuarters.map((u) => `${u.quarterLabel}: ${u.detail}`));
       setFetchStatus("done");
     } catch (e) {
       console.error("[fetch-em] error:", e);
@@ -748,15 +781,21 @@ export function CrushHistoryTable({
   async function commitSave(
     targetEarningsDate: string,
     sourceEvent: CrushHistoryEvent,
-    field: "em" | "actual",
+    field: "em" | "actual" | "session",
     rawPercent: number | null,
-    // Only meaningful for field === "em" — an "actual"-only edit
-    // ignores these and re-sends sourceEvent's EXISTING provenance
+    // Only meaningful for field === "em" — an "actual"/"session"-only
+    // edit ignores these and re-sends sourceEvent's EXISTING provenance
     // unchanged below, mirroring how impliedMovePct itself is
     // preserved on that path. Without that, editing Actual on a row
     // that already had Expiry/Read Date set would silently wipe them.
     impliedMoveExpiryInput: string | null,
     impliedMoveReadDateInput: string | null,
+    // undefined = preserve sourceEvent's existing timing untouched
+    // (the common EM/Actual-edit path). A value (including null, an
+    // explicit "leave unset") = this save is setting it — used by the
+    // "session" field and by an em-field save that also resolved a
+    // placeholder's date+session together in one dialog.
+    timingOverride?: "bmo" | "amc" | null,
   ): Promise<string | null> {
     const impliedMovePct =
       field === "em" ? (rawPercent === null ? null : rawPercent / 100) : sourceEvent.impliedMovePct;
@@ -766,6 +805,7 @@ export function CrushHistoryTable({
       field === "em" ? (impliedMoveExpiryInput || null) : (sourceEvent.impliedMoveExpiry ?? null);
     const impliedMoveReadDate =
       field === "em" ? (impliedMoveReadDateInput || null) : (sourceEvent.impliedMoveReadDate ?? null);
+    const timing = timingOverride === undefined ? (sourceEvent.timing ?? null) : timingOverride;
 
     const post = (confirmImplausibleImplied: boolean) =>
       fetch("/api/screener/earnings-history/update", {
@@ -779,6 +819,7 @@ export function CrushHistoryTable({
           confirmImplausibleImplied,
           impliedMoveExpiry,
           impliedMoveReadDate,
+          timing,
         }),
         cache: "no-store",
       });
@@ -844,14 +885,22 @@ export function CrushHistoryTable({
   // malformed value at all.
   // Opens the provenance dialog for a new/changed EM save — shared by
   // both entry points below (a normal row, and a placeholder row once
-  // its real date has just been resolved).
-  function openProvenancePrompt(event: CrushHistoryEvent, targetEarningsDate: string, rawPercent: number) {
+  // its real date has just been resolved). timingOverride carries a
+  // session chosen in the SAME date-resolve dialog through to the
+  // final save; undefined when the row's date/session weren't touched.
+  function openProvenancePrompt(
+    event: CrushHistoryEvent,
+    targetEarningsDate: string,
+    rawPercent: number,
+    timingOverride?: "bmo" | "amc" | null,
+  ) {
     setPendingProvenance({
       event,
       targetEarningsDate,
       rawPercent,
       impliedMoveExpiry: "",
       impliedMoveReadDate: "",
+      timingOverride,
       error: null,
       saving: false,
     });
@@ -865,7 +914,18 @@ export function CrushHistoryTable({
     if (placeholderDates.has(e.earningsDate)) {
       // Opens the dialog and returns immediately, without awaiting a
       // save — commitSave only runs once the user confirms a date.
-      setPendingResolve({ event: e, field, rawPercent, dateInput: "", error: null, saving: false });
+      const suggestion = dateSuggestions[quarterYearLabel(quarterOfDate(e.earningsDate))] ?? null;
+      setPendingResolve({
+        event: e,
+        field,
+        rawPercent,
+        dateInput: "",
+        dateEditable: true,
+        sessionInput: "",
+        suggestion,
+        error: null,
+        saving: false,
+      });
       return;
     }
     if (field === "em" && rawPercent !== null) {
@@ -875,23 +935,56 @@ export function CrushHistoryTable({
     await commitSave(e.earningsDate, e, field, rawPercent, null, null);
   }
 
+  // Dedicated trigger for a row that already has a real date but no
+  // session — a narrower ask than saveField's placeholder-date-resolve
+  // path (the date is already known; only the session needs deciding).
+  function openSessionResolve(e: CrushHistoryEvent) {
+    const suggestion = sessionSuggestions[e.earningsDate] ?? null;
+    setPendingResolve({
+      event: e,
+      field: "session",
+      rawPercent: null,
+      dateInput: e.earningsDate,
+      dateEditable: false,
+      sessionInput: "",
+      suggestion,
+      error: null,
+      saving: false,
+    });
+  }
+
   async function confirmPendingResolve() {
     if (!pendingResolve) return;
-    if (!pendingResolve.dateInput) {
+    if (pendingResolve.dateEditable && !pendingResolve.dateInput) {
       setPendingResolve((prev) => (prev ? { ...prev, error: "Pick a date first." } : prev));
       return;
     }
-    const { event, field, rawPercent, dateInput } = pendingResolve;
+    const { event, field, rawPercent, dateInput, dateEditable, sessionInput } = pendingResolve;
+    const targetDate = dateEditable ? dateInput : event.earningsDate;
+    const timingOverride: "bmo" | "amc" | null = sessionInput === "" ? null : sessionInput;
+
+    if (field === "session") {
+      setPendingResolve((prev) => (prev ? { ...prev, saving: true, error: null } : prev));
+      const errorMsg = await commitSave(targetDate, event, "session", null, null, null, timingOverride);
+      if (errorMsg === null) {
+        setPendingResolve(null);
+      } else {
+        setPendingResolve((prev) => (prev ? { ...prev, saving: false, error: errorMsg } : prev));
+      }
+      return;
+    }
     if (field === "em" && rawPercent !== null) {
-      // Real date resolved — hand off to the provenance prompt next,
-      // targeting the now-known real date instead of the placeholder.
-      // commitSave doesn't run from this path for this case.
+      // Real date (and whatever session was chosen alongside it)
+      // resolved — hand off to the provenance prompt next, targeting
+      // the now-known real date. commitSave doesn't run from this path
+      // for this case; the provenance dialog's own confirm does,
+      // carrying timingOverride through.
       setPendingResolve(null);
-      openProvenancePrompt(event, dateInput, rawPercent);
+      openProvenancePrompt(event, targetDate, rawPercent, timingOverride);
       return;
     }
     setPendingResolve((prev) => (prev ? { ...prev, saving: true, error: null } : prev));
-    const errorMsg = await commitSave(dateInput, event, field, rawPercent, null, null);
+    const errorMsg = await commitSave(targetDate, event, field, rawPercent, null, null, timingOverride);
     if (errorMsg === null) {
       setPendingResolve(null);
     } else {
@@ -910,7 +1003,8 @@ export function CrushHistoryTable({
   async function confirmPendingProvenance() {
     if (!pendingProvenance) return;
     setPendingProvenance((prev) => (prev ? { ...prev, saving: true, error: null } : prev));
-    const { event, targetEarningsDate, rawPercent, impliedMoveExpiry, impliedMoveReadDate } = pendingProvenance;
+    const { event, targetEarningsDate, rawPercent, impliedMoveExpiry, impliedMoveReadDate, timingOverride } =
+      pendingProvenance;
     const errorMsg = await commitSave(
       targetEarningsDate,
       event,
@@ -918,6 +1012,7 @@ export function CrushHistoryTable({
       rawPercent,
       impliedMoveExpiry || null,
       impliedMoveReadDate || null,
+      timingOverride,
     );
     if (errorMsg === null) {
       setPendingProvenance(null);
@@ -964,43 +1059,38 @@ export function CrushHistoryTable({
         <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
           Earnings history
         </div>
-        {fetchStatus !== "done" && (
-          <button
-            type="button"
-            onClick={handleFetchEmHistory}
-            disabled={fetchStatus === "fetching"}
-            className="inline-flex items-center gap-1 rounded border border-border bg-background/60 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-foreground/90 hover:bg-background disabled:opacity-60"
-          >
-            {fetchStatus === "fetching" ? (
-              <>
-                <Loader2 className="h-3 w-3 animate-spin" />
-                Fetching…
-              </>
-            ) : fetchStatus === "error" ? (
-              <>↻ Retry</>
-            ) : (
-              <>
-                📊 Fetch EM history
-                {sorted.length > 0 ? ` (${sorted.length})` : ""}
-              </>
-            )}
-          </button>
-        )}
+        <button
+          type="button"
+          onClick={handleFetchEmHistory}
+          disabled={fetchStatus === "fetching"}
+          className="inline-flex items-center gap-1 rounded border border-border bg-background/60 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-foreground/90 hover:bg-background disabled:opacity-60"
+        >
+          {fetchStatus === "fetching" ? (
+            <>
+              <Loader2 className="h-3 w-3 animate-spin" />
+              Fetching…
+            </>
+          ) : fetchStatus === "error" ? (
+            <>↻ Retry</>
+          ) : fetchStatus === "done" ? (
+            <>🔁 Re-check sources</>
+          ) : (
+            <>
+              📊 Fetch EM history
+              {sorted.length > 0 ? ` (${sorted.length})` : ""}
+            </>
+          )}
+        </button>
         {fetchStatus === "done" && (
           <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] font-semibold uppercase tracking-wide">
-            <span className="text-emerald-300">
-              {actualPopulated > 0
-                ? `✓ ${actualPopulated} actual ${actualPopulated === 1 ? "move" : "moves"} populated`
-                : "✓ history up to date"}
-            </span>
             {eventsWithActual > 0 && (
               eventsWithEm < eventsWithActual ? (
                 <span className="text-amber-300">
-                  · ⚠️ {eventsWithEm}/{eventsWithActual} implied moves (historical backfill discontinued)
+                  ⚠️ {eventsWithEm}/{eventsWithActual} implied moves (historical backfill discontinued)
                 </span>
               ) : (
                 <span className="text-emerald-300">
-                  · ✓ {eventsWithEm}/{eventsWithActual} implied moves
+                  ✓ {eventsWithEm}/{eventsWithActual} implied moves
                 </span>
               )
             )}
@@ -1011,6 +1101,23 @@ export function CrushHistoryTable({
         <div className="mb-2 flex items-start gap-1 rounded border border-rose-500/40 bg-rose-500/10 p-1.5 text-[10px] text-rose-200">
           <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
           <span>{fetchError}</span>
+        </div>
+      )}
+      {/* Surfaced explicitly rather than folded into a generic "done" —
+          the durable version of this lives in each row's own blocked-
+          state indicator below (reload-persistent, no re-fetch needed);
+          this is the immediate post-fetch summary so a scan of all 8
+          rows isn't required to see what just happened. */}
+      {fetchStatus === "done" && unresolvedAfterFetch && unresolvedAfterFetch.length > 0 && (
+        <div className="mb-2 rounded border border-amber-500/30 bg-amber-500/[0.06] p-1.5 text-[10px] text-amber-200">
+          <div className="font-semibold uppercase tracking-wide">
+            {unresolvedAfterFetch.length} quarter{unresolvedAfterFetch.length === 1 ? "" : "s"} still unresolved
+          </div>
+          <ul className="mt-0.5 list-inside list-disc space-y-0.5">
+            {unresolvedAfterFetch.map((line) => (
+              <li key={line}>{line}</li>
+            ))}
+          </ul>
         </div>
       )}
       <div className="overflow-x-auto rounded border border-border">
@@ -1122,6 +1229,16 @@ export function CrushHistoryTable({
               const isF = e.grade === "F";
               const isManual = e.impliedMoveSource === "manual";
               const isPlaceholder = placeholderDates.has(e.earningsDate);
+              // Blocked state 2: a real date exists but no session — the
+              // close pair for actual-move computation is undeterminable
+              // without one. Distinct from state 1 (no date at all) and
+              // from simply having no implied move (not blocked — see
+              // the Note column below).
+              const noSession = !isPlaceholder && (e.timing === null || e.timing === "unknown");
+              const quarterSuggestion = isPlaceholder
+                ? dateSuggestions[quarterYearLabel(quarterOfDate(e.earningsDate))]
+                : undefined;
+              const rowSessionSuggestion = noSession ? sessionSuggestions[e.earningsDate] : undefined;
               const rowError = editErrors[e.earningsDate];
               const analysis = researchAnalyses?.[e.earningsDate] ?? null;
               const isExpanded = expandedAnalysisDate === e.earningsDate;
@@ -1174,6 +1291,25 @@ export function CrushHistoryTable({
                           </TooltipTrigger>
                           <TooltipContent className="max-w-xs text-sm">
                             Hand-entered — Fetch EM History will never overwrite this row. Click EM/Actual to re-edit.
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    )}
+                    {noSession && (
+                      <TooltipProvider delayDuration={200}>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <button
+                              type="button"
+                              onClick={() => openSessionResolve(e)}
+                              className="ml-1.5 cursor-pointer rounded bg-orange-500/15 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-orange-300 hover:bg-orange-500/25"
+                            >
+                              no session
+                            </button>
+                          </TooltipTrigger>
+                          <TooltipContent className="max-w-xs text-sm">
+                            Date confirmed, but BMO/AMC is unknown — actual move can&apos;t be computed without it (the
+                            wrong session picks the wrong close pair). Click to set it.
                           </TooltipContent>
                         </Tooltip>
                       </TooltipProvider>
@@ -1276,6 +1412,82 @@ export function CrushHistoryTable({
                       <span className="text-rose-300" title={rowError}>
                         ⚠ save failed
                       </span>
+                    ) : isPlaceholder ? (
+                      // Blocked state 1: no date at all. Always visible
+                      // here (not just on the Qtr-cell tooltip hover) —
+                      // this is the thing that must survive a week away
+                      // without needing to re-run anything.
+                      <span className="flex flex-wrap items-center gap-1 text-amber-300/90">
+                        {quarterSuggestion === undefined ? (
+                          <>No confirmed date — Fetch EM History for a suggestion, or click EM/Actual to enter one.</>
+                        ) : quarterSuggestion.status === "suggested" ? (
+                          <>
+                            Yahoo suggests {fmtEarningsDateShort(quarterSuggestion.date!)}, session inferred:{" "}
+                            {quarterSuggestion.hour ? quarterSuggestion.hour.toUpperCase() : "none"} (UTC-hour
+                            heuristic, not reported).
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setPendingResolve({
+                                  event: e,
+                                  field: "em",
+                                  rawPercent: null,
+                                  dateInput: quarterSuggestion.date!,
+                                  dateEditable: true,
+                                  sessionInput: quarterSuggestion.hour ?? "",
+                                  suggestion: quarterSuggestion,
+                                  error: null,
+                                  saving: false,
+                                })
+                              }
+                              className="rounded border border-amber-400/40 bg-amber-500/15 px-1 py-0.5 font-semibold uppercase tracking-wide text-amber-200 hover:bg-amber-500/25"
+                            >
+                              Review &amp; confirm
+                            </button>
+                          </>
+                        ) : quarterSuggestion.status === "outside_coverage" ? (
+                          <>Outside source coverage — manual date required. Re-fetching will not resolve this.</>
+                        ) : quarterSuggestion.status === "no_match" ? (
+                          <>No matching date found in source data — manual date required.</>
+                        ) : (
+                          <>Source lookup failed — try Fetch EM History again, or enter the date manually.</>
+                        )}
+                      </span>
+                    ) : noSession ? (
+                      // Blocked state 2: date confirmed, session unknown.
+                      <span className="flex flex-wrap items-center gap-1 text-orange-300/90">
+                        {rowSessionSuggestion === undefined ? (
+                          <>No session — Fetch EM History for a suggestion, or click &quot;no session&quot; to set it.</>
+                        ) : rowSessionSuggestion.status === "suggested" ? (
+                          <>
+                            Yahoo suggests session: {rowSessionSuggestion.hour?.toUpperCase()} (UTC-hour heuristic,
+                            not reported).
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setPendingResolve({
+                                  event: e,
+                                  field: "session",
+                                  rawPercent: null,
+                                  dateInput: e.earningsDate,
+                                  dateEditable: false,
+                                  sessionInput: rowSessionSuggestion.hour ?? "",
+                                  suggestion: rowSessionSuggestion,
+                                  error: null,
+                                  saving: false,
+                                })
+                              }
+                              className="rounded border border-orange-400/40 bg-orange-500/15 px-1 py-0.5 font-semibold uppercase tracking-wide text-orange-200 hover:bg-orange-500/25"
+                            >
+                              Review &amp; confirm
+                            </button>
+                          </>
+                        ) : rowSessionSuggestion.status === "not_found" ? (
+                          <>No session found in source data for this date — enter it manually.</>
+                        ) : (
+                          <>Source lookup failed — try Fetch EM History again, or set the session manually.</>
+                        )}
+                      </span>
                     ) : (
                       <>
                         {isSimilar && (
@@ -1292,6 +1504,9 @@ export function CrushHistoryTable({
                           </span>
                         )}
                         {!isSimilar && e.impliedMovePct === null && (
+                          // Not a blocked state — date+session are fine,
+                          // this quarter simply has no implied move on
+                          // file (no historical options-data source).
                           <span>EM not available</span>
                         )}
                       </>
@@ -1348,25 +1563,82 @@ export function CrushHistoryTable({
       >
         <DialogContent className="max-w-sm">
           <DialogHeader>
-            <DialogTitle>Confirm the real earnings date</DialogTitle>
+            <DialogTitle>
+              {pendingResolve?.field === "session" ? "Confirm the earnings session" : "Confirm the real earnings date"}
+            </DialogTitle>
           </DialogHeader>
-          <p className="text-sm text-muted-foreground">
-            This quarter has no confirmed earnings date yet. Enter the real announcement date from
-            ThinkorSwim before saving {pendingResolve?.field === "em" ? "the implied move" : "the actual move"}.
-          </p>
-          <input
-            autoFocus
-            type="date"
-            value={pendingResolve?.dateInput ?? ""}
-            disabled={pendingResolve?.saving}
-            onChange={(ev) =>
-              setPendingResolve((prev) => (prev ? { ...prev, dateInput: ev.target.value, error: null } : prev))
-            }
-            onKeyDown={(ev) => {
-              if (ev.key === "Enter") void confirmPendingResolve();
-            }}
-            className="w-full rounded border border-border bg-background px-2 py-1.5 text-sm outline-none focus:border-primary"
-          />
+          {pendingResolve?.dateEditable ? (
+            <p className="text-sm text-muted-foreground">
+              This quarter has no confirmed earnings date yet. Enter the real announcement date from
+              ThinkorSwim before saving {pendingResolve?.field === "em" ? "the implied move" : "the actual move"}.
+            </p>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              {fmtEarningsDateShort(pendingResolve?.dateInput ?? "")} is confirmed. This row has no session
+              (BMO/AMC) on file — actual-move computation needs one to pick the right close pair.
+            </p>
+          )}
+          {/* The suggestion, if any, is never auto-applied — it's shown
+              here as context for what "Review & confirm" pre-filled
+              below, always labeled as inferred, never as fact. */}
+          {pendingResolve?.suggestion && (
+            <div className="rounded border border-border bg-background/60 p-2 text-xs text-muted-foreground">
+              {pendingResolve.suggestion.status === "suggested" ? (
+                <>
+                  <span className="font-semibold text-foreground">Yahoo suggests: </span>
+                  {"date" in pendingResolve.suggestion && pendingResolve.suggestion.date
+                    ? `${fmtEarningsDateShort(pendingResolve.suggestion.date)}, `
+                    : ""}
+                  session {pendingResolve.suggestion.hour ? pendingResolve.suggestion.hour.toUpperCase() : "unknown"}{" "}
+                  — <span className="italic">inferred from a UTC-hour heuristic, not a reported session.</span> Pre-
+                  filled below; still requires your confirmation.
+                </>
+              ) : pendingResolve.suggestion.status === "outside_coverage" ? (
+                <>Outside source coverage — the source&apos;s data doesn&apos;t reach back this far. Enter manually.</>
+              ) : pendingResolve.suggestion.status === "no_match" || pendingResolve.suggestion.status === "not_found" ? (
+                <>No matching entry found in source data for this quarter. Enter manually.</>
+              ) : (
+                <>Source lookup failed. Enter manually, or try Fetch EM History again.</>
+              )}
+            </div>
+          )}
+          {pendingResolve?.dateEditable && (
+            <input
+              autoFocus
+              type="date"
+              value={pendingResolve?.dateInput ?? ""}
+              disabled={pendingResolve?.saving}
+              onChange={(ev) =>
+                setPendingResolve((prev) => (prev ? { ...prev, dateInput: ev.target.value, error: null } : prev))
+              }
+              onKeyDown={(ev) => {
+                if (ev.key === "Enter") void confirmPendingResolve();
+              }}
+              className="w-full rounded border border-border bg-background px-2 py-1.5 text-sm outline-none focus:border-primary"
+            />
+          )}
+          <div>
+            <div className="mb-1 text-xs font-medium text-muted-foreground">
+              Session {pendingResolve?.suggestion?.status === "suggested" ? "(inferred — confirm or change)" : ""}
+            </div>
+            <div className="flex gap-1.5">
+              {(["", "bmo", "amc"] as const).map((opt) => (
+                <button
+                  key={opt || "unset"}
+                  type="button"
+                  disabled={pendingResolve?.saving}
+                  onClick={() => setPendingResolve((prev) => (prev ? { ...prev, sessionInput: opt } : prev))}
+                  className={`flex-1 rounded border px-2 py-1.5 text-sm font-medium disabled:opacity-60 ${
+                    pendingResolve?.sessionInput === opt
+                      ? "border-primary bg-primary/15 text-foreground"
+                      : "border-border bg-background/60 text-muted-foreground hover:bg-background"
+                  }`}
+                >
+                  {opt === "" ? "Not set" : opt.toUpperCase()}
+                </button>
+              ))}
+            </div>
+          </div>
           {pendingResolve?.error && (
             <div className="flex items-start gap-1 text-xs text-rose-300">
               <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />

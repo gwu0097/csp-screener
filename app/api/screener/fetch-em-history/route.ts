@@ -4,137 +4,67 @@ import {
   gradeFromRatio,
   type CrushHistoryEvent,
 } from "@/lib/earnings-history-table";
-import { quarterLabel } from "@/lib/quarter-label";
 import {
-  getFinnhubEarningsPeriods,
-} from "@/lib/earnings";
-import {
-  fetchYahooPriceAction,
-  updateEncyclopedia,
-} from "@/lib/encyclopedia";
-import { getYahooPastAnnouncements } from "@/lib/yahoo";
+  quarterLabel,
+  quarterOfDate,
+  quarterYearLabel,
+  previousQuarter,
+  quarterDateRange,
+  type QuarterYear,
+} from "@/lib/quarter-label";
+import { fetchFinnhubEarningsCalendar, type CalendarEntry } from "@/lib/encyclopedia";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
-// Per-symbol fetch from the screener row. Seeds historical actual
-// moves (Finnhub → encyclopedia ingest, Yahoo fallback) and returns
-// the refreshed crush events. Historical implied moves are no longer
-// backfilled — the paid options-history data source was cancelled;
-// implied moves now only come from live screener runs (Schwab chain
-// at analysis time). Rows already backfilled keep their values.
-export const maxDuration = 60;
 
-// Seeds historical earnings_history rows when the table has no
-// actual_move_pct events for the symbol. Tries Finnhub /stock/earnings
-// first (which gives fiscal quarter-end periods that updateEncyclopedia
-// then maps to real announcement dates via Yahoo), then falls back to
-// Yahoo's earningsChart.quarterly[].reportedDate when Finnhub returns
-// nothing. Either path computes actual move % from Yahoo price bars.
-type SeedReport = {
-  finnhubPeriods: number;
-  yahooDates: number;
-  rowsAdded: number;
-  source: "finnhub" | "yahoo" | "none";
-  detail: string;
+// Per-symbol fetch from the screener row. 2026-08-19 rework: no longer
+// silently writes rows. The prior version (via updateEncyclopedia /
+// Finnhub, or a Yahoo-fallback auto-upsert) wrote real earnings_history
+// rows with no confirmation step at all — directly at odds with "do not
+// auto-accept." Now this route only COMPUTES suggestions and returns
+// them; every write happens through /api/screener/earnings-history/update,
+// same as a hand-typed manual entry, only once the user explicitly
+// confirms (see components/crush-history-table.tsx's pendingResolve
+// dialog).
+//
+// Single source: fetchFinnhubEarningsCalendar (lib/encyclopedia.ts) is
+// Yahoo-backed despite its name (see that function's own doc comment —
+// it reads Yahoo's quoteSummary earnings module, not Finnhub, because
+// Finnhub's free tier only returns the next upcoming entry). Labeled
+// "yahoo" everywhere in this route's output, not "finnhub" — there is
+// no second, independent source to compare it against, so no agreement
+// indicator either (2026-08-19 audit: getFinnhubEarningsPeriods and
+// getYahooPastAnnouncements both ultimately read the same
+// earningsChart.quarterly array).
+export const maxDuration = 30;
+
+const HISTORY_QUARTER_COUNT = 8;
+
+function todayEasternIso(): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
+
+type DateSuggestionStatus = "suggested" | "outside_coverage" | "no_match" | "source_error";
+type DateSuggestion = {
+  quarterLabel: string;
+  rangeStart: string;
+  rangeEnd: string;
+  status: DateSuggestionStatus;
+  date: string | null;
+  hour: "bmo" | "amc" | null;
 };
 
-async function seedHistoricalRows(symbol: string): Promise<SeedReport> {
-  const sb = createServerClient();
-  const finnhubPeriods = await getFinnhubEarningsPeriods(symbol);
-  if (finnhubPeriods.length > 0) {
-    try {
-      const summary = await updateEncyclopedia(symbol);
-      return {
-        finnhubPeriods: finnhubPeriods.length,
-        yahooDates: 0,
-        rowsAdded: summary.newRecords + summary.updatedRecords,
-        source: "finnhub",
-        detail: `finnhub returned ${finnhubPeriods.length} periods; encyclopedia ingest added ${summary.newRecords} new + ${summary.updatedRecords} updated`,
-      };
-    } catch (e) {
-      console.warn(
-        `[fetch-em] seed via Finnhub/encyclopedia failed for ${symbol}: ${e instanceof Error ? e.message : e}`,
-      );
-    }
-  }
-
-  // Yahoo fallback: pull announcement dates directly, then compute
-  // actual move % from Yahoo bars and upsert into earnings_history.
-  const yahooAnnouncements = await getYahooPastAnnouncements(symbol);
-  if (yahooAnnouncements.length === 0) {
-    return {
-      finnhubPeriods: finnhubPeriods.length,
-      yahooDates: 0,
-      rowsAdded: 0,
-      source: "none",
-      detail: `finnhub=${finnhubPeriods.length} periods; yahoo=0 announcements — nothing to seed`,
-    };
-  }
-
-  // Hand-entered rows (from the earnings-history table's inline EM/
-  // Actual editor) must never be overwritten by this seed path — same
-  // rule as the Finnhub/updateEncyclopedia path in lib/encyclopedia.ts.
-  const manualRes = await sb
-    .from("earnings_history")
-    .select("earnings_date")
-    .eq("symbol", symbol)
-    .eq("implied_move_source", "manual");
-  const manualDates = new Set(
-    ((manualRes.data ?? []) as Array<{ earnings_date: string }>).map((r) => r.earnings_date),
-  );
-
-  let added = 0;
-  for (const ann of yahooAnnouncements) {
-    if (manualDates.has(ann.iso)) continue;
-    // Yahoo's earningsChart carries no BMO/AMC signal, so this always
-    // resolves to timing=null — fetchYahooPriceAction's confirmed-date
-    // branch returns null rather than guess a pair when timing is
-    // unknown (2026-08-12 fix), so this fallback path now yields more
-    // incomplete rows than before. Accepted: it's already the lower-
-    // priority fallback behind Finnhub/updateEncyclopedia, and a wrong
-    // attribution here is worse than a gap, same as everywhere else.
-    const price = await fetchYahooPriceAction(symbol, ann.iso, null);
-    const payload: Record<string, unknown> = {
-      symbol,
-      earnings_date: ann.iso,
-      price_before: price.price_before,
-      price_after: price.price_after,
-      price_at_expiry: price.price_at_expiry,
-      actual_move_pct: price.actual_move_pct,
-      data_source: "yahoo",
-      is_complete:
-        price.price_before !== null && price.price_after !== null,
-      // ann's fiscal fields come straight from Yahoo's own
-      // fiscalQuarter string (getYahooPastAnnouncements never falls
-      // back to calendarQuarter/date) — null here means Yahoo simply
-      // didn't have it for this quarter, not a guess. Included only
-      // when non-null: this upsert can re-run against a row a later
-      // backfill already populated (e.g. from an older Yahoo-only
-      // window that predates the fiscal columns), and a null here must
-      // never clobber a value some other source already established.
-      ...(ann.fiscalQuarter !== null ? { fiscal_quarter: ann.fiscalQuarter } : {}),
-      ...(ann.fiscalYear !== null ? { fiscal_year: ann.fiscalYear } : {}),
-      ...(ann.periodEnd !== null ? { period_end: ann.periodEnd } : {}),
-    };
-    const up = await sb
-      .from("earnings_history")
-      .upsert(payload, { onConflict: "symbol,earnings_date" });
-    if (up.error) {
-      console.warn(
-        `[fetch-em] yahoo seed upsert failed for ${symbol}@${ann.iso}: ${up.error.message}`,
-      );
-      continue;
-    }
-    added += 1;
-  }
-  return {
-    finnhubPeriods: finnhubPeriods.length,
-    yahooDates: yahooAnnouncements.length,
-    rowsAdded: added,
-    source: "yahoo",
-    detail: `finnhub=${finnhubPeriods.length} periods; yahoo=${yahooAnnouncements.length} announcements; upserted ${added} rows`,
-  };
-}
+type SessionSuggestionStatus = "suggested" | "not_found" | "source_error";
+type SessionSuggestion = {
+  earningsDate: string;
+  status: SessionSuggestionStatus;
+  hour: "bmo" | "amc" | null;
+};
 
 type Body = { symbol?: unknown };
 
@@ -152,36 +82,139 @@ export async function POST(req: NextRequest) {
   }
 
   const sb = createServerClient();
-  const initialRead = await sb
+
+  // Existing rows for this symbol — used both to find which of the 8
+  // quarter slots are missing a date, and which real rows are missing
+  // a session.
+  const existingRes = await sb
     .from("earnings_history")
-    .select("earnings_date,actual_move_pct")
+    .select("earnings_date,timing,actual_move_pct,implied_move_pct")
     .eq("symbol", symbol);
-  if (initialRead.error) {
-    return NextResponse.json({ error: initialRead.error.message }, { status: 500 });
+  if (existingRes.error) {
+    return NextResponse.json({ error: existingRes.error.message }, { status: 500 });
   }
-  const historicalCount = ((initialRead.data ?? []) as Array<{
+  type ExistingRow = {
+    earnings_date: string;
+    timing: "bmo" | "amc" | "unknown" | null;
     actual_move_pct: number | null;
-  }>).filter((row) => row.actual_move_pct !== null).length;
+    implied_move_pct: number | null;
+  };
+  const existingRows = (existingRes.data ?? []) as ExistingRow[];
 
-  // Seed when the table is cold for this symbol (fewer than 3 rows
-  // with an actual move).
-  let seedReport: SeedReport | null = null;
-  if (historicalCount < 3) {
-    seedReport = await seedHistoricalRows(symbol);
-    console.log(`[fetch-em] seed ${symbol}: ${seedReport.detail}`);
-  }
-  const seedAdded = seedReport?.rowsAdded ?? 0;
-  const messages: string[] = [];
-  if (seedReport) {
-    messages.push(`seed (${seedReport.source}): ${seedReport.detail}`);
+  const todayIso = todayEasternIso();
+  const pinnedQY = quarterOfDate(todayIso);
+  const byQuarter = new Map<string, ExistingRow>();
+  for (const r of existingRows) {
+    const label = quarterYearLabel(quarterOfDate(r.earnings_date));
+    if (!byQuarter.has(label)) byQuarter.set(label, r);
   }
 
-  // Re-fetch the full crush history so the client can drop-in
-  // replace its rendered events list with the latest grades.
+  // Same 8-quarter walk-back as the client's placeholder loop
+  // (components/crush-history-table.tsx) — shared quarter-label helpers
+  // so "which quarter is missing" can't independently drift between
+  // client and server.
+  const missingQuarters: Array<{ qy: QuarterYear; label: string }> = [];
+  const sessionlessRows: ExistingRow[] = [];
+  {
+    let cursor = quarterOfDate(todayIso);
+    for (let i = 0; i < HISTORY_QUARTER_COUNT; i += 1) {
+      if (cursor.q !== pinnedQY.q || cursor.y !== pinnedQY.y) {
+        const label = quarterYearLabel(cursor);
+        const real = byQuarter.get(label);
+        if (!real) {
+          missingQuarters.push({ qy: cursor, label });
+        } else if (real.timing === null || real.timing === "unknown") {
+          sessionlessRows.push(real);
+        }
+      }
+      cursor = previousQuarter(cursor);
+    }
+  }
+
+  // One calendar fetch per symbol, reused for every missing quarter AND
+  // every sessionless row — Yahoo's earningsChart.quarterly only ever
+  // returns ~4 most recent quarters (documented limitation), so this is
+  // cheap and there's nothing to gain from fetching per-quarter.
+  let calendar: CalendarEntry[] = [];
+  let calendarError: string | null = null;
+  try {
+    calendar = await fetchFinnhubEarningsCalendar(symbol);
+  } catch (e) {
+    calendarError = e instanceof Error ? e.message : "source lookup failed";
+    console.warn(`[fetch-em-history] calendar fetch failed for ${symbol}: ${calendarError}`);
+  }
+  const oldestCovered = calendar.length > 0 ? calendar.map((c) => c.announcementDate).sort()[0] : null;
+
+  const dateSuggestions: DateSuggestion[] = [];
+  for (const { qy, label } of missingQuarters) {
+    const range = quarterDateRange(qy);
+    if (calendarError) {
+      dateSuggestions.push({ quarterLabel: label, rangeStart: range.start, rangeEnd: range.end, status: "source_error", date: null, hour: null });
+      continue;
+    }
+    const match = calendar.find((c) => c.announcementDate >= range.start && c.announcementDate <= range.end);
+    if (match) {
+      dateSuggestions.push({
+        quarterLabel: label,
+        rangeStart: range.start,
+        rangeEnd: range.end,
+        status: "suggested",
+        date: match.announcementDate,
+        hour: match.hour === "bmo" || match.hour === "amc" ? match.hour : null,
+      });
+      continue;
+    }
+    // Outside coverage vs no-match are genuinely different diagnoses:
+    // "outside_coverage" means the source's window structurally doesn't
+    // reach this quarter at all (re-fetching will never help); "no_match"
+    // means the window reaches this far but nothing landed here (a real,
+    // if rarer, gap — a skipped quarter, fiscal-year shift, etc.).
+    const status: DateSuggestionStatus =
+      oldestCovered !== null && range.end < oldestCovered ? "outside_coverage" : "no_match";
+    dateSuggestions.push({ quarterLabel: label, rangeStart: range.start, rangeEnd: range.end, status, date: null, hour: null });
+  }
+
+  const sessionSuggestions: SessionSuggestion[] = [];
+  for (const row of sessionlessRows) {
+    if (calendarError) {
+      sessionSuggestions.push({ earningsDate: row.earnings_date, status: "source_error", hour: null });
+      continue;
+    }
+    const match = calendar.find((c) => c.announcementDate === row.earnings_date);
+    if (match && (match.hour === "bmo" || match.hour === "amc")) {
+      sessionSuggestions.push({ earningsDate: row.earnings_date, status: "suggested", hour: match.hour });
+    } else {
+      sessionSuggestions.push({ earningsDate: row.earnings_date, status: "not_found", hour: null });
+    }
+  }
+
+  const unresolvedQuarters: Array<{ quarterLabel: string; reason: "no_date" | "no_session"; detail: string }> = [];
+  for (const s of dateSuggestions) {
+    if (s.status === "suggested") continue;
+    const detail =
+      s.status === "outside_coverage"
+        ? "outside source coverage, manual date required"
+        : s.status === "no_match"
+          ? "no matching date in source data, manual date required"
+          : "source lookup failed";
+    unresolvedQuarters.push({ quarterLabel: s.quarterLabel, reason: "no_date", detail });
+  }
+  for (const s of sessionSuggestions) {
+    if (s.status === "suggested") continue;
+    const label = quarterYearLabel(quarterOfDate(s.earningsDate));
+    const detail =
+      s.status === "not_found"
+        ? "no session in source data, manual session required"
+        : "source lookup failed";
+    unresolvedQuarters.push({ quarterLabel: label, reason: "no_session", detail });
+  }
+
+  // Re-fetch the full crush history so the client can drop-in replace
+  // its rendered events list.
   const refreshed = await sb
     .from("earnings_history")
     .select(
-      "earnings_date,implied_move_pct,actual_move_pct,move_ratio,implied_move_source,implied_move_expiry,implied_move_read_date,date_confidence,fiscal_quarter,fiscal_year,period_end,t1_unrecoverable",
+      "earnings_date,implied_move_pct,actual_move_pct,move_ratio,implied_move_source,implied_move_expiry,implied_move_read_date,date_confidence,fiscal_quarter,fiscal_year,period_end,t1_unrecoverable,timing",
     )
     .eq("symbol", symbol)
     .order("earnings_date", { ascending: false })
@@ -199,6 +232,7 @@ export async function POST(req: NextRequest) {
     fiscal_year: number | null;
     period_end: string | null;
     t1_unrecoverable: boolean | null;
+    timing: "bmo" | "amc" | "unknown" | null;
   }>).map((row) => {
     const ratio =
       row.move_ratio ??
@@ -229,6 +263,7 @@ export async function POST(req: NextRequest) {
       impliedMoveReadDate: row.implied_move_read_date,
       dateConfidence: row.date_confidence,
       t1Unrecoverable: row.t1_unrecoverable === true,
+      timing: row.timing,
     };
   });
 
@@ -238,15 +273,17 @@ export async function POST(req: NextRequest) {
   ).length;
 
   console.log(
-    `[fetch-em-history] ${symbol}: seedAdded=${seedAdded} ` +
-      `(eventsWithActual=${eventsWithActual} eventsWithEm=${eventsWithEm})`,
+    `[fetch-em-history] ${symbol}: missingQuarters=${missingQuarters.length} sessionless=${sessionlessRows.length} ` +
+      `suggested=${dateSuggestions.filter((s) => s.status === "suggested").length + sessionSuggestions.filter((s) => s.status === "suggested").length} ` +
+      `unresolved=${unresolvedQuarters.length} (eventsWithActual=${eventsWithActual} eventsWithEm=${eventsWithEm})`,
   );
 
   return NextResponse.json({
-    seedAdded,
     eventsWithActual,
     eventsWithEm,
     events,
-    messages,
+    dateSuggestions,
+    sessionSuggestions,
+    unresolvedQuarters,
   });
 }

@@ -7,6 +7,7 @@ import {
   type CrushHistoryEvent,
 } from "@/lib/earnings-history-table";
 import { quarterLabel, isRepresentativeDateSlot, isWeekend } from "@/lib/quarter-label";
+import { fetchYahooPriceAction } from "@/lib/encyclopedia";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -49,6 +50,14 @@ type Body = {
   // the 2026-08-18 audit.
   impliedMoveExpiry?: unknown; // YYYY-MM-DD or null
   impliedMoveReadDate?: unknown; // YYYY-MM-DD or null
+  // BMO/AMC/unknown, or null if not set. Written verbatim — same
+  // preserve-unless-changing convention as impliedMoveExpiry above: the
+  // client always sends the row's existing timing when this save isn't
+  // the one changing it. When this save DOES resolve it to a real
+  // session and no actual move exists yet, this route computes one via
+  // Yahoo price history immediately (2026-08-19 date-suggestion flow) —
+  // never guessed, only ever run against an explicitly confirmed session.
+  timing?: unknown;
 };
 
 // Accepts a finite number, or null/undefined -> null (explicit clear).
@@ -74,6 +83,14 @@ function parseNullableDateString(v: unknown, field: string): { ok: true; value: 
     return { ok: false, error: `${field} must be YYYY-MM-DD or null` };
   }
   return { ok: true, value: v };
+}
+
+function parseNullableTiming(
+  v: unknown,
+): { ok: true; value: "bmo" | "amc" | "unknown" | null } | { ok: false; error: string } {
+  if (v === null || v === undefined) return { ok: true, value: null };
+  if (v === "bmo" || v === "amc" || v === "unknown") return { ok: true, value: v };
+  return { ok: false, error: 'timing must be "bmo", "amc", "unknown", or null' };
 }
 
 export async function POST(req: NextRequest) {
@@ -111,6 +128,8 @@ export async function POST(req: NextRequest) {
   if (!impliedMoveExpiry.ok) return NextResponse.json({ error: impliedMoveExpiry.error }, { status: 400 });
   const impliedMoveReadDate = parseNullableDateString(body.impliedMoveReadDate, "impliedMoveReadDate");
   if (!impliedMoveReadDate.ok) return NextResponse.json({ error: impliedMoveReadDate.error }, { status: 400 });
+  const timing = parseNullableTiming(body.timing);
+  if (!timing.ok) return NextResponse.json({ error: timing.error }, { status: 400 });
 
   const sb = createServerClient();
 
@@ -149,13 +168,43 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // A session that just resolved to a real BMO/AMC (this save's job,
+  // per the fetch-history date-suggestion flow) with no actual move on
+  // file yet — compute it now via Yahoo price history. This is exactly
+  // the prerequisite pair (real date + real, EXPLICITLY confirmed
+  // session — never "unknown", never guessed) the whole suggestion flow
+  // exists to establish before this computation is safe to run; a
+  // client-submitted actualMovePct (typed by hand, or the row's
+  // existing preserved value) is never overridden.
+  let actualMovePct = actual.value;
+  let priceBefore: number | null = null;
+  let priceAfter: number | null = null;
+  let priceAtExpiry: number | null = null;
+  let autoComputedActual = false;
+  if (actualMovePct === null && (timing.value === "bmo" || timing.value === "amc")) {
+    try {
+      const price = await fetchYahooPriceAction(symbol, earningsDate, timing.value);
+      if (price.actual_move_pct !== null) {
+        actualMovePct = price.actual_move_pct;
+        priceBefore = price.price_before;
+        priceAfter = price.price_after;
+        priceAtExpiry = price.price_at_expiry;
+        autoComputedActual = true;
+      }
+    } catch (e) {
+      console.warn(
+        `[earnings-history-update] actual-move auto-compute failed for ${symbol}@${earningsDate}: ${e instanceof Error ? e.message : e}`,
+      );
+    }
+  }
+
   // Same ratio formula as everywhere else that computes it
   // (fetch-em-history, getCrushHistory, calculateBreachAnalysis):
   // |actual| / implied, magnitude-only — direction is already carried
   // separately by actualMovePct's own sign.
   const ratio =
-    em.value !== null && em.value > 0 && actual.value !== null
-      ? Math.abs(actual.value) / em.value
+    em.value !== null && em.value > 0 && actualMovePct !== null
+      ? Math.abs(actualMovePct) / em.value
       : null;
   const grade = gradeFromRatio(ratio);
 
@@ -182,13 +231,17 @@ export async function POST(req: NextRequest) {
         symbol,
         earnings_date: earningsDate,
         implied_move_pct: em.value,
-        actual_move_pct: actual.value,
+        actual_move_pct: actualMovePct,
         move_ratio: ratio,
         implied_move_source: "manual",
         implied_move_expiry: impliedMoveExpiry.value,
         implied_move_read_date: impliedMoveReadDate.value,
-        is_complete: em.value !== null && actual.value !== null,
+        timing: timing.value,
+        is_complete: em.value !== null && actualMovePct !== null,
         ...(placeholderMatch ? { date_confidence: "low" } : {}),
+        ...(autoComputedActual
+          ? { price_before: priceBefore, price_after: priceAfter, price_at_expiry: priceAtExpiry }
+          : {}),
       },
       { onConflict: "symbol,earnings_date" },
     );
@@ -221,7 +274,7 @@ export async function POST(req: NextRequest) {
     periodEnd: null,
     fiscalKnown: false,
     impliedMovePct: em.value,
-    actualMovePct: actual.value,
+    actualMovePct,
     ratio,
     grade,
     impliedMoveSource: "manual",
@@ -231,6 +284,7 @@ export async function POST(req: NextRequest) {
     // Unknown here without a re-read (see comment above) — same
     // fallback rationale as fiscalQuarter.
     t1Unrecoverable: false,
+    timing: timing.value,
   };
   return NextResponse.json(warning ? { event, warning } : { event });
 }
