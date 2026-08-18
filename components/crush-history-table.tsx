@@ -308,6 +308,53 @@ function gradeBadgeCls(g: CrushHistoryEvent["grade"]): string {
   return "bg-zinc-500/10 text-muted-foreground";
 }
 
+// Session-picker default for the confirm-date/confirm-session dialog.
+// Never silent: whichever rule fires is shown in the dialog verbatim
+// (see sessionDefaultLabel below), because a wrong session computes a
+// real-looking actual move off the wrong close pair — worse than a
+// blank "Not set". Precedence, checked in order:
+//   1. This exact quarter has a "suggested" Yahoo entry with an hour —
+//      use it, labeled as inferred from source.
+//   2. No source suggestion, but every OTHER row for this symbol that
+//      has a real stored session (bmo/amc, not null/"unknown") agrees
+//      on one value — use it, labeled as the symbol's own history with
+//      a count (e.g. "BMO on all 3 stored quarters").
+//   3. Stored sessions disagree — show the split, default stays blank.
+//   4. No suggestion and no stored sessions at all — blank, no evidence.
+type SessionDefault = { value: "" | "bmo" | "amc"; rule: 1 | 2 | 3 | 4; label: string };
+
+function computeSessionDefault(
+  suggestionHour: "bmo" | "amc" | null | undefined,
+  storedSessions: Array<"bmo" | "amc">,
+): SessionDefault {
+  if (suggestionHour) {
+    return {
+      value: suggestionHour,
+      rule: 1,
+      label: `Rule 1: inferred from source (Yahoo, UTC-hour heuristic) for this quarter.`,
+    };
+  }
+  if (storedSessions.length > 0) {
+    const unique = new Set(storedSessions);
+    if (unique.size === 1) {
+      const only = Array.from(unique)[0];
+      return {
+        value: only,
+        rule: 2,
+        label: `Rule 2: ${only.toUpperCase()} on all ${storedSessions.length} stored quarter${storedSessions.length === 1 ? "" : "s"} for this symbol.`,
+      };
+    }
+    const bmoCount = storedSessions.filter((s) => s === "bmo").length;
+    const amcCount = storedSessions.filter((s) => s === "amc").length;
+    return {
+      value: "",
+      rule: 3,
+      label: `Rule 3: stored sessions disagree — ${bmoCount} BMO / ${amcCount} AMC across this symbol's history. Pick one.`,
+    };
+  }
+  return { value: "", rule: 4, label: "Rule 4: no evidence either way — set manually if known." };
+}
+
 // Click-to-edit EM/Actual cell. Percent in, percent out (e.g. typing
 // "4.5" means 4.5%) — the caller converts to/from the fraction the API
 // and the rest of this table use. Ratio/Grade are never editable here;
@@ -484,6 +531,11 @@ export function CrushHistoryTable({
     // selector is live.
     dateEditable: boolean;
     sessionInput: "" | "bmo" | "amc";
+    // Which of computeSessionDefault's 4 rules produced sessionInput's
+    // initial value — always shown in the dialog (see the state comment
+    // on that function for why silent pre-fill isn't acceptable here).
+    sessionDefaultRule: 1 | 2 | 3 | 4;
+    sessionDefaultLabel: string;
     // The fetched suggestion for this exact slot/date, if any — drives
     // the "Yahoo suggests..." banner and its distinct outside-coverage/
     // no-match/error copy. Null until a fetch has run this session.
@@ -600,6 +652,15 @@ export function CrushHistoryTable({
   const sorted = liveEvents
     .filter((e) => e !== upcoming && e.earningsDate < todayIso)
     .sort((a, b) => b.earningsDate.localeCompare(a.earningsDate));
+
+  // Every REAL stored session for this symbol across the currently-
+  // loaded rows (the 8-quarter window plus the pinned/upcoming row,
+  // when it already has one) — the evidence base for
+  // computeSessionDefault's rule 2/3. Excludes null/"unknown" (not
+  // evidence either way) by construction.
+  const storedSessions: Array<"bmo" | "amc"> = [...sorted, ...(upcoming ? [upcoming] : [])]
+    .map((e) => e.timing)
+    .filter((t): t is "bmo" | "amc" => t === "bmo" || t === "amc");
 
   const pinnedDate = todayEarningsDate || upcoming?.earningsDate || todayIso;
   // Analyses are written the day of the print — the pinned row (today's
@@ -915,13 +976,19 @@ export function CrushHistoryTable({
       // Opens the dialog and returns immediately, without awaiting a
       // save — commitSave only runs once the user confirms a date.
       const suggestion = dateSuggestions[quarterYearLabel(quarterOfDate(e.earningsDate))] ?? null;
+      const sessionDefault = computeSessionDefault(
+        suggestion?.status === "suggested" ? suggestion.hour : null,
+        storedSessions,
+      );
       setPendingResolve({
         event: e,
         field,
         rawPercent,
         dateInput: "",
         dateEditable: true,
-        sessionInput: "",
+        sessionInput: sessionDefault.value,
+        sessionDefaultRule: sessionDefault.rule,
+        sessionDefaultLabel: sessionDefault.label,
         suggestion,
         error: null,
         saving: false,
@@ -940,13 +1007,19 @@ export function CrushHistoryTable({
   // path (the date is already known; only the session needs deciding).
   function openSessionResolve(e: CrushHistoryEvent) {
     const suggestion = sessionSuggestions[e.earningsDate] ?? null;
+    const sessionDefault = computeSessionDefault(
+      suggestion?.status === "suggested" ? suggestion.hour : null,
+      storedSessions,
+    );
     setPendingResolve({
       event: e,
       field: "session",
       rawPercent: null,
       dateInput: e.earningsDate,
       dateEditable: false,
-      sessionInput: "",
+      sessionInput: sessionDefault.value,
+      sessionDefaultRule: sessionDefault.rule,
+      sessionDefaultLabel: sessionDefault.label,
       suggestion,
       error: null,
       saving: false,
@@ -1427,19 +1500,22 @@ export function CrushHistoryTable({
                             heuristic, not reported).
                             <button
                               type="button"
-                              onClick={() =>
+                              onClick={() => {
+                                const sessionDefault = computeSessionDefault(quarterSuggestion.hour, storedSessions);
                                 setPendingResolve({
                                   event: e,
                                   field: "em",
                                   rawPercent: null,
                                   dateInput: quarterSuggestion.date!,
                                   dateEditable: true,
-                                  sessionInput: quarterSuggestion.hour ?? "",
+                                  sessionInput: sessionDefault.value,
+                                  sessionDefaultRule: sessionDefault.rule,
+                                  sessionDefaultLabel: sessionDefault.label,
                                   suggestion: quarterSuggestion,
                                   error: null,
                                   saving: false,
-                                })
-                              }
+                                });
+                              }}
                               className="rounded border border-amber-400/40 bg-amber-500/15 px-1 py-0.5 font-semibold uppercase tracking-wide text-amber-200 hover:bg-amber-500/25"
                             >
                               Review &amp; confirm
@@ -1464,19 +1540,22 @@ export function CrushHistoryTable({
                             not reported).
                             <button
                               type="button"
-                              onClick={() =>
+                              onClick={() => {
+                                const sessionDefault = computeSessionDefault(rowSessionSuggestion.hour, storedSessions);
                                 setPendingResolve({
                                   event: e,
                                   field: "session",
                                   rawPercent: null,
                                   dateInput: e.earningsDate,
                                   dateEditable: false,
-                                  sessionInput: rowSessionSuggestion.hour ?? "",
+                                  sessionInput: sessionDefault.value,
+                                  sessionDefaultRule: sessionDefault.rule,
+                                  sessionDefaultLabel: sessionDefault.label,
                                   suggestion: rowSessionSuggestion,
                                   error: null,
                                   saving: false,
-                                })
-                              }
+                                });
+                              }}
                               className="rounded border border-orange-400/40 bg-orange-500/15 px-1 py-0.5 font-semibold uppercase tracking-wide text-orange-200 hover:bg-orange-500/25"
                             >
                               Review &amp; confirm
@@ -1618,9 +1697,24 @@ export function CrushHistoryTable({
             />
           )}
           <div>
-            <div className="mb-1 text-xs font-medium text-muted-foreground">
-              Session {pendingResolve?.suggestion?.status === "suggested" ? "(inferred — confirm or change)" : ""}
-            </div>
+            <div className="mb-1 text-xs font-medium text-muted-foreground">Session</div>
+            {/* Always shown, whichever rule fired — see computeSessionDefault.
+                A default here is a suggestion, never a silent pre-fill: a
+                wrong session computes a real-looking wrong number, worse
+                than leaving it blank. */}
+            {pendingResolve && (
+              <div
+                className={`mb-1.5 rounded border px-2 py-1 text-[11px] ${
+                  pendingResolve.sessionDefaultRule === 3
+                    ? "border-orange-500/40 bg-orange-500/10 text-orange-200"
+                    : pendingResolve.sessionDefaultRule === 4
+                      ? "border-border bg-background/60 text-muted-foreground"
+                      : "border-sky-500/40 bg-sky-500/10 text-sky-200"
+                }`}
+              >
+                {pendingResolve.sessionDefaultLabel}
+              </div>
+            )}
             <div className="flex gap-1.5">
               {(["", "bmo", "amc"] as const).map((opt) => (
                 <button
