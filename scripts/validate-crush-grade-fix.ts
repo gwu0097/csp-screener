@@ -507,10 +507,10 @@ function runNeutralDataProof(): void {
   const withPresentComponent = computeCrushComposite({
     historicalMoves: sharedHistoricalMoves,
     crushHistory: [
-      { earningsDate: "2025-01-01", qtrLabel: "Q1", fiscalQuarter: null, fiscalYear: null, periodEnd: null, fiscalKnown: false, impliedMovePct: 0.08, actualMovePct: 0.02, ratio: 0.25, grade: "A", impliedMoveSource: "manual", dateConfidence: null, t1Unrecoverable: false },
-      { earningsDate: "2025-04-01", qtrLabel: "Q2", fiscalQuarter: null, fiscalYear: null, periodEnd: null, fiscalKnown: false, impliedMovePct: 0.08, actualMovePct: -0.02, ratio: 0.25, grade: "A", impliedMoveSource: "manual", dateConfidence: null, t1Unrecoverable: false },
-      { earningsDate: "2025-07-01", qtrLabel: "Q3", fiscalQuarter: null, fiscalYear: null, periodEnd: null, fiscalKnown: false, impliedMovePct: 0.08, actualMovePct: 0.01, ratio: 0.125, grade: "A", impliedMoveSource: "manual", dateConfidence: null, t1Unrecoverable: false },
-      { earningsDate: "2025-10-01", qtrLabel: "Q4", fiscalQuarter: null, fiscalYear: null, periodEnd: null, fiscalKnown: false, impliedMovePct: 0.08, actualMovePct: -0.01, ratio: 0.125, grade: "A", impliedMoveSource: "manual", dateConfidence: null, t1Unrecoverable: false },
+      { earningsDate: "2025-01-01", qtrLabel: "Q1", fiscalQuarter: null, fiscalYear: null, periodEnd: null, fiscalKnown: false, impliedMovePct: 0.08, actualMovePct: 0.02, ratio: 0.25, grade: "A", impliedMoveSource: "manual", impliedMoveExpiry: null, impliedMoveReadDate: null, dateConfidence: null, t1Unrecoverable: false },
+      { earningsDate: "2025-04-01", qtrLabel: "Q2", fiscalQuarter: null, fiscalYear: null, periodEnd: null, fiscalKnown: false, impliedMovePct: 0.08, actualMovePct: -0.02, ratio: 0.25, grade: "A", impliedMoveSource: "manual", impliedMoveExpiry: null, impliedMoveReadDate: null, dateConfidence: null, t1Unrecoverable: false },
+      { earningsDate: "2025-07-01", qtrLabel: "Q3", fiscalQuarter: null, fiscalYear: null, periodEnd: null, fiscalKnown: false, impliedMovePct: 0.08, actualMovePct: 0.01, ratio: 0.125, grade: "A", impliedMoveSource: "manual", impliedMoveExpiry: null, impliedMoveReadDate: null, dateConfidence: null, t1Unrecoverable: false },
+      { earningsDate: "2025-10-01", qtrLabel: "Q4", fiscalQuarter: null, fiscalYear: null, periodEnd: null, fiscalKnown: false, impliedMovePct: 0.08, actualMovePct: -0.01, ratio: 0.125, grade: "A", impliedMoveSource: "manual", impliedMoveExpiry: null, impliedMoveReadDate: null, dateConfidence: null, t1Unrecoverable: false },
     ],
     ...commonInputs,
   });

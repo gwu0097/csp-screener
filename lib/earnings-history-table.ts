@@ -21,6 +21,19 @@ export type CrushHistoryEvent = {
   ratio: number | null;
   grade: "A" | "B" | "C" | "D" | "F" | null;
   impliedMoveSource: string | null;
+  // Provenance for a manually-entered implied move: which options
+  // expiry the ATM straddle % was read from, and the calendar date it
+  // was read (distinct from the row's created_at, which only records
+  // when it was SAVED here, not necessarily when it was looked up on
+  // ThinkorSwim). Both null on any row entered before this pair of
+  // columns existed (2026-08-18) and on any row where they were left
+  // blank — optional by design, never required to save an implied
+  // move. Added specifically so a future implausibility flag (see
+  // checkImpliedMovePlausibility below) has something to check against
+  // instead of being permanently unfalsifiable, as all 166 pre-existing
+  // manual rows are.
+  impliedMoveExpiry: string | null;
+  impliedMoveReadDate: string | null;
   // Whether earningsDate itself is trusted — see lib/encyclopedia.ts's
   // date_confidence write path. Not read by any scoring; surfaced for
   // the Analysis Dump export's per-row provenance.
@@ -101,7 +114,7 @@ export async function getCrushHistory(
   const res = await sb
     .from("earnings_history")
     .select(
-      "earnings_date,implied_move_pct,actual_move_pct,move_ratio,implied_move_source,date_confidence,fiscal_quarter,fiscal_year,period_end,t1_unrecoverable",
+      "earnings_date,implied_move_pct,actual_move_pct,move_ratio,implied_move_source,implied_move_expiry,implied_move_read_date,date_confidence,fiscal_quarter,fiscal_year,period_end,t1_unrecoverable",
     )
     .eq("symbol", symbol.toUpperCase())
     .order("earnings_date", { ascending: false })
@@ -118,6 +131,8 @@ export async function getCrushHistory(
     actual_move_pct: number | null;
     move_ratio: number | null;
     implied_move_source: string | null;
+    implied_move_expiry: string | null;
+    implied_move_read_date: string | null;
     date_confidence: "confirmed" | "low" | null;
     fiscal_quarter: number | null;
     fiscal_year: number | null;
@@ -151,6 +166,8 @@ export async function getCrushHistory(
       ratio,
       grade: gradeFromRatio(ratio),
       impliedMoveSource: r.implied_move_source,
+      impliedMoveExpiry: r.implied_move_expiry,
+      impliedMoveReadDate: r.implied_move_read_date,
       dateConfidence: r.date_confidence,
       t1Unrecoverable: r.t1_unrecoverable === true,
     };

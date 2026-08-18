@@ -146,6 +146,12 @@ type CrushHistoryEvent = {
   ratio: number | null;
   grade: "A" | "B" | "C" | "D" | "F" | null;
   impliedMoveSource: string | null;
+  // Optional provenance for a manually-entered implied move — which
+  // expiry the straddle was read from, and the date it was read
+  // (distinct from when the row was saved). Prompted for on new EM
+  // entry (see the provenance dialog below) but never required.
+  impliedMoveExpiry: string | null;
+  impliedMoveReadDate: string | null;
 };
 
 const SIMILAR_EM_TOLERANCE = 0.02; // ±2pp from today's EM
@@ -476,6 +482,27 @@ export function CrushHistoryTable({
     saving: boolean;
   } | null>(null);
 
+  // Prompted on every new/changed EM entry — optional provenance (which
+  // expiry the straddle was read from, and the date it was read) that
+  // makes a future implausibility flag on this row actually checkable,
+  // instead of permanently unfalsifiable the way all 166 pre-existing
+  // manual rows are (2026-08-18 audit). Both fields can be left blank:
+  // closing the dialog (Escape/backdrop) still saves the EM value with
+  // whatever's currently typed, same as clicking Save — by the time
+  // this dialog is open, the EM number itself is already decided (past
+  // the blanket >=40% and per-symbol plausibility confirmations, if
+  // either fired); this step only ever adds optional metadata to a
+  // save that's happening regardless, never gates or discards it.
+  const [pendingProvenance, setPendingProvenance] = useState<{
+    event: CrushHistoryEvent;
+    targetEarningsDate: string;
+    rawPercent: number;
+    impliedMoveExpiry: string;
+    impliedMoveReadDate: string;
+    error: string | null;
+    saving: boolean;
+  } | null>(null);
+
   // Advisory-only research analyses for this symbol, keyed by
   // earnings_date. null = not yet loaded; {} = loaded, none exist.
   const [researchAnalyses, setResearchAnalyses] = useState<Record<string, ResearchAnalysisRow> | null>(null);
@@ -631,6 +658,8 @@ export function CrushHistoryTable({
             ratio: null,
             grade: null,
             impliedMoveSource: null,
+            impliedMoveExpiry: null,
+            impliedMoveReadDate: null,
           },
         );
       }
@@ -721,11 +750,22 @@ export function CrushHistoryTable({
     sourceEvent: CrushHistoryEvent,
     field: "em" | "actual",
     rawPercent: number | null,
+    // Only meaningful for field === "em" — an "actual"-only edit
+    // ignores these and re-sends sourceEvent's EXISTING provenance
+    // unchanged below, mirroring how impliedMovePct itself is
+    // preserved on that path. Without that, editing Actual on a row
+    // that already had Expiry/Read Date set would silently wipe them.
+    impliedMoveExpiryInput: string | null,
+    impliedMoveReadDateInput: string | null,
   ): Promise<string | null> {
     const impliedMovePct =
       field === "em" ? (rawPercent === null ? null : rawPercent / 100) : sourceEvent.impliedMovePct;
     const actualMovePct =
       field === "actual" ? (rawPercent === null ? null : rawPercent / 100) : sourceEvent.actualMovePct;
+    const impliedMoveExpiry =
+      field === "em" ? (impliedMoveExpiryInput || null) : (sourceEvent.impliedMoveExpiry ?? null);
+    const impliedMoveReadDate =
+      field === "em" ? (impliedMoveReadDateInput || null) : (sourceEvent.impliedMoveReadDate ?? null);
 
     const post = (confirmImplausibleImplied: boolean) =>
       fetch("/api/screener/earnings-history/update", {
@@ -737,6 +777,8 @@ export function CrushHistoryTable({
           impliedMovePct,
           actualMovePct,
           confirmImplausibleImplied,
+          impliedMoveExpiry,
+          impliedMoveReadDate,
         }),
         cache: "no-store",
       });
@@ -800,6 +842,21 @@ export function CrushHistoryTable({
   // not an uncontrolled input, a native dialog with no forgiving format
   // handling. A controlled <input type="date"> can't produce a
   // malformed value at all.
+  // Opens the provenance dialog for a new/changed EM save — shared by
+  // both entry points below (a normal row, and a placeholder row once
+  // its real date has just been resolved).
+  function openProvenancePrompt(event: CrushHistoryEvent, targetEarningsDate: string, rawPercent: number) {
+    setPendingProvenance({
+      event,
+      targetEarningsDate,
+      rawPercent,
+      impliedMoveExpiry: "",
+      impliedMoveReadDate: "",
+      error: null,
+      saving: false,
+    });
+  }
+
   async function saveField(
     e: CrushHistoryEvent,
     field: "em" | "actual",
@@ -811,7 +868,11 @@ export function CrushHistoryTable({
       setPendingResolve({ event: e, field, rawPercent, dateInput: "", error: null, saving: false });
       return;
     }
-    await commitSave(e.earningsDate, e, field, rawPercent);
+    if (field === "em" && rawPercent !== null) {
+      openProvenancePrompt(e, e.earningsDate, rawPercent);
+      return;
+    }
+    await commitSave(e.earningsDate, e, field, rawPercent, null, null);
   }
 
   async function confirmPendingResolve() {
@@ -820,9 +881,17 @@ export function CrushHistoryTable({
       setPendingResolve((prev) => (prev ? { ...prev, error: "Pick a date first." } : prev));
       return;
     }
-    setPendingResolve((prev) => (prev ? { ...prev, saving: true, error: null } : prev));
     const { event, field, rawPercent, dateInput } = pendingResolve;
-    const errorMsg = await commitSave(dateInput, event, field, rawPercent);
+    if (field === "em" && rawPercent !== null) {
+      // Real date resolved — hand off to the provenance prompt next,
+      // targeting the now-known real date instead of the placeholder.
+      // commitSave doesn't run from this path for this case.
+      setPendingResolve(null);
+      openProvenancePrompt(event, dateInput, rawPercent);
+      return;
+    }
+    setPendingResolve((prev) => (prev ? { ...prev, saving: true, error: null } : prev));
+    const errorMsg = await commitSave(dateInput, event, field, rawPercent, null, null);
     if (errorMsg === null) {
       setPendingResolve(null);
     } else {
@@ -832,6 +901,29 @@ export function CrushHistoryTable({
 
   function cancelPendingResolve() {
     setPendingResolve(null);
+  }
+
+  // Always proceeds with the save — see the state comment above for
+  // why this dialog has no real "cancel" path, only "save with
+  // whatever's typed." Called both by the Save button and by
+  // onOpenChange(false) (Escape/backdrop).
+  async function confirmPendingProvenance() {
+    if (!pendingProvenance) return;
+    setPendingProvenance((prev) => (prev ? { ...prev, saving: true, error: null } : prev));
+    const { event, targetEarningsDate, rawPercent, impliedMoveExpiry, impliedMoveReadDate } = pendingProvenance;
+    const errorMsg = await commitSave(
+      targetEarningsDate,
+      event,
+      "em",
+      rawPercent,
+      impliedMoveExpiry || null,
+      impliedMoveReadDate || null,
+    );
+    if (errorMsg === null) {
+      setPendingProvenance(null);
+    } else {
+      setPendingProvenance((prev) => (prev ? { ...prev, saving: false, error: errorMsg } : prev));
+    }
   }
 
   const similar: CrushHistoryEvent[] = [];
@@ -1297,6 +1389,71 @@ export function CrushHistoryTable({
               className="inline-flex items-center gap-1.5 rounded bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-60"
             >
               {pendingResolve?.saving && <Loader2 className="h-3 w-3 animate-spin" />}
+              Save
+            </button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={pendingProvenance !== null}
+        onOpenChange={(open) => {
+          // No real "cancel" here — see the pendingProvenance state
+          // comment. Closing (Escape/backdrop) proceeds with whatever's
+          // typed, same as clicking Save.
+          if (!open) void confirmPendingProvenance();
+        }}
+      >
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Where did this come from? (optional)</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            Which expiry the ATM straddle % was read from, and the date you read it — both optional, but
+            without them a future outlier flag on this row can never be checked against anything.
+          </p>
+          <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+            Expiry read from
+            <input
+              autoFocus
+              type="date"
+              value={pendingProvenance?.impliedMoveExpiry ?? ""}
+              disabled={pendingProvenance?.saving}
+              onChange={(ev) =>
+                setPendingProvenance((prev) => (prev ? { ...prev, impliedMoveExpiry: ev.target.value } : prev))
+              }
+              className="w-full rounded border border-border bg-background px-2 py-1.5 text-sm text-foreground outline-none focus:border-primary"
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+            Date read
+            <input
+              type="date"
+              value={pendingProvenance?.impliedMoveReadDate ?? ""}
+              disabled={pendingProvenance?.saving}
+              onKeyDown={(ev) => {
+                if (ev.key === "Enter") void confirmPendingProvenance();
+              }}
+              onChange={(ev) =>
+                setPendingProvenance((prev) => (prev ? { ...prev, impliedMoveReadDate: ev.target.value } : prev))
+              }
+              className="w-full rounded border border-border bg-background px-2 py-1.5 text-sm text-foreground outline-none focus:border-primary"
+            />
+          </label>
+          {pendingProvenance?.error && (
+            <div className="flex items-start gap-1 text-xs text-rose-300">
+              <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+              <span>{pendingProvenance.error}</span>
+            </div>
+          )}
+          <DialogFooter>
+            <button
+              type="button"
+              onClick={() => void confirmPendingProvenance()}
+              disabled={pendingProvenance?.saving}
+              className="inline-flex items-center gap-1.5 rounded bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-60"
+            >
+              {pendingProvenance?.saving && <Loader2 className="h-3 w-3 animate-spin" />}
               Save
             </button>
           </DialogFooter>

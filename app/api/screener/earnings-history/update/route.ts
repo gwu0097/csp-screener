@@ -41,6 +41,14 @@ type Body = {
   // straight to saving instead of re-computing and re-flagging the same
   // warning a second time.
   confirmImplausibleImplied?: unknown;
+  // Provenance for a manually-entered implied move — optional, never
+  // required to save. See the migration comment
+  // (migrations/2026-08-18-add-implied-move-provenance.sql) for why:
+  // without these, an implausibility flag on this row is permanently
+  // unfalsifiable after the fact, exactly like the 12/166 flagged in
+  // the 2026-08-18 audit.
+  impliedMoveExpiry?: unknown; // YYYY-MM-DD or null
+  impliedMoveReadDate?: unknown; // YYYY-MM-DD or null
 };
 
 // Accepts a finite number, or null/undefined -> null (explicit clear).
@@ -50,6 +58,20 @@ function parseNullableNumber(v: unknown, field: string): { ok: true; value: numb
   if (v === null || v === undefined) return { ok: true, value: null };
   if (typeof v !== "number" || !Number.isFinite(v)) {
     return { ok: false, error: `${field} must be a finite number or null` };
+  }
+  return { ok: true, value: v };
+}
+
+// Same shape as parseNullableNumber but for a YYYY-MM-DD date string —
+// used for the two optional provenance fields. No further semantic
+// validation (e.g. expiry >= earningsDate) — format only, matching how
+// permissive the rest of this route is about anything not proven
+// impossible (contrast isWeekend's hard reject on earningsDate itself,
+// which IS a real impossibility).
+function parseNullableDateString(v: unknown, field: string): { ok: true; value: string | null } | { ok: false; error: string } {
+  if (v === null || v === undefined) return { ok: true, value: null };
+  if (typeof v !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(v)) {
+    return { ok: false, error: `${field} must be YYYY-MM-DD or null` };
   }
   return { ok: true, value: v };
 }
@@ -85,6 +107,10 @@ export async function POST(req: NextRequest) {
   if (!em.ok) return NextResponse.json({ error: em.error }, { status: 400 });
   const actual = parseNullableNumber(body.actualMovePct, "actualMovePct");
   if (!actual.ok) return NextResponse.json({ error: actual.error }, { status: 400 });
+  const impliedMoveExpiry = parseNullableDateString(body.impliedMoveExpiry, "impliedMoveExpiry");
+  if (!impliedMoveExpiry.ok) return NextResponse.json({ error: impliedMoveExpiry.error }, { status: 400 });
+  const impliedMoveReadDate = parseNullableDateString(body.impliedMoveReadDate, "impliedMoveReadDate");
+  if (!impliedMoveReadDate.ok) return NextResponse.json({ error: impliedMoveReadDate.error }, { status: 400 });
 
   const sb = createServerClient();
 
@@ -159,6 +185,8 @@ export async function POST(req: NextRequest) {
         actual_move_pct: actual.value,
         move_ratio: ratio,
         implied_move_source: "manual",
+        implied_move_expiry: impliedMoveExpiry.value,
+        implied_move_read_date: impliedMoveReadDate.value,
         is_complete: em.value !== null && actual.value !== null,
         ...(placeholderMatch ? { date_confidence: "low" } : {}),
       },
@@ -197,6 +225,8 @@ export async function POST(req: NextRequest) {
     ratio,
     grade,
     impliedMoveSource: "manual",
+    impliedMoveExpiry: impliedMoveExpiry.value,
+    impliedMoveReadDate: impliedMoveReadDate.value,
     dateConfidence: placeholderMatch ? "low" : null,
     // Unknown here without a re-read (see comment above) — same
     // fallback rationale as fiscalQuarter.
