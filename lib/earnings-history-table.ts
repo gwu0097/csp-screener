@@ -9,6 +9,7 @@ import { createServerClient } from "@/lib/supabase";
 import type { OptionsFlow } from "@/lib/options-flow";
 import { quarterLabel as computeQuarterLabel } from "@/lib/quarter-label";
 import { writeEarningsHistory } from "@/lib/earnings-history-writer";
+import { isNyseHoliday, precedingTradingDay } from "@/lib/market-holidays";
 
 export type CrushHistoryEvent = {
   earningsDate: string;
@@ -22,19 +23,16 @@ export type CrushHistoryEvent = {
   ratio: number | null;
   grade: "A" | "B" | "C" | "D" | "F" | null;
   impliedMoveSource: string | null;
-  // Provenance for a manually-entered implied move: which options
-  // expiry the ATM straddle % was read from, and the calendar date it
-  // was read (distinct from the row's created_at, which only records
-  // when it was SAVED here, not necessarily when it was looked up on
-  // ThinkorSwim). Both null on any row entered before this pair of
-  // columns existed (2026-08-18) and on any row where they were left
-  // blank — optional by design, never required to save an implied
-  // move. Added specifically so a future implausibility flag (see
-  // checkImpliedMovePlausibility below) has something to check against
-  // instead of being permanently unfalsifiable, as all 166 pre-existing
-  // manual rows are.
+  // Which options expiry the ATM straddle % was implicitly read from —
+  // computed server-side from earningsDate (computeImpliedMoveExpiry
+  // below), never asked for. The read DATE itself is no longer a
+  // separate field (2026-08-19): the row's created_at already records
+  // when it was saved, which is what "when was this read" meant in
+  // practice — a distinct impliedMoveReadDate column just duplicated
+  // that with an extra optional prompt nobody needed. Null when the
+  // computation can't be trusted (see computeImpliedMoveExpiry's own
+  // comment on the earnings-date-on-a-Friday case) rather than guessed.
   impliedMoveExpiry: string | null;
-  impliedMoveReadDate: string | null;
   // Whether earningsDate itself is trusted — see lib/encyclopedia.ts's
   // date_confidence write path. Not read by any scoring; surfaced for
   // the Analysis Dump export's per-row provenance.
@@ -62,6 +60,41 @@ export function gradeFromRatio(ratio: number | null): CrushHistoryEvent["grade"]
   if (ratio < 1.0) return "C";
   if (ratio < 1.2) return "D";
   return "F";
+}
+
+// Which options expiry a manually-entered implied move was implicitly
+// read from — the first Friday on/after earningsDate, same convention
+// lib/screener.ts::nextFridayOnOrAfter / lib/encyclopedia.ts's own
+// nextFridayOnOrAfterIso already use to pick the earnings-driven
+// expiry, with one addition: shifted to the preceding trading day when
+// that Friday itself is an NYSE closure (Good Friday is the recurring
+// case — the OCC moves the listed expiry back a day rather than
+// skipping a week).
+//
+// Two things this deliberately does NOT try to resolve, both left
+// null rather than guessed:
+//   - earningsDate itself landing on a Friday. "On or after" is
+//     trivially the same day, but whether that same-day 0DTE contract
+//     actually captures the earnings reaction depends on BMO vs AMC
+//     timing relative to the 4pm close — this function has no
+//     visibility into that.
+//   - a ticker with no weekly options, where the real listed expiry is
+//     the next monthly (third Friday), not this Friday. Resolving that
+//     requires a live chain lookup (see lib/screener.ts's
+//     chainHasWeeklyExpiry / monthly_fallback path) — there's no
+//     static way to know it, and for a manual backfill of a PAST
+//     event, "today's" chain wouldn't even answer the question for
+//     that date. Unaddressed: this function will return a weekly
+//     Friday for a monthly-only name and be wrong. No detection exists
+//     for this case yet.
+export function computeImpliedMoveExpiry(earningsDate: string): string | null {
+  const d = new Date(earningsDate + "T00:00:00Z");
+  const day = d.getUTCDay();
+  if (day === 5) return null;
+  const delta = (5 - day + 7) % 7;
+  const friday = new Date(d.getTime() + delta * 24 * 60 * 60 * 1000);
+  const expiry = friday.toISOString().slice(0, 10);
+  return isNyseHoliday(expiry) ? precedingTradingDay(expiry) : expiry;
 }
 
 export type DirectionalMoveCoverage = {
@@ -121,7 +154,7 @@ export async function getCrushHistory(
   const res = await sb
     .from("earnings_history")
     .select(
-      "earnings_date,implied_move_pct,actual_move_pct,move_ratio,implied_move_source,implied_move_expiry,implied_move_read_date,date_confidence,fiscal_quarter,fiscal_year,period_end,t1_unrecoverable,timing",
+      "earnings_date,implied_move_pct,actual_move_pct,move_ratio,implied_move_source,implied_move_expiry,date_confidence,fiscal_quarter,fiscal_year,period_end,t1_unrecoverable,timing",
     )
     .eq("symbol", symbol.toUpperCase())
     .order("earnings_date", { ascending: false })
@@ -139,7 +172,6 @@ export async function getCrushHistory(
     move_ratio: number | null;
     implied_move_source: string | null;
     implied_move_expiry: string | null;
-    implied_move_read_date: string | null;
     date_confidence: "human_verified" | "edgar_derived" | "vendor_derived" | "inferred" | "unknown" | null;
     fiscal_quarter: number | null;
     fiscal_year: number | null;
@@ -175,7 +207,6 @@ export async function getCrushHistory(
       grade: gradeFromRatio(ratio),
       impliedMoveSource: r.implied_move_source,
       impliedMoveExpiry: r.implied_move_expiry,
-      impliedMoveReadDate: r.implied_move_read_date,
       dateConfidence: r.date_confidence,
       t1Unrecoverable: r.t1_unrecoverable === true,
       timing: r.timing,

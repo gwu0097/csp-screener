@@ -214,7 +214,7 @@ export async function POST(req: NextRequest) {
   const refreshed = await sb
     .from("earnings_history")
     .select(
-      "earnings_date,implied_move_pct,actual_move_pct,move_ratio,implied_move_source,implied_move_expiry,implied_move_read_date,date_confidence,fiscal_quarter,fiscal_year,period_end,t1_unrecoverable,timing",
+      "earnings_date,implied_move_pct,actual_move_pct,move_ratio,implied_move_source,implied_move_expiry,date_confidence,fiscal_quarter,fiscal_year,period_end,t1_unrecoverable,timing",
     )
     .eq("symbol", symbol)
     .order("earnings_date", { ascending: false })
@@ -226,7 +226,6 @@ export async function POST(req: NextRequest) {
     move_ratio: number | null;
     implied_move_source: string | null;
     implied_move_expiry: string | null;
-    implied_move_read_date: string | null;
     date_confidence: "human_verified" | "edgar_derived" | "vendor_derived" | "inferred" | "unknown" | null;
     fiscal_quarter: number | null;
     fiscal_year: number | null;
@@ -260,7 +259,6 @@ export async function POST(req: NextRequest) {
       grade: gradeFromRatio(ratio),
       impliedMoveSource: row.implied_move_source,
       impliedMoveExpiry: row.implied_move_expiry,
-      impliedMoveReadDate: row.implied_move_read_date,
       dateConfidence: row.date_confidence,
       t1Unrecoverable: row.t1_unrecoverable === true,
       timing: row.timing,

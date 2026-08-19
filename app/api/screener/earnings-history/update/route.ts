@@ -4,6 +4,7 @@ import {
   gradeFromRatio,
   recordImpliedMoveCapture,
   checkImpliedMovePlausibility,
+  computeImpliedMoveExpiry,
   type CrushHistoryEvent,
 } from "@/lib/earnings-history-table";
 import { quarterLabel, isRepresentativeDateSlot, isWeekend } from "@/lib/quarter-label";
@@ -43,16 +44,7 @@ type Body = {
   // straight to saving instead of re-computing and re-flagging the same
   // warning a second time.
   confirmImplausibleImplied?: unknown;
-  // Provenance for a manually-entered implied move — optional, never
-  // required to save. See the migration comment
-  // (migrations/2026-08-18-add-implied-move-provenance.sql) for why:
-  // without these, an implausibility flag on this row is permanently
-  // unfalsifiable after the fact, exactly like the 12/166 flagged in
-  // the 2026-08-18 audit.
-  impliedMoveExpiry?: unknown; // YYYY-MM-DD or null
-  impliedMoveReadDate?: unknown; // YYYY-MM-DD or null
-  // BMO/AMC/unknown, or null if not set. Written verbatim — same
-  // preserve-unless-changing convention as impliedMoveExpiry above: the
+  // BMO/AMC/unknown, or null if not set. Written verbatim — the
   // client always sends the row's existing timing when this save isn't
   // the one changing it. When this save DOES resolve it to a real
   // session and no actual move exists yet, this route computes one via
@@ -77,20 +69,6 @@ function parseNullableNumber(v: unknown, field: string): { ok: true; value: numb
   if (v === null || v === undefined) return { ok: true, value: null };
   if (typeof v !== "number" || !Number.isFinite(v)) {
     return { ok: false, error: `${field} must be a finite number or null` };
-  }
-  return { ok: true, value: v };
-}
-
-// Same shape as parseNullableNumber but for a YYYY-MM-DD date string —
-// used for the two optional provenance fields. No further semantic
-// validation (e.g. expiry >= earningsDate) — format only, matching how
-// permissive the rest of this route is about anything not proven
-// impossible (contrast isWeekend's hard reject on earningsDate itself,
-// which IS a real impossibility).
-function parseNullableDateString(v: unknown, field: string): { ok: true; value: string | null } | { ok: false; error: string } {
-  if (v === null || v === undefined) return { ok: true, value: null };
-  if (typeof v !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(v)) {
-    return { ok: false, error: `${field} must be YYYY-MM-DD or null` };
   }
   return { ok: true, value: v };
 }
@@ -134,10 +112,10 @@ export async function POST(req: NextRequest) {
   if (!em.ok) return NextResponse.json({ error: em.error }, { status: 400 });
   const actual = parseNullableNumber(body.actualMovePct, "actualMovePct");
   if (!actual.ok) return NextResponse.json({ error: actual.error }, { status: 400 });
-  const impliedMoveExpiry = parseNullableDateString(body.impliedMoveExpiry, "impliedMoveExpiry");
-  if (!impliedMoveExpiry.ok) return NextResponse.json({ error: impliedMoveExpiry.error }, { status: 400 });
-  const impliedMoveReadDate = parseNullableDateString(body.impliedMoveReadDate, "impliedMoveReadDate");
-  if (!impliedMoveReadDate.ok) return NextResponse.json({ error: impliedMoveReadDate.error }, { status: 400 });
+  // Derived from earningsDate, never asked for — see
+  // computeImpliedMoveExpiry's own comment for what it does and
+  // doesn't cover.
+  const impliedMoveExpiry = computeImpliedMoveExpiry(earningsDate);
   const timing = parseNullableTiming(body.timing);
   if (!timing.ok) return NextResponse.json({ error: timing.error }, { status: 400 });
   const dateHumanConfirmed = body.dateHumanConfirmed === true;
@@ -259,8 +237,7 @@ export async function POST(req: NextRequest) {
       actual_move_pct: actualMovePct,
       move_ratio: ratio,
       implied_move_source: "manual",
-      implied_move_expiry: impliedMoveExpiry.value,
-      implied_move_read_date: impliedMoveReadDate.value,
+      implied_move_expiry: impliedMoveExpiry,
       // Written verbatim, including null — an explicit clear, same as
       // every other field on this route (see the Body type's own
       // comment on timing).
@@ -317,8 +294,7 @@ export async function POST(req: NextRequest) {
     ratio,
     grade,
     impliedMoveSource: "manual",
-    impliedMoveExpiry: impliedMoveExpiry.value,
-    impliedMoveReadDate: impliedMoveReadDate.value,
+    impliedMoveExpiry,
     dateConfidence: tier ?? null,
     // Unknown here without a re-read (see comment above) — same
     // fallback rationale as fiscalQuarter.
