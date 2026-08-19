@@ -8,6 +8,7 @@
 import { createServerClient } from "@/lib/supabase";
 import type { OptionsFlow } from "@/lib/options-flow";
 import { quarterLabel as computeQuarterLabel } from "@/lib/quarter-label";
+import { writeEarningsHistory } from "@/lib/earnings-history-writer";
 
 export type CrushHistoryEvent = {
   earningsDate: string;
@@ -639,30 +640,31 @@ export async function persistLiveImpliedMove(
         `${protectedByT0 ? "T0 already captured" : "manual entry"} takes precedence; capture still appended.`,
     );
   } else {
-    // 2026-08-19 Phase A fix: this upsert never set data_source/
-    // date_confidence at all, which was silently fine pre-migration
-    // (DB defaults covered it) but fails NOT NULL on data_source for
-    // any genuinely new symbol+date since Step 1's provenance migration
-    // dropped that default. Only supplied on a real insert (existingRes
-    // above, read moments ago) — omitted on an update so an existing
-    // row's tier/source is never touched by this path, which only ever
-    // records an implied move, not a date claim.
+    // Only asserts tier/data_source on a real insert (existingRes above,
+    // read moments ago) — omitted on an update so an existing row's
+    // tier/source is never touched by this path, which only ever
+    // records an implied move, not a date claim. This is what keeps it
+    // a passive write once the precedence trigger is live: an update
+    // that never sets date_confidence always passes, regardless of the
+    // stored row's tier.
     const isNewRow = existingRes.data === null;
-    const upsert = await sb
-      .from("earnings_history")
-      .upsert(
-        {
-          symbol: symbol.toUpperCase(),
-          earnings_date: writeDate,
-          implied_move_pct: emPct,
-          implied_move_source: source,
-          ...(isNewRow ? { data_source: "live_em_tracker", date_confidence: "unknown" } : {}),
-        },
-        { onConflict: "symbol,earnings_date" },
-      );
-    if (upsert.error) {
+    const upsert = await writeEarningsHistory({
+      symbol,
+      earningsDate: writeDate,
+      attemptedBy: "live_em_tracker",
+      ...(isNewRow ? { dataSource: "live_em_tracker" as const, tier: "unknown" as const } : {}),
+      fields: {
+        implied_move_pct: emPct,
+        implied_move_source: source,
+      },
+    });
+    if (upsert.outcome === "error") {
       console.warn(
-        `[earnings-history-table] persist live EM ${symbol}@${writeDate} failed: ${upsert.error.message}`,
+        `[earnings-history-table] persist live EM ${symbol}@${writeDate} failed: ${upsert.message}`,
+      );
+    } else if (upsert.outcome === "rejected") {
+      console.warn(
+        `[earnings-history-table] persist live EM ${symbol}@${writeDate} rejected by precedence guard (unexpected on this insert-gated path) — stored tier ${upsert.rejection.storedTier}`,
       );
     }
   }
@@ -690,11 +692,11 @@ export async function persistFlowSnapshot(
     note: u.note,
   }));
   const sb = createServerClient();
-  // 2026-08-19 Phase A fix: same gap and same fix as persistLiveImpliedMove
-  // above — data_source is NOT NULL with no default since Step 1's
-  // provenance migration, so a genuinely new symbol+date row needs it
-  // explicitly; an existing row's tier/source is left untouched (this
-  // path never makes a date claim, only records a flow snapshot).
+  // Same gap and same fix as persistLiveImpliedMove above — tier/
+  // data_source only asserted on a real insert; an existing row's
+  // tier/source is left untouched (this path never makes a date claim,
+  // only records a flow snapshot), which keeps it a passive write once
+  // the precedence trigger is live.
   const existingRes = await sb
     .from("earnings_history")
     .select("symbol")
@@ -702,26 +704,28 @@ export async function persistFlowSnapshot(
     .eq("earnings_date", earningsDate)
     .maybeSingle();
   const isNewRow = existingRes.data === null;
-  const upsert = await sb
-    .from("earnings_history")
-    .upsert(
-      {
-        symbol: symbol.toUpperCase(),
-        earnings_date: earningsDate,
-        flow_pc_ratio: Number(flow.putCallRatio.toFixed(3)),
-        flow_bias: flow.flowBias,
-        flow_deep_otm_put_pct: Number(
-          flow.deepOtmPutCluster.pctOfTotalPutVolume.toFixed(2),
-        ),
-        flow_unusual_top3: top3,
-        flow_captured_at: new Date().toISOString(),
-        ...(isNewRow ? { data_source: "live_flow_snapshot", date_confidence: "unknown" } : {}),
-      },
-      { onConflict: "symbol,earnings_date" },
-    );
-  if (upsert.error) {
+  const upsert = await writeEarningsHistory({
+    symbol,
+    earningsDate,
+    attemptedBy: "live_flow_snapshot",
+    ...(isNewRow ? { dataSource: "live_flow_snapshot" as const, tier: "unknown" as const } : {}),
+    fields: {
+      flow_pc_ratio: Number(flow.putCallRatio.toFixed(3)),
+      flow_bias: flow.flowBias,
+      flow_deep_otm_put_pct: Number(
+        flow.deepOtmPutCluster.pctOfTotalPutVolume.toFixed(2),
+      ),
+      flow_unusual_top3: top3,
+      flow_captured_at: new Date().toISOString(),
+    },
+  });
+  if (upsert.outcome === "error") {
     console.warn(
-      `[earnings-history-table] persist flow ${symbol}@${earningsDate} failed: ${upsert.error.message}`,
+      `[earnings-history-table] persist flow ${symbol}@${earningsDate} failed: ${upsert.message}`,
+    );
+  } else if (upsert.outcome === "rejected") {
+    console.warn(
+      `[earnings-history-table] persist flow ${symbol}@${earningsDate} rejected by precedence guard (unexpected on this insert-gated path) — stored tier ${upsert.rejection.storedTier}`,
     );
   }
 }

@@ -30,7 +30,7 @@ import {
 import type { EarningsWatchRow } from "@/components/earnings-watch-view";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { SchwabStatusBanner } from "@/components/schwab-status-banner";
-import { CaptureHealthPanel, CrushCaptureHealthPanel, PriceIntegrityFlagsPanel } from "@/components/capture-health-panel";
+import { CaptureHealthPanel, CrushCaptureHealthPanel, PriceIntegrityFlagsPanel, EarningsHistoryRejectionsPanel } from "@/components/capture-health-panel";
 
 // Markdown body for the AI morning brief — mirrors the styling used for
 // filing analyses (components/filing-analysis.tsx) without a typography plugin.
@@ -799,6 +799,7 @@ export function DashboardView() {
       <CaptureHealthPanel />
       <CrushCaptureHealthPanel />
       <PriceIntegrityFlagsPanel />
+      <EarningsHistoryRejectionsPanel />
       {/* ---------- Header ---------- */}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>

@@ -35,6 +35,7 @@ import {
   checkAndMarkCorruptedBaseline,
 } from "@/lib/earnings-capture-attempts";
 import { findNearbyEarningsRow, recordImpliedMoveCapture } from "@/lib/earnings-history-table";
+import { writeEarningsHistory } from "@/lib/earnings-history-writer";
 import YahooFinance from "yahoo-finance2";
 
 const FINNHUB_RATE_DELAY_MS = 200;
@@ -868,8 +869,8 @@ export async function updateEncyclopedia(symbol: string): Promise<UpdateSummary>
       price.price_after !== null;
 
     const payload = {
-      symbol: sym,
-      earnings_date,
+      // symbol/earnings_date are supplied by writeEarningsHistory's own
+      // symbol/earningsDate args below, not duplicated here.
       // Fiscal identifiers from Finnhub's own /stock/earnings row —
       // r.year/r.quarter are exactly what calMatch was looked up by
       // (calendarByQuarter.get(`${r.year}|${r.quarter}`)), so there's
@@ -919,26 +920,30 @@ export async function updateEncyclopedia(symbol: string): Promise<UpdateSummary>
       analyst_sentiment: null,
       news_summary: null,
       perplexity_pulled_at: null,
-      // 2026-08-19 Phase A fix: "finnhub"/"low"/"confirmed" were retired
-      // by the earnings_history date/data provenance migration (Step 1)
-      // and rejected by the CHECK constraints ever since — this upsert
-      // has been failing unconditionally, every call, since that
-      // migration landed. Remapped to the values Step 1 already
-      // reserved for this exact path: encyclopedia_phase1_finnhub is
-      // this route's own data_source slot; vendor_derived/inferred is
-      // the direct successor of confirmed/low (Step 1's own backfill
-      // classified this exact row shape — real calendar match vs
-      // quarter-end fallback — the same way).
-      data_source: "encyclopedia_phase1_finnhub",
-      date_confidence: dateUntrusted ? "inferred" : "vendor_derived",
       is_complete,
     };
-    const up = await sb
-      .from("earnings_history")
-      .upsert(payload, { onConflict: "symbol,earnings_date" });
-    if (up.error) {
+    // Phase B: routed through the single writer. This is a date-
+    // authority path — it asserts its own tier unconditionally on
+    // every call, insert or update, which is intentional: a routine
+    // Phase 1 refresh should never silently downgrade a row a stronger
+    // source (manual confirm, EDGAR) already classified. The
+    // precedence trigger (once live) is what actually enforces that;
+    // this call just states the assertion plainly.
+    const up = await writeEarningsHistory({
+      symbol: sym,
+      earningsDate: earnings_date,
+      attemptedBy: "encyclopedia_phase1_finnhub",
+      dataSource: "encyclopedia_phase1_finnhub",
+      tier: dateUntrusted ? "inferred" : "vendor_derived",
+      fields: payload,
+    });
+    if (up.outcome === "error") {
+      console.warn(`[encyclopedia] upsert(${sym}, ${earnings_date}) failed: ${up.message}`);
+      continue;
+    }
+    if (up.outcome === "rejected") {
       console.warn(
-        `[encyclopedia] upsert(${sym}, ${earnings_date}) failed: ${up.error.message}`,
+        `[encyclopedia] upsert(${sym}, ${earnings_date}) rejected by precedence guard — stored tier ${up.rejection.storedTier} outranks ${up.rejection.attemptedTier}`,
       );
       continue;
     }
@@ -1444,13 +1449,7 @@ export async function reingestHistoricalDates(
             : newerRow.move_ratio,
         // match.hour is exactly what fetchYahooPriceActionTimed above
         // used to compute price.price_before/price_after.
-        timing: preserveNewerTiming ? newerRow.timing : match.hour,
         timing_source: preserveNewerTiming ? newerRow.timing_source : "yahoo_timestamp_heuristic",
-        // 2026-08-19 Phase A fix: "finnhub+calendar-rekey" was retired
-        // by Step 1's provenance migration — this upsert has been
-        // failing unconditionally since. Remapped to the value Step 1
-        // already reserved for this exact path.
-        data_source: "encyclopedia_phase2c_rekey",
         // match.fiscalYear/fiscalQuarter/periodEnd are null unless
         // Yahoo's own fiscalQuarter string was present (never the
         // calendarQuarter fallback — see CalendarEntry's doc comment).
@@ -1462,14 +1461,35 @@ export async function reingestHistoricalDates(
         ...(match.fiscalYear !== null ? { fiscal_year: match.fiscalYear } : {}),
         ...(match.periodEnd !== null ? { period_end: match.periodEnd } : {}),
       };
-      const u = await sb
-        .from("earnings_history")
-        .update(updatePayload)
-        .eq("id", newerRow.id);
-      if (u.error) {
+      // Phase B: routed through the single writer. No tier assertion —
+      // this path has never touched date_confidence (only
+      // timing/data_source/earnings_date), so it stays a passive write
+      // for precedence purposes and always passes the trigger once
+      // live, same as before Phase B.
+      const u = await writeEarningsHistory({
+        id: newerRow.id,
+        attemptedBy: "encyclopedia_phase2c_rekey",
+        dataSource: "encyclopedia_phase2c_rekey",
+        // match.hour's type includes "dmh" (Yahoo's during-market-hours
+        // session) and null, neither of which earnings_history.timing's
+        // CHECK constraint accepts — a pre-existing gap (this code path
+        // predates Phase B), unchanged here: the DB still rejects it
+        // exactly as before, now surfaced as outcome:"error" below
+        // instead of a bare up.error.
+        timing: preserveNewerTiming ? newerRow.timing : (match.hour as "bmo" | "amc" | "unknown"),
+        fields: updatePayload,
+      });
+      if (u.outcome === "error") {
         report.unmatched_rows.push({
           oldDate: row.earnings_date,
-          reason: `merge_update_failed: ${u.error.message}`,
+          reason: `merge_update_failed: ${u.message}`,
+        });
+        continue;
+      }
+      if (u.outcome === "rejected") {
+        report.unmatched_rows.push({
+          oldDate: row.earnings_date,
+          reason: `merge_update_rejected: stored tier ${u.rejection.storedTier}`,
         });
         continue;
       }
@@ -1500,7 +1520,6 @@ export async function reingestHistoricalDates(
     const preserveRowTiming =
       row.timing_source === "manual" || row.timing_source === "finnhub_hour";
     const updatePayload = {
-      earnings_date: announcementDate,
       eps_estimate: merged.eps_estimate,
       eps_actual: merged.eps_actual,
       eps_surprise_pct,
@@ -1517,24 +1536,36 @@ export async function reingestHistoricalDates(
       perplexity_pulled_at: null,
       // match.hour is exactly what fetchYahooPriceActionTimed above
       // used to compute price.price_before/price_after.
-      timing: preserveRowTiming ? row.timing : match.hour,
       timing_source: preserveRowTiming ? row.timing_source : "yahoo_timestamp_heuristic",
-      // 2026-08-19 Phase A fix — see the merge branch's identical note above.
-      data_source: "encyclopedia_phase2c_rekey",
       // Same non-null-only guard as the merge branch above — row may
       // already have fiscal data from another source.
       ...(match.fiscalQuarter !== null ? { fiscal_quarter: match.fiscalQuarter } : {}),
       ...(match.fiscalYear !== null ? { fiscal_year: match.fiscalYear } : {}),
       ...(match.periodEnd !== null ? { period_end: match.periodEnd } : {}),
     };
-    const u = await sb
-      .from("earnings_history")
-      .update(updatePayload)
-      .eq("id", row.id);
-    if (u.error) {
+    // Phase B: routed through the single writer. This branch DOES
+    // rekey earnings_date (newEarningsDate) — still no tier assertion,
+    // same reasoning as the merge branch above.
+    const u = await writeEarningsHistory({
+      id: row.id,
+      attemptedBy: "encyclopedia_phase2c_rekey",
+      dataSource: "encyclopedia_phase2c_rekey",
+      // See the merge branch's identical cast note above.
+      timing: preserveRowTiming ? row.timing : (match.hour as "bmo" | "amc" | "unknown"),
+      newEarningsDate: announcementDate,
+      fields: updatePayload,
+    });
+    if (u.outcome === "error") {
       report.unmatched_rows.push({
         oldDate: row.earnings_date,
-        reason: `update_failed: ${u.error.message}`,
+        reason: `update_failed: ${u.message}`,
+      });
+      continue;
+    }
+    if (u.outcome === "rejected") {
+      report.unmatched_rows.push({
+        oldDate: row.earnings_date,
+        reason: `update_rejected: stored tier ${u.rejection.storedTier}`,
       });
       continue;
     }
@@ -1632,7 +1663,6 @@ export async function upsertHistoryStub(
   earningsDate: string,
   timing: "amc" | "bmo" | "unknown" = "unknown",
 ): Promise<void> {
-  const sb = createServerClient();
   const existing = await readHistoryRow(symbol, earningsDate);
   if (existing) return;
   const nearby = await findNearbyEarningsRow(symbol, earningsDate);
@@ -1645,34 +1675,30 @@ export async function upsertHistoryStub(
     );
     return;
   }
-  // 2026-08-19 Phase A fix: "encyclopedia-live" was retired by Step 1's
-  // provenance migration — this upsert has been failing unconditionally
-  // since (remapped to the value Step 1 already reserved for this
-  // path). It also had NO .error check at all, unlike every other
-  // writer in this file — silent failure, which is exactly why this
-  // went unnoticed. T0 capture calls this first for any first-time
-  // event (see captureEarningsT0 below); when it silently failed,
-  // readHistoryRow then found nothing and T0 short-circuited with
-  // reason:"row_not_found" before ever reaching its own update —
-  // first-time captures were being dropped with no visible signal.
-  const up = await sb
-    .from("earnings_history")
-    .upsert(
-      {
-        symbol: symbol.toUpperCase(),
-        earnings_date: writeDate,
-        data_source: "encyclopedia_live_stub",
-        date_confidence: "unknown",
-        is_complete: false,
-        timing,
-        // "unknown" isn't a real determination — nothing to attribute.
-        timing_source: timing === "unknown" ? null : "finnhub_hour",
-      },
-      { onConflict: "symbol,earnings_date" },
-    );
-  if (up.error) {
+  // Insert-only (existing row already returned above) — routed through
+  // the single writer at its reserved data_source/tier. T0 capture
+  // calls this first for any first-time event (see captureEarningsT0
+  // below); a silent failure here previously meant readHistoryRow then
+  // found nothing and T0 short-circuited with reason:"row_not_found"
+  // before ever reaching its own update.
+  const up = await writeEarningsHistory({
+    symbol,
+    earningsDate: writeDate,
+    attemptedBy: "encyclopedia_live_stub",
+    dataSource: "encyclopedia_live_stub",
+    tier: "unknown",
+    timing,
+    fields: {
+      is_complete: false,
+      // "unknown" isn't a real determination — nothing to attribute.
+      timing_source: timing === "unknown" ? null : "finnhub_hour",
+    },
+  });
+  if (up.outcome === "error") {
+    console.warn(`[encyclopedia] upsertHistoryStub(${symbol}, ${writeDate}) failed: ${up.message}`);
+  } else if (up.outcome === "rejected") {
     console.warn(
-      `[encyclopedia] upsertHistoryStub(${symbol}, ${writeDate}) failed: ${up.error.message}`,
+      `[encyclopedia] upsertHistoryStub(${symbol}, ${writeDate}) rejected by precedence guard (unexpected on an insert-only path) — stored tier ${up.rejection.storedTier}`,
     );
   }
 }
@@ -1909,30 +1935,42 @@ export async function captureEarningsT0(
     }
   }
 
-  const sb = createServerClient();
-  const up = await sb
-    .from("earnings_history")
-    .update({
+  // Phase B: routed through the single writer. No tier/dataSource
+  // assertion — this path has never claimed row identity or touched
+  // date_confidence (t0_capture is a reserved-but-unused data_source
+  // literal, same status as fetch_em_yahoo_seed), so it stays a
+  // passive write for precedence purposes; timing itself isn't
+  // tier-ranked, so it always passes the trigger regardless.
+  const up = await writeEarningsHistory({
+    symbol: sym,
+    earningsDate,
+    attemptedBy: "t0_capture",
+    // Prefer this call's real calendar-sourced timing; fall back to
+    // whatever the row already carried (e.g. a stub seeded by
+    // persistLiveImpliedMove, which has no calendar context) rather
+    // than clobbering a known value with "unknown".
+    timing: timing !== "unknown" ? timing : (row?.timing ?? "unknown"),
+    fields: {
       price_before,
       implied_move_pct,
       implied_move_source: "schwab_t0",
       iv_before,
       two_x_em_strike,
-      // Prefer this call's real calendar-sourced timing; fall back to
-      // whatever the row already carried (e.g. a stub seeded by
-      // persistLiveImpliedMove, which has no calendar context) rather
-      // than clobbering a known value with "unknown".
-      timing: timing !== "unknown" ? timing : (row?.timing ?? "unknown"),
       timing_source:
         timing !== "unknown" ? "finnhub_hour" : (row?.timing_source ?? null),
       t0_captured_at: new Date().toISOString(),
       ...(fiscalFields ?? {}),
-    })
-    .eq("symbol", sym)
-    .eq("earnings_date", earningsDate);
-  if (up.error) {
-    console.warn(`[encyclopedia:T0] update(${sym}, ${earningsDate}) failed: ${up.error.message}`);
-    return { captured: false, skipped: true, reason: `db_error:${up.error.message}` };
+    },
+  });
+  if (up.outcome === "error") {
+    console.warn(`[encyclopedia:T0] update(${sym}, ${earningsDate}) failed: ${up.message}`);
+    return { captured: false, skipped: true, reason: `db_error:${up.message}` };
+  }
+  if (up.outcome === "rejected") {
+    console.warn(
+      `[encyclopedia:T0] update(${sym}, ${earningsDate}) rejected by precedence guard (unexpected — timing isn't tier-ranked) — stored tier ${up.rejection.storedTier}`,
+    );
+    return { captured: false, skipped: true, reason: "precedence_rejected" };
   }
   // Append to the capture log too — see recordImpliedMoveCapture's
   // comment (lib/earnings-history-table.ts). T0 already self-gates

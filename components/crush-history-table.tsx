@@ -575,6 +575,11 @@ export function CrushHistoryTable({
     // collected a session in the same dialog — undefined when this EM
     // save didn't touch the date/session (the row was already real).
     timingOverride?: "bmo" | "amc" | null;
+    // True only when this EM save is the handoff from the placeholder-
+    // resolve dialog (pendingResolve.dateEditable was true) — i.e. a
+    // human just explicitly confirmed targetEarningsDate against a
+    // source. False for a plain EM edit on an already-real-dated row.
+    dateHumanConfirmed: boolean;
     error: string | null;
     saving: boolean;
   } | null>(null);
@@ -857,6 +862,11 @@ export function CrushHistoryTable({
     // "session" field and by an em-field save that also resolved a
     // placeholder's date+session together in one dialog.
     timingOverride?: "bmo" | "amc" | null,
+    // True ONLY when this exact call is the placeholder-resolve
+    // dialog's date-confirm action — see the Body type's own comment
+    // in app/api/screener/earnings-history/update/route.ts. Every
+    // other call site omits this (defaults false).
+    dateHumanConfirmed = false,
   ): Promise<string | null> {
     const impliedMovePct =
       field === "em" ? (rawPercent === null ? null : rawPercent / 100) : sourceEvent.impliedMovePct;
@@ -881,6 +891,7 @@ export function CrushHistoryTable({
           impliedMoveExpiry,
           impliedMoveReadDate,
           timing,
+          dateHumanConfirmed,
         }),
         cache: "no-store",
       });
@@ -954,6 +965,7 @@ export function CrushHistoryTable({
     targetEarningsDate: string,
     rawPercent: number,
     timingOverride?: "bmo" | "amc" | null,
+    dateHumanConfirmed = false,
   ) {
     setPendingProvenance({
       event,
@@ -962,6 +974,7 @@ export function CrushHistoryTable({
       impliedMoveExpiry: "",
       impliedMoveReadDate: "",
       timingOverride,
+      dateHumanConfirmed,
       error: null,
       saving: false,
     });
@@ -1053,11 +1066,20 @@ export function CrushHistoryTable({
       // for this case; the provenance dialog's own confirm does,
       // carrying timingOverride through.
       setPendingResolve(null);
-      openProvenancePrompt(event, targetDate, rawPercent, timingOverride);
+      openProvenancePrompt(event, targetDate, rawPercent, timingOverride, dateEditable);
       return;
     }
     setPendingResolve((prev) => (prev ? { ...prev, saving: true, error: null } : prev));
-    const errorMsg = await commitSave(targetDate, event, field, rawPercent, null, null, timingOverride);
+    const errorMsg = await commitSave(
+      targetDate,
+      event,
+      field,
+      rawPercent,
+      null,
+      null,
+      timingOverride,
+      dateEditable,
+    );
     if (errorMsg === null) {
       setPendingResolve(null);
     } else {
@@ -1076,8 +1098,15 @@ export function CrushHistoryTable({
   async function confirmPendingProvenance() {
     if (!pendingProvenance) return;
     setPendingProvenance((prev) => (prev ? { ...prev, saving: true, error: null } : prev));
-    const { event, targetEarningsDate, rawPercent, impliedMoveExpiry, impliedMoveReadDate, timingOverride } =
-      pendingProvenance;
+    const {
+      event,
+      targetEarningsDate,
+      rawPercent,
+      impliedMoveExpiry,
+      impliedMoveReadDate,
+      timingOverride,
+      dateHumanConfirmed,
+    } = pendingProvenance;
     const errorMsg = await commitSave(
       targetEarningsDate,
       event,
@@ -1086,6 +1115,7 @@ export function CrushHistoryTable({
       impliedMoveExpiry || null,
       impliedMoveReadDate || null,
       timingOverride,
+      dateHumanConfirmed,
     );
     if (errorMsg === null) {
       setPendingProvenance(null);

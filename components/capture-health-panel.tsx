@@ -426,3 +426,88 @@ export function PriceIntegrityFlagsPanel() {
     </div>
   );
 }
+
+// A write the earnings_history precedence trigger rejected — the
+// incoming date_confidence tier ranked below the row's stored tier
+// (migrations/2026-08-19-earnings-history-precedence-trigger.sql),
+// logged by lib/earnings-history-writer.ts. Persistent panel, not a
+// toast, same reasoning as PriceIntegrityFlagsPanel above: a rejection
+// can originate from an unattended cron (Phase 1 refresh, the manual-
+// repair script), so it has to surface on the next page load regardless
+// of who — if anyone — was watching when it happened.
+type RejectionRow = {
+  id: string;
+  symbol: string;
+  earnings_date: string;
+  quarter_label: string | null;
+  attempted_by: string;
+  attempted_tier: string;
+  attempted_data_source: string | null;
+  attempted_timing: string | null;
+  stored_tier: string;
+  stored_data_source: string;
+  stored_earnings_date: string;
+  stored_timing: string | null;
+  created_at: string;
+};
+type RejectionsResp = { rejections: RejectionRow[] };
+
+export function EarningsHistoryRejectionsPanel() {
+  const [resp, setResp] = useState<RejectionsResp | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/capture-health/earnings-history-rejections", { cache: "no-store" })
+      .then((r) => (r.ok ? (r.json() as Promise<RejectionsResp>) : null))
+      .then((j) => {
+        if (!cancelled) setResp(j);
+      })
+      .catch(() => {
+        if (!cancelled) setResp(null);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (loading || !resp || resp.rejections.length === 0) return null;
+
+  return (
+    <div className="rounded-lg border-2 border-rose-500 bg-rose-500/10 p-4 shadow-[0_0_0_1px_rgba(244,63,94,0.3)]">
+      <div className="flex items-center gap-2">
+        <AlertOctagon className="h-5 w-5 shrink-0 text-rose-400" />
+        <span className="text-base font-bold text-rose-200">
+          Earnings history writes rejected: {resp.rejections.length} (last 30d)
+        </span>
+      </div>
+      <p className="mt-1 text-xs text-rose-200/80">
+        The precedence guard blocked these because the incoming date confidence tier ranked below
+        what&apos;s already stored — the stored row wins, nothing was changed. Investigate the
+        writer named below, not the row.
+      </p>
+      <ul className="mt-3 space-y-2">
+        {resp.rejections.map((r) => (
+          <li
+            key={r.id}
+            className="rounded border border-rose-500/30 bg-rose-500/5 p-2 text-xs text-rose-100"
+          >
+            <div className="font-mono font-semibold">
+              {r.symbol} · earnings_date {r.earnings_date}
+              {r.quarter_label ? ` (${r.quarter_label})` : ""}
+            </div>
+            <div className="mt-1 text-rose-200/90">
+              {r.attempted_by} attempted {r.attempted_tier}
+              {r.attempted_data_source ? ` / ${r.attempted_data_source}` : ""} — stored is{" "}
+              {r.stored_tier} / {r.stored_data_source}
+            </div>
+            <div className="text-rose-200/70">{new Date(r.created_at).toLocaleString()}</div>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}

@@ -8,6 +8,7 @@ import {
 } from "@/lib/earnings-history-table";
 import { quarterLabel, isRepresentativeDateSlot, isWeekend } from "@/lib/quarter-label";
 import { fetchYahooPriceAction } from "@/lib/encyclopedia";
+import { writeEarningsHistory, type EarningsHistoryTier } from "@/lib/earnings-history-writer";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -58,6 +59,15 @@ type Body = {
   // Yahoo price history immediately (2026-08-19 date-suggestion flow) —
   // never guessed, only ever run against an explicitly confirmed session.
   timing?: unknown;
+  // Set true ONLY by the placeholder-resolve dialog's date-confirm
+  // action (components/crush-history-table.tsx) — the one place a
+  // human is explicitly attesting "I checked a source and this date is
+  // right," as opposed to every other save through this route, which
+  // is a hand-typed EM/Actual edit that happens to also carry whatever
+  // date the row already has. Never inferred from payload shape; a
+  // plain EM-only or Actual-only edit always sends this false/absent
+  // and the row's existing tier is left untouched.
+  dateHumanConfirmed?: unknown;
 };
 
 // Accepts a finite number, or null/undefined -> null (explicit clear).
@@ -130,6 +140,7 @@ export async function POST(req: NextRequest) {
   if (!impliedMoveReadDate.ok) return NextResponse.json({ error: impliedMoveReadDate.error }, { status: 400 });
   const timing = parseNullableTiming(body.timing);
   if (!timing.ok) return NextResponse.json({ error: timing.error }, { status: 400 });
+  const dateHumanConfirmed = body.dateHumanConfirmed === true;
 
   const sb = createServerClient();
 
@@ -210,56 +221,71 @@ export async function POST(req: NextRequest) {
 
   // Soft signal, not a rejection — a real report can coincidentally land
   // on a representativeDate() slot (CAVA's 2025-05-15 Q1 print did), so
-  // blocking would reject valid data. Downgrading to 'low' instead just
-  // asks for a second look; the 2026-08-11 audit found 23 rows where a
-  // placeholder date was never corrected and silently stamped
+  // blocking would reject valid data. Downgrading to 'inferred' instead
+  // just asks for a second look; the 2026-08-11 audit found 23 rows
+  // where a placeholder date was never corrected and silently stamped
   // 'confirmed' by this route's own DB-default, undetected until an
-  // unrelated bug report years later. When it doesn't match, this
-  // route still doesn't set date_confidence at all (preserves whatever
-  // the row already has on an update, or the DB default on insert) —
-  // only the match case is new behavior.
+  // unrelated bug report years later. dateHumanConfirmed overrides it:
+  // a human just explicitly attested to this exact date via the
+  // placeholder-resolve dialog, which outranks the coincidental-slot
+  // heuristic outright. Neither case fires, this route sets no tier at
+  // all — preserves whatever the row already has (an EM-only or
+  // Actual-only edit is never a date claim).
   const placeholderMatch = isRepresentativeDateSlot(earningsDate);
-  const warning = placeholderMatch
-    ? `${earningsDate} matches a placeholder report-date slot (the 15th of Feb/May/Aug/Nov) — ` +
-      `saved, but marked low-confidence until the real date is confirmed against a source like ThinkorSwim.`
-    : null;
+  const tier: EarningsHistoryTier | undefined = dateHumanConfirmed
+    ? "human_verified"
+    : placeholderMatch
+      ? "inferred"
+      : undefined;
+  const warning =
+    placeholderMatch && !dateHumanConfirmed
+      ? `${earningsDate} matches a placeholder report-date slot (the 15th of Feb/May/Aug/Nov) — ` +
+        `saved, but marked low-confidence until the real date is confirmed against a source like ThinkorSwim.`
+      : null;
 
-  const up = await sb
-    .from("earnings_history")
-    .upsert(
+  // data_source is always this route's own reserved value regardless of
+  // which field changed — every save through this route is a
+  // manual-editor touch by definition (independent of the tier
+  // question above, which is specifically about the DATE's trust
+  // level).
+  const up = await writeEarningsHistory({
+    symbol,
+    earningsDate,
+    attemptedBy: "manual_em_editor",
+    dataSource: "manual_em_editor",
+    tier,
+    fields: {
+      implied_move_pct: em.value,
+      actual_move_pct: actualMovePct,
+      move_ratio: ratio,
+      implied_move_source: "manual",
+      implied_move_expiry: impliedMoveExpiry.value,
+      implied_move_read_date: impliedMoveReadDate.value,
+      // Written verbatim, including null — an explicit clear, same as
+      // every other field on this route (see the Body type's own
+      // comment on timing).
+      timing: timing.value,
+      is_complete: em.value !== null && actualMovePct !== null,
+      ...(autoComputedActual
+        ? { price_before: priceBefore, price_after: priceAfter, price_at_expiry: priceAtExpiry }
+        : {}),
+    },
+  });
+  if (up.outcome === "error") {
+    return NextResponse.json({ error: up.message }, { status: 500 });
+  }
+  if (up.outcome === "rejected") {
+    return NextResponse.json(
       {
-        symbol,
-        earnings_date: earningsDate,
-        implied_move_pct: em.value,
-        actual_move_pct: actualMovePct,
-        move_ratio: ratio,
-        implied_move_source: "manual",
-        implied_move_expiry: impliedMoveExpiry.value,
-        implied_move_read_date: impliedMoveReadDate.value,
-        timing: timing.value,
-        is_complete: em.value !== null && actualMovePct !== null,
-        // 2026-08-19 Phase A fix: data_source was never set at all here
-        // (NOT NULL violation on any brand-new symbol+date since Step
-        // 1's provenance migration dropped the default), and
-        // date_confidence:"low" was retired by that same migration
-        // (this save has been failing unconditionally on every
-        // placeholder-slot date since). data_source is always this
-        // route's own reserved value regardless of which field changed
-        // — every save through this route is a manual-editor touch by
-        // definition. date_confidence stays untouched (preserved on
-        // update, defaults to 'unknown' on insert) except the
-        // placeholder-match case, where "inferred" is the direct
-        // successor to the old "low".
-        data_source: "manual_em_editor",
-        ...(placeholderMatch ? { date_confidence: "inferred" } : {}),
-        ...(autoComputedActual
-          ? { price_before: priceBefore, price_after: priceAfter, price_at_expiry: priceAtExpiry }
-          : {}),
+        rejected: true,
+        rejection: up.rejection,
+        error:
+          `This save would downgrade ${symbol} ${earningsDate}'s date confidence from ` +
+          `${up.rejection.storedTier} to ${up.rejection.attemptedTier} — rejected. ` +
+          `The stored date classification wins; nothing was changed.`,
       },
-      { onConflict: "symbol,earnings_date" },
+      { status: 409 },
     );
-  if (up.error) {
-    return NextResponse.json({ error: up.error.message }, { status: 500 });
   }
   // Append to the capture log too (null spot — a hand-typed value has
   // no live read behind it). Only when a real EM was submitted, not a
@@ -293,7 +319,7 @@ export async function POST(req: NextRequest) {
     impliedMoveSource: "manual",
     impliedMoveExpiry: impliedMoveExpiry.value,
     impliedMoveReadDate: impliedMoveReadDate.value,
-    dateConfidence: placeholderMatch ? "inferred" : null,
+    dateConfidence: tier ?? null,
     // Unknown here without a re-read (see comment above) — same
     // fallback rationale as fiscalQuarter.
     t1Unrecoverable: false,
