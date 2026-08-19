@@ -6,7 +6,7 @@
 // implied move (today's EM is the only fair comparison set).
 
 import { Fragment, useEffect, useState, type ReactNode } from "react";
-import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Loader2, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Loader2, Pencil, XCircle } from "lucide-react";
 import {
   Tooltip,
   TooltipContent,
@@ -542,6 +542,19 @@ export function CrushHistoryTable({
     saving: boolean;
   } | null>(null);
 
+  // Corrects earnings_date on an ALREADY-REAL row (a mistyped manual
+  // entry) — distinct from pendingResolve above, which only ever
+  // assigns a date to a SYNTHETIC placeholder slot that has no
+  // underlying row yet. Renaming an existing row's key is a different
+  // operation server-side (app/api/screener/earnings-history/edit-date)
+  // and has its own, much smaller dialog: just the date, no EM/session.
+  const [pendingDateEdit, setPendingDateEdit] = useState<{
+    event: CrushHistoryEvent;
+    dateInput: string;
+    error: string | null;
+    saving: boolean;
+  } | null>(null);
+
   // Per-quarter (missing-date slots) and per-date (dated-but-sessionless
   // rows) suggestions from the last Fetch EM History run — see
   // handleFetchEmHistory. Empty until a fetch has actually run; nothing
@@ -795,6 +808,62 @@ export function CrushHistoryTable({
         ? base.map((e) => (e.earningsDate === updated.earningsDate ? updated : e))
         : [...base, updated];
     });
+  }
+
+  // Like applyEditedEvent, but the row's KEY itself changed — matching
+  // solely on updated.earningsDate would leave the stale old-dated
+  // entry sitting alongside the new one (applyEditedEvent's "not found
+  // -> append" branch has no way to know oldDate should be dropped).
+  function applyRenamedEvent(oldDate: string, updated: CrushHistoryEvent) {
+    setRefreshed((prev) => {
+      const base = (prev ?? events ?? []).filter((e) => e.earningsDate !== oldDate);
+      return [...base, updated];
+    });
+  }
+
+  function openDateEdit(e: CrushHistoryEvent) {
+    setPendingDateEdit({ event: e, dateInput: e.earningsDate, error: null, saving: false });
+  }
+
+  function cancelDateEdit() {
+    setPendingDateEdit(null);
+  }
+
+  async function confirmDateEdit() {
+    if (!pendingDateEdit) return;
+    const { event, dateInput } = pendingDateEdit;
+    if (!dateInput) {
+      setPendingDateEdit((prev) => (prev ? { ...prev, error: "Pick a date first." } : prev));
+      return;
+    }
+    if (dateInput === event.earningsDate) {
+      setPendingDateEdit(null);
+      return;
+    }
+    setPendingDateEdit((prev) => (prev ? { ...prev, saving: true, error: null } : prev));
+    try {
+      const res = await fetch("/api/screener/earnings-history/edit-date", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          symbol: todaySymbol,
+          oldEarningsDate: event.earningsDate,
+          newEarningsDate: dateInput,
+        }),
+        cache: "no-store",
+      });
+      const json = (await res.json()) as { event: CrushHistoryEvent } | { error: string };
+      if (!res.ok || !("event" in json)) {
+        const msg = "error" in json ? json.error : `HTTP ${res.status}`;
+        setPendingDateEdit((prev) => (prev ? { ...prev, saving: false, error: msg } : prev));
+        return;
+      }
+      applyRenamedEvent(event.earningsDate, json.event);
+      setPendingDateEdit(null);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "network error";
+      setPendingDateEdit((prev) => (prev ? { ...prev, saving: false, error: msg } : prev));
+    }
   }
 
   // Shared save path for both placeholder and real rows — sends BOTH
@@ -1261,9 +1330,23 @@ export function CrushHistoryTable({
                         </Tooltip>
                       </TooltipProvider>
                     ) : (
-                      <span className="ml-1.5 text-muted-foreground">
-                        {fmtEarningsDateShort(e.earningsDate)}
-                      </span>
+                      <TooltipProvider delayDuration={200}>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <button
+                              type="button"
+                              onClick={() => openDateEdit(e)}
+                              className="ml-1.5 inline-flex items-center gap-1 text-muted-foreground hover:text-foreground"
+                            >
+                              {fmtEarningsDateShort(e.earningsDate)}
+                              <Pencil className="h-2.5 w-2.5 opacity-50" />
+                            </button>
+                          </TooltipTrigger>
+                          <TooltipContent className="max-w-xs text-sm">
+                            Wrong date? Click to correct it — EM/Actual/session carry over unchanged.
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
                     )}
                     {isManual && (
                       <TooltipProvider delayDuration={200}>
@@ -1666,6 +1749,60 @@ export function CrushHistoryTable({
               className="inline-flex items-center gap-1.5 rounded bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-60"
             >
               {pendingResolve?.saving && <Loader2 className="h-3 w-3 animate-spin" />}
+              Save
+            </button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={pendingDateEdit !== null}
+        onOpenChange={(open) => {
+          if (!open) cancelDateEdit();
+        }}
+      >
+        <DialogContent className="max-w-xs">
+          <DialogHeader>
+            <DialogTitle>Correct the earnings date</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            EM, Actual, ratio, and session all carry over unchanged — only the date moves.
+          </p>
+          <input
+            autoFocus
+            type="date"
+            value={pendingDateEdit?.dateInput ?? ""}
+            disabled={pendingDateEdit?.saving}
+            onKeyDown={(ev) => {
+              if (ev.key === "Enter") void confirmDateEdit();
+            }}
+            onChange={(ev) =>
+              setPendingDateEdit((prev) => (prev ? { ...prev, dateInput: ev.target.value } : prev))
+            }
+            className="w-full rounded border border-border bg-background px-2 py-1.5 text-sm text-foreground outline-none focus:border-primary"
+          />
+          {pendingDateEdit?.error && (
+            <div className="flex items-start gap-1 text-xs text-rose-300">
+              <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+              <span>{pendingDateEdit.error}</span>
+            </div>
+          )}
+          <DialogFooter>
+            <button
+              type="button"
+              onClick={cancelDateEdit}
+              disabled={pendingDateEdit?.saving}
+              className="rounded border border-border bg-background/60 px-3 py-1.5 text-sm hover:bg-background disabled:opacity-60"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => void confirmDateEdit()}
+              disabled={pendingDateEdit?.saving}
+              className="inline-flex items-center gap-1.5 rounded bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-60"
+            >
+              {pendingDateEdit?.saving && <Loader2 className="h-3 w-3 animate-spin" />}
               Save
             </button>
           </DialogFooter>
