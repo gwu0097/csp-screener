@@ -313,6 +313,12 @@ export type SchwabTokenRow = {
   updated_at: string;
 };
 
+// Separate token storage for the "Account Data" Schwab app (Accounts
+// and Trading Production) — see lib/schwab-account.ts and
+// migrations/2026-08-20-schwab-account-tokens.sql for why this is its
+// own table rather than a row in schwab_tokens.
+export type SchwabAccountTokenRow = SchwabTokenRow;
+
 // TradeRow / the `trades` table were removed when we rebuilt the journal
 // around `positions` + `fills`. See lib/positions.ts for the new row types.
 
