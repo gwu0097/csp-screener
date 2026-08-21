@@ -12,8 +12,9 @@
 import { useEffect, useState } from "react";
 import { AlertOctagon } from "lucide-react";
 import { BROKER_LABEL } from "@/lib/brokers";
+import { Button } from "@/components/ui/button";
 
-type UnresolvedItem = {
+export type UnresolvedItem = {
   id: string;
   activityId: number;
   type: string;
@@ -28,13 +29,23 @@ type UnresolvedItem = {
   positionEffect: string | null;
   amount: number | null;
   price: number | null;
+  contracts: number | null;
+  direction: "short" | "long" | null;
   outcome: string;
   detail: string | null;
 };
 
-export function SchwabUnresolvedActivityPanel() {
+type Props = {
+  onImport: (item: UnresolvedItem) => void;
+  // Bumped by the parent after a successful "Import" submission so
+  // this panel refetches and drops the now-resolved row.
+  refreshToken?: number;
+};
+
+export function SchwabUnresolvedActivityPanel({ onImport, refreshToken }: Props) {
   const [items, setItems] = useState<UnresolvedItem[] | null>(null);
   const [loading, setLoading] = useState(true);
+  const [dismissing, setDismissing] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -52,7 +63,23 @@ export function SchwabUnresolvedActivityPanel() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [refreshToken]);
+
+  async function dismiss(id: string) {
+    setDismissing(id);
+    try {
+      const res = await fetch(`/api/schwab-account/unresolved/${id}/dismiss`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: "user_dismissed" }),
+      });
+      if (res.ok) {
+        setItems((prev) => (prev ? prev.filter((it) => it.id !== id) : prev));
+      }
+    } finally {
+      setDismissing(null);
+    }
+  }
 
   if (loading || !items || items.length === 0) return null;
 
@@ -67,8 +94,8 @@ export function SchwabUnresolvedActivityPanel() {
       <p className="mt-1 text-xs text-amber-200/80">
         Real Schwab account activity that doesn&apos;t match anything in this app — most often a
         close/assignment/expiration for a position that was opened before this connection existed.
-        Nothing was guessed or written. Add the missing position manually (Import), then it&apos;ll
-        match automatically on the next poll.
+        Nothing was guessed or written, and this won&apos;t be retried automatically. Import opens a
+        prefilled manual entry for it; Dismiss hides it for good without logging anything.
       </p>
       <ul className="mt-3 space-y-2">
         {items.map((it) => (
@@ -89,6 +116,25 @@ export function SchwabUnresolvedActivityPanel() {
             </div>
             <div className="text-amber-200/70">{it.detail ?? it.outcome}</div>
             <div className="text-amber-200/50">{new Date(it.transactionTime).toLocaleString()}</div>
+            <div className="mt-2 flex gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-6 border-amber-500/40 px-2 text-[11px] text-amber-100 hover:bg-amber-500/20"
+                onClick={() => onImport(it)}
+              >
+                Import
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 px-2 text-[11px] text-amber-200/70 hover:bg-amber-500/10 hover:text-amber-100"
+                disabled={dismissing === it.id}
+                onClick={() => dismiss(it.id)}
+              >
+                {dismissing === it.id ? "Dismissing…" : "Dismiss"}
+              </Button>
+            </div>
           </li>
         ))}
       </ul>

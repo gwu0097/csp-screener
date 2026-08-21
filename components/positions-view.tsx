@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ComponentProps } from "react";
 import { AlertTriangle, ArrowDown, ArrowUp, Briefcase, Camera, Loader2, Plus, RefreshCcw, Undo2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ImportScreenshotModal } from "@/components/import-screenshot-modal";
@@ -21,7 +21,10 @@ import { UndoImportPopover } from "@/components/undo-import-popover";
 import type { ConfirmItem } from "@/components/expire-confirmation-modal";
 import { BROKER_ORDER, BROKER_LABEL } from "@/lib/brokers";
 import { SchwabTokenBanner } from "@/components/schwab-token-banner";
-import { SchwabUnresolvedActivityPanel } from "@/components/schwab-unresolved-activity-panel";
+import {
+  SchwabUnresolvedActivityPanel,
+  type UnresolvedItem,
+} from "@/components/schwab-unresolved-activity-panel";
 import {
   SellSharesModal,
   type SellSharesTarget,
@@ -687,6 +690,19 @@ export function PositionsView() {
   const [message, setMessage] = useState<string | null>(null);
   const [showScreenshot, setShowScreenshot] = useState(false);
   const [showManual, setShowManual] = useState(false);
+  // Prefill for a manual import triggered from the "Schwab activity
+  // detected, not applied" panel — null for the plain toolbar "Add".
+  // modalKey forces a remount on every open (ImportManualModal seeds
+  // its fields from `prefill` only in useState's initializer, so
+  // reopening the same mounted instance with a new prefill wouldn't
+  // otherwise pick it up).
+  const [manualPrefill, setManualPrefill] = useState<
+    (NonNullable<ComponentProps<typeof ImportManualModal>["prefill"]> & {
+      sourceUnresolvedId?: string;
+    }) | null
+  >(null);
+  const [modalKey, setModalKey] = useState(0);
+  const [unresolvedRefreshToken, setUnresolvedRefreshToken] = useState(0);
   const [sellTarget, setSellTarget] = useState<SellSharesTarget | null>(null);
   const [closeOptionTarget, setCloseOptionTarget] =
     useState<CloseOptionTarget | null>(null);
@@ -1000,6 +1016,40 @@ export function PositionsView() {
     if (closedOpen) void loadClosed();
   };
 
+  // Manual-import submit success, specifically for the case where the
+  // modal was opened via the unresolved-activity panel's "Import"
+  // button — also marks the source Schwab transaction row resolved so
+  // it drops out of that panel instead of coming back next poll.
+  const onManualImportSuccess = (msg: string) => {
+    onImportSuccess(msg);
+    const sourceId = manualPrefill?.sourceUnresolvedId;
+    setManualPrefill(null);
+    if (sourceId) {
+      void fetch(`/api/schwab-account/unresolved/${sourceId}/dismiss`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: "manual_import" }),
+      }).then(() => setUnresolvedRefreshToken((n) => n + 1));
+    }
+  };
+
+  function handleImportFromUnresolved(item: UnresolvedItem) {
+    setManualPrefill({
+      symbol: item.symbol ?? undefined,
+      strike: item.strike ?? undefined,
+      expiry: item.expiry ?? undefined,
+      premium: item.price ?? undefined,
+      action: item.positionEffect === "OPENING" ? "open" : "close",
+      broker: item.broker,
+      contracts: item.contracts ?? 1,
+      direction: item.direction ?? "short",
+      optionType: item.putCall === "CALL" ? "call" : "put",
+      sourceUnresolvedId: item.id,
+    });
+    setModalKey((k) => k + 1);
+    setShowManual(true);
+  }
+
   async function loadClosed() {
     setClosedLoading(true);
     try {
@@ -1235,7 +1285,11 @@ export function PositionsView() {
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => setShowManual(true)}
+                onClick={() => {
+                  setManualPrefill(null);
+                  setModalKey((k) => k + 1);
+                  setShowManual(true);
+                }}
                 className="text-sm text-muted-foreground hover:text-foreground"
               >
                 <Plus className="mr-1.5 h-3.5 w-3.5" />
@@ -1312,7 +1366,10 @@ export function PositionsView() {
       )}
 
       <SchwabTokenBanner />
-      <SchwabUnresolvedActivityPanel />
+      <SchwabUnresolvedActivityPanel
+        onImport={handleImportFromUnresolved}
+        refreshToken={unresolvedRefreshToken}
+      />
 
       {market?.warning && (
         <div
@@ -1661,7 +1718,13 @@ export function PositionsView() {
         onOpenChange={setShowScreenshot}
         onSuccess={onImportSuccess}
       />
-      <ImportManualModal open={showManual} onOpenChange={setShowManual} onSuccess={onImportSuccess} />
+      <ImportManualModal
+        key={modalKey}
+        open={showManual}
+        onOpenChange={setShowManual}
+        onSuccess={onManualImportSuccess}
+        prefill={manualPrefill ?? undefined}
+      />
       <SellSharesModal
         open={sellTarget !== null}
         target={sellTarget}

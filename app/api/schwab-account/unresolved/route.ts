@@ -59,6 +59,7 @@ export async function GET() {
     .from("schwab_account_transactions")
     .select("id,activity_id,type,transaction_time,process_outcome,process_detail,broker,account_number,raw")
     .eq("processed", true)
+    .eq("dismissed", false)
     .gte("transaction_time", since)
     .order("transaction_time", { ascending: false })
     .limit(500);
@@ -71,6 +72,7 @@ export async function GET() {
     .slice(0, 100);
   const items = rows.map((r) => {
     const leg = r.raw.transferItems?.find((ti) => ti.instrument?.assetType !== "CURRENCY");
+    const amount = leg?.amount ?? null;
     return {
       id: r.id,
       activityId: r.activity_id,
@@ -84,8 +86,13 @@ export async function GET() {
       putCall: leg?.instrument?.putCall ?? null,
       expiry: leg?.instrument?.expirationDate?.slice(0, 10) ?? null,
       positionEffect: leg?.positionEffect ?? null,
-      amount: leg?.amount ?? null,
+      amount,
       price: leg?.price ?? null,
+      // Prefill hints for the "Import" action — contracts/direction
+      // mirror lib/schwab-account-import.ts's own TradeInput mapping
+      // (amount<0 = sold to open = short; abs(amount) = contract count).
+      contracts: amount !== null ? Math.abs(amount) : null,
+      direction: amount !== null ? (amount < 0 ? "short" : "long") : null,
       outcome: r.process_outcome,
       detail: r.process_detail,
     };

@@ -21,6 +21,9 @@ type Props = {
     premium?: number;
     action?: "open" | "close";
     broker?: string;
+    contracts?: number;
+    direction?: "short" | "long";
+    optionType?: "put" | "call";
   };
 };
 
@@ -62,9 +65,9 @@ export function ImportManualModal({ open, onOpenChange, onSuccess, prefill }: Pr
   const [strike, setStrike] = useState<number | "">(prefill?.strike ?? "");
   const [expiry, setExpiry] = useState(prefill?.expiry ?? "");
   const [premium, setPremium] = useState<number | "">(prefill?.premium ?? "");
-  const [contracts, setContracts] = useState<number>(1);
-  const [direction, setDirection] = useState<"short" | "long">("short");
-  const [optionType, setOptionType] = useState<"put" | "call">("put");
+  const [contracts, setContracts] = useState<number>(prefill?.contracts ?? 1);
+  const [direction, setDirection] = useState<"short" | "long">(prefill?.direction ?? "short");
+  const [optionType, setOptionType] = useState<"put" | "call">(prefill?.optionType ?? "put");
 
   // Stock-only
   const [stockAction, setStockAction] = useState<StockAction>("sell");
