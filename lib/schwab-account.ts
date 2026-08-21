@@ -73,20 +73,18 @@ type TokenResponse = {
 };
 
 export function getSchwabAcctAuthUrl(): string {
-  // scope has no real restrictive effect on Schwab's end (see this
-  // file's header comment — there is no read-only scope for Trading,
-  // access is all-or-nothing per the app's registered product), but
-  // lib/schwab.ts's working market-data authorize request always sends
-  // scope=readonly and this one omitted it entirely — the one
-  // structural difference between a request that reaches Schwab's
-  // login page cleanly and one that doesn't. Matching the known-good
-  // shape rather than omitting a param Schwab's authorize endpoint may
-  // require to be merely present.
+  // 2026-08-21: tried adding scope=readonly to match lib/schwab.ts's
+  // working market-data request — reverted. It didn't fix the "unable
+  // to complete your request" error and correlated with a regression
+  // (could reach the login form before, couldn't after), so it wasn't
+  // the right lead. Evidence now points at something on Schwab's side
+  // (the error page reads "For institutional use only" and serves from
+  // sws-gateway.schwab.com — not obviously the standard individual-
+  // trader OAuth login), not a request-shape problem here.
   const params = new URLSearchParams({
     client_id: CLIENT_ID,
     redirect_uri: REDIRECT_URI,
     response_type: "code",
-    scope: "readonly",
   });
   return `${OAUTH_BASE}/authorize?${params.toString()}`;
 }
