@@ -75,12 +75,28 @@ export async function GET(): Promise<NextResponse> {
 
   const last = rows[0] ?? null;
 
+  // Coverage can only be measured from when the capture job first
+  // actually ran. Business days before that predate the feature
+  // (capture_health_daily was created by the 2026-08-04 migration) and
+  // must NOT count as "missed runs" — otherwise the handful of
+  // pre-launch late-July business days with no row keep this panel
+  // DEGRADED for a month until they age out of the 30-day window.
+  // Anchored to run_started_at (a real run), not mere row presence:
+  // some pre-launch days have no row at all even inside
+  // reconciliation's backfill reach, so an earliest-row floor wouldn't
+  // fully exclude them.
+  const trackingStart =
+    rows
+      .filter((r) => r.run_started_at !== null)
+      .map((r) => r.capture_date)
+      .sort()[0] ?? null;
+
   function coverage(days: number) {
     const bdaysInWindow: string[] = [];
     for (let i = 0; i < days; i++) {
       const d = addCalDays(todayEt, -i);
       if (d === todayEt) continue; // today may not have run yet — not a gap
-      if (isBday(d)) bdaysInWindow.push(d);
+      if (isBday(d) && (!trackingStart || d >= trackingStart)) bdaysInWindow.push(d);
     }
     const zeroRunDates = bdaysInWindow.filter((d) => !byDate.has(d));
     const highFailureDates = bdaysInWindow
