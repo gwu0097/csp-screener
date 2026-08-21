@@ -21,6 +21,7 @@ const PUBLIC_PATHS = new Set([
   "/api/earnings/capture-t1",
   "/api/earnings/seed-em",
   "/api/earnings/sweep-eps",
+  "/api/schwab-account/poll-transactions",
 ]);
 
 function secret(): Uint8Array {
