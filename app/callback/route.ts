@@ -5,6 +5,11 @@ import { authErrorResponse, requireAdmin } from "@/lib/auth";
 export const dynamic = "force-dynamic";
 export const maxDuration = 30;
 
+// Registered redirect_uri for the "Account Data" Schwab app
+// (https://csp-screener.vercel.app/callback) — the bare top-level path
+// is what's configured on Schwab's developer portal for this app, so
+// the handler has to live at exactly this route, not nested under
+// /api/auth/schwab-account/ like the rest of that app's routes.
 export async function GET(req: NextRequest) {
   try {
     await requireAdmin();
