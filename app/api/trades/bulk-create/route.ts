@@ -57,7 +57,7 @@ export type StockTradeInput = {
   broker?: string | null;
 };
 
-type BulkBody = {
+export type BulkBody = {
   trades?: TradeInput[];
   stockTrades?: StockTradeInput[];
   // Code for the timezone the broker screenshot was displayed in.
@@ -288,7 +288,17 @@ export async function POST(req: NextRequest) {
   } catch {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
+  return runBulkCreate(userId, body);
+}
 
+// Extracted so the Schwab Account Data auto-import poller can call the
+// exact same match-or-create / duplicate-detection / aggregate-recompute
+// logic in-process, with an explicit userId (there's no session to
+// derive one from in a cron context) instead of a second, divergent
+// writer. Nothing below this point changed — same function body, same
+// behavior, just no longer reading req/userId off the HTTP request
+// directly.
+export async function runBulkCreate(userId: string, body: BulkBody): Promise<NextResponse> {
   const itemsRaw = Array.isArray(body.trades) ? body.trades : [];
   const stockItemsRaw = Array.isArray(body.stockTrades) ? body.stockTrades : [];
   if (itemsRaw.length === 0 && stockItemsRaw.length === 0) {

@@ -64,7 +64,17 @@ export async function POST(req: NextRequest) {
       { status: 400 },
     );
   }
+  return createStockFromAssignment(userId, ids);
+}
 
+// Extracted for the Schwab Account Data auto-import poller, same
+// reasoning as bulk-create's runBulkCreate split — one writer, called
+// from both the route (session-derived userId) and the cron job
+// (admin userId resolved directly, no session to derive one from).
+export async function createStockFromAssignment(
+  userId: string,
+  ids: string[],
+): Promise<NextResponse> {
   const sb = createServerClient();
 
   const lookup = await sb

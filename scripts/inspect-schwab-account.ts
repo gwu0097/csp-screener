@@ -56,8 +56,11 @@ async function main() {
   const days = daysArgIdx !== -1 ? Number(process.argv[daysArgIdx + 1]) || 90 : 90;
   const today = new Date();
   const start = new Date(today.getTime() - days * 24 * 60 * 60 * 1000);
-  const startDate = start.toISOString().slice(0, 10);
-  const endDate = today.toISOString().slice(0, 10);
+  // Confirmed live: a bare YYYY-MM-DD startDate/endDate 400s
+  // ("not a valid value for startDate") — the Trader API transactions
+  // endpoint wants a full ISO-8601 datetime, not a date.
+  const startDate = start.toISOString();
+  const endDate = today.toISOString();
 
   console.log(`\n=== GET .../transactions?startDate=${startDate}&endDate=${endDate} ===`);
   const transactions = await getAccountTransactions(accountHash, { startDate, endDate });
