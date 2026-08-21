@@ -39,6 +39,7 @@ type PendingRow = {
 };
 
 type UnrecoverableRow = {
+  id: string;
   symbol: string;
   earnings_date: string;
   t1_unrecoverable_reason: string | null;
@@ -110,10 +111,17 @@ export async function GET(): Promise<NextResponse> {
       .eq("t1_unrecoverable", false)
       .gte("earnings_date", since30)
       .lte("earnings_date", todayEt),
+    // Excludes t1_unrecoverable_dismissed=true: once a permanent
+    // failure has been reviewed and dismissed, it should never flip
+    // this panel to "attention needed" again — see the dismiss route
+    // and migrations/2026-08-21-earnings-history-t1-dismiss.sql. This
+    // is state-based (dismissed or not), not a freshness window — a
+    // row stays flagged no matter how old until someone dismisses it.
     sb
       .from("earnings_history")
-      .select("symbol,earnings_date,t1_unrecoverable_reason")
+      .select("id,symbol,earnings_date,t1_unrecoverable_reason")
       .eq("t1_unrecoverable", true)
+      .eq("t1_unrecoverable_dismissed", false)
       .gte("earnings_date", since30)
       .order("earnings_date", { ascending: false }),
     sb
@@ -193,6 +201,7 @@ export async function GET(): Promise<NextResponse> {
     .sort((a, b) => b.attempts - a.attempts);
 
   const unrecoverable = ((unrecoverableRes.data ?? []) as UnrecoverableRow[]).map((r) => ({
+    id: r.id,
     symbol: r.symbol,
     earningsDate: r.earnings_date,
     reason: r.t1_unrecoverable_reason,

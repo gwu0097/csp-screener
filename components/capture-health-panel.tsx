@@ -185,7 +185,7 @@ type CrushHealthResp = {
     days: CrushHealthDay[];
   };
   incomplete: Array<{ symbol: string; earningsDate: string; attempts: number; lastAttemptAt: string | null; lastFailureReason: string | null }>;
-  unrecoverable: Array<{ symbol: string; earningsDate: string; reason: string | null }>;
+  unrecoverable: Array<{ id: string; symbol: string; earningsDate: string; reason: string | null }>;
 };
 
 function dayStateLabel(s: CrushHealthDay["state"]): string {
@@ -235,6 +235,12 @@ export function CrushCaptureHealthPanel() {
   const [resp, setResp] = useState<CrushHealthResp | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Local, mutable copy of resp.unrecoverable so a Dismiss click can
+  // remove rows immediately (and let `degraded` re-evaluate) without a
+  // full refetch. Dismiss is permanent server-side (see the dismiss
+  // route) — a page reload won't bring these back.
+  const [unrecoverable, setUnrecoverable] = useState<CrushHealthResp["unrecoverable"]>([]);
+  const [dismissingKey, setDismissingKey] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -244,7 +250,10 @@ export function CrushCaptureHealthPanel() {
         return r.json() as Promise<CrushHealthResp>;
       })
       .then((j) => {
-        if (!cancelled) setResp(j);
+        if (!cancelled) {
+          setResp(j);
+          setUnrecoverable(j.unrecoverable);
+        }
       })
       .catch((e) => {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
@@ -256,6 +265,43 @@ export function CrushCaptureHealthPanel() {
       cancelled = true;
     };
   }, []);
+
+  async function dismissIds(ids: string[]): Promise<boolean> {
+    try {
+      const res = await fetch("/api/capture-health/crush/dismiss", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids }),
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  async function dismissReason(reason: string, ids: string[]) {
+    setDismissingKey(reason);
+    try {
+      if (await dismissIds(ids)) {
+        setUnrecoverable((prev) => prev.filter((r) => !ids.includes(r.id)));
+      }
+    } finally {
+      setDismissingKey(null);
+    }
+  }
+
+  async function dismissAllUnrecoverable() {
+    if (unrecoverable.length === 0) return;
+    const ids = unrecoverable.map((r) => r.id);
+    setDismissingKey("__all__");
+    try {
+      if (await dismissIds(ids)) {
+        setUnrecoverable([]);
+      }
+    } finally {
+      setDismissingKey(null);
+    }
+  }
 
   if (loading) {
     return (
@@ -274,7 +320,7 @@ export function CrushCaptureHealthPanel() {
     );
   }
 
-  const { t0, t1, incomplete, unrecoverable } = resp;
+  const { t0, t1, incomplete } = resp;
   const degraded = incomplete.length > 0 || unrecoverable.length > 0 || t0.days.some((d) => d.state === "no_run" || d.state === "ran_failed") || t1.days.some((d) => d.state === "no_run" || d.state === "ran_failed");
 
   return (
@@ -339,16 +385,36 @@ export function CrushCaptureHealthPanel() {
 
       {unrecoverable.length > 0 && (
         <div className="mt-3">
-          <div className="text-xs font-semibold text-rose-200">
-            Aged out permanently ({unrecoverable.length})
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-xs font-semibold text-rose-200">
+              Aged out permanently ({unrecoverable.length})
+            </div>
+            <button
+              type="button"
+              disabled={dismissingKey !== null}
+              onClick={() => dismissAllUnrecoverable()}
+              className="text-[11px] text-rose-200/70 hover:text-rose-100 disabled:opacity-50"
+            >
+              {dismissingKey === "__all__" ? "Dismissing…" : "Dismiss all"}
+            </button>
           </div>
           <div className="mt-1 space-y-2">
             {groupByReason(unrecoverable).map(([reason, rows]) => (
-              <div key={reason}>
-                <div className="text-xs text-rose-100/90">{reason}</div>
-                <div className="mt-0.5 font-mono text-xs text-rose-200/80">
-                  {rows.map((r) => `${r.symbol} (${r.earningsDate})`).join(", ")}
+              <div key={reason} className="flex items-start justify-between gap-2">
+                <div>
+                  <div className="text-xs text-rose-100/90">{reason}</div>
+                  <div className="mt-0.5 font-mono text-xs text-rose-200/80">
+                    {rows.map((r) => `${r.symbol} (${r.earningsDate})`).join(", ")}
+                  </div>
                 </div>
+                <button
+                  type="button"
+                  disabled={dismissingKey !== null}
+                  onClick={() => dismissReason(reason, rows.map((r) => r.id))}
+                  className="shrink-0 text-[11px] text-rose-200/70 hover:text-rose-100 disabled:opacity-50"
+                >
+                  {dismissingKey === reason ? "Dismissing…" : "Dismiss"}
+                </button>
               </div>
             ))}
           </div>
