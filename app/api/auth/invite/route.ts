@@ -64,9 +64,11 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: write.error.message }, { status: 500 });
   }
 
-  const base =
-    process.env.NEXT_PUBLIC_APP_URL?.replace(/\/$/, "") ??
-    req.nextUrl.origin;
+  // req.nextUrl.origin, not NEXT_PUBLIC_APP_URL — this is the admin's
+  // own browser hitting the real app domain; that env var was found
+  // misconfigured to a different Vercel project's URL, which would
+  // have silently handed out invite links pointing at the wrong app.
+  const base = req.nextUrl.origin;
   return NextResponse.json({
     inviteUrl: `${base}/login?invite=${token}`,
     expiresAt: expires,

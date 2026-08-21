@@ -28,7 +28,15 @@ export async function GET(req: NextRequest) {
   const code = req.nextUrl.searchParams.get("code");
   const error = req.nextUrl.searchParams.get("error");
   const errorDescription = req.nextUrl.searchParams.get("error_description");
-  const origin = process.env.NEXT_PUBLIC_APP_URL ?? req.nextUrl.origin;
+  // req.nextUrl.origin, not NEXT_PUBLIC_APP_URL: this is a
+  // self-referential redirect back into the same app that's serving
+  // this request, and Schwab would already have rejected the callback
+  // if the host didn't match the registered redirect_uri. Trusting an
+  // external env var here has no upside and a real failure mode —
+  // NEXT_PUBLIC_APP_URL was found misconfigured to a different
+  // Vercel project's URL, silently sending every post-login redirect
+  // there.
+  const origin = req.nextUrl.origin;
 
   if (error) {
     console.error("[schwab-callback] Schwab returned error:", error, errorDescription);

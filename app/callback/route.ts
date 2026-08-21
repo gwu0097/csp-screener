@@ -22,7 +22,11 @@ export async function GET(req: NextRequest) {
   const code = req.nextUrl.searchParams.get("code");
   const error = req.nextUrl.searchParams.get("error");
   const errorDescription = req.nextUrl.searchParams.get("error_description");
-  const origin = process.env.NEXT_PUBLIC_APP_URL ?? req.nextUrl.origin;
+  // req.nextUrl.origin, not NEXT_PUBLIC_APP_URL — see the market-data
+  // callback's identical comment; that env var was found misconfigured
+  // to a different Vercel project's URL, silently sending post-login
+  // redirects (including the second leg of "Reconnect both") there.
+  const origin = req.nextUrl.origin;
   // "Reconnect both": if this is the second leg, the market-data
   // connection already succeeded — carry that through as schwab=
   // connected on every redirect below so the settings page still
