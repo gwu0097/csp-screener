@@ -21,6 +21,7 @@ import { UndoImportPopover } from "@/components/undo-import-popover";
 import type { ConfirmItem } from "@/components/expire-confirmation-modal";
 import { BROKER_ORDER, BROKER_LABEL } from "@/lib/brokers";
 import { SchwabTokenBanner } from "@/components/schwab-token-banner";
+import { SchwabUnresolvedActivityPanel } from "@/components/schwab-unresolved-activity-panel";
 import {
   SellSharesModal,
   type SellSharesTarget,
@@ -1311,6 +1312,7 @@ export function PositionsView() {
       )}
 
       <SchwabTokenBanner />
+      <SchwabUnresolvedActivityPanel />
 
       {market?.warning && (
         <div
