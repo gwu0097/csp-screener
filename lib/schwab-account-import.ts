@@ -22,10 +22,9 @@
 //     landed (for the audit trail) but never turned into a position.
 import { createServerClient } from "@/lib/supabase";
 import { getAccountNumbers, getAccountTransactions } from "@/lib/schwab-account";
-import { runBulkCreate, type TradeInput, type StockTradeInput } from "@/app/api/trades/bulk-create/route";
-import { createStockFromAssignment } from "@/app/api/positions/create-from-assignment/route";
+import { runBulkCreate, type TradeInput, type StockTradeInput } from "@/lib/bulk-create-trades";
 import { autoExpirePosition, recordAssignment } from "@/lib/expire-positions";
-import { reduceStockLotForCallAssignment } from "@/lib/positions";
+import { reduceStockLotForCallAssignment, createStockFromAssignment } from "@/lib/positions";
 
 // Account -> broker mapping. Exactly two accounts exist under this
 // connection; a hardcoded table is the right size for that, not a

@@ -1,6 +1,8 @@
 // Shared types + recommendation engine for /positions.
 // Pure functions: no I/O here, so they're trivially unit-testable.
 
+import { NextResponse } from "next/server";
+import { createServerClient } from "@/lib/supabase";
 import { isAfterMarketCloseET } from "@/lib/expire-positions";
 //
 // Two layers live here:
@@ -346,6 +348,231 @@ export async function reduceStockLotForCallAssignment(
     console.warn(`[reduceStockLotForCallAssignment] recalc failed for ${lot.id}: ${recalc.error}`);
   }
   return { ok: true, stockPositionId: lot.id };
+}
+
+function todayIsoDate(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+// Creates stock_long position rows from already-assigned put positions.
+// Moved here from app/api/positions/create-from-assignment/route.ts —
+// Next.js's App Router only allows specific recognized names to be
+// exported from a route.ts file; exporting this as a plain function
+// from the route file passed tsc/lint locally but failed `next build`
+// ("is not a valid Route export field"), silently blocking every
+// deploy behind it. See lib/bulk-create-trades.ts's header for the
+// same story — same fix, same reasoning. The route is now a thin
+// wrapper; the Schwab Account Data auto-import poller
+// (lib/schwab-account-import.ts) calls this directly, in-process, with
+// the admin userId (no session to derive one from in a cron context).
+//
+// For each item, looks up the parent (status='assigned') put, computes
+// cost basis = strike − avg_premium_per_share (the premium reduces the
+// assigned shares' cost basis, so the stock round-trip carries the
+// whole economic result), zeroes the parent's realized_pnl, then
+// inserts a stock_long row. Idempotent via assignment_source_id.
+export async function createStockFromAssignment(
+  userId: string,
+  ids: string[],
+): Promise<NextResponse> {
+  const sb = createServerClient();
+
+  const lookup = await sb
+    .from("positions")
+    .select(
+      "id,symbol,broker,strike,expiry,total_contracts,avg_premium_sold,status",
+    )
+    .in("id", ids)
+    .eq("user_id", userId);
+  if (lookup.error) {
+    return NextResponse.json({ error: lookup.error.message }, { status: 500 });
+  }
+  type Parent = {
+    id: string;
+    symbol: string;
+    broker: string | null;
+    strike: number;
+    expiry: string;
+    total_contracts: number | null;
+    avg_premium_sold: number | null;
+    status: string;
+  };
+  const parents = (lookup.data ?? []) as Parent[];
+
+  // Compute REMAINING contracts per parent from its fill set so the
+  // share count reflects only the contracts that were actually
+  // assigned (= opened − prior closes), not the historical "ever
+  // opened" count on the row. Parents with partial-close / roll
+  // history would otherwise mint too many shares.
+  const fillsRes = await sb
+    .from("fills")
+    .select("position_id, fill_type, contracts")
+    .in("position_id", ids)
+    .eq("user_id", userId);
+  type FillRow = {
+    position_id: string;
+    fill_type: string;
+    contracts: number;
+  };
+  const fillsByPos = new Map<string, FillRow[]>();
+  for (const f of (fillsRes.data ?? []) as FillRow[]) {
+    const arr = fillsByPos.get(f.position_id) ?? [];
+    arr.push(f);
+    fillsByPos.set(f.position_id, arr);
+  }
+  const remainingByPos = new Map<string, number>();
+  for (const id of ids) {
+    const fills = fillsByPos.get(id) ?? [];
+    const opened = fills
+      .filter((f) => f.fill_type === "open")
+      .reduce((s, f) => s + f.contracts, 0);
+    const closed = fills
+      .filter((f) => f.fill_type === "close")
+      .reduce((s, f) => s + f.contracts, 0);
+    remainingByPos.set(id, Math.max(0, opened - closed));
+  }
+
+  // Skip parents that already have a stock_long row pointing back
+  // (idempotent guard against double-clicks / retries).
+  const existRes = await sb
+    .from("positions")
+    .select("id,assignment_source_id")
+    .in("assignment_source_id", ids)
+    .eq("user_id", userId);
+  const alreadyCreated = new Set(
+    ((existRes.data ?? []) as Array<{ assignment_source_id: string }>).map(
+      (r) => r.assignment_source_id,
+    ),
+  );
+
+  const created: Array<{
+    parentId: string;
+    stockPositionId: string;
+    symbol: string;
+    shares: number;
+    costBasis: number;
+  }> = [];
+  const skipped: Array<{ parentId: string; reason: string }> = [];
+
+  const today = todayIsoDate();
+
+  for (const p of parents) {
+    if (alreadyCreated.has(p.id)) {
+      skipped.push({
+        parentId: p.id,
+        reason: "stock_long row already exists for this assignment",
+      });
+      continue;
+    }
+    if (p.status !== "assigned") {
+      skipped.push({
+        parentId: p.id,
+        reason: `parent status is ${p.status}, expected 'assigned'`,
+      });
+      continue;
+    }
+    const strike = Number(p.strike);
+    // Use REMAINING (opened − prior_closes), not total_contracts —
+    // see fills computation above. NET 7-opened/4-rolled → remaining
+    // = 3 → 300 shares. total_contracts would have produced 700.
+    const contracts = remainingByPos.get(p.id) ?? 0;
+    if (contracts <= 0) {
+      skipped.push({
+        parentId: p.id,
+        reason: "parent has 0 remaining contracts — nothing to create",
+      });
+      continue;
+    }
+    // Premium reduces cost basis: the put's realized_pnl gets zeroed
+    // below (in the same request as this insert, so the two rows never
+    // go out of sync) and its collected premium is folded into the
+    // stock's cost basis instead. The stock round-trip then carries the
+    // whole economic result of the assignment cycle.
+    const avgPremiumSold =
+      p.avg_premium_sold !== null ? Number(p.avg_premium_sold) : 0;
+    const costBasis = Math.round((strike - avgPremiumSold) * 10000) / 10000;
+    const shares = contracts * 100;
+
+    const insert = await sb
+      .from("positions")
+      .insert({
+        symbol: p.symbol,
+        strike: 0,
+        expiry: today,
+        option_type: "put",
+        broker: p.broker ?? "schwab",
+        total_contracts: shares,
+        avg_premium_sold: null,
+        status: "open",
+        opened_date: today,
+        notes: `Assigned from ${p.symbol} $${strike}P ${p.expiry}`,
+        position_type: "stock_long",
+        assignment_source_id: p.id,
+        entry_stock_price: costBasis,
+        user_id: userId,
+      })
+      .select()
+      .single();
+    type InsertedRow = { id: string };
+    const inserted = insert.data as InsertedRow | null;
+    if (insert.error || !inserted) {
+      skipped.push({
+        parentId: p.id,
+        reason: `insert failed: ${insert.error?.message ?? "unknown"}`,
+      });
+      continue;
+    }
+    // Record the assignment as an `open` fill (shares @ cost basis) so
+    // recalculatePositionFromFills can derive remaining shares / status /
+    // realized P&L purely from the open-close fill ledger — the same
+    // model every other position uses. Without this the stock_long row
+    // has only close fills and recalc can't tell how many shares it
+    // started with.
+    const openFill = await sb.from("fills").insert({
+      position_id: inserted.id,
+      fill_type: "open",
+      contracts: shares,
+      premium: costBasis,
+      fill_date: today,
+      user_id: userId,
+    });
+    if (openFill.error) {
+      skipped.push({
+        parentId: p.id,
+        reason: `open-fill insert failed: ${openFill.error.message}`,
+      });
+      continue;
+    }
+    // Zero the parent put's realized_pnl now that its premium lives on
+    // the stock leg's cost basis instead — done only after the stock
+    // row + open fill succeed, so the two rows never go out of sync
+    // (an option can't end up zeroed with no stock leg to carry the
+    // economics, and vice versa).
+    const zeroParent = await sb
+      .from("positions")
+      .update({ realized_pnl: 0, updated_at: new Date().toISOString() })
+      .eq("id", p.id)
+      .eq("user_id", userId);
+    if (zeroParent.error) {
+      console.warn(
+        `[create-from-assignment] zeroing parent ${p.id} failed: ${zeroParent.error.message}`,
+      );
+    }
+    created.push({
+      parentId: p.id,
+      stockPositionId: inserted.id,
+      symbol: p.symbol,
+      shares,
+      costBasis,
+    });
+  }
+
+  return NextResponse.json({
+    created_count: created.length,
+    skipped_count: skipped.length,
+    created,
+    skipped,
+  });
 }
 
 // ---------- Recommendation engine ----------
