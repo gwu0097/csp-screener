@@ -409,11 +409,14 @@ async function pollOneAccount(
         await markProcessed(sb, r.id, "submitted", `bulk-create ok — fills_inserted=${json.fills_inserted ?? 0}`);
       }
     } else if (result.status === 409 || json.requires_confirmation) {
-      // Duplicate(s) detected — leave every row in this batch
-      // unprocessed with a clear reason rather than guessing which
-      // ones were the actual duplicates; next run re-attempts, and a
-      // human can look at schwab_account_transactions directly if it
-      // keeps recurring.
+      // Duplicate(s) detected — mark the whole batch processed with a
+      // clear reason rather than guessing which rows were the actual
+      // duplicates. This is NOT retried: markProcessed sets
+      // processed=true unconditionally, and the poller only re-reads
+      // processed=false rows. If a genuine new trade was batched
+      // alongside one duplicate, it's silently dropped here too —
+      // that's why these surface in the activity-review panel
+      // (Import + Dismiss), not just true error_ rows.
       for (const r of tradeSourceRows) {
         await markProcessed(
           sb,

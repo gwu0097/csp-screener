@@ -5,19 +5,31 @@ import { requireAdmin, authErrorResponse } from "@/lib/auth";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-// GET /api/schwab-account/unresolved
+// GET /api/schwab-account/activity
 //
-// Every schwab_account_transactions row the auto-import poller landed
-// but couldn't turn into a position update — process_outcome starting
-// with "error_" (a close/expiration/assignment with no matching
-// position, a bulk-create validation failure, etc.). This is the
-// "doesn't fit the model, surface it" half of the auto-import design:
-// a transaction that fits gets applied automatically (see
-// lib/schwab-account-import.ts); one that doesn't lands here instead
-// of silently sitting in a table nobody looks at.
+// Every schwab_account_transactions row the auto-import poller has
+// touched and the user hasn't dismissed yet — both what it applied
+// automatically (status "applied": submitted/expired/assigned, shown
+// so the user can validate what changed) and what it couldn't apply
+// (status "needs_review": a bulk-create validation error, no matching
+// position, or a suspected duplicate it declined to write). Purely
+// administrative noise (dividends, cash transfers, fee-only legs) is
+// excluded — it was never a position event to review. Dismissing a
+// row (see [id]/dismiss/route.ts) is permanent; the poller never
+// revisits processed=true rows, so nothing here is retried.
 const LOOKBACK_DAYS = 30;
 
-type UnresolvedRow = {
+// Real trade/expiration/assignment events the poller applied cleanly.
+const APPLIED_OUTCOMES = new Set(["submitted", "expired", "assigned"]);
+// Administrative rows that were never a position event — never shown.
+const NOISE_OUTCOMES = new Set([
+  "skipped_no_leg",
+  "skipped_unhandled_leg",
+  "skipped_unhandled",
+  "skipped_irrelevant_type",
+]);
+
+type ActivityRow = {
   id: string;
   activity_id: number;
   type: string;
@@ -53,8 +65,6 @@ export async function GET() {
 
   const sb = createServerClient();
   const since = new Date(Date.now() - LOOKBACK_DAYS * 24 * 60 * 60 * 1000).toISOString();
-  // The wrapper (lib/supabase.ts) has no .like()/.not() — fetch
-  // processed rows in the window and filter the error_* prefix in JS.
   const res = await sb
     .from("schwab_account_transactions")
     .select("id,activity_id,type,transaction_time,process_outcome,process_detail,broker,account_number,raw")
@@ -67,8 +77,8 @@ export async function GET() {
     return NextResponse.json({ error: res.error.message }, { status: 500 });
   }
 
-  const rows = ((res.data ?? []) as UnresolvedRow[])
-    .filter((r) => r.process_outcome?.startsWith("error_"))
+  const rows = ((res.data ?? []) as ActivityRow[])
+    .filter((r) => r.process_outcome && !NOISE_OUTCOMES.has(r.process_outcome))
     .slice(0, 100);
   const items = rows.map((r) => {
     const leg = r.raw.transferItems?.find((ti) => ti.instrument?.assetType !== "CURRENCY");
@@ -95,6 +105,7 @@ export async function GET() {
       direction: amount !== null ? (amount < 0 ? "short" : "long") : null,
       outcome: r.process_outcome,
       detail: r.process_detail,
+      status: APPLIED_OUTCOMES.has(r.process_outcome) ? "applied" : "needs_review",
     };
   });
 

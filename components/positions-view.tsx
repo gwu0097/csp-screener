@@ -22,9 +22,9 @@ import type { ConfirmItem } from "@/components/expire-confirmation-modal";
 import { BROKER_ORDER, BROKER_LABEL } from "@/lib/brokers";
 import { SchwabTokenBanner } from "@/components/schwab-token-banner";
 import {
-  SchwabUnresolvedActivityPanel,
-  type UnresolvedItem,
-} from "@/components/schwab-unresolved-activity-panel";
+  SchwabActivityPanel,
+  type ActivityItem,
+} from "@/components/schwab-activity-panel";
 import {
   SellSharesModal,
   type SellSharesTarget,
@@ -1017,15 +1017,15 @@ export function PositionsView() {
   };
 
   // Manual-import submit success, specifically for the case where the
-  // modal was opened via the unresolved-activity panel's "Import"
-  // button — also marks the source Schwab transaction row resolved so
-  // it drops out of that panel instead of coming back next poll.
+  // modal was opened via the Schwab activity panel's "Import" button —
+  // also marks the source Schwab transaction row resolved so it drops
+  // out of that panel instead of coming back next poll.
   const onManualImportSuccess = (msg: string) => {
     onImportSuccess(msg);
     const sourceId = manualPrefill?.sourceUnresolvedId;
     setManualPrefill(null);
     if (sourceId) {
-      void fetch(`/api/schwab-account/unresolved/${sourceId}/dismiss`, {
+      void fetch(`/api/schwab-account/activity/${sourceId}/dismiss`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ reason: "manual_import" }),
@@ -1033,7 +1033,7 @@ export function PositionsView() {
     }
   };
 
-  function handleImportFromUnresolved(item: UnresolvedItem) {
+  function handleImportFromUnresolved(item: ActivityItem) {
     setManualPrefill({
       symbol: item.symbol ?? undefined,
       strike: item.strike ?? undefined,
@@ -1366,7 +1366,7 @@ export function PositionsView() {
       )}
 
       <SchwabTokenBanner />
-      <SchwabUnresolvedActivityPanel
+      <SchwabActivityPanel
         onImport={handleImportFromUnresolved}
         refreshToken={unresolvedRefreshToken}
       />
