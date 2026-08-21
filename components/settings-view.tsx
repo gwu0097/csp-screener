@@ -10,17 +10,33 @@ import { Check, X, ChevronDown, ChevronRight, AlertTriangle } from "lucide-react
 type Props = {
   connected: boolean;
   lastRefresh: string | null;
+  acctConnected: boolean;
+  acctLastRefresh: string | null;
   envFlags: Record<string, boolean>;
   schwabFlash: string | null;
   schwabReason: string | null;
+  schwabAcctFlash: string | null;
+  schwabAcctReason: string | null;
   // Signed-in role: members get a status-only Schwab card (the broker
   // connection belongs to the admin) and no maintenance/env tooling.
   role: "admin" | "member";
 };
 
-export function SettingsView({ connected, lastRefresh, envFlags, schwabFlash, schwabReason, role }: Props) {
+export function SettingsView({
+  connected,
+  lastRefresh,
+  acctConnected,
+  acctLastRefresh,
+  envFlags,
+  schwabFlash,
+  schwabReason,
+  schwabAcctFlash,
+  schwabAcctReason,
+  role,
+}: Props) {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
+  const [acctBusy, setAcctBusy] = useState(false);
   const isAdmin = role === "admin";
 
   async function disconnect() {
@@ -30,6 +46,16 @@ export function SettingsView({ connected, lastRefresh, envFlags, schwabFlash, sc
       router.refresh();
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function disconnectAcct() {
+    setAcctBusy(true);
+    try {
+      await fetch("/api/auth/schwab-account", { method: "DELETE" });
+      router.refresh();
+    } finally {
+      setAcctBusy(false);
     }
   }
 
@@ -45,6 +71,16 @@ export function SettingsView({ connected, lastRefresh, envFlags, schwabFlash, sc
       {schwabFlash === "error" && (
         <div className="rounded-md border border-rose-500/30 bg-rose-500/10 p-2 text-base text-rose-300">
           Schwab connection failed{schwabReason ? `: ${schwabReason}` : ""}.
+        </div>
+      )}
+      {schwabAcctFlash === "connected" && (
+        <div className="rounded-md border border-emerald-500/30 bg-emerald-500/10 p-2 text-base text-emerald-300">
+          Schwab Account Data connected successfully.
+        </div>
+      )}
+      {schwabAcctFlash === "error" && (
+        <div className="rounded-md border border-rose-500/30 bg-rose-500/10 p-2 text-base text-rose-300">
+          Schwab Account Data connection failed{schwabAcctReason ? `: ${schwabAcctReason}` : ""}.
         </div>
       )}
 
@@ -85,6 +121,41 @@ export function SettingsView({ connected, lastRefresh, envFlags, schwabFlash, sc
           )}
         </CardContent>
       </Card>
+
+      {isAdmin && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center justify-between">
+              Schwab Account Data connection (read-only)
+              <Badge variant={acctConnected ? "default" : "destructive"}>
+                {acctConnected ? "connected" : "disconnected"}
+              </Badge>
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="text-base text-muted-foreground">
+              Last refresh: {acctLastRefresh ? new Date(acctLastRefresh).toLocaleString() : "never"}
+            </div>
+            <p className="text-sm text-muted-foreground">
+              Separate app registration (Accounts and Trading), separate token storage from the
+              connection above. Read-only by construction — this app has no way to place, replace, or
+              cancel an order.
+            </p>
+            <div className="flex gap-2">
+              {!acctConnected && (
+                <Button asChild>
+                  <a href="/api/auth/schwab-account">Connect Account Data</a>
+                </Button>
+              )}
+              {acctConnected && (
+                <Button variant="destructive" onClick={disconnectAcct} disabled={acctBusy}>
+                  {acctBusy ? "Disconnecting…" : "Disconnect"}
+                </Button>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       <Card>
         <CardHeader>

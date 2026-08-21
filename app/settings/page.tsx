@@ -1,14 +1,19 @@
 import { isSchwabConnected } from "@/lib/schwab";
+import { isSchwabAcctConnected } from "@/lib/schwab-account";
 import { SettingsView } from "@/components/settings-view";
 import { getSessionUser } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-type SearchParams = { schwab?: string; reason?: string };
+type SearchParams = { schwab?: string; reason?: string; schwabAcct?: string };
 
 export default async function SettingsPage({ searchParams }: { searchParams: SearchParams }) {
   const { connected, lastRefresh } = await isSchwabConnected().catch(() => ({ connected: false, lastRefresh: null }));
+  const { connected: acctConnected, lastRefresh: acctLastRefresh } = await isSchwabAcctConnected().catch(() => ({
+    connected: false,
+    lastRefresh: null,
+  }));
   const session = await getSessionUser();
   const role = session?.role ?? "member";
 
@@ -16,6 +21,9 @@ export default async function SettingsPage({ searchParams }: { searchParams: Sea
     SCHWAB_CLIENT_ID: Boolean(process.env.SCHWAB_CLIENT_ID),
     SCHWAB_CLIENT_SECRET: Boolean(process.env.SCHWAB_CLIENT_SECRET),
     SCHWAB_REDIRECT_URI: Boolean(process.env.SCHWAB_REDIRECT_URI),
+    SCHWAB_ACCT_CLIENT_ID: Boolean(process.env.SCHWAB_ACCT_CLIENT_ID),
+    SCHWAB_ACCT_CLIENT_SECRET: Boolean(process.env.SCHWAB_ACCT_CLIENT_SECRET),
+    SCHWAB_ACCT_REDIRECT_URI: Boolean(process.env.SCHWAB_ACCT_REDIRECT_URI),
     FINNHUB_API_KEY: Boolean(process.env.FINNHUB_API_KEY),
     NEXT_PUBLIC_SUPABASE_URL: Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL),
     NEXT_PUBLIC_SUPABASE_ANON_KEY: Boolean(process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY),
@@ -27,9 +35,13 @@ export default async function SettingsPage({ searchParams }: { searchParams: Sea
     <SettingsView
       connected={connected}
       lastRefresh={lastRefresh}
+      acctConnected={acctConnected}
+      acctLastRefresh={acctLastRefresh}
       envFlags={envFlags}
       schwabFlash={searchParams.schwab ?? null}
       schwabReason={searchParams.reason ?? null}
+      schwabAcctFlash={searchParams.schwabAcct ?? null}
+      schwabAcctReason={searchParams.reason ?? null}
       role={role}
     />
   );
