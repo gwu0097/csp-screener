@@ -29,7 +29,7 @@ import {
 } from "@/components/buy-zone-view";
 import type { EarningsWatchRow } from "@/components/earnings-watch-view";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { SchwabStatusBanner } from "@/components/schwab-status-banner";
+import { SchwabStatusBanner, SchwabAcctStatusBanner } from "@/components/schwab-status-banner";
 import { CaptureHealthPanel, CrushCaptureHealthPanel, PriceIntegrityFlagsPanel, EarningsHistoryRejectionsPanel } from "@/components/capture-health-panel";
 
 // Markdown body for the AI morning brief — mirrors the styling used for
@@ -796,6 +796,7 @@ export function DashboardView() {
   return (
     <div className="space-y-4">
       <SchwabStatusBanner />
+      <SchwabAcctStatusBanner />
       <CaptureHealthPanel />
       <CrushCaptureHealthPanel />
       <PriceIntegrityFlagsPanel />

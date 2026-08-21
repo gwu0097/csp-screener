@@ -85,3 +85,66 @@ export function SchwabStatusBanner() {
     </div>
   );
 }
+
+// Same warning mechanism as SchwabStatusBanner above, mirrored rather
+// than parameterized (matching lib/schwab-account.ts's own isolation
+// stance — see that file's header comment). Independent state: this
+// connection can be fine while the market-data one is expiring, or
+// vice versa, and each banner shows/hides on its own rather than
+// trying to express both in one message. Renders nothing for members
+// (route is admin-only, a 401/403 here is expected and silent) — same
+// as SchwabStatusBanner.
+export function SchwabAcctStatusBanner() {
+  const [resp, setResp] = useState<StatusResp | null>(null);
+  const [checked, setChecked] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/schwab-account/token-status?verify=1", { cache: "no-store" })
+      .then((r) => (r.ok ? (r.json() as Promise<StatusResp>) : null))
+      .then((j) => {
+        if (!cancelled) setResp(j);
+      })
+      .catch(() => {
+        if (!cancelled) setResp(null);
+      })
+      .finally(() => {
+        if (!cancelled) setChecked(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (!checked || !resp) return null;
+
+  const isFailure =
+    resp.status === "expired" || resp.status === "refresh_failed" || resp.status === "missing";
+  const shouldShow = isFailure || resp.shouldWarn;
+  if (!shouldShow) return null;
+
+  const message = isFailure
+    ? `Schwab Account Data connection is down (live check just now: ${resp.status}). Reconnect to restore auto-import.`
+    : resp.warningMessage;
+
+  const urgent = isFailure || resp.warningClause === 4;
+
+  return (
+    <div
+      className={
+        urgent
+          ? "flex items-center gap-2 rounded-md border border-rose-500/40 bg-rose-500/10 p-2 text-sm text-rose-200"
+          : "flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-2 text-sm text-amber-200"
+      }
+    >
+      <AlertTriangle className="h-4 w-4 shrink-0" />
+      <span className="flex-1">{message}</span>
+      <a
+        href="/settings"
+        className="shrink-0 rounded bg-foreground/10 px-2 py-1 text-xs font-medium hover:bg-foreground/20"
+      >
+        Reconnect
+      </a>
+    </div>
+  );
+}
