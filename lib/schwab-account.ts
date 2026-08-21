@@ -72,7 +72,14 @@ type TokenResponse = {
   scope?: string;
 };
 
-export function getSchwabAcctAuthUrl(): string {
+// Re-exported so both legs of "Reconnect both" use the identical
+// marker — see lib/schwab.ts's own copy of this constant for the
+// full explanation. Kept as a separate literal (not imported from
+// lib/schwab.ts) to preserve the zero-shared-code isolation between
+// these two connections.
+export const CHAIN_BOTH_STATE = "chain_both";
+
+export function getSchwabAcctAuthUrl(state?: string): string {
   // 2026-08-21: tried adding scope=readonly to match lib/schwab.ts's
   // working market-data request — reverted. It didn't fix the "unable
   // to complete your request" error and correlated with a regression
@@ -86,6 +93,7 @@ export function getSchwabAcctAuthUrl(): string {
     redirect_uri: REDIRECT_URI,
     response_type: "code",
   });
+  if (state) params.set("state", state);
   return `${OAUTH_BASE}/authorize?${params.toString()}`;
 }
 

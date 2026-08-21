@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { exchangeCodeForTokens } from "@/lib/schwab";
+import { exchangeCodeForTokens, CHAIN_BOTH_STATE } from "@/lib/schwab";
 import { authErrorResponse, requireAdmin } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
@@ -46,6 +46,14 @@ export async function GET(req: NextRequest) {
   try {
     await exchangeCodeForTokens(code);
     console.log("[schwab-callback] token exchange succeeded");
+    // "Reconnect both" — this leg succeeded, chain into the Account
+    // Data app's own authorize flow rather than stopping here. Only
+    // on success: a failure here shouldn't attempt the second app in
+    // an inconsistent state, and the normal error redirect below still
+    // fires for it either way.
+    if (req.nextUrl.searchParams.get("state") === CHAIN_BOTH_STATE) {
+      return NextResponse.redirect(`${origin}/api/auth/schwab-account?chain=1`);
+    }
     return NextResponse.redirect(`${origin}/settings?schwab=connected`);
   } catch (e) {
     const msg = e instanceof Error ? e.message : "unknown";

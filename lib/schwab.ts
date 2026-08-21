@@ -20,13 +20,20 @@ type TokenResponse = {
   scope?: string;
 };
 
-export function getSchwabAuthUrl(): string {
+// Marker echoed back via the OAuth `state` param — lets the callback
+// recognize a "Reconnect both" request and chain into the Account
+// Data app's authorize flow (see app/api/auth/schwab/route.ts and
+// callback/route.ts) instead of stopping at /settings.
+export const CHAIN_BOTH_STATE = "chain_both";
+
+export function getSchwabAuthUrl(state?: string): string {
   const params = new URLSearchParams({
     client_id: CLIENT_ID,
     redirect_uri: REDIRECT_URI,
     response_type: "code",
     scope: "readonly",
   });
+  if (state) params.set("state", state);
   return `${OAUTH_BASE}/authorize?${params.toString()}`;
 }
 

@@ -84,6 +84,18 @@ export function SettingsView({
         </div>
       )}
 
+      {isAdmin && (
+        <div className="flex items-center justify-between rounded-md border border-border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
+          <span>
+            Both Schwab connections need reconnecting roughly weekly — Schwab&apos;s refresh tokens
+            don&apos;t reliably renew themselves.
+          </span>
+          <Button asChild variant="outline" size="sm">
+            <a href="/api/auth/schwab?chain=1">Reconnect both →</a>
+          </Button>
+        </div>
+      )}
+
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center justify-between">
