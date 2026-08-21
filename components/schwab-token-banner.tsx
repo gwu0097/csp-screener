@@ -13,10 +13,12 @@
 // that condition cannot be dismissed away, and a poll that escalates
 // to clause 4 clears any prior dismissal of a lower-severity clause.
 //
-// The Reconnect link points at /api/auth/schwab which redirects into
-// Schwab's OAuth flow; the existing callback persists the new
-// tokens and updates updated_at, so the banner self-clears on next
-// mount after a successful reconnect.
+// The Reconnect link points at /api/auth/schwab?chain=1 — the market
+// data OAuth flow, tagged to chain into the Account Data flow right
+// after (see app/api/auth/schwab/callback/route.ts's CHAIN_BOTH_STATE
+// handling). The existing callback persists the new tokens and
+// updates updated_at, so the banner self-clears on next mount after a
+// successful reconnect.
 
 import { useEffect, useState } from "react";
 import { AlertTriangle, RefreshCw } from "lucide-react";
@@ -135,7 +137,7 @@ export function SchwabTokenBanner() {
       <div className="flex items-center gap-2">
         {isAdmin && (
           <a
-            href="/api/auth/schwab"
+            href="/api/auth/schwab?chain=1"
             className={`inline-flex items-center gap-1.5 rounded border px-2.5 py-1 text-sm font-semibold ${
               tone === "red"
                 ? "border-rose-300/40 bg-rose-500/20 hover:bg-rose-500/30"
@@ -145,7 +147,7 @@ export function SchwabTokenBanner() {
             }`}
           >
             <RefreshCw className="h-3.5 w-3.5" />
-            Reconnect Schwab
+            Reconnect both
           </a>
         )}
         {status.warningClause !== 4 && (

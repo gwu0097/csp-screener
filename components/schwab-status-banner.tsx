@@ -77,10 +77,10 @@ export function SchwabStatusBanner() {
       <AlertTriangle className="h-4 w-4 shrink-0" />
       <span className="flex-1">{message}</span>
       <a
-        href="/settings"
+        href="/api/auth/schwab?chain=1"
         className="shrink-0 rounded bg-foreground/10 px-2 py-1 text-xs font-medium hover:bg-foreground/20"
       >
-        Reconnect
+        Reconnect both
       </a>
     </div>
   );
@@ -140,10 +140,10 @@ export function SchwabAcctStatusBanner() {
       <AlertTriangle className="h-4 w-4 shrink-0" />
       <span className="flex-1">{message}</span>
       <a
-        href="/settings"
+        href="/api/auth/schwab?chain=1"
         className="shrink-0 rounded bg-foreground/10 px-2 py-1 text-xs font-medium hover:bg-foreground/20"
       >
-        Reconnect
+        Reconnect both
       </a>
     </div>
   );
