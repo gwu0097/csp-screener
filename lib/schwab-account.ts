@@ -73,10 +73,20 @@ type TokenResponse = {
 };
 
 export function getSchwabAcctAuthUrl(): string {
+  // scope has no real restrictive effect on Schwab's end (see this
+  // file's header comment — there is no read-only scope for Trading,
+  // access is all-or-nothing per the app's registered product), but
+  // lib/schwab.ts's working market-data authorize request always sends
+  // scope=readonly and this one omitted it entirely — the one
+  // structural difference between a request that reaches Schwab's
+  // login page cleanly and one that doesn't. Matching the known-good
+  // shape rather than omitting a param Schwab's authorize endpoint may
+  // require to be merely present.
   const params = new URLSearchParams({
     client_id: CLIENT_ID,
     redirect_uri: REDIRECT_URI,
     response_type: "code",
+    scope: "readonly",
   });
   return `${OAUTH_BASE}/authorize?${params.toString()}`;
 }
