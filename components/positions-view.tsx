@@ -26,6 +26,10 @@ import {
   type ActivityItem,
 } from "@/components/schwab-activity-panel";
 import {
+  RobinhoodActivityPanel,
+  type RobinhoodActivityItem,
+} from "@/components/robinhood-activity-panel";
+import {
   SellSharesModal,
   type SellSharesTarget,
 } from "@/components/sell-shares-modal";
@@ -690,19 +694,24 @@ export function PositionsView() {
   const [message, setMessage] = useState<string | null>(null);
   const [showScreenshot, setShowScreenshot] = useState(false);
   const [showManual, setShowManual] = useState(false);
-  // Prefill for a manual import triggered from the "Schwab activity
-  // detected, not applied" panel — null for the plain toolbar "Add".
-  // modalKey forces a remount on every open (ImportManualModal seeds
-  // its fields from `prefill` only in useState's initializer, so
-  // reopening the same mounted instance with a new prefill wouldn't
-  // otherwise pick it up).
+  // Prefill for a manual import triggered from either broker's
+  // "activity detected" panel — null for the plain toolbar "Add".
+  // sourceBroker picks which dismiss endpoint onManualImportSuccess
+  // calls; the two panels are otherwise independent (separate refresh
+  // tokens below) so dismissing a Robinhood row never touches the
+  // Schwab panel's state or vice versa. modalKey forces a remount on
+  // every open (ImportManualModal seeds its fields from `prefill` only
+  // in useState's initializer, so reopening the same mounted instance
+  // with a new prefill wouldn't otherwise pick it up).
   const [manualPrefill, setManualPrefill] = useState<
     (NonNullable<ComponentProps<typeof ImportManualModal>["prefill"]> & {
       sourceUnresolvedId?: string;
+      sourceBroker?: "schwab" | "robinhood";
     }) | null
   >(null);
   const [modalKey, setModalKey] = useState(0);
   const [unresolvedRefreshToken, setUnresolvedRefreshToken] = useState(0);
+  const [robinhoodRefreshToken, setRobinhoodRefreshToken] = useState(0);
   const [sellTarget, setSellTarget] = useState<SellSharesTarget | null>(null);
   const [closeOptionTarget, setCloseOptionTarget] =
     useState<CloseOptionTarget | null>(null);
@@ -1017,14 +1026,22 @@ export function PositionsView() {
   };
 
   // Manual-import submit success, specifically for the case where the
-  // modal was opened via the Schwab activity panel's "Import" button —
-  // also marks the source Schwab transaction row resolved so it drops
-  // out of that panel instead of coming back next poll.
+  // modal was opened via one of the "activity detected" panels'
+  // "Import" button — also marks the source row resolved on whichever
+  // broker's dismiss endpoint it came from, so it drops out of that
+  // panel instead of coming back next poll.
   const onManualImportSuccess = (msg: string) => {
     onImportSuccess(msg);
     const sourceId = manualPrefill?.sourceUnresolvedId;
+    const sourceBroker = manualPrefill?.sourceBroker;
     setManualPrefill(null);
-    if (sourceId) {
+    if (sourceId && sourceBroker === "robinhood") {
+      void fetch(`/api/robinhood-account/activity/${sourceId}/dismiss`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: "manual_import" }),
+      }).then(() => setRobinhoodRefreshToken((n) => n + 1));
+    } else if (sourceId) {
       void fetch(`/api/schwab-account/activity/${sourceId}/dismiss`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1045,6 +1062,25 @@ export function PositionsView() {
       direction: item.direction ?? "short",
       optionType: item.putCall === "CALL" ? "call" : "put",
       sourceUnresolvedId: item.id,
+      sourceBroker: "schwab",
+    });
+    setModalKey((k) => k + 1);
+    setShowManual(true);
+  }
+
+  function handleImportFromRobinhoodUnresolved(item: RobinhoodActivityItem) {
+    setManualPrefill({
+      symbol: item.symbol ?? undefined,
+      strike: item.strike ?? undefined,
+      expiry: item.expiry ?? undefined,
+      premium: item.price ?? undefined,
+      action: item.positionEffect === "OPENING" ? "open" : "close",
+      broker: item.broker,
+      contracts: item.contracts ?? 1,
+      direction: item.direction ?? "short",
+      optionType: item.putCall === "call" ? "call" : "put",
+      sourceUnresolvedId: item.id,
+      sourceBroker: "robinhood",
     });
     setModalKey((k) => k + 1);
     setShowManual(true);
@@ -1369,6 +1405,10 @@ export function PositionsView() {
       <SchwabActivityPanel
         onImport={handleImportFromUnresolved}
         refreshToken={unresolvedRefreshToken}
+      />
+      <RobinhoodActivityPanel
+        onImport={handleImportFromRobinhoodUnresolved}
+        refreshToken={robinhoodRefreshToken}
       />
 
       {market?.warning && (

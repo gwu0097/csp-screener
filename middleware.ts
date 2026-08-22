@@ -22,6 +22,7 @@ const PUBLIC_PATHS = new Set([
   "/api/earnings/seed-em",
   "/api/earnings/sweep-eps",
   "/api/schwab-account/poll-transactions",
+  "/api/robinhood-account/poll-transactions",
 ]);
 
 function secret(): Uint8Array {
