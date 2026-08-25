@@ -195,6 +195,30 @@ async function refreshAccessToken(refreshToken: string): Promise<TokenResponse> 
   return postTokenRequest(body);
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// One retry before a token-endpoint 400/401 is treated as proof the
+// refresh token is dead — mirrors
+// lib/schwab-account.ts::refreshAcctAccessTokenWithRetry, added there
+// after a 2026-08-24 incident where a one-off Schwab backend error
+// ("Failed to resolve access token") permanently poisoned a
+// connection that had been reconnected days earlier and was very
+// likely still valid. This connection has never hit that failure
+// mode, but the code was identically unprotected, so the same fix
+// applies here too rather than waiting for a first incident.
+async function refreshAccessTokenWithRetry(refreshToken: string): Promise<TokenResponse> {
+  try {
+    return await refreshAccessToken(refreshToken);
+  } catch (e) {
+    if (!(e instanceof SchwabAuthError) || (e.status !== 400 && e.status !== 401)) throw e;
+    console.warn(`[schwab-token] refresh failed (${e.status}), retrying once in 3s before invalidating`);
+    await sleep(3000);
+    return await refreshAccessToken(refreshToken);
+  }
+}
+
 async function loadLatestTokenRow(): Promise<SchwabTokenRow | null> {
   const supabase = createServerClient();
   const { data, error } = await supabase
@@ -275,7 +299,7 @@ export async function forceRefreshToken(): Promise<ForceRefreshResult> {
     (new Date(hadStoredExpiry).getTime() - Date.now()) / 86_400_000;
 
   try {
-    const fresh = await refreshAccessToken(row.refresh_token);
+    const fresh = await refreshAccessTokenWithRetry(row.refresh_token);
     await persistTokens(fresh);
     const updated = await loadLatestTokenRow();
     return {
@@ -318,7 +342,7 @@ export async function getValidAccessToken(): Promise<string> {
 
   let fresh: TokenResponse;
   try {
-    fresh = await refreshAccessToken(row.refresh_token);
+    fresh = await refreshAccessTokenWithRetry(row.refresh_token);
   } catch (e) {
     if (e instanceof SchwabAuthError && (e.status === 400 || e.status === 401)) {
       await invalidateSchwabToken();
