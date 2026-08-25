@@ -233,6 +233,31 @@ async function refreshAcctAccessToken(refreshToken: string): Promise<TokenRespon
   return postTokenRequest(body);
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// One retry before a token-endpoint 400/401 is treated as proof the
+// refresh token is dead. Added after a 2026-08-24 incident: Schwab
+// returned "unsupported_token_type ... Failed to resolve access
+// token" — a backend token-lookup error, not the standard
+// invalid_grant "your refresh token is expired/revoked" response —
+// and the then-instant invalidateSchwabAcctToken() call permanently
+// poisoned a connection that had been reconnected days earlier and
+// was very likely still valid. A short retry survives a one-off
+// Schwab-side hiccup like that one while still poisoning promptly on
+// a genuinely dead token, which fails on both attempts, not just one.
+async function refreshAcctAccessTokenWithRetry(refreshToken: string): Promise<TokenResponse> {
+  try {
+    return await refreshAcctAccessToken(refreshToken);
+  } catch (e) {
+    if (!(e instanceof SchwabAcctAuthError) || (e.status !== 400 && e.status !== 401)) throw e;
+    console.warn(`[schwab-acct-token] refresh failed (${e.status}), retrying once in 3s before invalidating`);
+    await sleep(3000);
+    return await refreshAcctAccessToken(refreshToken);
+  }
+}
+
 async function loadLatestAcctTokenRow(): Promise<SchwabAccountTokenRow | null> {
   const supabase = createServerClient();
   const { data, error } = await supabase
@@ -283,7 +308,7 @@ export async function forceRefreshAcctToken(): Promise<AcctForceRefreshResult> {
   const hadStoredExpiry = row.refresh_token_expires_at;
   const daysRemainingBeforeAttempt = (new Date(hadStoredExpiry).getTime() - Date.now()) / 86_400_000;
   try {
-    const fresh = await refreshAcctAccessToken(row.refresh_token);
+    const fresh = await refreshAcctAccessTokenWithRetry(row.refresh_token);
     await persistAcctTokens(fresh);
     const updated = await loadLatestAcctTokenRow();
     return {
@@ -326,7 +351,7 @@ export async function getValidAcctAccessToken(): Promise<string> {
 
   let fresh: TokenResponse;
   try {
-    fresh = await refreshAcctAccessToken(row.refresh_token);
+    fresh = await refreshAcctAccessTokenWithRetry(row.refresh_token);
   } catch (e) {
     if (e instanceof SchwabAcctAuthError && (e.status === 400 || e.status === 401)) {
       await invalidateSchwabAcctToken();
