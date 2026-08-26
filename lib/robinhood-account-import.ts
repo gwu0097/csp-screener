@@ -84,16 +84,31 @@ function extractOrders(input: unknown): RhOrder[] {
 // unrelated CLI permission-warning line before the actual response,
 // and whether the JSON itself gets wrapped in a ```json fence is
 // inconsistent — a plain fence-regex strip failed to find/close the
-// fence correctly and left trailing content that broke JSON.parse.
-// Fence stripping only handles "content between two known markers";
-// it can't handle "unknown junk before AND after, fence or no fence."
-// Brace-counting instead finds the first `{`, then walks forward
-// tracking string state (so braces inside quoted strings don't
-// confuse it) until the matching closing `}` — the first COMPLETE top-
-// level JSON object in the text, regardless of what surrounds it.
-function extractFirstJsonObject(text: string): string {
-  const start = text.indexOf("{");
-  if (start === -1) throw new Error("No JSON object found in courier output");
+// fence correctly and left trailing content that broke JSON.parse. A
+// second, separate failure that same day was genuinely truncated
+// output (not a wrapping problem) — traced to the courier's prompt
+// asking Claude to reproduce a large, irrelevant "guide" text field
+// verbatim alongside the real data; the courier no longer asks for
+// that field, so the expected top-level shape here is now a bare
+// array most of the time, though this still accepts an object too.
+// Brace/bracket-counting finds the first `{` or `[`, then walks
+// forward tracking string state (so braces/brackets inside quoted
+// strings don't confuse it) until the matching closer — the first
+// COMPLETE top-level JSON value in the text, regardless of what
+// surrounds it.
+function extractFirstJsonValue(text: string): string {
+  let start = -1;
+  let openChar = "";
+  let closeChar = "";
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === "{" || text[i] === "[") {
+      start = i;
+      openChar = text[i];
+      closeChar = openChar === "{" ? "}" : "]";
+      break;
+    }
+  }
+  if (start === -1) throw new Error("No JSON value found in courier output");
   let depth = 0;
   let inString = false;
   let escaped = false;
@@ -109,17 +124,17 @@ function extractFirstJsonObject(text: string): string {
       inString = true;
       continue;
     }
-    if (ch === "{") depth++;
-    else if (ch === "}") {
+    if (ch === openChar) depth++;
+    else if (ch === closeChar) {
       depth--;
       if (depth === 0) return text.slice(start, i + 1);
     }
   }
-  throw new Error("Unbalanced JSON object in courier output");
+  throw new Error("Unbalanced JSON value in courier output");
 }
 
 function parseCourierBody(raw: string): unknown {
-  return JSON.parse(extractFirstJsonObject(raw));
+  return JSON.parse(extractFirstJsonValue(raw));
 }
 
 async function resolveAdminUserId(): Promise<string> {

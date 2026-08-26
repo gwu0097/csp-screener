@@ -15,10 +15,22 @@
 // Telegram, same as a Schwab reconnect-needed case — the user
 // reconnects it once and the courier resumes.
 //
+// The prompt deliberately asks for ONLY the data.orders array, not the
+// full tool response — the omitted "guide" field is pure LLM-facing
+// instruction prose (unused by anything downstream) that's long and
+// intricate enough to be exactly the kind of content an LLM can
+// truncate or garble when asked to reproduce it verbatim. A
+// 2026-08-26 incident traced two consecutive scheduled failures to
+// this: one run wrapped the guide-inclusive response in a markdown
+// fence inconsistently, the next produced genuinely truncated JSON
+// mid-guide-text. Dropping the guide field shrinks the ask
+// substantially and removes the hardest part to reproduce faithfully.
+//
 // Run via com.csp.robinhood-courier launchd agent, weekdays.
 // Usage: npx tsx scripts/robinhood-courier.ts
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
+import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
 
 function loadEnvLocal(): void {
@@ -39,15 +51,45 @@ const POLL_URL = "https://csp-screener.vercel.app/api/robinhood-account/poll-tra
 // migrations/2026-08-21-robinhood-account-transactions.sql.
 const LOOKBACK_DAYS = 7;
 
-// Brace-counting extraction, not a fence regex — see the identical
-// helper (and the 2026-08-26 incident that motivated it) in
-// lib/robinhood-account-import.ts::extractFirstJsonObject. Duplicated
+const STATE_DIR = resolve(homedir(), "Library/Application Support/csp-screener");
+const STATE_PATH = resolve(STATE_DIR, "robinhood-courier-state.json");
+
+type State = { lastStatus: "ok" | "failed" | "unknown"; checkedAt: string; detail?: string };
+
+function readState(): State {
+  try {
+    return JSON.parse(readFileSync(STATE_PATH, "utf8")) as State;
+  } catch {
+    return { lastStatus: "unknown", checkedAt: "" };
+  }
+}
+function writeState(s: State): void {
+  if (!existsSync(STATE_DIR)) mkdirSync(STATE_DIR, { recursive: true });
+  writeFileSync(STATE_PATH, JSON.stringify(s, null, 2));
+}
+
+// Brace/bracket-counting extraction, not a fence regex — see the
+// identical helper in lib/robinhood-account-import.ts (server-side,
+// where the 2026-08-26 parse failure actually happened). Duplicated
 // rather than shared: this file only ever imports lib/telegram-alert,
 // deliberately, so a courier failure can't be traced to an import-time
-// coupling with the server-side lib.
-function extractFirstJsonObject(text: string): string {
-  const start = text.indexOf("{");
-  if (start === -1) throw new Error("No JSON object found in claude -p output");
+// coupling with the server-side lib. Accepts either a top-level object
+// or array as the first JSON value in the text, since the prompt below
+// asks for a bare array but a "no prose" instruction is not a
+// guarantee Claude never wraps it.
+function extractFirstJsonValue(text: string): string {
+  let start = -1;
+  let openChar = "";
+  let closeChar = "";
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === "{" || text[i] === "[") {
+      start = i;
+      openChar = text[i];
+      closeChar = openChar === "{" ? "}" : "]";
+      break;
+    }
+  }
+  if (start === -1) throw new Error("No JSON value found in claude -p output");
   let depth = 0;
   let inString = false;
   let escaped = false;
@@ -63,30 +105,51 @@ function extractFirstJsonObject(text: string): string {
       inString = true;
       continue;
     }
-    if (ch === "{") depth++;
-    else if (ch === "}") {
+    if (ch === openChar) depth++;
+    else if (ch === closeChar) {
       depth--;
       if (depth === 0) return text.slice(start, i + 1);
     }
   }
-  throw new Error("Unbalanced JSON object in claude -p output");
+  throw new Error("Unbalanced JSON value in claude -p output");
 }
 
 async function main() {
   loadEnvLocal();
   const { sendTelegramAlert } = await import("../lib/telegram-alert");
+  const prev = readState();
+  const nowIso = new Date().toISOString();
+
+  // Alert only on a state transition (ok -> failing, failing -> ok),
+  // not on every failed run — a 2026-08-26 incident sent a separate
+  // Telegram message for each of several consecutive scheduled
+  // failures before this was added, mirroring the dedup already built
+  // into scripts/schwab-account-poll-trigger.ts.
+  async function fail(detail: string): Promise<void> {
+    console.error(`[robinhood-courier] ${detail}`);
+    if (prev.lastStatus !== "failed") {
+      await sendTelegramAlert(`🔴 Robinhood courier failing: ${detail}`);
+    }
+    writeState({ lastStatus: "failed", checkedAt: nowIso, detail });
+    process.exitCode = 1;
+  }
+  async function succeed(summary: string): Promise<void> {
+    console.log(`[robinhood-courier] ${summary}`);
+    if (prev.lastStatus === "failed") {
+      await sendTelegramAlert("🟢 Robinhood courier recovered — back to normal.");
+    }
+    writeState({ lastStatus: "ok", checkedAt: nowIso });
+  }
 
   // No hardcoded default — this repo is public and a Robinhood account
   // number has no safe truncation the way Schwab's last-3-digits
   // ACCOUNT_BROKER_MAP does. Lives only in the untracked .env.local.
   const ACCOUNT_NUMBER = process.env.ROBINHOOD_ACCOUNT_NUMBER ?? "";
   if (!ACCOUNT_NUMBER) {
-    console.error("[robinhood-courier] ROBINHOOD_ACCOUNT_NUMBER not set in .env.local, aborting");
-    process.exitCode = 1;
+    await fail("ROBINHOOD_ACCOUNT_NUMBER not set in .env.local, aborting");
     return;
   }
 
-  const nowIso = new Date().toISOString();
   const lookbackSince = new Date(Date.now() - LOOKBACK_DAYS * 24 * 60 * 60 * 1000).toISOString();
   console.log(`[${nowIso}] robinhood courier — account ${ACCOUNT_NUMBER}, lookback since ${lookbackSince}`);
 
@@ -94,8 +157,13 @@ async function main() {
     `Call the robinhood MCP tool get_option_orders with account_number="${ACCOUNT_NUMBER}"`,
     `and created_at_gte="${lookbackSince}". Do not call any other tool.`,
     `Do not place, cancel, or modify any order.`,
-    `Output ONLY the raw JSON the tool returned — no prose, no markdown code`,
-    `fences, no summary, no commentary. Your entire response must be valid JSON.`,
+    `The tool result has a top-level "data.orders" array and a separate "guide"`,
+    `field — the guide field is instructions for you, not order data; do NOT`,
+    `include it or any other part of the response in your output.`,
+    `Output ONLY the JSON array found at data.orders, nothing else: no prose,`,
+    `no markdown code fences, no summary, no commentary, no wrapping object.`,
+    `Your entire response must be exactly that array, starting with [ and`,
+    `ending with ].`,
   ].join(" ");
 
   let stdout: string;
@@ -107,22 +175,18 @@ async function main() {
     );
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    console.error(`[robinhood-courier] claude -p failed: ${msg}`);
-    await sendTelegramAlert(
-      `🔴 Robinhood courier: headless Claude call failed (${msg}). If this persists, the Robinhood MCP connection likely needs reconnecting — run \`claude mcp list\` to check.`,
+    await fail(
+      `headless Claude call failed (${msg}). If this persists, the Robinhood MCP connection likely needs reconnecting — run \`claude mcp list\` to check.`,
     );
-    process.exitCode = 1;
     return;
   }
 
   let rawJson: string;
   try {
-    rawJson = extractFirstJsonObject(stdout);
+    rawJson = extractFirstJsonValue(stdout);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    console.error(`[robinhood-courier] couldn't extract JSON from claude -p output: ${msg}`);
-    await sendTelegramAlert(`🔴 Robinhood courier: claude -p output wasn't parseable JSON (${msg}) — nothing submitted.`);
-    process.exitCode = 1;
+    await fail(`claude -p output wasn't parseable JSON (${msg}) — nothing submitted.`);
     return;
   }
 
@@ -141,9 +205,7 @@ async function main() {
     );
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    console.error(`[robinhood-courier] POST failed: ${msg}`);
-    await sendTelegramAlert(`🔴 Robinhood courier: POST to poll-transactions failed (${msg}).`);
-    process.exitCode = 1;
+    await fail(`POST to poll-transactions failed (${msg}).`);
     return;
   }
 
@@ -155,15 +217,13 @@ async function main() {
 
   if (!res.ok || !json.ok) {
     const detail = json.error ?? json.report?.errors?.join("; ") ?? `HTTP ${res.status}`;
-    console.error(`[robinhood-courier] poll-transactions reported failure: ${detail}`);
-    await sendTelegramAlert(`🔴 Robinhood courier: import failed — ${detail}`);
-    process.exitCode = 1;
+    await fail(`import failed — ${detail}`);
     return;
   }
 
   const r = json.report;
-  console.log(
-    `[robinhood-courier] ok — orders=${r?.ordersSeen ?? 0} executions=${r?.executionsSeen ?? 0} landed=${r?.executionsLanded ?? 0} submitted=${r?.tradesSubmitted ?? 0} skipped=${r?.skipped ?? 0}`,
+  await succeed(
+    `ok — orders=${r?.ordersSeen ?? 0} executions=${r?.executionsSeen ?? 0} landed=${r?.executionsLanded ?? 0} submitted=${r?.tradesSubmitted ?? 0} skipped=${r?.skipped ?? 0}`,
   );
 }
 
@@ -172,7 +232,11 @@ main().catch(async (e) => {
   console.error(`[robinhood-courier] fatal: ${msg}`);
   try {
     const { sendTelegramAlert } = await import("../lib/telegram-alert");
-    await sendTelegramAlert(`🔴 Robinhood courier: fatal error — ${msg}`);
+    const prev = readState();
+    if (prev.lastStatus !== "failed") {
+      await sendTelegramAlert(`🔴 Robinhood courier: fatal error — ${msg}`);
+    }
+    writeState({ lastStatus: "failed", checkedAt: new Date().toISOString(), detail: msg });
   } catch {
     // best-effort alert — don't mask the original failure
   }
