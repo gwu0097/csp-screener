@@ -233,12 +233,14 @@ async function pollOneAccount(
     raw: SchwabTransaction;
   }>;
 
-  const tradeInputs: TradeInput[] = [];
-  const stockInputs: StockTradeInput[] = [];
-  // Maps back from a synthesized TradeInput/StockTradeInput to the
-  // landed row(s) it came from, so the batch bulk-create result can be
-  // reflected back onto schwab_account_transactions afterward.
-  const tradeSourceRows: Array<{ id: string; activity_id: number }> = [];
+  // Carries each synthesized TradeInput/StockTradeInput together with
+  // the landed row it came from — a single array, not three parallel
+  // ones, so an individual retry (see below) can always submit the
+  // exact same payload attributed back to the exact same row.
+  type PendingSubmission =
+    | { kind: "trade"; row: { id: string; activity_id: number }; input: TradeInput }
+    | { kind: "stock"; row: { id: string; activity_id: number }; input: StockTradeInput };
+  const pending: PendingSubmission[] = [];
 
   for (const row of unprocessed) {
     const txn = row.raw;
@@ -253,34 +255,40 @@ async function pollOneAccount(
         const action = leg.positionEffect === "OPENING" ? "open" : "close";
         const amount = leg.amount ?? 0;
         const direction: "short" | "long" = amount < 0 ? "short" : "long";
-        tradeInputs.push({
-          symbol: leg.instrument.underlyingSymbol ?? "",
-          action,
-          contracts: Math.abs(amount),
-          strike: leg.instrument.strikePrice ?? 0,
-          expiry: expiryDateOnly(leg.instrument.expirationDate ?? txn.time),
-          optionType: leg.instrument.putCall === "CALL" ? "call" : "put",
-          ...(action === "open" ? { direction } : {}),
-          premium: Math.abs(leg.price ?? 0),
-          broker,
-          timePlaced: txn.time.replace(/\+0000$/, ""),
-          notes: `Schwab auto-import (activity ${txn.activityId})`,
+        pending.push({
+          kind: "trade",
+          row: { id: row.id, activity_id: txn.activityId },
+          input: {
+            symbol: leg.instrument.underlyingSymbol ?? "",
+            action,
+            contracts: Math.abs(amount),
+            strike: leg.instrument.strikePrice ?? 0,
+            expiry: expiryDateOnly(leg.instrument.expirationDate ?? txn.time),
+            optionType: leg.instrument.putCall === "CALL" ? "call" : "put",
+            ...(action === "open" ? { direction } : {}),
+            premium: Math.abs(leg.price ?? 0),
+            broker,
+            timePlaced: txn.time.replace(/\+0000$/, ""),
+            notes: `Schwab auto-import (activity ${txn.activityId})`,
+          },
         });
-        tradeSourceRows.push({ id: row.id, activity_id: txn.activityId });
       } else if (leg.instrument.assetType === "EQUITY" && (leg.amount ?? 0) < 0) {
         // A stock SELL — the only stock-side case bulk-create accepts
         // (shares only ever arrive via assignment, handled separately
         // below). A stock BUY that isn't an assignment consequence
         // isn't a CSP-journal event this app models; skip it.
-        stockInputs.push({
-          symbol: leg.instrument.symbol ?? "",
-          action: "sell",
-          shares: Math.abs(leg.amount ?? 0),
-          price: leg.price ?? 0,
-          date: expiryDateOnly(txn.time),
-          broker,
+        pending.push({
+          kind: "stock",
+          row: { id: row.id, activity_id: txn.activityId },
+          input: {
+            symbol: leg.instrument.symbol ?? "",
+            action: "sell",
+            shares: Math.abs(leg.amount ?? 0),
+            price: leg.price ?? 0,
+            date: expiryDateOnly(txn.time),
+            broker,
+          },
         });
-        tradeSourceRows.push({ id: row.id, activity_id: txn.activityId });
       } else {
         await markProcessed(sb, row.id, "skipped_unhandled_leg", `assetType=${leg.instrument.assetType} amount=${leg.amount}`);
         base.skipped += 1;
@@ -385,10 +393,18 @@ async function pollOneAccount(
     base.skipped += 1;
   }
 
-  if (tradeInputs.length > 0 || stockInputs.length > 0) {
+  type BulkCreateJson = {
+    errors?: string[];
+    duplicates?: string[];
+    requires_confirmation?: boolean;
+    positions_created?: number;
+    fills_inserted?: number;
+  };
+
+  if (pending.length > 0) {
     const result = await runBulkCreate(adminUserId, {
-      trades: tradeInputs,
-      stockTrades: stockInputs,
+      trades: pending.filter((p) => p.kind === "trade").map((p) => p.input as TradeInput),
+      stockTrades: pending.filter((p) => p.kind === "stock").map((p) => p.input as StockTradeInput),
       sourceTimezone: "UTC",
       // Never auto-confirm: a duplicate warning from bulk-create means
       // this exact fill was already recorded (by a prior run or a
@@ -396,41 +412,55 @@ async function pollOneAccount(
       // push a second fill through.
       confirmDuplicates: false,
     });
-    const json = (await result.json()) as {
-      errors?: string[];
-      duplicates?: string[];
-      requires_confirmation?: boolean;
-      positions_created?: number;
-      fills_inserted?: number;
-    };
+    const json = (await result.json()) as BulkCreateJson;
+
     if (result.status === 200) {
-      base.tradesSubmitted = tradeInputs.length + stockInputs.length;
-      for (const r of tradeSourceRows) {
-        await markProcessed(sb, r.id, "submitted", `bulk-create ok — fills_inserted=${json.fills_inserted ?? 0}`);
+      base.tradesSubmitted = pending.length;
+      for (const p of pending) {
+        await markProcessed(sb, p.row.id, "submitted", `bulk-create ok — fills_inserted=${json.fills_inserted ?? 0}`);
       }
-    } else if (result.status === 409 || json.requires_confirmation) {
-      // Duplicate(s) detected — mark the whole batch processed with a
-      // clear reason rather than guessing which rows were the actual
-      // duplicates. This is NOT retried: markProcessed sets
-      // processed=true unconditionally, and the poller only re-reads
-      // processed=false rows. If a genuine new trade was batched
-      // alongside one duplicate, it's silently dropped here too —
-      // that's why these surface in the activity-review panel
-      // (Import + Dismiss), not just true error_ rows.
-      for (const r of tradeSourceRows) {
-        await markProcessed(
-          sb,
-          r.id,
-          "skipped_duplicate",
-          (json.duplicates ?? []).join("; ") || "bulk-create reported a suspected duplicate",
-        );
-      }
-      base.skipped += tradeSourceRows.length;
     } else {
-      for (const r of tradeSourceRows) {
-        await markProcessed(sb, r.id, "error_bulk_create_failed", (json.errors ?? []).join("; ") || `status ${result.status}`);
+      // The batch was rejected — either a real validation error on one
+      // leg, or a suspected duplicate somewhere in it. bulk-create has
+      // no partial success, so ALL of it got rejected together, but
+      // that doesn't mean every row was actually the problem: a
+      // 2026-08-26 incident found an unrelated, perfectly valid SNPS
+      // open marked error_bulk_create_failed with an ELF close's error
+      // message, purely because they landed in the same batch. Retry
+      // each row individually so only the row(s) that genuinely fail
+      // get an error/duplicate outcome — and one attributed to THAT
+      // row, not whichever error string the batch call happened to
+      // return first. Opens before closes, same ordering bulk-create
+      // itself applies internally to a batch — needed here too since
+      // each individual call only sees one row and can't reorder
+      // across calls.
+      const isOpen = (p: PendingSubmission) => p.kind === "trade" && p.input.action === "open";
+      const retryOrder = [...pending].sort((a, b) => Number(isOpen(b)) - Number(isOpen(a)));
+      for (const p of retryOrder) {
+        const singleResult = await runBulkCreate(adminUserId, {
+          trades: p.kind === "trade" ? [p.input] : [],
+          stockTrades: p.kind === "stock" ? [p.input] : [],
+          sourceTimezone: "UTC",
+          confirmDuplicates: false,
+        });
+        const singleJson = (await singleResult.json()) as BulkCreateJson;
+        if (singleResult.status === 200) {
+          base.tradesSubmitted += 1;
+          await markProcessed(sb, p.row.id, "submitted", `bulk-create ok (individual retry after batch failure) — fills_inserted=${singleJson.fills_inserted ?? 0}`);
+        } else if (singleResult.status === 409 || singleJson.requires_confirmation) {
+          base.skipped += 1;
+          await markProcessed(
+            sb,
+            p.row.id,
+            "skipped_duplicate",
+            (singleJson.duplicates ?? []).join("; ") || "bulk-create reported a suspected duplicate",
+          );
+        } else {
+          const detail = (singleJson.errors ?? []).join("; ") || `status ${singleResult.status}`;
+          errors.push(`activity ${p.row.activity_id}: ${detail}`);
+          await markProcessed(sb, p.row.id, "error_bulk_create_failed", detail);
+        }
       }
-      errors.push(`bulk-create batch failed: ${(json.errors ?? []).join("; ") || `status ${result.status}`}`);
     }
   }
 
