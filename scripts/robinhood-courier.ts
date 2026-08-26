@@ -12,7 +12,7 @@
 // successfully called it non-interactively), not a stored OAuth token
 // this script manages directly. If that MCP connection's own auth
 // ever lapses, `claude -p` will fail below and this alerts via
-// Telegram, same as a Schwab reconnect-needed case — the user
+// Discord, same as a Schwab reconnect-needed case — the user
 // reconnects it once and the courier resumes.
 //
 // The prompt deliberately asks for ONLY the data.orders array, not the
@@ -71,7 +71,7 @@ function writeState(s: State): void {
 // Brace/bracket-counting extraction, not a fence regex — see the
 // identical helper in lib/robinhood-account-import.ts (server-side,
 // where the 2026-08-26 parse failure actually happened). Duplicated
-// rather than shared: this file only ever imports lib/telegram-alert,
+// rather than shared: this file only ever imports lib/discord-alert,
 // deliberately, so a courier failure can't be traced to an import-time
 // coupling with the server-side lib. Accepts either a top-level object
 // or array as the first JSON value in the text, since the prompt below
@@ -116,19 +116,19 @@ function extractFirstJsonValue(text: string): string {
 
 async function main() {
   loadEnvLocal();
-  const { sendTelegramAlert } = await import("../lib/telegram-alert");
+  const { sendDiscordAlert } = await import("../lib/discord-alert");
   const prev = readState();
   const nowIso = new Date().toISOString();
 
   // Alert only on a state transition (ok -> failing, failing -> ok),
   // not on every failed run — a 2026-08-26 incident sent a separate
-  // Telegram message for each of several consecutive scheduled
+  // Discord message for each of several consecutive scheduled
   // failures before this was added, mirroring the dedup already built
   // into scripts/schwab-account-poll-trigger.ts.
   async function fail(detail: string): Promise<void> {
     console.error(`[robinhood-courier] ${detail}`);
     if (prev.lastStatus !== "failed") {
-      await sendTelegramAlert(`🔴 Robinhood courier failing: ${detail}`);
+      await sendDiscordAlert(`🔴 Robinhood courier failing: ${detail}`);
     }
     writeState({ lastStatus: "failed", checkedAt: nowIso, detail });
     process.exitCode = 1;
@@ -136,7 +136,7 @@ async function main() {
   async function succeed(summary: string): Promise<void> {
     console.log(`[robinhood-courier] ${summary}`);
     if (prev.lastStatus === "failed") {
-      await sendTelegramAlert("🟢 Robinhood courier recovered — back to normal.");
+      await sendDiscordAlert("🟢 Robinhood courier recovered — back to normal.", { mention: false });
     }
     writeState({ lastStatus: "ok", checkedAt: nowIso });
   }
@@ -231,10 +231,10 @@ main().catch(async (e) => {
   const msg = e instanceof Error ? e.message : String(e);
   console.error(`[robinhood-courier] fatal: ${msg}`);
   try {
-    const { sendTelegramAlert } = await import("../lib/telegram-alert");
+    const { sendDiscordAlert } = await import("../lib/discord-alert");
     const prev = readState();
     if (prev.lastStatus !== "failed") {
-      await sendTelegramAlert(`🔴 Robinhood courier: fatal error — ${msg}`);
+      await sendDiscordAlert(`🔴 Robinhood courier: fatal error — ${msg}`);
     }
     writeState({ lastStatus: "failed", checkedAt: new Date().toISOString(), detail: msg });
   } catch {

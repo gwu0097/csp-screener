@@ -3,7 +3,7 @@
 // retry pass — see --skip-reconcile in the runner script), looking back
 // over capture_health_daily for recent business days:
 //   - no rollup row at all for a date => the scheduled run never fired
-//     (or died before writing anything) — Telegram alert + MISSED rows
+//     (or died before writing anything) — Discord alert + MISSED rows
 //     for that date's full due set.
 //   - a rollup row with a non-empty `outstanding` list => the run fired
 //     but some symbols never reached fired/suppressed — MISSED rows for
@@ -14,7 +14,7 @@
 // prior date the way there is for daily's fixed T+1..T+20 window.
 import { createServerClient } from "./supabase";
 import { writeOutcomeChunk, type OutcomeRow } from "./local-chain-store";
-import { sendTelegramAlert } from "./telegram-alert";
+import { sendDiscordAlert } from "./discord-alert";
 import { upsertHealthRollup, type CaptureHealthDailyRow, type OutstandingSymbol } from "./capture-health";
 
 const LOOKBACK_DAYS = 5;
@@ -158,7 +158,7 @@ export async function reconcileMissedCaptures(
         }
       }
       if (!dryRun) {
-        await sendTelegramAlert(
+        await sendDiscordAlert(
           `🔴 Post-earnings capture: NO RUN recorded for ${dateIso} (found during reconciliation on ${todayIso}). ` +
             `${due.length} symbols were due and got MISSED rows.`,
         );

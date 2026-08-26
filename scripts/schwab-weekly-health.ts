@@ -1,16 +1,13 @@
-// Weekend Schwab Account Data token health check — mirrors
-// scripts/schwab-weekly-health.ts exactly, one connection over.
-// Attempts a LIVE refresh-token exchange
-// (lib/schwab-account.forceRefreshAcctToken) rather than trusting
-// isSchwabAcctConnected() or the stored expiry, for the same reason
-// the market-data check does: Schwab refresh tokens can be
-// non-rotating, so a dead one can sit undetected for up to a week.
-// Silent on a routine healthy check; Discord alert only on failure,
-// and a recovery confirmation the next time it succeeds after a
-// prior failure.
+// Weekend Schwab token health check. Attempts a LIVE refresh-token
+// exchange (lib/schwab.forceRefreshToken) — does not trust
+// isSchwabConnected() or the stored expiry, since a dead refresh
+// token can otherwise sit undetected for up to a week (see
+// forceRefreshToken's doc comment). Silent on a routine healthy
+// check; Discord alert only on failure, and a recovery confirmation
+// the next time it succeeds after a prior failure.
 //
-// Run via com.csp.schwab-account-health launchd agent, Saturdays only.
-// Usage: npx tsx scripts/schwab-account-health.ts
+// Run via com.csp.schwab-health launchd agent, Saturdays only.
+// Usage: npx tsx scripts/schwab-weekly-health.ts
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { homedir } from "node:os";
@@ -26,7 +23,7 @@ function loadEnvLocal(): void {
 }
 
 const STATE_DIR = resolve(homedir(), "Library/Application Support/csp-screener");
-const STATE_PATH = resolve(STATE_DIR, "schwab-account-health-state.json");
+const STATE_PATH = resolve(STATE_DIR, "schwab-health-state.json");
 const RECONNECT_URL = "https://csp-screener.vercel.app/settings";
 
 type State = { lastStatus: "ok" | "failed" | "unknown"; checkedAt: string; detail?: string };
@@ -46,14 +43,14 @@ function writeState(s: State): void {
 
 async function main() {
   loadEnvLocal();
-  const { forceRefreshAcctToken } = await import("../lib/schwab-account");
+  const { forceRefreshToken } = await import("../lib/schwab");
   const { sendDiscordAlert } = await import("../lib/discord-alert");
 
   const prev = readState();
   const nowIso = new Date().toISOString();
-  console.log(`[${nowIso}] weekly Schwab Account Data health check — prev status: ${prev.lastStatus}`);
+  console.log(`[${nowIso}] weekly Schwab health check — prev status: ${prev.lastStatus}`);
 
-  const result = await forceRefreshAcctToken();
+  const result = await forceRefreshToken();
 
   if (result.ok) {
     console.log(
@@ -61,7 +58,7 @@ async function main() {
     );
     if (prev.lastStatus === "failed") {
       const msg =
-        `✅ Schwab Account Data reconnected successfully.\n` +
+        `✅ Schwab reconnected successfully.\n` +
         `Live refresh verified working just now. Refresh token now valid until ${result.newRefreshExpiresAt}.`;
       const sent = await sendDiscordAlert(msg, { mention: false });
       console.log(`recovery alert sent: ${sent.ok}${sent.error ? ` (${sent.error})` : ""}`);
@@ -76,11 +73,11 @@ async function main() {
       `refresh FAILED — error=${result.error} hadStoredExpiry=${result.hadStoredExpiry} daysRemainingBeforeAttempt=${daysTxt}`,
     );
     const msg =
-      `⚠️ Schwab Account Data weekly health check FAILED — live token refresh did not succeed.\n\n` +
+      `⚠️ Schwab weekly health check FAILED — live token refresh did not succeed.\n\n` +
       `Error: ${result.error}\n` +
       (result.hadStoredExpiry
         ? `Stored records said the refresh token was valid until ${result.hadStoredExpiry} (${daysTxt} days remaining) — but Schwab rejected it live just now, so that stored value can't be trusted.\n\n`
-        : `Schwab Account Data was never connected (no token on file).\n\n`) +
+        : `Schwab was never connected (no token on file).\n\n`) +
       `Reconnect: ${RECONNECT_URL}`;
     const sent = await sendDiscordAlert(msg);
     console.log(`failure alert sent: ${sent.ok}${sent.error ? ` (${sent.error})` : ""}`);
@@ -89,6 +86,6 @@ async function main() {
 }
 
 main().catch((e) => {
-  console.error("[schwab-account-health] fatal:", e);
+  console.error("[schwab-weekly-health] fatal:", e);
   process.exit(1);
 });

@@ -5,7 +5,7 @@
 import { getOptionsChain, getValidAccessToken, SchwabApiError } from "./schwab";
 import { getCurrentPrice } from "./yahoo";
 import { getMarketContext } from "./market";
-import { sendTelegramAlert } from "./telegram-alert";
+import { sendDiscordAlert } from "./discord-alert";
 import {
   writeChainChunk,
   writeOutcomeChunk,
@@ -166,7 +166,7 @@ export async function runChainCapture(
 
     const failedCount = (counts.errored ?? 0) + (counts.schwab_disconnected ?? 0);
     if (candidates.length > 0 && failedCount / candidates.length > FAILURE_ALERT_THRESHOLD) {
-      await sendTelegramAlert(
+      await sendDiscordAlert(
         `🔴 ${label} capture: ${failedCount}/${candidates.length} due symbols failed ` +
           `(${Math.round((failedCount / candidates.length) * 100)}%) for ${captureDate}.\n` +
           `fired=${counts.fired ?? 0} errored=${counts.errored ?? 0} disconnected=${counts.schwab_disconnected ?? 0} ` +
@@ -237,7 +237,7 @@ export async function runChainCapture(
     result.disconnected = candidates.length;
     if (!dryRun) {
       await writeOutcomeChunk(outcomeRows, phase, runStartedAt, captureDate, 1);
-      await sendTelegramAlert(
+      await sendDiscordAlert(
         `⚠️ ${label} capture SKIPPED — Schwab disconnected.\n${candidates.length} symbols due, none captured.\nReconnect: ${reconnectUrl}`,
       );
       await finalizeRollup(now);
@@ -371,7 +371,7 @@ export async function runChainCapture(
         result.disconnected += 1;
         if (!dryRun && !disconnectedAlertSent) {
           disconnectedAlertSent = true;
-          await sendTelegramAlert(
+          await sendDiscordAlert(
             `⚠️ ${label} capture: Schwab disconnected mid-run at symbol ${c.symbol} (${processed + 1}/${toProcess.length} processed). Remaining symbols will log schwab_disconnected too.\nReconnect: ${reconnectUrl}`,
           );
         }

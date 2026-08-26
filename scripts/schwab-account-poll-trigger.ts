@@ -5,16 +5,15 @@
 // lib/schwab-account.ts's refreshAcctAccessTokenWithRetry comment)
 // with zero notification, since only the WEEKLY Saturday health check
 // alerts, and it had already run days before the failure started.
-// Telegram alerting runs from here (a local script using .env.local),
-// not from the deployed route itself — no existing app/api/* route in
-// this codebase sends Telegram alerts, so Vercel's runtime env isn't
-// confirmed to have TELEGRAM_BOT_TOKEN/TELEGRAM_ALERT_CHAT_ID set;
-// this mirrors the proven-working scripts/schwab-weekly-health.ts
-// pattern instead of assuming that.
+// Discord alerting runs from here (a local script using .env.local),
+// not from the deployed route itself — no app/api/* route in this
+// codebase posts to Discord, so Vercel's runtime env isn't confirmed
+// to have DISCORD_WEBHOOK_URL set; this mirrors the proven-working
+// scripts/schwab-weekly-health.ts pattern instead of assuming that.
 //
 // Alerts only on a state transition (ok -> failing, failing -> ok),
 // not on every failed run — a known-broken connection would otherwise
-// spam Telegram 4x/day until reconnected.
+// spam Discord 4x/day until reconnected.
 //
 // Run via com.csp.schwab-account-poll launchd agent, weekdays.
 // Usage: npx tsx scripts/schwab-account-poll-trigger.ts
@@ -59,7 +58,7 @@ type PollResponse = {
 
 async function main() {
   loadEnvLocal();
-  const { sendTelegramAlert } = await import("../lib/telegram-alert");
+  const { sendDiscordAlert } = await import("../lib/discord-alert");
 
   const prev = readState();
   const nowIso = new Date().toISOString();
@@ -74,7 +73,7 @@ async function main() {
     const msg = e instanceof Error ? e.message : String(e);
     console.error(`[schwab-account-poll-trigger] request failed: ${msg}`);
     if (prev.lastStatus !== "failed") {
-      await sendTelegramAlert(`🔴 Schwab Account Data poll: request failed (${msg}).`);
+      await sendDiscordAlert(`🔴 Schwab Account Data poll: request failed (${msg}).`);
     }
     writeState({ lastStatus: "failed", checkedAt: nowIso, detail: msg });
     process.exitCode = 1;
@@ -94,7 +93,7 @@ async function main() {
       `HTTP ${res.status}`;
     console.error(`[schwab-account-poll-trigger] failed: ${detail}`);
     if (prev.lastStatus !== "failed") {
-      await sendTelegramAlert(`🔴 Schwab Account Data poll failing: ${detail}\nReconnect: ${RECONNECT_URL}`);
+      await sendDiscordAlert(`🔴 Schwab Account Data poll failing: ${detail}\nReconnect: ${RECONNECT_URL}`);
     }
     writeState({ lastStatus: "failed", checkedAt: nowIso, detail });
     process.exitCode = 1;
@@ -102,7 +101,7 @@ async function main() {
   }
 
   if (prev.lastStatus === "failed") {
-    await sendTelegramAlert("🟢 Schwab Account Data poll recovered — back to normal.");
+    await sendDiscordAlert("🟢 Schwab Account Data poll recovered — back to normal.", { mention: false });
   }
   writeState({ lastStatus: "ok", checkedAt: nowIso });
 }
