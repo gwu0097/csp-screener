@@ -306,31 +306,50 @@ export async function ingestAndProcessRobinhoodOrders(
     execution_timestamp: string | null;
   }>;
 
-  const tradeInputs: TradeInput[] = [];
-  const sourceRows: Array<{ id: string; execution_id: string }> = [];
+  // Carries each synthesized TradeInput together with the landed row
+  // it came from — see lib/schwab-account-import.ts's identical
+  // `pending` array for the full reasoning (a 2026-08-26 incident on
+  // that pipeline: one bad leg in a batch caused an unrelated valid
+  // trade to be marked errored with the bad leg's error message,
+  // purely because bulk-create has no partial success). This file had
+  // the same three-parallel-array pattern and the same bug, just not
+  // yet hit — confirmed live the next day: an NVDA $190P open got
+  // marked needs_review with a completely unrelated $185P duplicate
+  // warning, purely because it shared a batch with two ambiguous
+  // $185P fills.
+  const pending: Array<{ row: { id: string; execution_id: string }; input: TradeInput }> = [];
 
   for (const row of unprocessed) {
     const action: "open" | "close" = row.position_effect === "open" ? "open" : "close";
     const direction: "short" | "long" = row.side === "sell" ? "short" : "long";
-    tradeInputs.push({
-      symbol: row.symbol,
-      action,
-      contracts: row.contracts,
-      strike: row.strike,
-      expiry: row.expiry,
-      optionType: row.option_type,
-      ...(action === "open" ? { direction } : {}),
-      premium: Math.abs(row.price),
-      broker: "robinhood",
-      timePlaced: row.execution_timestamp ? toTimePlaced(row.execution_timestamp) : undefined,
-      notes: `Robinhood auto-import (execution ${row.execution_id})`,
+    pending.push({
+      row: { id: row.id, execution_id: row.execution_id },
+      input: {
+        symbol: row.symbol,
+        action,
+        contracts: row.contracts,
+        strike: row.strike,
+        expiry: row.expiry,
+        optionType: row.option_type,
+        ...(action === "open" ? { direction } : {}),
+        premium: Math.abs(row.price),
+        broker: "robinhood",
+        timePlaced: row.execution_timestamp ? toTimePlaced(row.execution_timestamp) : undefined,
+        notes: `Robinhood auto-import (execution ${row.execution_id})`,
+      },
     });
-    sourceRows.push({ id: row.id, execution_id: row.execution_id });
   }
 
-  if (tradeInputs.length > 0) {
+  type BulkCreateJson = {
+    errors?: string[];
+    duplicates?: string[];
+    requires_confirmation?: boolean;
+    fills_inserted?: number;
+  };
+
+  if (pending.length > 0) {
     const result = await runBulkCreate(adminUserId, {
-      trades: tradeInputs,
+      trades: pending.map((p) => p.input),
       sourceTimezone: "UTC",
       // Never auto-confirm — see the identical comment in
       // lib/schwab-account-import.ts. A duplicate warning means this
@@ -338,32 +357,47 @@ export async function ingestAndProcessRobinhoodOrders(
       // leave it alone, surfaced in the review panel instead.
       confirmDuplicates: false,
     });
-    const json = (await result.json()) as {
-      errors?: string[];
-      duplicates?: string[];
-      requires_confirmation?: boolean;
-      fills_inserted?: number;
-    };
+    const json = (await result.json()) as BulkCreateJson;
+
     if (result.status === 200) {
-      report.tradesSubmitted = tradeInputs.length;
-      for (const r of sourceRows) {
-        await markProcessed(sb, r.id, "submitted", `bulk-create ok — fills_inserted=${json.fills_inserted ?? 0}`);
+      report.tradesSubmitted = pending.length;
+      for (const p of pending) {
+        await markProcessed(sb, p.row.id, "submitted", `bulk-create ok — fills_inserted=${json.fills_inserted ?? 0}`);
       }
-    } else if (result.status === 409 || json.requires_confirmation) {
-      for (const r of sourceRows) {
-        await markProcessed(
-          sb,
-          r.id,
-          "skipped_duplicate",
-          (json.duplicates ?? []).join("; ") || "bulk-create reported a suspected duplicate",
-        );
-      }
-      report.skipped += sourceRows.length;
     } else {
-      for (const r of sourceRows) {
-        await markProcessed(sb, r.id, "error_bulk_create_failed", (json.errors ?? []).join("; ") || `status ${result.status}`);
+      // Batch rejected — retry each row individually so only the
+      // row(s) that genuinely fail (or are genuinely ambiguous
+      // duplicates) get flagged, attributed to that row specifically.
+      // Opens first, same ordering bulk-create applies internally to
+      // a batch — needed here too since each individual call only
+      // sees one row and can't reorder across calls.
+      const retryOrder = [...pending].sort(
+        (a, b) => Number(b.input.action === "open") - Number(a.input.action === "open"),
+      );
+      for (const p of retryOrder) {
+        const singleResult = await runBulkCreate(adminUserId, {
+          trades: [p.input],
+          sourceTimezone: "UTC",
+          confirmDuplicates: false,
+        });
+        const singleJson = (await singleResult.json()) as BulkCreateJson;
+        if (singleResult.status === 200) {
+          report.tradesSubmitted += 1;
+          await markProcessed(sb, p.row.id, "submitted", `bulk-create ok (individual retry after batch failure) — fills_inserted=${singleJson.fills_inserted ?? 0}`);
+        } else if (singleResult.status === 409 || singleJson.requires_confirmation) {
+          report.skipped += 1;
+          await markProcessed(
+            sb,
+            p.row.id,
+            "skipped_duplicate",
+            (singleJson.duplicates ?? []).join("; ") || "bulk-create reported a suspected duplicate",
+          );
+        } else {
+          const detail = (singleJson.errors ?? []).join("; ") || `status ${singleResult.status}`;
+          errors.push(`execution ${p.row.execution_id}: ${detail}`);
+          await markProcessed(sb, p.row.id, "error_bulk_create_failed", detail);
+        }
       }
-      errors.push(`bulk-create batch failed: ${(json.errors ?? []).join("; ") || `status ${result.status}`}`);
     }
   }
 
