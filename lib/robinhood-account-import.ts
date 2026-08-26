@@ -79,13 +79,47 @@ function extractOrders(input: unknown): RhOrder[] {
   return [];
 }
 
-// Defensive: a "JSON only" system prompt can still leak a markdown
-// fence or stray whitespace around the payload. Strip a wrapping
-// ```json ... ``` fence if present, then parse.
+// Defensive: a "JSON only" system prompt is not a guarantee. Observed
+// live (2026-08-26 incident): claude -p's stdout is prefixed with an
+// unrelated CLI permission-warning line before the actual response,
+// and whether the JSON itself gets wrapped in a ```json fence is
+// inconsistent — a plain fence-regex strip failed to find/close the
+// fence correctly and left trailing content that broke JSON.parse.
+// Fence stripping only handles "content between two known markers";
+// it can't handle "unknown junk before AND after, fence or no fence."
+// Brace-counting instead finds the first `{`, then walks forward
+// tracking string state (so braces inside quoted strings don't
+// confuse it) until the matching closing `}` — the first COMPLETE top-
+// level JSON object in the text, regardless of what surrounds it.
+function extractFirstJsonObject(text: string): string {
+  const start = text.indexOf("{");
+  if (start === -1) throw new Error("No JSON object found in courier output");
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  throw new Error("Unbalanced JSON object in courier output");
+}
+
 function parseCourierBody(raw: string): unknown {
-  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-  const text = fenced ? fenced[1] : raw;
-  return JSON.parse(text.trim());
+  return JSON.parse(extractFirstJsonObject(raw));
 }
 
 async function resolveAdminUserId(): Promise<string> {

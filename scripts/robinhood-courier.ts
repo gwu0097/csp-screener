@@ -39,9 +39,37 @@ const POLL_URL = "https://csp-screener.vercel.app/api/robinhood-account/poll-tra
 // migrations/2026-08-21-robinhood-account-transactions.sql.
 const LOOKBACK_DAYS = 7;
 
-function fenceStrip(text: string): string {
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-  return (fenced ? fenced[1] : text).trim();
+// Brace-counting extraction, not a fence regex — see the identical
+// helper (and the 2026-08-26 incident that motivated it) in
+// lib/robinhood-account-import.ts::extractFirstJsonObject. Duplicated
+// rather than shared: this file only ever imports lib/telegram-alert,
+// deliberately, so a courier failure can't be traced to an import-time
+// coupling with the server-side lib.
+function extractFirstJsonObject(text: string): string {
+  const start = text.indexOf("{");
+  if (start === -1) throw new Error("No JSON object found in claude -p output");
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  throw new Error("Unbalanced JSON object in claude -p output");
 }
 
 async function main() {
@@ -87,10 +115,13 @@ async function main() {
     return;
   }
 
-  const rawJson = fenceStrip(stdout);
-  if (!rawJson) {
-    console.error("[robinhood-courier] empty output from claude -p");
-    await sendTelegramAlert("🔴 Robinhood courier: claude -p returned empty output — nothing submitted.");
+  let rawJson: string;
+  try {
+    rawJson = extractFirstJsonObject(stdout);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(`[robinhood-courier] couldn't extract JSON from claude -p output: ${msg}`);
+    await sendTelegramAlert(`🔴 Robinhood courier: claude -p output wasn't parseable JSON (${msg}) — nothing submitted.`);
     process.exitCode = 1;
     return;
   }
