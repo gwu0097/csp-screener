@@ -91,7 +91,14 @@ type ContractPatchBody = {
   strike?: unknown;
   expiry?: unknown;
   optionType?: unknown;
+  broker?: unknown;
 };
+
+// Same set the manual-import modal offers — see components/import-
+// manual-modal.tsx's BROKERS constant. Kept as a literal copy rather
+// than a shared import: this route only needs the list for
+// validation, not the display-label mapping that comes with it.
+const VALID_BROKERS = ["schwab", "schwab2", "robinhood", "covered_calls", "fidelity", "other"] as const;
 
 // Corrects a position's own contract attributes (strike, expiry, option
 // type) — distinct from Edit Fills, which only touches the fills ledger.
@@ -141,9 +148,10 @@ export async function PATCH(
   const hasStrike = body.strike !== undefined;
   const hasExpiry = body.expiry !== undefined;
   const hasOptionType = body.optionType !== undefined;
-  if (!hasStrike && !hasExpiry && !hasOptionType) {
+  const hasBroker = body.broker !== undefined;
+  if (!hasStrike && !hasExpiry && !hasOptionType && !hasBroker) {
     return NextResponse.json(
-      { error: "At least one of strike, expiry, optionType is required" },
+      { error: "At least one of strike, expiry, optionType, broker is required" },
       { status: 400 },
     );
   }
@@ -185,10 +193,24 @@ export async function PATCH(
     newOptionType = body.optionType;
   }
 
+  let newBroker: string | null = null;
+  if (hasBroker) {
+    if (
+      typeof body.broker !== "string" ||
+      !(VALID_BROKERS as readonly string[]).includes(body.broker)
+    ) {
+      return NextResponse.json(
+        { error: `broker must be one of ${VALID_BROKERS.join(", ")}` },
+        { status: 400 },
+      );
+    }
+    newBroker = body.broker;
+  }
+
   const sb = createServerClient();
   const posRes = await sb
     .from("positions")
-    .select("id,symbol,strike,expiry,option_type,position_type,opened_date")
+    .select("id,symbol,strike,expiry,option_type,position_type,opened_date,broker")
     .eq("id", id)
     .eq("user_id", userId)
     .maybeSingle();
@@ -203,14 +225,17 @@ export async function PATCH(
     option_type: string | null;
     position_type: string | null;
     opened_date: string;
+    broker: string | null;
   } | null;
   if (!pos) {
     return NextResponse.json({ error: "position not found" }, { status: 404 });
   }
   // Strike/expiry/option type are option-only concepts — stock positions
   // store strike=0 as a placeholder, never a real contract attribute (see
-  // position_type gating used throughout this codebase).
-  if (pos.position_type === "stock") {
+  // position_type gating used throughout this codebase). Broker has no
+  // such restriction — a stock lot can move accounts too — so this guard
+  // only fires when one of the option-only fields was actually requested.
+  if (pos.position_type === "stock" && (hasStrike || hasExpiry || hasOptionType)) {
     return NextResponse.json(
       { error: "Contract attributes only apply to option positions" },
       { status: 400 },
@@ -220,32 +245,45 @@ export async function PATCH(
   const finalStrike = newStrike ?? Number(pos.strike);
   const finalExpiry = newExpiry ?? pos.expiry;
   const finalOptionType = newOptionType ?? (pos.option_type as "put" | "call" | null) ?? "put";
+  const finalBroker = newBroker ?? pos.broker;
 
-  const unchanged =
+  const contractUnchanged =
     finalStrike === Number(pos.strike) &&
     finalExpiry === pos.expiry &&
     finalOptionType === (pos.option_type ?? "put");
-  if (unchanged) {
+  const brokerUnchanged = finalBroker === pos.broker;
+  if (contractUnchanged && brokerUnchanged) {
     return NextResponse.json({
       success: true,
       id,
       strike: finalStrike,
       expiry: finalExpiry,
       optionType: finalOptionType,
+      broker: finalBroker,
       changed: false,
     });
   }
 
+  // Moving broker alone (no contract-field change) doesn't touch
+  // strike/expiry/option_type or their entry_iv/entry_delta/entry_dte
+  // snapshots — those are still correct for whichever real contract
+  // this is, regardless of which account bucket it's filed under.
+  const updatePayload: Record<string, unknown> = {};
+  if (!contractUnchanged) {
+    updatePayload.strike = finalStrike;
+    updatePayload.expiry = finalExpiry;
+    updatePayload.option_type = finalOptionType;
+    updatePayload.entry_iv = null;
+    updatePayload.entry_delta = null;
+    updatePayload.entry_dte = null;
+  }
+  if (!brokerUnchanged) {
+    updatePayload.broker = finalBroker;
+  }
+
   const upd = await sb
     .from("positions")
-    .update({
-      strike: finalStrike,
-      expiry: finalExpiry,
-      option_type: finalOptionType,
-      entry_iv: null,
-      entry_delta: null,
-      entry_dte: null,
-    })
+    .update(updatePayload)
     .eq("id", id)
     .eq("user_id", userId);
   if (upd.error) {
@@ -254,22 +292,26 @@ export async function PATCH(
 
   // Best-effort — same fills-null-only stamp used on import. Never
   // overwrites entry_stock_price / entry_em_pct / entry_vix (left
-  // untouched above, so their null-check always skips them here).
-  try {
-    const ctx = await buildStampContext();
-    await stampEntryContext(ctx, {
-      id,
-      symbol: pos.symbol,
-      strike: finalStrike,
-      expiry: finalExpiry,
-      optionType: finalOptionType,
-      openedDate: pos.opened_date,
-      userId,
-    });
-  } catch (e) {
-    console.warn(
-      `[positions/contract-edit] restamp failed for ${id}: ${e instanceof Error ? e.message : e}`,
-    );
+  // untouched above, so their null-check always skips them here). Only
+  // worth attempting when the contract itself actually changed — a
+  // pure broker move has no new contract to restamp against.
+  if (!contractUnchanged) {
+    try {
+      const ctx = await buildStampContext();
+      await stampEntryContext(ctx, {
+        id,
+        symbol: pos.symbol,
+        strike: finalStrike,
+        expiry: finalExpiry,
+        optionType: finalOptionType,
+        openedDate: pos.opened_date,
+        userId,
+      });
+    } catch (e) {
+      console.warn(
+        `[positions/contract-edit] restamp failed for ${id}: ${e instanceof Error ? e.message : e}`,
+      );
+    }
   }
 
   return NextResponse.json({
@@ -278,6 +320,7 @@ export async function PATCH(
     strike: finalStrike,
     expiry: finalExpiry,
     optionType: finalOptionType,
+    broker: finalBroker,
     changed: true,
   });
 }

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { ChevronRight, ExternalLink, ListChecks, Loader2, Pencil, Plus, Trash2, X } from "lucide-react";
+import { ArrowRightLeft, ChevronRight, ExternalLink, ListChecks, Loader2, Pencil, Plus, Trash2, X } from "lucide-react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import {
@@ -361,6 +361,12 @@ export function PositionCard(props: Props) {
   // the position itself (distinct from Edit Fills, which only touches
   // the fills ledger). Same open-positions-only scoping as editsOpen.
   const [contractEditOpen, setContractEditOpen] = useState(false);
+  // Move-account panel toggle — reclassifies which broker/account
+  // bucket this position is filed under (e.g. a covered call sold on
+  // Schwab 2 that should actually be tracked under the Covered Calls
+  // pseudo-account). Same open-positions-only scoping; unlike contract
+  // edits this applies to stock positions too (see the PATCH route).
+  const [moveAccountOpen, setMoveAccountOpen] = useState(false);
   // Trade-type confirmation chip. Auto-detected rolled / recovery_play
   // classifications surface a non-blocking strip until the user
   // confirms, reclassifies, or dismisses (dismiss = session-local).
@@ -1130,6 +1136,16 @@ export function PositionCard(props: Props) {
                 {contractEditOpen ? "Hide Contract" : "Edit Contract"}
               </button>
             )}
+            {props.kind === "open" && (
+              <button
+                type="button"
+                onClick={() => setMoveAccountOpen((v) => !v)}
+                className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-sm text-muted-foreground hover:text-foreground"
+              >
+                <ArrowRightLeft className="h-3 w-3" />
+                {moveAccountOpen ? "Hide Move Account" : "Move Account"}
+              </button>
+            )}
             <Link
               href={`/research/${encodeURIComponent(p.symbol)}`}
               className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-sm text-muted-foreground hover:text-foreground"
@@ -1160,6 +1176,14 @@ export function PositionCard(props: Props) {
               strike={props.position.strike}
               expiry={props.position.expiry}
               optionType={props.position.optionType}
+              onChanged={props.onCloseSubmitted}
+            />
+          )}
+
+          {props.kind === "open" && moveAccountOpen && (
+            <MoveAccountPanel
+              positionId={props.position.id}
+              broker={props.position.broker}
               onChanged={props.onCloseSubmitted}
             />
           )}
@@ -2222,6 +2246,108 @@ function EditContractPanel({
         >
           {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
           Save Correction
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// Same broker set the manual-import modal offers (components/import-
+// manual-modal.tsx's BROKERS) and the PATCH route validates against —
+// kept as a local literal rather than importing lib/brokers.BROKER_ORDER,
+// which is a narrower canonical set for grouping tracked positions, not
+// the full list of buckets a position can be filed under.
+const MOVE_ACCOUNT_BROKERS = ["schwab", "schwab2", "robinhood", "covered_calls", "fidelity", "other"] as const;
+const MOVE_ACCOUNT_BROKER_LABEL: Record<string, string> = {
+  schwab: "Schwab",
+  schwab2: "Schwab 2",
+  robinhood: "Robinhood",
+  covered_calls: "Covered Calls",
+  fidelity: "Fidelity",
+  other: "Other",
+};
+
+function MoveAccountPanel({
+  positionId,
+  broker,
+  onChanged,
+}: {
+  positionId: string;
+  broker: string;
+  onChanged: (msg: string) => void;
+}) {
+  const [brokerVal, setBrokerVal] = useState(broker);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setBrokerVal(broker);
+  }, [broker]);
+
+  const dirty = brokerVal !== broker;
+
+  async function handleSave() {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/positions/${positionId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ broker: brokerVal }),
+      });
+      if (!res.ok) {
+        const j = (await res.json().catch(() => ({}))) as { error?: string };
+        setError(j.error ?? `HTTP ${res.status}`);
+        return;
+      }
+      onChanged(
+        `Moved to ${MOVE_ACCOUNT_BROKER_LABEL[brokerVal] ?? brokerVal} — the position now lists under that account.`,
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Network error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="mt-4 rounded-md border border-border bg-background/40 p-3 text-sm">
+      <div className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+        Move Account
+      </div>
+      <div className="mb-3 text-[11px] text-muted-foreground">
+        Reclassifies which account this position is filed under (e.g. a covered call sold on
+        Schwab 2 that should be tracked under Covered Calls instead). Fills, entry context, and
+        every other field are untouched — only the account label changes.
+      </div>
+      {error && (
+        <div className="mb-2 rounded border border-rose-500/40 bg-rose-500/10 p-1.5 text-rose-200">
+          {error}
+        </div>
+      )}
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+          Account
+          <select
+            value={brokerVal}
+            onChange={(e) => setBrokerVal(e.target.value)}
+            className="rounded border border-border bg-background px-2 py-1 text-sm"
+          >
+            {MOVE_ACCOUNT_BROKERS.map((b) => (
+              <option key={b} value={b}>
+                {MOVE_ACCOUNT_BROKER_LABEL[b]}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button
+          type="button"
+          onClick={() => void handleSave()}
+          disabled={!dirty || busy}
+          className="inline-flex items-center gap-1 rounded border border-border bg-background px-2 py-1 text-sm hover:bg-background/80 disabled:opacity-50"
+        >
+          {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+          Save Move
         </button>
       </div>
     </div>
