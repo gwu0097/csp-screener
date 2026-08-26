@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState, type ComponentProps } from "react";
+import { useCallback, useEffect, useRef, useState, type ComponentProps } from "react";
 import { AlertTriangle, ArrowDown, ArrowUp, Briefcase, Camera, Loader2, Plus, RefreshCcw, Undo2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ImportScreenshotModal } from "@/components/import-screenshot-modal";
@@ -41,6 +41,14 @@ import {
   CloseOptionModal,
   type CloseOptionTarget,
 } from "@/components/close-option-modal";
+
+// Prefill shape ImportManualModal accepts, extended with which
+// "activity detected" panel (if any) triggered this open — used both
+// for a single Import and for the "Import all" walkthrough queue.
+type ManualPrefillData = NonNullable<ComponentProps<typeof ImportManualModal>["prefill"]> & {
+  sourceUnresolvedId?: string;
+  sourceBroker?: "schwab" | "robinhood";
+};
 
 type SortKey =
   | "strike"
@@ -703,15 +711,25 @@ export function PositionsView() {
   // every open (ImportManualModal seeds its fields from `prefill` only
   // in useState's initializer, so reopening the same mounted instance
   // with a new prefill wouldn't otherwise pick it up).
-  const [manualPrefill, setManualPrefill] = useState<
-    (NonNullable<ComponentProps<typeof ImportManualModal>["prefill"]> & {
-      sourceUnresolvedId?: string;
-      sourceBroker?: "schwab" | "robinhood";
-    }) | null
-  >(null);
+  const [manualPrefill, setManualPrefill] = useState<ManualPrefillData | null>(null);
   const [modalKey, setModalKey] = useState(0);
   const [unresolvedRefreshToken, setUnresolvedRefreshToken] = useState(0);
   const [robinhoodRefreshToken, setRobinhoodRefreshToken] = useState(0);
+  // "Import all" walkthrough queue — the remaining prefills to show
+  // after the current one is dismissed (success) or abandoned
+  // (cancel). A ref, not state: it's read/written only from within
+  // event handlers and one effect, never rendered directly, and using
+  // state here would trigger an extra render on every queue mutation
+  // for no visual benefit. lastCloseWasSuccessRef distinguishes "the
+  // modal just closed because the user submitted" (advance to the
+  // next queued item) from "the modal just closed because the user
+  // cancelled/pressed Escape" (stop the walkthrough, clear the rest of
+  // the queue) — ImportManualModal calls onSuccess then onOpenChange
+  // (false) on a submit, but only onOpenChange(false) on a cancel, so
+  // this flag (set inside onManualImportSuccess, read+reset in the
+  // effect below) is the only way to tell those two closes apart.
+  const importQueueRef = useRef<ManualPrefillData[]>([]);
+  const lastCloseWasSuccessRef = useRef(false);
   const [sellTarget, setSellTarget] = useState<SellSharesTarget | null>(null);
   const [closeOptionTarget, setCloseOptionTarget] =
     useState<CloseOptionTarget | null>(null);
@@ -1029,12 +1047,16 @@ export function PositionsView() {
   // modal was opened via one of the "activity detected" panels'
   // "Import" button — also marks the source row resolved on whichever
   // broker's dismiss endpoint it came from, so it drops out of that
-  // panel instead of coming back next poll.
+  // panel instead of coming back next poll. Flags the close that's
+  // about to happen (ImportManualModal calls onSuccess then
+  // onOpenChange(false)) as a real submit, not a cancel, so the effect
+  // below knows to advance the "Import all" queue instead of clearing it.
   const onManualImportSuccess = (msg: string) => {
     onImportSuccess(msg);
     const sourceId = manualPrefill?.sourceUnresolvedId;
     const sourceBroker = manualPrefill?.sourceBroker;
     setManualPrefill(null);
+    lastCloseWasSuccessRef.current = true;
     if (sourceId && sourceBroker === "robinhood") {
       void fetch(`/api/robinhood-account/activity/${sourceId}/dismiss`, {
         method: "POST",
@@ -1050,8 +1072,30 @@ export function PositionsView() {
     }
   };
 
-  function handleImportFromUnresolved(item: ActivityItem) {
-    setManualPrefill({
+  // Once the modal has actually closed (either a submit's own
+  // onOpenChange(false) or a plain cancel), decide what happens next.
+  // Deliberately keyed on `showManual` alone, not manualPrefill — this
+  // must run strictly after the modal is closed, and reading it inside
+  // onManualImportSuccess itself (which fires before the close) would
+  // race the still-open modal.
+  useEffect(() => {
+    if (showManual) return;
+    if (lastCloseWasSuccessRef.current && importQueueRef.current.length > 0) {
+      const next = importQueueRef.current.shift()!;
+      setManualPrefill(next);
+      setModalKey((k) => k + 1);
+      setShowManual(true);
+    } else {
+      // Either nothing was queued, or the modal was cancelled
+      // mid-walkthrough — a cancel stops the rest of the queue rather
+      // than silently skipping to the next item.
+      importQueueRef.current = [];
+    }
+    lastCloseWasSuccessRef.current = false;
+  }, [showManual]);
+
+  function activityToPrefill(item: ActivityItem): ManualPrefillData {
+    return {
       symbol: item.symbol ?? undefined,
       strike: item.strike ?? undefined,
       expiry: item.expiry ?? undefined,
@@ -1063,13 +1107,11 @@ export function PositionsView() {
       optionType: item.putCall === "CALL" ? "call" : "put",
       sourceUnresolvedId: item.id,
       sourceBroker: "schwab",
-    });
-    setModalKey((k) => k + 1);
-    setShowManual(true);
+    };
   }
 
-  function handleImportFromRobinhoodUnresolved(item: RobinhoodActivityItem) {
-    setManualPrefill({
+  function robinhoodActivityToPrefill(item: RobinhoodActivityItem): ManualPrefillData {
+    return {
       symbol: item.symbol ?? undefined,
       strike: item.strike ?? undefined,
       expiry: item.expiry ?? undefined,
@@ -1081,9 +1123,40 @@ export function PositionsView() {
       optionType: item.putCall === "call" ? "call" : "put",
       sourceUnresolvedId: item.id,
       sourceBroker: "robinhood",
-    });
+    };
+  }
+
+  function openManualPrefill(prefill: ManualPrefillData) {
+    setManualPrefill(prefill);
     setModalKey((k) => k + 1);
     setShowManual(true);
+  }
+
+  function handleImportFromUnresolved(item: ActivityItem) {
+    openManualPrefill(activityToPrefill(item));
+  }
+
+  function handleImportFromRobinhoodUnresolved(item: RobinhoodActivityItem) {
+    openManualPrefill(robinhoodActivityToPrefill(item));
+  }
+
+  // "Import all" — queues every remaining item and opens the first;
+  // the effect above walks the rest one at a time as each is
+  // submitted or cancelled. No-op on an empty list (shouldn't happen —
+  // the panel only renders this button when needsReviewCount > 0 —
+  // but cheap to guard).
+  function handleImportAllFromUnresolved(items: ActivityItem[]) {
+    if (items.length === 0) return;
+    const [first, ...rest] = items.map(activityToPrefill);
+    importQueueRef.current = rest;
+    openManualPrefill(first);
+  }
+
+  function handleImportAllFromRobinhoodUnresolved(items: RobinhoodActivityItem[]) {
+    if (items.length === 0) return;
+    const [first, ...rest] = items.map(robinhoodActivityToPrefill);
+    importQueueRef.current = rest;
+    openManualPrefill(first);
   }
 
   async function loadClosed() {
@@ -1404,10 +1477,12 @@ export function PositionsView() {
       <SchwabTokenBanner />
       <SchwabActivityPanel
         onImport={handleImportFromUnresolved}
+        onImportAll={handleImportAllFromUnresolved}
         refreshToken={unresolvedRefreshToken}
       />
       <RobinhoodActivityPanel
         onImport={handleImportFromRobinhoodUnresolved}
+        onImportAll={handleImportAllFromRobinhoodUnresolved}
         refreshToken={robinhoodRefreshToken}
       />
 

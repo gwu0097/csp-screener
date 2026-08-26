@@ -35,12 +35,17 @@ export type RobinhoodActivityItem = {
 
 type Props = {
   onImport: (item: RobinhoodActivityItem) => void;
+  // Fires once with every currently-loaded needs_review item — the
+  // parent walks them through the same prefilled-manual-entry modal a
+  // single Import opens, one after another (not a silent bulk submit),
+  // so each one still gets a look before it's confirmed.
+  onImportAll: (items: RobinhoodActivityItem[]) => void;
   // Bumped by the parent after a successful "Import" submission so
   // this panel refetches and drops the now-resolved row.
   refreshToken?: number;
 };
 
-export function RobinhoodActivityPanel({ onImport, refreshToken }: Props) {
+export function RobinhoodActivityPanel({ onImport, onImportAll, refreshToken }: Props) {
   const [items, setItems] = useState<RobinhoodActivityItem[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [dismissing, setDismissing] = useState<string | null>(null);
@@ -101,7 +106,8 @@ export function RobinhoodActivityPanel({ onImport, refreshToken }: Props) {
 
   if (loading || !items || items.length === 0) return null;
 
-  const needsReviewCount = items.filter((it) => it.status === "needs_review").length;
+  const needsReviewItems = items.filter((it) => it.status === "needs_review");
+  const needsReviewCount = needsReviewItems.length;
   const alarmed = needsReviewCount > 0;
 
   return (
@@ -124,24 +130,38 @@ export function RobinhoodActivityPanel({ onImport, refreshToken }: Props) {
             Robinhood activity: {items.length} to review
           </span>
         </div>
-        <Button
-          variant="ghost"
-          size="sm"
-          className={
-            "h-6 px-2 text-[11px] " +
-            (alarmed ? "text-amber-200/70 hover:text-amber-100" : "text-emerald-200/70 hover:text-emerald-100")
-          }
-          disabled={dismissingAll}
-          onClick={() => dismissAll()}
-        >
-          {dismissingAll ? "Dismissing…" : "Dismiss all"}
-        </Button>
+        <div className="flex items-center gap-1">
+          {needsReviewCount > 0 && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-6 px-2 text-[11px] text-amber-200/70 hover:text-amber-100"
+              disabled={dismissingAll}
+              onClick={() => onImportAll(needsReviewItems)}
+            >
+              {`Import all (${needsReviewCount})`}
+            </Button>
+          )}
+          <Button
+            variant="ghost"
+            size="sm"
+            className={
+              "h-6 px-2 text-[11px] " +
+              (alarmed ? "text-amber-200/70 hover:text-amber-100" : "text-emerald-200/70 hover:text-emerald-100")
+            }
+            disabled={dismissingAll}
+            onClick={() => dismissAll()}
+          >
+            {dismissingAll ? "Dismissing…" : "Dismiss all"}
+          </Button>
+        </div>
       </div>
       <p className={"mt-1 text-xs " + (alarmed ? "text-amber-200/80" : "text-emerald-200/80")}>
         What the Robinhood courier detected and what it couldn&apos;t apply. Applied rows are already
         reflected in your positions — validate, then Dismiss. Needs-review rows weren&apos;t written
-        anywhere and won&apos;t be retried: Import opens a prefilled manual entry, or Dismiss to ignore
-        for good.
+        anywhere and won&apos;t be retried: Import opens a prefilled manual entry, Import all walks
+        through the same prefilled entry for every needs-review row one after another so each still
+        gets a look before it&apos;s confirmed, or Dismiss to ignore for good.
       </p>
       <ul className="mt-3 space-y-2">
         {items.map((it) => {
