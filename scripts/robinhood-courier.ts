@@ -191,10 +191,16 @@ async function main() {
 
   let stdout: string;
   try {
+    // 90s was too tight — a 2026-08-27 diagnostic timed a genuinely
+    // successful headless call at 93.6s (fetching + the MCP round
+    // trip both vary in latency), so real calls were spuriously
+    // ETIMEDOUT-ing at the old limit. This isn't the whole-script
+    // budget: launchd fires this job every 2 hours, so there's ample
+    // room.
     stdout = execFileSync(
       CLAUDE_BIN,
       ["-p", prompt, "--allowedTools", "mcp__robinhood__get_option_orders"],
-      { encoding: "utf8", timeout: 90_000, maxBuffer: 10 * 1024 * 1024 },
+      { encoding: "utf8", timeout: 170_000, maxBuffer: 10 * 1024 * 1024 },
     );
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
