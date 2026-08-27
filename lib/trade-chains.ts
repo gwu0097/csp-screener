@@ -38,6 +38,8 @@ export type ChainPosition = {
   total_contracts: number | null;
   assignment_source_id: string | null;
   entry_stock_price: number | null;
+  option_type: string | null;
+  direction: string | null;
 };
 
 export type Chain = {
@@ -320,13 +322,31 @@ export async function classifyUserChains(
   let q = sb
     .from("positions")
     .select(
-      "id,symbol,broker,strike,expiry,status,position_type,opened_date,closed_date,realized_pnl,total_contracts,assignment_source_id,entry_stock_price",
+      "id,symbol,broker,strike,expiry,status,position_type,opened_date,closed_date,realized_pnl,total_contracts,assignment_source_id,entry_stock_price,option_type,direction",
     )
     .eq("user_id", userId);
   if (symbol) q = q.eq("symbol", symbol.toUpperCase());
   const posRes = await q;
   if (posRes.error) throw new Error(`positions fetch failed: ${posRes.error.message}`);
-  const positions = (posRes.data ?? []) as ChainPosition[];
+  const allPositions = (posRes.data ?? []) as ChainPosition[];
+  if (allPositions.length === 0) return [];
+
+  // This classifier exists specifically to detect CSP-put recovery
+  // patterns (deep-ITM entries, assignment wheels, rolls) — every rule
+  // below assumes a short-put campaign. A covered call (always
+  // option_type='call' + direction='short' in this app's model — see
+  // MarkAssignedModal's put/call handling) being rolled is normal,
+  // expected management, not a recovery signal, but it trips the same
+  // "2+ sequential legs -> rolled" branch just from having multiple
+  // legs. Excluded entirely rather than reclassified: a covered call
+  // simply never enters buildChains, so it gets no trade_chain_id/
+  // trade_type from this pipeline and the confirm-chip (which only
+  // fires for trade_type in rolled/recovery_play) never appears for
+  // one. Stock legs are untouched — they still participate in wheel-
+  // chain detection exactly as before.
+  const positions = allPositions.filter(
+    (p) => !(p.position_type === "option" && p.option_type === "call" && p.direction === "short"),
+  );
   if (positions.length === 0) return [];
 
   const ids = positions.map((p) => p.id);
