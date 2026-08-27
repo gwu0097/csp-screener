@@ -18,10 +18,15 @@ export const revalidate = 0;
 // permanent; the importer never revisits processed=true rows.
 const LOOKBACK_DAYS = 30;
 
-// v1 has no administrative-noise outcomes to filter (unlike Schwab's
-// dividends/fees/transfers) — only options fills ever land in this
-// table at all. Just applied vs needs-review.
+// No administrative-noise outcomes to filter beyond duplicates (unlike
+// Schwab's dividends/fees/transfers) — only options fills ever land in
+// this table at all. skipped_duplicate is excluded from needs_review:
+// the importer always attaches Robinhood's own execution_id (see
+// fills.external_id), so a skipped_duplicate here is an exact id match
+// against a fill already correctly on the position — not a
+// probabilistic guess, nothing to review or dismiss.
 const APPLIED_OUTCOMES = new Set(["submitted"]);
+const NOISE_OUTCOMES = new Set(["skipped_duplicate"]);
 
 type ActivityRow = {
   id: string;
@@ -65,7 +70,9 @@ export async function GET() {
     return NextResponse.json({ error: res.error.message }, { status: 500 });
   }
 
-  const rows = (res.data ?? []) as ActivityRow[];
+  const rows = ((res.data ?? []) as ActivityRow[]).filter(
+    (r) => r.process_outcome && !NOISE_OUTCOMES.has(r.process_outcome),
+  );
   const items = rows.map((r) => ({
     id: r.id,
     executionId: r.execution_id,

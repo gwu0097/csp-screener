@@ -11,22 +11,31 @@ export const revalidate = 0;
 // touched and the user hasn't dismissed yet — both what it applied
 // automatically (status "applied": submitted/expired/assigned, shown
 // so the user can validate what changed) and what it couldn't apply
-// (status "needs_review": a bulk-create validation error, no matching
-// position, or a suspected duplicate it declined to write). Purely
-// administrative noise (dividends, cash transfers, fee-only legs) is
-// excluded — it was never a position event to review. Dismissing a
-// row (see [id]/dismiss/route.ts) is permanent; the poller never
-// revisits processed=true rows, so nothing here is retried.
+// (status "needs_review": a genuine bulk-create validation error or no
+// matching position). Purely administrative noise (dividends, cash
+// transfers, fee-only legs) is excluded — it was never a position
+// event to review. A suspected duplicate is ALSO excluded, not shown
+// as needs_review: since both auto-importers always attach the
+// broker's own fill id (Schwab activityId / Robinhood execution_id —
+// see fills.external_id), a skipped_duplicate here is an exact id
+// match against a fill that's already correctly on the position, not
+// a probabilistic guess — there's nothing to review or dismiss, the
+// data is already right. Dismissing a row (see [id]/dismiss/route.ts)
+// is permanent; the poller never revisits processed=true rows, so
+// nothing here is retried.
 const LOOKBACK_DAYS = 30;
 
 // Real trade/expiration/assignment events the poller applied cleanly.
 const APPLIED_OUTCOMES = new Set(["submitted", "expired", "assigned"]);
-// Administrative rows that were never a position event — never shown.
+// Rows that were never a genuine, unresolved position event — never
+// shown. Administrative noise (dividends/fees/transfers) plus proven
+// duplicates (see header comment above).
 const NOISE_OUTCOMES = new Set([
   "skipped_no_leg",
   "skipped_unhandled_leg",
   "skipped_unhandled",
   "skipped_irrelevant_type",
+  "skipped_duplicate",
 ]);
 
 type ActivityRow = {
