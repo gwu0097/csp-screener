@@ -160,6 +160,14 @@ type TickerGroup<T> = {
   contractCount: number;
   stockPrice: number | null;
   combinedPnl: number | null;
+  // Same formula as computeBrokerStats's maxProfit, scoped to this
+  // ticker within the broker section — avgPremiumSold × remaining
+  // contracts × 100, summed over positions that have a finite
+  // avgPremiumSold (manually-added rows without fills are null and
+  // excluded, counted in maxProfitMissing). Only meaningful for open
+  // positions; the closed-section call site doesn't render it.
+  maxProfit: number;
+  maxProfitMissing: number;
 };
 
 // Sub-grouping inside a broker section. Sorts ticker groups by total
@@ -184,7 +192,15 @@ function groupByTicker<
     const stockPrice = stockPriceRow?.currentStockPrice ?? null;
     const pnls = arr.map(pnlOf).filter((v): v is number => v !== null);
     const combinedPnl = pnls.length === 0 ? null : pnls.reduce((s, v) => s + v, 0);
-    out.push({ symbol, items: arr, contractCount, stockPrice, combinedPnl });
+    const maxProfitContributors = arr.filter(
+      (p) => p.avgPremiumSold !== null && Number.isFinite(p.avgPremiumSold),
+    );
+    const maxProfit = maxProfitContributors.reduce(
+      (s, p) => s + (p.avgPremiumSold as number) * (p.remainingContracts ?? 0) * 100,
+      0,
+    );
+    const maxProfitMissing = arr.length - maxProfitContributors.length;
+    out.push({ symbol, items: arr, contractCount, stockPrice, combinedPnl, maxProfit, maxProfitMissing });
   }
   out.sort((a, b) => b.contractCount - a.contractCount);
   return out;
@@ -249,16 +265,25 @@ function PositionsTableHeader({
 // broker section. Shows symbol + contract count + current price once,
 // plus the combined P&L for that ticker so the user can see the
 // per-name exposure at a glance instead of mentally summing rows.
+// maxProfit is optional — only the open section passes it (max profit
+// is "premium still collectible," meaningless for a closed position),
+// rendered as a dim, unlabeled figure right before the unrealized
+// number so the compact row doesn't get busier than the account-panel
+// header above it.
 function TickerSubHeader({
   symbol,
   contractCount,
   stockPrice,
   combinedPnl,
+  maxProfit,
+  maxProfitMissing,
 }: {
   symbol: string;
   contractCount: number;
   stockPrice: number | null;
   combinedPnl: number | null;
+  maxProfit?: number | null;
+  maxProfitMissing?: number;
 }) {
   const pnlCls =
     combinedPnl === null
@@ -279,8 +304,20 @@ function TickerSubHeader({
           </span>
         )}
       </div>
-      <span className={cn("font-mono text-base font-semibold", pnlCls)}>
-        {fmtDollarsSigned(combinedPnl)}
+      <span className="flex items-baseline gap-2">
+        {maxProfit != null && (
+          <span className="font-mono text-base text-muted-foreground/70">
+            {fmtDollarsSigned(maxProfit)}
+            {(maxProfitMissing ?? 0) > 0 && (
+              <span className="ml-1 text-sm text-muted-foreground/50">
+                ({maxProfitMissing} excluded)
+              </span>
+            )}
+          </span>
+        )}
+        <span className={cn("font-mono text-base font-semibold", pnlCls)}>
+          {fmtDollarsSigned(combinedPnl)}
+        </span>
       </span>
     </div>
   );
@@ -1664,6 +1701,8 @@ export function PositionsView() {
                     contractCount={tg.contractCount}
                     stockPrice={tg.stockPrice}
                     combinedPnl={tg.combinedPnl}
+                    maxProfit={tg.maxProfit}
+                    maxProfitMissing={tg.maxProfitMissing}
                   />
                   {sortPositions(tg.items, sortKey, sortDir).map((p) => (
                     <PositionCard
