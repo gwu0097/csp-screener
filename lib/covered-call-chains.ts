@@ -16,15 +16,23 @@
 // back every leg of a covered-call roll until final assignment, so
 // there's no separate stock position to union in.
 //
-// Scope: strictly broker='covered_calls' (the user's explicit choice
-// — not "any short call anywhere"), matching the earlier "total
-// premium collected" stat work.
+// Scope: any short call, any broker (option_type='call' AND
+// direction='short') — same broker-agnostic definition already used
+// to exclude covered calls from CSP classification in
+// lib/trade-chains.ts. Deliberately NOT restricted to
+// broker='covered_calls': rolls are placed directly at Schwab/
+// Robinhood, which have no concept of that pseudo-account, so the
+// new leg lands auto-imported under broker='schwab'/'schwab2'/
+// 'robinhood'. Restricting to covered_calls would require a manual
+// "Move Account" on every single rolled leg for the chain to link,
+// defeating auto-detection entirely.
 import { randomUUID } from "node:crypto";
 import { createServerClient } from "@/lib/supabase";
 
 export type CoveredCallPosition = {
   id: string;
   symbol: string;
+  broker: string;
   strike: number;
   expiry: string;
   status: string;
@@ -86,9 +94,11 @@ class UF {
 }
 
 // Pure computation over the rows passed in — caller fetches. Callers
-// must pre-filter to covered_calls short calls only; this function
-// doesn't re-check broker/option_type/direction so it can be exercised
-// directly against a symbol's worth of already-scoped rows.
+// must pre-filter to short calls only; this function doesn't re-check
+// option_type/direction so it can be exercised directly against a
+// symbol's worth of already-scoped rows. Broker IS re-checked here
+// (see the same-broker guard below), since the caller now fetches
+// across all brokers.
 export function buildCoveredCallChains(positions: CoveredCallPosition[]): CoveredCallChain[] {
   const uf = new UF();
   const byGroup = new Map<string, CoveredCallPosition[]>();
@@ -102,6 +112,11 @@ export function buildCoveredCallChains(positions: CoveredCallPosition[]): Covere
       if (!a.closed_date) continue;
       for (const b of group) {
         if (a.id === b.id) continue;
+        // Same-broker guard: a roll happens within one account, so
+        // don't link a close in one broker to an open in another —
+        // that's two independent covered-call sequences on the same
+        // underlying coinciding in time, not a roll.
+        if (a.broker !== b.broker) continue;
         // Same "succeeds its predecessor" guard as the CSP builder —
         // b must open at/after a's close AND strictly after a's open,
         // so two same-day parallel strikes don't chain into a
@@ -156,9 +171,8 @@ export async function classifyAndPersistCoveredCallChains(
   const sb = createServerClient();
   let q = sb
     .from("positions")
-    .select("id,symbol,strike,expiry,status,opened_date,closed_date,realized_pnl")
+    .select("id,symbol,broker,strike,expiry,status,opened_date,closed_date,realized_pnl")
     .eq("user_id", userId)
-    .eq("broker", "covered_calls")
     .eq("position_type", "option")
     .eq("option_type", "call")
     .eq("direction", "short");
