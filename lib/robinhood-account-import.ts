@@ -41,7 +41,14 @@ type RhExecution = {
   id: string;
   price: string;
   quantity: string;
-  trade_date: string;
+  // Not reliably present — a 2026-08-27 incident found an execution
+  // whose trade_date was absent from the MCP response entirely,
+  // violating robinhood_account_transactions' `date not null` and
+  // silently dropping that fill from every subsequent poll (the
+  // insert failure recurs every run since the row never lands).
+  // Fell back to deriving from `timestamp` below rather than trusting
+  // this field unconditionally.
+  trade_date?: string;
   timestamp: string;
 };
 
@@ -183,7 +190,12 @@ function flattenOrders(orders: RhOrder[]): FlatFill[] {
           positionEffect: leg.position_effect,
           contracts: Number(execution.quantity),
           price: Number(execution.price),
-          tradeDate: execution.trade_date,
+          // execution.trade_date is sometimes absent from the MCP
+          // response (see RhExecution's comment) — fall back to the
+          // date portion of the execution timestamp, which is always
+          // present, rather than landing a null and losing the fill
+          // every run.
+          tradeDate: execution.trade_date ?? execution.timestamp.slice(0, 10),
           timestamp: execution.timestamp,
           raw: {
             order: { id: order.id, chain_symbol: order.chain_symbol, state: order.state },

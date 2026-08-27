@@ -107,11 +107,25 @@ function logYahooFailure(label: string, e: unknown): void {
   console.warn(`[yahoo] ${label} failed: ${msg}`);
 }
 
+// yahoo-finance2 takes no signal/timeout option, so a hung request
+// would otherwise block indefinitely. A 2026-08-27 incident traced a
+// Robinhood-import 504 to an uncapped external call in this same
+// entry-context-stamping path (the Schwab counterpart, fixed in
+// lib/schwab.ts with AbortSignal.timeout) — race against a manual
+// timeout here for the same reason. The caller already treats a
+// failure as best-effort (quoteRaw always resolves to null on error).
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)),
+  ]);
+}
+
 // ---------- Raw quote ----------
 
 async function quoteRaw(symbol: string): Promise<RawQuote | null> {
   try {
-    const result = await yf.quote(symbol, {}, MODULE_OPTS);
+    const result = await withTimeout(yf.quote(symbol, {}, MODULE_OPTS), 10_000, `quote(${symbol})`);
     if (result === null || result === undefined) {
       console.warn(`[yahoo] quote(${symbol}) returned ${result === null ? "null" : "undefined"}`);
       return null;

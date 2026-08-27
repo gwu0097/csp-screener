@@ -362,12 +362,19 @@ export async function schwabGet<T>(path: string, params?: Record<string, string 
       url.searchParams.set(k, String(v));
     }
   }
+  // Bounded — a 2026-08-27 incident traced a Robinhood-import 504 to
+  // this call (via getOptionsChain, from entry-context stamping)
+  // hanging with no timeout, blowing through the poll route's whole
+  // 60s budget on a batch of just 2 items. 10s is generous for a
+  // single Schwab GET; the caller (entry-context stamping) already
+  // treats a failure here as best-effort and continues without it.
   const res = await fetch(url.toString(), {
     headers: {
       Authorization: `Bearer ${token}`,
       Accept: "application/json",
     },
     cache: "no-store",
+    signal: AbortSignal.timeout(10_000),
   });
   if (!res.ok) {
     const text = await res.text();
