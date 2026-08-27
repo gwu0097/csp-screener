@@ -54,7 +54,8 @@ const LOOKBACK_DAYS = 7;
 const STATE_DIR = resolve(homedir(), "Library/Application Support/csp-screener");
 const STATE_PATH = resolve(STATE_DIR, "robinhood-courier-state.json");
 
-type State = { lastStatus: "ok" | "failed" | "unknown"; checkedAt: string; detail?: string };
+type Severity = "ok" | "warning" | "failed";
+type State = { lastStatus: Severity | "unknown"; checkedAt: string; detail?: string };
 
 function readState(): State {
   try {
@@ -66,6 +67,14 @@ function readState(): State {
 function writeState(s: State): void {
   if (!existsSync(STATE_DIR)) mkdirSync(STATE_DIR, { recursive: true });
   writeFileSync(STATE_PATH, JSON.stringify(s, null, 2));
+}
+
+// Same classifier as scripts/schwab-account-poll-trigger.ts — see
+// that file's comment for the full reasoning. Duplicated per this
+// script's existing zero-import-coupling convention, not shared.
+function classifyErrors(errors: string[]): Severity {
+  if (errors.length === 0) return "ok";
+  return errors.every((e) => /no matching open position/i.test(e)) ? "warning" : "failed";
 }
 
 // Brace/bracket-counting extraction, not a fence regex — see the
@@ -120,11 +129,14 @@ async function main() {
   const prev = readState();
   const nowIso = new Date().toISOString();
 
-  // Alert only on a state transition (ok -> failing, failing -> ok),
-  // not on every failed run — a 2026-08-26 incident sent a separate
-  // Discord message for each of several consecutive scheduled
-  // failures before this was added, mirroring the dedup already built
-  // into scripts/schwab-account-poll-trigger.ts.
+  // Alert only on a state transition (ok/warning/failed), not on every
+  // run in a bad state — a 2026-08-26 incident sent a separate Discord
+  // message for each of several consecutive scheduled failures before
+  // this was added, mirroring the dedup already built into
+  // scripts/schwab-account-poll-trigger.ts. Three severities: a trade
+  // the poller can't match to a tracked position (off-strategy, or
+  // opened outside this app) is a "warning" — surfaced, no mention —
+  // distinct from "failed" (something is actually broken).
   async function fail(detail: string): Promise<void> {
     console.error(`[robinhood-courier] ${detail}`);
     if (prev.lastStatus !== "failed") {
@@ -133,9 +145,20 @@ async function main() {
     writeState({ lastStatus: "failed", checkedAt: nowIso, detail });
     process.exitCode = 1;
   }
+  async function warn(detail: string, count: number): Promise<void> {
+    console.warn(`[robinhood-courier] warning: ${detail}`);
+    if (prev.lastStatus !== "warning") {
+      await sendDiscordAlert(
+        `🟡 Robinhood courier: ${count} trade(s) couldn't auto-import because they aren't part of a tracked position — not necessarily broken, just off-strategy or opened outside this app. Review and Dismiss in the activity panel.\n${detail}`,
+        { mention: false },
+      );
+    }
+    writeState({ lastStatus: "warning", checkedAt: nowIso, detail });
+    // Not a script failure — the poll itself ran fine; exit code stays 0.
+  }
   async function succeed(summary: string): Promise<void> {
     console.log(`[robinhood-courier] ${summary}`);
-    if (prev.lastStatus === "failed") {
+    if (prev.lastStatus === "failed" || prev.lastStatus === "warning") {
       await sendDiscordAlert("🟢 Robinhood courier recovered — back to normal.", { mention: false });
     }
     writeState({ lastStatus: "ok", checkedAt: nowIso });
@@ -215,8 +238,25 @@ async function main() {
     error?: string;
   };
 
-  if (!res.ok || !json.ok) {
-    const detail = json.error ?? json.report?.errors?.join("; ") ?? `HTTP ${res.status}`;
+  // A non-2xx HTTP status is always a real failure — never content-
+  // classified, regardless of what the body says.
+  if (!res.ok) {
+    const detail = json.error ?? `HTTP ${res.status}`;
+    await fail(`import failed — ${detail}`);
+    return;
+  }
+
+  if (!json.ok) {
+    const allErrors = json.error ? [json.error] : (json.report?.errors ?? []);
+    const detail =
+      json.error ?? ((json.report?.errors ?? []).join("; ") || `ok=false with no error detail (HTTP ${res.status})`);
+    // No captured error strings despite ok=false is itself an anomaly
+    // — classify as failed, not a silent "ok" via classifyErrors([]).
+    const severity: Severity = allErrors.length > 0 ? classifyErrors(allErrors) : "failed";
+    if (severity === "warning") {
+      await warn(detail, allErrors.length);
+      return;
+    }
     await fail(`import failed — ${detail}`);
     return;
   }
