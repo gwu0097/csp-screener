@@ -438,13 +438,20 @@ async function pollOneAccount(
       // each row individually so only the row(s) that genuinely fail
       // get an error/duplicate outcome — and one attributed to THAT
       // row, not whichever error string the batch call happened to
-      // return first. Opens before closes, same ordering bulk-create
-      // itself applies internally to a batch — needed here too since
-      // each individual call only sees one row and can't reorder
-      // across calls.
-      const isOpen = (p: PendingSubmission) => p.kind === "trade" && p.input.action === "open";
-      const retryOrder = [...pending].sort((a, b) => Number(isOpen(b)) - Number(isOpen(a)));
-      for (const p of retryOrder) {
+      // return first.
+      //
+      // Opens-phase, then closes-phase — NOT one flat sequential loop.
+      // A close may depend on a position an open in this SAME batch
+      // just created, so every open must fully commit before any close
+      // runs; within a phase, items are independent of each other and
+      // run concurrently. A 2026-08-27 incident found 6 sequential
+      // individual retries (each doing a live options-chain lookup +
+      // entry-context stamp + chain/campaign classification) blew past
+      // the route's 60s Vercel timeout — this parallelizes each phase
+      // so wall-clock scales with the SLOWEST item in a phase, not the
+      // sum of all of them. No explicit concurrency cap: realistic
+      // batch-failure sizes here are a handful of items, not hundreds.
+      const retryOne = async (p: PendingSubmission): Promise<void> => {
         const singleResult = await runBulkCreate(adminUserId, {
           trades: p.kind === "trade" ? [p.input] : [],
           stockTrades: p.kind === "stock" ? [p.input] : [],
@@ -468,7 +475,12 @@ async function pollOneAccount(
           errors.push(`activity ${p.row.activity_id}: ${detail}`);
           await markProcessed(sb, p.row.id, "error_bulk_create_failed", detail);
         }
-      }
+      };
+      const isOpen = (p: PendingSubmission) => p.kind === "trade" && p.input.action === "open";
+      const opens = pending.filter(isOpen);
+      const closes = pending.filter((p) => !isOpen(p));
+      await Promise.all(opens.map(retryOne));
+      await Promise.all(closes.map(retryOne));
     }
   }
 

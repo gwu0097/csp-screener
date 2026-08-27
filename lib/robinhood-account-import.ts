@@ -375,13 +375,15 @@ export async function ingestAndProcessRobinhoodOrders(
       // Batch rejected — retry each row individually so only the
       // row(s) that genuinely fail (or are genuinely ambiguous
       // duplicates) get flagged, attributed to that row specifically.
-      // Opens first, same ordering bulk-create applies internally to
-      // a batch — needed here too since each individual call only
-      // sees one row and can't reorder across calls.
-      const retryOrder = [...pending].sort(
-        (a, b) => Number(b.input.action === "open") - Number(a.input.action === "open"),
-      );
-      for (const p of retryOrder) {
+      //
+      // Opens-phase, then closes-phase — NOT one flat sequential loop.
+      // See the identical comment in lib/schwab-account-import.ts for
+      // the full reasoning (a close may depend on a position an open
+      // in this same batch just created; a 2026-08-27 incident found
+      // sequential individual retries blowing past the route's 60s
+      // Vercel timeout on a batch with several failing items). Each
+      // phase runs concurrently; phases run in order.
+      const retryOne = async (p: (typeof pending)[number]): Promise<void> => {
         const singleResult = await runBulkCreate(adminUserId, {
           trades: [p.input],
           sourceTimezone: "UTC",
@@ -404,7 +406,11 @@ export async function ingestAndProcessRobinhoodOrders(
           errors.push(`execution ${p.row.execution_id}: ${detail}`);
           await markProcessed(sb, p.row.id, "error_bulk_create_failed", detail);
         }
-      }
+      };
+      const opens = pending.filter((p) => p.input.action === "open");
+      const closes = pending.filter((p) => p.input.action !== "open");
+      await Promise.all(opens.map(retryOne));
+      await Promise.all(closes.map(retryOne));
     }
   }
 
