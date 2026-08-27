@@ -1184,7 +1184,20 @@ export function PositionsView() {
 
   const positions = data?.positions ?? [];
   const market = data?.market;
-  const totalOpenContracts = positions.reduce(
+  // Top-line page stats are scoped by the active broker filter, same
+  // as every per-broker-group stat below (computeBrokerStats) —
+  // "All" specifically means "all CSP accounts", excluding Covered
+  // Calls: premium/unrealized from a covered call isn't a CSP number
+  // and was silently baked into "All" with no way to see a CSP-only
+  // view. Selecting Covered Calls itself shows that account's own
+  // numbers here instead of the same page-wide total repeated. The
+  // row list below (visibleBrokerGroups) already filtered correctly;
+  // this brings the top arithmetic in line with it.
+  const statsBroker = (broker: string | null | undefined) =>
+    brokerFilter === "all" ? broker !== "covered_calls" : broker === brokerFilter;
+  const statsPositions = positions.filter((p) => statsBroker(p.broker));
+  const statsStockPositions = (data?.stockPositions ?? []).filter((s) => statsBroker(s.broker));
+  const totalOpenContracts = statsPositions.reduce(
     (sum, p) => sum + p.remainingContracts,
     0,
   );
@@ -1192,11 +1205,11 @@ export function PositionsView() {
   // entry premium) and stock positions ((spot − cost basis) ×
   // shares). Stocks are required here so the top-line "Unrealized"
   // doesn't omit assigned-to-stock exposure.
-  const optionsUnrealized = positions.reduce(
+  const optionsUnrealized = statsPositions.reduce(
     (sum, p) => sum + (p.pnlDollars ?? 0),
     0,
   );
-  const stockUnrealized = (data?.stockPositions ?? []).reduce(
+  const stockUnrealized = statsStockPositions.reduce(
     (sum, s) => sum + (s.pnlDollars ?? 0),
     0,
   );
@@ -1226,7 +1239,7 @@ export function PositionsView() {
       );
     }
   }, [data, marketStateStr, marketIsRegular, optionsStale]);
-  const anyOptionEstimate = positions.some(
+  const anyOptionEstimate = statsPositions.some(
     (p) => p.pnlSource === "intrinsic" || p.pnlSource === "maxProfitOtm",
   );
   const unrealizedIsEstimate = optionsStale || anyOptionEstimate;
@@ -1235,15 +1248,18 @@ export function PositionsView() {
   // expires worthless. Per position: avgPremiumSold × remainingContracts
   // × 100. Manually-added positions without fills carry avgPremiumSold=
   // null — exclude those from the sum and surface the count so the user
-  // knows the headline number is missing some positions.
-  const maxProfitContributors = positions.filter(
+  // knows the headline number is missing some positions. For Covered
+  // Calls this doubles as "how much I'm making" — the option leg can
+  // only close at full-premium-kept or better (Option A accounting;
+  // see lib/expire-positions.ts::recordAssignment), never a loss.
+  const maxProfitContributors = statsPositions.filter(
     (p) => p.avgPremiumSold !== null && Number.isFinite(p.avgPremiumSold),
   );
   const maxProfit = maxProfitContributors.reduce(
     (sum, p) => sum + (p.avgPremiumSold as number) * p.remainingContracts * 100,
     0,
   );
-  const maxProfitMissing = positions.length - maxProfitContributors.length;
+  const maxProfitMissing = statsPositions.length - maxProfitContributors.length;
 
   const brokerGroups = groupByBroker(positions);
   const visibleBrokerGroups =
@@ -1273,9 +1289,9 @@ export function PositionsView() {
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="space-y-1.5">
             <div className="font-mono text-xl font-semibold tracking-tight text-foreground tabular-nums sm:text-2xl">
-              <span>{positions.length}</span>
+              <span>{statsPositions.length}</span>
               <span className="ml-2 text-base font-medium uppercase tracking-wider text-muted-foreground">
-                {positions.length === 1 ? "position" : "positions"}
+                {statsPositions.length === 1 ? "position" : "positions"}
               </span>
               {totalOpenContracts > 0 && (
                 <>
@@ -1288,7 +1304,7 @@ export function PositionsView() {
               )}
             </div>
             <div className="flex flex-wrap items-baseline gap-x-5 gap-y-1 text-base">
-              {positions.length > 0 && (
+              {statsPositions.length > 0 && (
                 <div>
                   <span className="text-muted-foreground">Max Profit </span>
                   <span className="font-mono text-base font-semibold text-emerald-300">
@@ -1303,7 +1319,7 @@ export function PositionsView() {
                   )}
                 </div>
               )}
-              {positions.length > 0 && (
+              {statsPositions.length > 0 && (
                 <div>
                   <span className="text-muted-foreground">Unrealized </span>
                   {(() => {
@@ -1313,8 +1329,8 @@ export function PositionsView() {
                     // intrinsic-estimate runs so the user knows the
                     // total isn't from a live mark.
                     const hasAnyPnl =
-                      positions.some((p) => p.pnlDollars !== null) ||
-                      (data?.stockPositions ?? []).some(
+                      statsPositions.some((p) => p.pnlDollars !== null) ||
+                      statsStockPositions.some(
                         (s) => s.pnlDollars !== null,
                       );
                     if (!hasAnyPnl) {
