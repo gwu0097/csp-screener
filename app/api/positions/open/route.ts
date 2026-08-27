@@ -147,6 +147,11 @@ type OpenPosition = {
   entryEmPct: number | null;
   entryVix: number | null;
   entryStockPrice: number | null;
+  // Covered-call roll-chain summary (lib/covered-call-chains.ts) —
+  // only present when this position is one of 2+ legs linked by a
+  // roll. null for a never-rolled covered call (the common case) and
+  // for every non-covered-call position.
+  rollChain: { legCount: number; premiumSoFar: number } | null;
 };
 
 function daysBetween(a: Date, b: Date): number {
@@ -362,6 +367,51 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: pErr.message }, { status: 500 });
   }
   const allRows = (posRows ?? []) as PositionRow[];
+
+  // Covered-call roll-chain summaries (lib/covered-call-chains.ts).
+  // A chain's already-rolled-away legs are CLOSED, so they aren't in
+  // allRows (status='open' only) — a second, targeted fetch by chain
+  // id is needed to compute an accurate legCount/premiumSoFar. Cheap
+  // early-exit when no open row is part of a chain at all (the common
+  // case — most covered calls are never rolled).
+  const rollChainByPositionId = new Map<string, { legCount: number; premiumSoFar: number }>();
+  {
+    const openChainIds = Array.from(
+      new Set(
+        allRows
+          .map((r) => (r as PositionRow & { covered_call_chain_id?: string | null }).covered_call_chain_id)
+          .filter((id): id is string => !!id),
+      ),
+    );
+    if (openChainIds.length > 0) {
+      const chainRes = await supabase
+        .from("positions")
+        .select("id,status,realized_pnl,covered_call_chain_id")
+        .eq("user_id", userId)
+        .in("covered_call_chain_id", openChainIds);
+      const byChain = new Map<string, Array<{ id: string; status: string; realized_pnl: number | null }>>();
+      for (const row of (chainRes.data ?? []) as Array<{
+        id: string;
+        status: string;
+        realized_pnl: number | null;
+        covered_call_chain_id: string;
+      }>) {
+        const arr = byChain.get(row.covered_call_chain_id) ?? [];
+        arr.push(row);
+        byChain.set(row.covered_call_chain_id, arr);
+      }
+      for (const members of Array.from(byChain.values())) {
+        const premiumSoFar =
+          Math.round(
+            members
+              .filter((m) => m.status !== "open")
+              .reduce((s, m) => s + Number(m.realized_pnl ?? 0), 0) * 100,
+          ) / 100;
+        const summary = { legCount: members.length, premiumSoFar };
+        for (const m of members) rollChainByPositionId.set(m.id, summary);
+      }
+    }
+  }
 
   // Partition by position_type. Pre-migration rows have NULL
   // position_type and are treated as options (the original meaning
@@ -974,6 +1024,7 @@ export async function GET(req: NextRequest) {
         (p as unknown as { entry_regime_grade?: string | null }).entry_regime_grade ?? null,
       entryIvEdge: (p as unknown as { entry_iv_edge?: number | null }).entry_iv_edge ?? null,
       entryEmPct: (p as unknown as { entry_em_pct?: number | null }).entry_em_pct ?? null,
+      rollChain: rollChainByPositionId.get(p.id) ?? null,
       entryVix: (p as unknown as { entry_vix?: number | null }).entry_vix ?? null,
       entryStockPrice:
         (p as unknown as { entry_stock_price?: number | null }).entry_stock_price ?? null,

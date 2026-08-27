@@ -114,6 +114,11 @@ export type OpenPositionClientView = {
   entryEmPct: number | null;
   entryVix: number | null;
   entryStockPrice: number | null;
+  // Covered-call roll-chain summary (lib/covered-call-chains.ts) —
+  // only present when this position is one of 2+ legs linked by a
+  // roll. null for a never-rolled covered call (the common case) and
+  // for every non-covered-call position.
+  rollChain: { legCount: number; premiumSoFar: number } | null;
 };
 
 export type ClosedPositionClientView = {
@@ -152,6 +157,15 @@ export type ClosedPositionClientView = {
     sharesAssigned: number;
     opportunityCost: number | null;
     netOutcome: number | null;
+  } | null;
+  // Covered-call roll-chain summary (lib/covered-call-chains.ts) —
+  // resolution is non-null once the chain's latest leg reached a
+  // terminal state (assigned or expired) — "premium captured until
+  // exercised or expired" lands here as a final number.
+  rollChain: {
+    legCount: number;
+    premiumSoFar: number;
+    resolution: "assigned" | "expired_worthless" | null;
   } | null;
 };
 
@@ -1227,6 +1241,44 @@ function RecDot({ rec }: { rec: PostEarningsRecView }) {
 // doesn't editorialize. Net outcome uses the same green/red P&L
 // convention as every other dollar figure on this card, not a
 // special warning color.
+// Covered-call roll-chain summary — shown on any leg that's part of a
+// multi-leg roll (lib/covered-call-chains.ts). Neutral framing, same
+// as CalledAwayOutcomeRows: this is informational, not a P&L verdict —
+// premiumSoFar is already net of any debit roll (a leg bought back for
+// more than it sold for correctly pulls this number down, it's just
+// not editorialized as a "loss" here).
+function RollChainSummary({
+  rollChain,
+  resolution,
+}: {
+  rollChain: { legCount: number; premiumSoFar: number };
+  resolution: "assigned" | "expired_worthless" | null;
+}) {
+  const statusLabel =
+    resolution === "assigned"
+      ? "exercised"
+      : resolution === "expired_worthless"
+        ? "expired"
+        : "still rolling";
+  return (
+    <>
+      <div className="mb-0.5 mt-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+        Roll chain
+      </div>
+      <Row k="Legs rolled" v={`${rollChain.legCount}×`} />
+      <Row
+        k={resolution ? "Premium captured" : "Premium captured so far"}
+        v={
+          <span className={rollChain.premiumSoFar >= 0 ? "text-emerald-300" : "text-rose-300"}>
+            {fmtDollarsSigned(rollChain.premiumSoFar)}
+          </span>
+        }
+      />
+      <Row k="Status" v={statusLabel} />
+    </>
+  );
+}
+
 function CalledAwayOutcomeRows({
   outcome,
   strike,
@@ -1339,6 +1391,12 @@ function PositionDetailsColumn({
       )}
       {kind === "open" && pnlPct !== null && (
         <Row k="Unrealized %" v={fmtPctSigned(pnlPct)} />
+      )}
+      {p.rollChain && (
+        <RollChainSummary
+          rollChain={p.rollChain}
+          resolution={kind === "closed" ? (p as ClosedPositionClientView).rollChain?.resolution ?? null : null}
+        />
       )}
       <Row k="Entry stock price" v={fmtDollars(p.entryStockPrice)} />
       <Row

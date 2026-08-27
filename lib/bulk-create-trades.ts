@@ -24,6 +24,7 @@ import { buildSnapshotRow, fetchChainWideSafe } from "@/lib/snapshots";
 import { recordPositionOutcome } from "@/lib/post-earnings";
 import { buildStampContext, stampEntryContext } from "@/lib/entry-context";
 import { classifyUserChains, persistChains } from "@/lib/trade-chains";
+import { classifyAndPersistCoveredCallChains } from "@/lib/covered-call-chains";
 import { buildAndPersistCampaigns } from "@/lib/campaigns";
 
 export type TradeInput = {
@@ -1328,6 +1329,22 @@ export async function runBulkCreate(userId: string, body: BulkBody): Promise<Nex
       } catch (e) {
         console.warn(
           `[bulk-create] chain detection failed for ${sym}: ${e instanceof Error ? e.message : e}`,
+        );
+      }
+      // Covered-call roll-chain linking — separate from the CSP chain
+      // detection above (which excludes covered calls entirely; see
+      // lib/covered-call-chains.ts's header). Purely mechanical, no
+      // skipConfirmed concept needed here.
+      try {
+        const result = await classifyAndPersistCoveredCallChains(userId, sym);
+        if (result.chainsWritten > 0) {
+          console.log(
+            `[bulk-create] covered-call chain detection ${sym}: ${result.chainsWritten} chain(s), ${result.membersUpdated} member(s) linked`,
+          );
+        }
+      } catch (e) {
+        console.warn(
+          `[bulk-create] covered-call chain detection failed for ${sym}: ${e instanceof Error ? e.message : e}`,
         );
       }
     }

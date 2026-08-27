@@ -79,6 +79,17 @@ type ClosedPositionView = {
     // line net of what was received for writing the call.
     netOutcome: number | null;
   } | null;
+  // Covered-call roll-chain summary (lib/covered-call-chains.ts) —
+  // only present when this position is one of 2+ legs linked by a
+  // roll. resolution is non-null once the chain's latest leg reached
+  // a terminal state (no further leg opened after it) — this is where
+  // "premium captured until exercised or expired" lands as a final
+  // number.
+  rollChain: {
+    legCount: number;
+    premiumSoFar: number;
+    resolution: "assigned" | "expired_worthless" | null;
+  } | null;
 };
 
 type PositionRowFull = PositionRow & {
@@ -93,6 +104,7 @@ type PositionRowFull = PositionRow & {
   entry_em_pct: number | null;
   entry_vix: number | null;
   entry_stock_price: number | null;
+  covered_call_chain_id?: string | null;
 };
 
 export async function GET() {
@@ -193,6 +205,41 @@ export async function GET() {
     const premiumCollected = p.realized_pnl ?? 0;
     const netOutcome = opportunityCost !== null ? premiumCollected - opportunityCost : null;
     return { currentPrice, sharesAssigned, opportunityCost, netOutcome };
+  }
+
+  // Covered-call roll-chain summary — unlike the open route, no extra
+  // fetch is needed: a chain's non-open legs (rolled-away middles,
+  // status='closed'; the terminal leg, status='assigned' or
+  // 'expired_worthless') are ALL already present in `positions` (this
+  // query already covers every non-open status). resolution is only
+  // set from the latest-by-opened_date VISIBLE member's status being
+  // truly terminal (assigned/expired_worthless) — a rolled-away middle
+  // leg is status='closed', which correctly never sets resolution, so
+  // a chain still being rolled (its newest leg is open and not in this
+  // query at all) never gets mislabeled as resolved here.
+  const rollChainByPositionId = new Map<
+    string,
+    { legCount: number; premiumSoFar: number; resolution: "assigned" | "expired_worthless" | null }
+  >();
+  {
+    const byChain = new Map<string, PositionRowFull[]>();
+    for (const p of positions) {
+      const chainId = p.covered_call_chain_id;
+      if (!chainId) continue;
+      const arr = byChain.get(chainId) ?? [];
+      arr.push(p);
+      byChain.set(chainId, arr);
+    }
+    for (const members of Array.from(byChain.values())) {
+      members.sort((a, b) => a.opened_date.localeCompare(b.opened_date));
+      const premiumSoFar =
+        Math.round(members.reduce((s, m) => s + Number(m.realized_pnl ?? 0), 0) * 100) / 100;
+      const latestStatus = members[members.length - 1].status as string;
+      const resolution: "assigned" | "expired_worthless" | null =
+        latestStatus === "assigned" || latestStatus === "expired_worthless" ? latestStatus : null;
+      const summary = { legCount: members.length, premiumSoFar, resolution };
+      for (const m of members) rollChainByPositionId.set(m.id, summary);
+    }
   }
 
   // Entry-grade fallback — mirrors the open route. Positions opened
@@ -300,6 +347,7 @@ export async function GET() {
       fills: fills.sort((a, b) => a.fill_date.localeCompare(b.fill_date)),
       postEarningsRec: recsByPosition.get(p.id) ?? null,
       calledAwayOutcome: calledAwayOutcomeFor(p),
+      rollChain: rollChainByPositionId.get(p.id) ?? null,
     };
   });
 
