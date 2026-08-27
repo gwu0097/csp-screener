@@ -270,6 +270,13 @@ async function pollOneAccount(
             broker,
             timePlaced: txn.time.replace(/\+0000$/, ""),
             notes: `Schwab auto-import (activity ${txn.activityId})`,
+            // Schwab's own unique id for this transaction — one TRADE
+            // transaction is one real fill, so this maps 1:1. Lets
+            // duplicate detection in runBulkCreate prove two fills
+            // with identical contracts/premium/date are genuinely
+            // separate executions rather than guessing from economic
+            // terms alone.
+            externalId: String(txn.activityId),
           },
         });
       } else if (leg.instrument.assetType === "EQUITY" && (leg.amount ?? 0) < 0) {
@@ -287,6 +294,7 @@ async function pollOneAccount(
             price: leg.price ?? 0,
             date: expiryDateOnly(txn.time),
             broker,
+            externalId: String(txn.activityId),
           },
         });
       } else {

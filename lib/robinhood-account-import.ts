@@ -336,6 +336,13 @@ export async function ingestAndProcessRobinhoodOrders(
         broker: "robinhood",
         timePlaced: row.execution_timestamp ? toTimePlaced(row.execution_timestamp) : undefined,
         notes: `Robinhood auto-import (execution ${row.execution_id})`,
+        // Robinhood's own unique id for this fill. Lets duplicate
+        // detection in runBulkCreate prove two fills with identical
+        // contracts/premium/date are genuinely separate executions
+        // (the 2026-08-27 NVDA $185P case: two real fills, same
+        // contracts/premium/date, wrongly flagged as one duplicate)
+        // rather than guessing from economic terms alone.
+        externalId: row.execution_id,
       },
     });
   }

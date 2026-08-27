@@ -25,6 +25,11 @@ export type Fill = {
   contracts: number;
   premium: number;
   fill_date: string;
+  // Broker-supplied unique id (Schwab activityId, Robinhood
+  // execution_id) when this fill came from an auto-import source —
+  // see lib/bulk-create-trades.ts's duplicate-detection logic. null/
+  // absent for manual and screenshot imports.
+  external_id?: string | null;
 };
 
 // 'short' = sold-to-open (CSP credit, the historical default).

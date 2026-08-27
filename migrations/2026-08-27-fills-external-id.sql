@@ -1,0 +1,11 @@
+-- Broker-agnostic, guaranteed-unique per-fill identifier from an
+-- auto-import source (Schwab activityId, Robinhood execution_id) —
+-- lets duplicate detection in lib/bulk-create-trades.ts prove two
+-- fills with identical economic terms (contracts, premium, date) are
+-- genuinely separate executions, instead of relying on the fuzzy
+-- match alone. NULL for manual/screenshot-imported fills, which have
+-- no such external id and keep using the fuzzy match unchanged.
+-- Deliberately a fresh generic column, not a reuse of the existing
+-- (unused) fills.schwab_activity_id bigint column — Robinhood's
+-- execution_id is a UUID string, not a bigint.
+alter table fills add column if not exists external_id text unique;

@@ -46,6 +46,14 @@ export type TradeInput = {
   timePlaced?: string;
   trade_date?: string;
   notes?: string | null;
+  // Broker-supplied unique id for this exact fill (Schwab activityId,
+  // Robinhood execution_id) — set only by auto-import sources. When
+  // present, duplicate detection below trusts it exclusively instead
+  // of the fuzzy contracts/premium/date match: two fills sharing this
+  // id are a real duplicate, two fills with different ids are proven
+  // separate executions even if their economic terms coincide. Manual
+  // and screenshot imports never set this and keep the fuzzy match.
+  externalId?: string;
 };
 
 // Stock-sell input — used to close (fully or partially) an existing
@@ -59,6 +67,8 @@ export type StockTradeInput = {
   price: number; // per-share sale price
   date: string; // YYYY-MM-DD
   broker?: string | null;
+  // Same meaning as TradeInput.externalId — see that field's comment.
+  externalId?: string;
 };
 
 export type BulkBody = {
@@ -315,7 +325,7 @@ export async function runBulkCreate(userId: string, body: BulkBody): Promise<Nex
     if (hit) return hit;
     const r = await supabase
       .from("fills")
-      .select("fill_type, contracts, premium, fill_date")
+      .select("fill_type, contracts, premium, fill_date, external_id")
       .eq("position_id", positionId)
       .eq("user_id", userId);
     if (r.error) return null;
@@ -534,14 +544,21 @@ export async function runBulkCreate(userId: string, body: BulkBody): Promise<Nex
       }
       // Cross-batch duplicate: an identical fill already exists on this
       // position from a previous import. Warning only — the user may be
-      // re-importing a corrected screenshot on purpose.
-      const alreadyImported = posFills.some(
-        (f) =>
-          f.fill_type === input.action &&
-          Number(f.contracts) === Number(input.contracts) &&
-          Math.abs(Number(f.premium) - Number(input.premium)) < 0.005 &&
-          f.fill_date === fillDate,
-      );
+      // re-importing a corrected screenshot on purpose. When this fill
+      // carries a broker-supplied externalId (auto-import), that's the
+      // only signal trusted: an exact id match is a real duplicate, no
+      // match is a proven-separate execution regardless of matching
+      // contracts/premium/date. Without an externalId (manual/
+      // screenshot import), fall back to the fuzzy economic-terms match.
+      const alreadyImported = input.externalId
+        ? posFills.some((f) => f.external_id === input.externalId)
+        : posFills.some(
+            (f) =>
+              f.fill_type === input.action &&
+              Number(f.contracts) === Number(input.contracts) &&
+              Math.abs(Number(f.premium) - Number(input.premium)) < 0.005 &&
+              f.fill_date === fillDate,
+          );
       if (alreadyImported) {
         duplicateWarnings.push(
           `${positionLabel}: an identical ${input.action} fill (${input.contracts} @ $${input.premium}, ${fillDate}) already exists from a previous import`,
@@ -596,8 +613,15 @@ export async function runBulkCreate(userId: string, body: BulkBody): Promise<Nex
   // Two or more rows identical on (symbol, strike, expiry, premium,
   // contracts, direction, action, broker) within this import. Warning,
   // not rejection — same-price partial fills in one session are real.
+  // If every row in a group carries its own distinct externalId, they
+  // are proven-separate real executions (e.g. two Robinhood fills that
+  // happen to share contracts/premium/date) — never flagged, no matter
+  // how many share the same economic terms. A group is only flagged
+  // when at least one member lacks an externalId, or two members
+  // collide on the same one (both conservative fallbacks to today's
+  // fuzzy behavior).
   {
-    const groups = new Map<string, { count: number; plan: OptionPlan }>();
+    const groups = new Map<string, { count: number; plan: OptionPlan; externalIds: Set<string> }>();
     for (const plan of optionPlans) {
       const i = plan.input;
       const k = [
@@ -611,15 +635,19 @@ export async function runBulkCreate(userId: string, body: BulkBody): Promise<Nex
         plan.broker,
       ].join("|");
       const g = groups.get(k);
-      if (g) g.count += 1;
-      else groups.set(k, { count: 1, plan });
-    }
-    for (const { count, plan } of Array.from(groups.values())) {
-      if (count > 1) {
-        duplicateWarnings.push(
-          `${plan.symbol} $${plan.input.strike} ${plan.expiry} (${plan.broker}): ${count} identical ${plan.input.action} fills (${plan.input.contracts} @ $${plan.input.premium}) in this import — remove the extras or confirm they are separate executions`,
-        );
+      if (g) {
+        g.count += 1;
+        if (i.externalId) g.externalIds.add(i.externalId);
+      } else {
+        groups.set(k, { count: 1, plan, externalIds: new Set(i.externalId ? [i.externalId] : []) });
       }
+    }
+    for (const { count, plan, externalIds } of Array.from(groups.values())) {
+      if (count <= 1) continue;
+      if (externalIds.size === count) continue; // every member proven distinct
+      duplicateWarnings.push(
+        `${plan.symbol} $${plan.input.strike} ${plan.expiry} (${plan.broker}): ${count} identical ${plan.input.action} fills (${plan.input.contracts} @ $${plan.input.premium}) in this import — remove the extras or confirm they are separate executions`,
+      );
     }
   }
 
@@ -967,6 +995,7 @@ export async function runBulkCreate(userId: string, body: BulkBody): Promise<Nex
         fill_time: fillTime,
         import_batch_id: importBatchId,
         user_id: userId,
+        external_id: input.externalId ?? null,
       });
       if (fillErr) {
         throw new Error(`${input.symbol}: fill insert failed — ${fillErr.message}`);
@@ -1050,6 +1079,7 @@ export async function runBulkCreate(userId: string, body: BulkBody): Promise<Nex
         fill_time: new Date().toISOString(),
         import_batch_id: importBatchId,
         user_id: userId,
+        external_id: sp.input.externalId ?? null,
       });
       if (fillInsert.error) {
         throw new Error(
