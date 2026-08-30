@@ -334,6 +334,13 @@ export async function ingestAndProcessRobinhoodOrders(
   for (const row of unprocessed) {
     const action: "open" | "close" = row.position_effect === "open" ? "open" : "close";
     const direction: "short" | "long" = row.side === "sell" ? "short" : "long";
+    // A short call is categorically a covered call, never a CSP —
+    // redirected to broker="covered_calls" instead of "robinhood" so
+    // it's born in the bucket every later broker-reported event on
+    // this same contract will also resolve to. Mirrors the identical
+    // fix in lib/schwab-account-import.ts's effectiveOptionBroker —
+    // see that comment for the 2026-08-30 incident this prevents.
+    const effectiveBroker = row.option_type === "call" && direction === "short" ? "covered_calls" : "robinhood";
     pending.push({
       row: { id: row.id, execution_id: row.execution_id },
       input: {
@@ -345,7 +352,7 @@ export async function ingestAndProcessRobinhoodOrders(
         optionType: row.option_type,
         ...(action === "open" ? { direction } : {}),
         premium: Math.abs(row.price),
-        broker: "robinhood",
+        broker: effectiveBroker,
         timePlaced: row.execution_timestamp ? toTimePlaced(row.execution_timestamp) : undefined,
         notes: `Robinhood auto-import (execution ${row.execution_id})`,
         // Robinhood's own unique id for this fill. Lets duplicate

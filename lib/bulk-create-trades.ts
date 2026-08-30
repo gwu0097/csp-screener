@@ -493,12 +493,24 @@ export async function runBulkCreate(userId: string, body: BulkBody): Promise<Nex
           const bMs = new Date(best.expiry + "T00:00:00Z").getTime();
           return Math.abs(cMs - targetMs) < Math.abs(bMs - targetMs) ? c : best;
         });
-        if (nearest.expiry !== expiry) {
-          console.warn(
-            `[bulk-create] ${symbol} close fill expiry ${expiry} routed to open position with expiry ${nearest.expiry}`,
-          );
+        const nearestDays = Math.abs(new Date(nearest.expiry + "T00:00:00Z").getTime() - targetMs) / 86_400_000;
+        // Sanity cap — a 2026-08-30 incident found this fallback
+        // silently routing a close to a position with a completely
+        // unrelated expiry (an 8-day-off match was the ONLY candidate
+        // available because the real target lived under a different
+        // broker bucket). A day or two of parser slop is the case this
+        // fallback exists for; beyond ~14 days it's not "the parser
+        // misread the date," it's "there is no real match here" — fall
+        // through to the orphan-close error path below instead of
+        // silently misattaching.
+        if (nearestDays <= 14) {
+          if (nearest.expiry !== expiry) {
+            console.warn(
+              `[bulk-create] ${symbol} close fill expiry ${expiry} routed to open position with expiry ${nearest.expiry}`,
+            );
+          }
+          existing = [nearest];
         }
-        existing = [nearest];
       }
     }
 

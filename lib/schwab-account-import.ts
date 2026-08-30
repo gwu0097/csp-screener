@@ -9,9 +9,12 @@
 //
 // Scope, deliberately narrow:
 //   - Only the two accounts under the Account Data Schwab connection
-//     (broker="schwab" / "schwab2"). Robinhood and covered_calls are
-//     untouched — this module never queries or writes anything for
-//     those brokers.
+//     (broker="schwab" / "schwab2") are polled — Robinhood has its own
+//     separate courier. A short call landed from either account is
+//     redirected to broker="covered_calls" (see effectiveOptionBroker
+//     below) instead of the account's own bucket — a categorical,
+//     broker-agnostic rule, not an exception to the "two accounts"
+//     scope above.
 //   - Forward-only. The first poll run for an account establishes a
 //     checkpoint at "now" and finds nothing — no historical backfill,
 //     no touching positions that already exist in the Schwab accounts
@@ -84,6 +87,33 @@ function expiryDateOnly(iso: string): string {
 // OPTION or EQUITY leg alongside them.
 function primaryLeg(txn: SchwabTransaction): TransferItem | null {
   return txn.transferItems?.find((ti) => ti.instrument.assetType !== "CURRENCY") ?? null;
+}
+
+// A short call is categorically a covered call, never a CSP — the same
+// broker-agnostic signal already used to exclude covered calls from
+// lib/trade-chains.ts's classifier. Landing it under the account's own
+// broker (schwab/schwab2) required a manual "Move Account" to the
+// covered_calls bucket, and a 2026-08-30 incident showed why that's
+// dangerous: once moved, every future broker-reported event on that
+// SAME contract (a roll, a close, an assignment) still auto-imports
+// tagged with the real account's broker, so broker-scoped position
+// matching can never find it — in that incident, a roll's close leg
+// silently misattached to an unrelated freshly-opened position instead
+// (lib/bulk-create-trades.ts's fuzzy close-fallback found a same-strike
+// "nearest expiry" candidate in the wrong broker bucket and accepted
+// it). Routing short calls to covered_calls at the source, instead of
+// after the fact, closes that gap for good: the position is born in
+// the bucket every later event will also resolve to.
+//
+// A long call (buying, not writing) isn't a covered call and keeps the
+// account's normal broker. Puts are always CSPs and are never
+// affected.
+function effectiveOptionBroker(
+  accountBroker: "schwab" | "schwab2",
+  optionType: "put" | "call",
+  direction: "short" | "long",
+): string {
+  return optionType === "call" && direction === "short" ? "covered_calls" : accountBroker;
 }
 
 export type PollReport = {
@@ -255,6 +285,7 @@ async function pollOneAccount(
         const action = leg.positionEffect === "OPENING" ? "open" : "close";
         const amount = leg.amount ?? 0;
         const direction: "short" | "long" = amount < 0 ? "short" : "long";
+        const optionType: "put" | "call" = leg.instrument.putCall === "CALL" ? "call" : "put";
         pending.push({
           kind: "trade",
           row: { id: row.id, activity_id: txn.activityId },
@@ -264,10 +295,10 @@ async function pollOneAccount(
             contracts: Math.abs(amount),
             strike: leg.instrument.strikePrice ?? 0,
             expiry: expiryDateOnly(leg.instrument.expirationDate ?? txn.time),
-            optionType: leg.instrument.putCall === "CALL" ? "call" : "put",
+            optionType,
             ...(action === "open" ? { direction } : {}),
             premium: Math.abs(leg.price ?? 0),
-            broker,
+            broker: effectiveOptionBroker(broker, optionType, direction),
             timePlaced: txn.time.replace(/\+0000$/, ""),
             notes: `Schwab auto-import (activity ${txn.activityId})`,
             // Schwab's own unique id for this transaction — one TRADE
@@ -316,12 +347,17 @@ async function pollOneAccount(
       const strike = leg.instrument.strikePrice ?? 0;
       const expiry = expiryDateOnly(leg.instrument.expirationDate ?? txn.time);
       const optionType: "put" | "call" = leg.instrument.putCall === "CALL" ? "call" : "put";
+      // RECEIVE_AND_DELIVER (assignment/expiration) only ever describes
+      // an event on the option WRITER's position — there's no "long"
+      // case here — so a call is unconditionally a covered call, same
+      // rule as the TRADE branch above.
+      const rdBroker = optionType === "call" ? "covered_calls" : broker;
 
       const posRes = await sb
         .from("positions")
         .select("id,avg_premium_sold")
         .eq("user_id", adminUserId)
-        .eq("broker", broker)
+        .eq("broker", rdBroker)
         .eq("symbol", symbol)
         .eq("strike", strike)
         .eq("expiry", expiry)
@@ -335,7 +371,7 @@ async function pollOneAccount(
           sb,
           row.id,
           "error_no_matching_position",
-          `no open ${broker} position for ${symbol} $${strike}${optionType === "call" ? "C" : "P"} ${expiry}`,
+          `no open ${rdBroker} position for ${symbol} $${strike}${optionType === "call" ? "C" : "P"} ${expiry}`,
         );
         errors.push(`activity ${txn.activityId}: no matching open position for ${symbol} $${strike} ${expiry}`);
         continue;
