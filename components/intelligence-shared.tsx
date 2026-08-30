@@ -721,13 +721,19 @@ export function PerformanceSection({
         // Apply the broker filter client-side. The route doesn't take
         // a ?broker= param (it always returns every account so the
         // Positions page can render the broker subsections), so we
-        // narrow here to match the realized-side broker tab.
-        if (broker !== "all") {
-          opts = opts.filter((o) => (o.broker ?? "").toLowerCase() === broker);
-          stocks = stocks.filter(
-            (s) => (s.broker ?? "").toLowerCase() === broker,
-          );
-        }
+        // narrow here to match the realized-side broker tab. Covered
+        // Calls is a separate pseudo-account, never a real CSP one —
+        // "all" must exclude it here too, mirroring the identical
+        // exclusion already applied to the realized side in
+        // app/api/intelligence/route.ts (allClosedRaw/stillOpenRes)
+        // and to the Positions page's statsBroker predicate. An
+        // explicit broker=covered_calls selection is untouched.
+        const matchesBroker = (b: string | null | undefined) => {
+          const key = (b ?? "").toLowerCase();
+          return broker === "all" ? key !== "covered_calls" : key === broker;
+        };
+        opts = opts.filter((o) => matchesBroker(o.broker));
+        stocks = stocks.filter((s) => matchesBroker(s.broker));
 
         // Outside regular hours, fall back to the Positions page's
         // localStorage live cache for any option pnlDollars the

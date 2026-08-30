@@ -240,7 +240,19 @@ export async function GET(req: NextRequest) {
   if (allClosedRes.error) {
     return NextResponse.json({ error: allClosedRes.error.message }, { status: 500 });
   }
-  const allClosedRaw = (allClosedRes.data ?? []) as PositionRow[];
+  // Covered Calls is a separate pseudo-account, never a real CSP one —
+  // when "all" is requested (broker === null), it must never silently
+  // fold into the aggregate the way a real broker would (same rule
+  // already applied to the Positions page's statsBroker predicate and,
+  // narrower, to the collateral series below). An explicit
+  // broker=covered_calls request is untouched — the query above
+  // already scoped it via .eq, and the user asking for that account
+  // by name should see its own real numbers.
+  const allClosedRaw = (
+    broker === null
+      ? ((allClosedRes.data ?? []) as PositionRow[]).filter((p) => p.broker !== "covered_calls")
+      : ((allClosedRes.data ?? []) as PositionRow[])
+  );
   // Partition by position_type. Pre-migration NULL is treated as
   // option. stock_long / stock_short rows have option-shaped columns
   // populated as placeholders (strike=0, option_type='put') and would
@@ -275,6 +287,16 @@ export async function GET(req: NextRequest) {
   const stillOpenRes = await stillOpenQuery;
   if (stillOpenRes.error) {
     return NextResponse.json({ error: stillOpenRes.error.message }, { status: 500 });
+  }
+  // Same "all" exclusion as allClosedRaw above, applied at the source
+  // so every downstream reader of stillOpenRes.data (partial-close
+  // banked P&L, still-open campaign-resolution check, the collateral
+  // series' own — already-unconditional — covered_calls skip) is
+  // automatically correct without touching each site individually.
+  if (broker === null) {
+    stillOpenRes.data = (stillOpenRes.data ?? []).filter(
+      (p: { broker?: string | null }) => p.broker !== "covered_calls",
+    );
   }
   type StillOpenRow = PositionRow & { updated_at: string };
   // Filter in JS — matches the SQL guard: realized_pnl IS NOT NULL AND
