@@ -41,6 +41,24 @@
 // of Part 2's actual risk case was the v5 failure mode.
 export const ANALYSIS_TEMPLATE_VERSION = "v6";
 
+// Fixed, not recomputed — the PEER CONTEXT section (AnalysisDumpTab)
+// prints this line every time it renders, regardless of what the
+// section's own peer list shows that day. It is the result of a
+// 2026-09-02 audit: joined earnings_history to itself via theme_members,
+// naive method (today's theme membership applied across all stored
+// earnings events — see that audit for the bias-corrected cut too,
+// n=6/14, too small to report as a rate). n=379 total across both
+// groups (peer-crash n=246, no-peer-crash n=133). The point of printing
+// this unconditionally is to keep the section's peer list read as
+// context a human/LLM reader can weigh, not as an implied signal —
+// there is no measured basis for treating a peer's earnings reaction as
+// predictive of the subject's own. Do not delete this line to make the
+// section read more conclusively; that is exactly the misreading it
+// exists to prevent. Update only if a new audit supersedes it, and
+// change the wording to match, not just the numbers.
+export const PEER_CONTEXT_BASE_RATE_LINE =
+  "Base rate: no measured relationship between peer earnings reactions and subject reaction (n=379, median +0.75% vs -0.20%).";
+
 export const ANALYSIS_TEMPLATE = `=== RESEARCH ANALYSIS REQUEST ===
 
 You are reviewing a cash-secured put setup on the ticker above. At the

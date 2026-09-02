@@ -58,7 +58,11 @@ import { ResearchAnalysisPasteBack, type SavedAnalysisInfo } from "@/components/
 import { ResearchAnalysisModal } from "@/components/research-analysis-modal";
 import { SchwabTokenBanner } from "@/components/schwab-token-banner";
 import { CSP_EARNINGS_SCREENER } from "@/lib/screener-config";
-import { ANALYSIS_TEMPLATE, ANALYSIS_TEMPLATE_VERSION } from "@/lib/analysis-dump-template";
+import {
+  ANALYSIS_TEMPLATE,
+  ANALYSIS_TEMPLATE_VERSION,
+  PEER_CONTEXT_BASE_RATE_LINE,
+} from "@/lib/analysis-dump-template";
 import {
   buildDictionaryInjectionSection,
   type ObservationDictionaryEntry,
@@ -4591,6 +4595,53 @@ function useObservationDictionary(): ObservationDictionaryEntry[] | null {
   return entries;
 }
 
+type PeerContextEvent = {
+  symbol: string;
+  themeName: string;
+  earningsDate: string;
+  actualMovePct: number | null;
+};
+
+type PeerContextSnapshot = {
+  themeNames: string[];
+  windowStart: string;
+  windowEnd: string;
+  events: PeerContextEvent[];
+};
+
+// PEER CONTEXT for the dump's own section (see app/api/screener/peer-
+// context/route.ts's header comment for the full reasoning). Facts
+// only — the symbol's own theme(s) and which same-theme peers reported
+// earnings in the trailing 21 days, with their actual move. Never feeds
+// computeCrushComposite/runStageFour/calculateThreeLayerGrade; this
+// hook's return value is consumed by exactly one place, the dump
+// section builder below, and nowhere in the grading path.
+function usePeerContext(symbol: string, asOfDate: string | null): PeerContextSnapshot | null {
+  const [snapshot, setSnapshot] = useState<PeerContextSnapshot | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setSnapshot(null);
+    if (!asOfDate) return;
+    (async () => {
+      try {
+        const params = new URLSearchParams({ symbol, asOfDate });
+        const res = await fetch(`/api/screener/peer-context?${params.toString()}`, {
+          cache: "no-store",
+        });
+        if (!res.ok) return;
+        const json = (await res.json()) as PeerContextSnapshot;
+        if (!cancelled) setSnapshot(json);
+      } catch {
+        /* best-effort — the dump section prints the theme as unavailable */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [symbol, asOfDate]);
+  return snapshot;
+}
+
 // Nearest listed strike to `target` — same snapping EditableStrikeCell/
 // TweetTab's old commitStrike used, so typing a strike that isn't
 // exactly on the chain grid still lands on a real, quotable contract.
@@ -4737,6 +4788,7 @@ function AnalysisDumpTab({
   const companyName = useCompanyName(r.symbol);
   const priceAction = usePriceAction(r.symbol, r.price);
   const observationDictionary = useObservationDictionary();
+  const peerContext = usePeerContext(r.symbol, r.earningsDate ?? null);
   const stageFourStrikes = r.stageFour?.availableStrikes;
   const availableStrikes = useMemo(
     () => refreshedChain?.strikes ?? stageFourStrikes ?? [],
@@ -5068,6 +5120,39 @@ function AnalysisDumpTab({
       }
     }
 
+    // ---------- PEER CONTEXT ----------
+    // Facts only — same-theme peers that reported earnings in the
+    // trailing 21 days, their date, their actual move, and a count.
+    // Deliberately NOT wired into computeCrushComposite, runStageFour,
+    // or calculateThreeLayerGrade (lib/screener.ts) — this section
+    // exists so a human/LLM reader can weigh peer reactions as
+    // evidence, not so any scoring path can read them as a modifier.
+    // PEER_CONTEXT_BASE_RATE_LINE is a fixed constant (see its own
+    // comment in lib/analysis-dump-template.ts) printed unconditionally
+    // so the null result is read as context on every render, never
+    // omitted just because today's peer list happens to look busy.
+    section("PEER CONTEXT");
+    push(PEER_CONTEXT_BASE_RATE_LINE);
+    if (peerContext === null) {
+      push("Peer context loading or unavailable.");
+    } else if (peerContext.themeNames.length === 0) {
+      push(`No theme membership on file for ${r.symbol}.`);
+    } else {
+      push(`Theme(s): ${peerContext.themeNames.join(", ")}`);
+      push(`Trailing 21 days (${peerContext.windowStart} to ${peerContext.windowEnd}) — peer earnings on file:`);
+      if (peerContext.events.length === 0) {
+        push("  none");
+      } else {
+        for (const ev of peerContext.events) {
+          push(`  ${ev.symbol.padEnd(6)} ${ev.earningsDate}   ${dumpPct(ev.actualMovePct)}`);
+        }
+      }
+      const withActual = peerContext.events.filter((e) => e.actualMovePct !== null);
+      const down10 = withActual.filter((e) => (e.actualMovePct as number) <= -0.1);
+      push(`Peers reporting in window: ${peerContext.events.length} (${withActual.length} with actual move on file)`);
+      push(`Peers down more than 10%: ${down10.length}`);
+    }
+
     // ---------- OBSERVATION DICTIONARY ----------
     // Injected at dump-build time from the live table, never stored in
     // the template constant — so the dictionary can grow without a code
@@ -5090,7 +5175,7 @@ function AnalysisDumpTab({
     push(ANALYSIS_TEMPLATE);
 
     return lines.join("\n").trim();
-  }, [r, tl, d, companyName, priceAction, observationDictionary, screenedAt, chainCapturedAt, effectiveStrike, effectiveDelta, effectivePremium, effectivePop, selectedRow, recommended, availableStrikes, spreadFlagPct, chainCampaigns, chainCampaignsFailed]);
+  }, [r, tl, d, companyName, priceAction, observationDictionary, peerContext, screenedAt, chainCapturedAt, effectiveStrike, effectiveDelta, effectivePremium, effectivePop, selectedRow, recommended, availableStrikes, spreadFlagPct, chainCampaigns, chainCampaignsFailed]);
 
   // Setup values snapshotted at analysis-save time (research_analyses
   // is never joined to live data later — spot/EM/grade all drift
