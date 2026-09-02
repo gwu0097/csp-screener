@@ -116,12 +116,25 @@ export async function runEpsSweep(opts?: { dryRun?: boolean }): Promise<EpsSweep
         continue;
       }
 
-      // Finnhub rows are keyed by fiscal period (quarter-end), this
-      // row by announcement date — match on fiscal identifiers when
-      // available (same identifiers T0's fiscal lookup already stamps),
-      // else nearest-preceding period within a bounded window. Never
-      // "just take the latest quarter" — that silently stamps the
-      // wrong quarter's EPS onto the row.
+      // Finnhub rows are keyed by fiscal period (quarter-end), this row
+      // by announcement date — match ONLY on fiscal identifiers already
+      // stamped on the row: fiscal_quarter+fiscal_year first, else an
+      // exact period_end match. No proximity/date-based fallback.
+      //
+      // A "nearest preceding period <= earnings_date" fallback lived
+      // here until a 2026-09-04 audit found it silently writing the
+      // WRONG quarter's actual onto the row: Finnhub's own period label
+      // for the correct just-reported quarter frequently falls AFTER
+      // earnings_date (confirmed for CRM, DELL, MRVL, MDB — a 4-for-4
+      // reproduction, not an edge case), so "preceding" reliably grabbed
+      // the PRIOR quarter instead. On RKLB it went further: the estimate
+      // matched the right quarter while the actual silently landed from
+      // a different, older one on the same row — flipping the sign of
+      // the surprise (stored: +60.8% beat; real: a miss). A wrong number
+      // reads as real data and poisons every downstream read; a null
+      // one is visibly incomplete and self-heals once fiscal_quarter is
+      // backfilled (see the accompanying repair plan). When neither
+      // identifier resolves, skip and log why rather than guess.
       let match: (typeof finnhubRows)[number] | null = null;
       if (row.fiscal_quarter !== null && row.fiscal_year !== null) {
         match =
@@ -131,34 +144,20 @@ export async function runEpsSweep(opts?: { dryRun?: boolean }): Promise<EpsSweep
       if (!match && row.period_end !== null) {
         match = finnhubRows.find((r) => r.period === row.period_end) ?? null;
       }
-      if (!match) {
-        const preceding = finnhubRows
-          .filter((r) => typeof r.period === "string" && r.period <= row.earnings_date)
-          .sort((a, b) => (a.period < b.period ? 1 : -1));
-        const nearest = preceding[0] ?? null;
-        if (nearest) {
-          const gapDays = Math.round(
-            (new Date(row.earnings_date + "T00:00:00Z").getTime() -
-              new Date(nearest.period + "T00:00:00Z").getTime()) /
-              86_400_000,
-          );
-          // A real announcement typically lands 2-6 weeks after its
-          // fiscal quarter-end; 100 days is a generous bound that still
-          // rejects a nearest-preceding match from an unrelated, much
-          // older quarter.
-          if (gapDays <= 100) match = nearest;
-        }
-      }
 
       if (!match) {
-        report.skipped.push({ symbol, earnings_date: row.earnings_date, reason: "no_period_match" });
+        const reason =
+          row.fiscal_quarter === null && row.period_end === null
+            ? "no_fiscal_identifiers"
+            : "no_period_match";
+        report.skipped.push({ symbol, earnings_date: row.earnings_date, reason });
         if (!dryRun) {
           await recordAncillaryAttempt({
             earningsHistoryId: row.id,
             symbol,
             earningsDate: row.earnings_date,
             phase: "eps-sweep",
-            outcome: "no_period_match",
+            outcome: reason,
           }).catch(() => {});
         }
         continue;
