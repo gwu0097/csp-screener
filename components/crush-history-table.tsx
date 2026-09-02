@@ -521,7 +521,13 @@ export function CrushHistoryTable({
   // in a real dialog can't produce a malformed value at all.
   const [pendingResolve, setPendingResolve] = useState<{
     event: CrushHistoryEvent;
-    field: "em" | "actual" | "session";
+    // "date" is a direct click on a placeholder row's date itself —
+    // resolves the date with no EM/Actual value attached (rawPercent
+    // stays null, same as if the OTHER field were being edited and
+    // this one were left untouched — commitSave already falls through
+    // to sourceEvent's existing null for whichever field isn't "em"/
+    // "actual", so no special-casing needed there).
+    field: "em" | "actual" | "session" | "date";
     rawPercent: number | null;
     dateInput: string;
     // false only for the "session" trigger on a row that already has a
@@ -883,7 +889,7 @@ export function CrushHistoryTable({
   async function commitSave(
     targetEarningsDate: string,
     sourceEvent: CrushHistoryEvent,
-    field: "em" | "actual" | "session",
+    field: "em" | "actual" | "session" | "date",
     rawPercent: number | null,
     // undefined = preserve sourceEvent's existing timing untouched
     // (the common EM/Actual-edit path). A value (including null, an
@@ -978,6 +984,45 @@ export function CrushHistoryTable({
   // not an uncontrolled input, a native dialog with no forgiving format
   // handling. A controlled <input type="date"> can't produce a
   // malformed value at all.
+  // Shared placeholder-resolve dialog opener — used both when saving
+  // an EM/Actual value against a placeholder row (the date must be
+  // confirmed before that value can attach to a real row) and when the
+  // user clicks the placeholder date directly with no value in hand
+  // yet (field="date", rawPercent=null — commitSave leaves both
+  // impliedMovePct/actualMovePct at sourceEvent's existing null).
+  function openPlaceholderResolve(
+    e: CrushHistoryEvent,
+    field: "em" | "actual" | "date",
+    rawPercent: number | null,
+  ): void {
+    const suggestion = dateSuggestions[quarterYearLabel(quarterOfDate(e.earningsDate))] ?? null;
+    const sessionDefault = computeSessionDefault(
+      suggestion?.status === "suggested" ? suggestion.hour : null,
+      storedSessions,
+    );
+    setPendingResolve({
+      event: e,
+      field,
+      rawPercent,
+      dateInput: "",
+      dateEditable: true,
+      sessionInput: sessionDefault.value,
+      sessionDefaultRule: sessionDefault.rule,
+      sessionDefaultLabel: sessionDefault.label,
+      suggestion,
+      error: null,
+      saving: false,
+    });
+  }
+
+  // Direct trigger for clicking a placeholder row's date itself —
+  // previously the only way to set a placeholder's date was indirectly,
+  // by editing EM/Actual first (which prompted for the date as a side
+  // effect). Opens the same dialog with no value attached.
+  function openPlaceholderDateEdit(e: CrushHistoryEvent): void {
+    openPlaceholderResolve(e, "date", null);
+  }
+
   async function saveField(
     e: CrushHistoryEvent,
     field: "em" | "actual",
@@ -986,24 +1031,7 @@ export function CrushHistoryTable({
     if (placeholderDates.has(e.earningsDate)) {
       // Opens the dialog and returns immediately, without awaiting a
       // save — commitSave only runs once the user confirms a date.
-      const suggestion = dateSuggestions[quarterYearLabel(quarterOfDate(e.earningsDate))] ?? null;
-      const sessionDefault = computeSessionDefault(
-        suggestion?.status === "suggested" ? suggestion.hour : null,
-        storedSessions,
-      );
-      setPendingResolve({
-        event: e,
-        field,
-        rawPercent,
-        dateInput: "",
-        dateEditable: true,
-        sessionInput: sessionDefault.value,
-        sessionDefaultRule: sessionDefault.rule,
-        sessionDefaultLabel: sessionDefault.label,
-        suggestion,
-        error: null,
-        saving: false,
-      });
+      openPlaceholderResolve(e, field, rawPercent);
       return;
     }
     // No provenance dialog (removed 2026-08-19 — implied_move_expiry is
@@ -1319,13 +1347,19 @@ export function CrushHistoryTable({
                       <TooltipProvider delayDuration={200}>
                         <Tooltip>
                           <TooltipTrigger asChild>
-                            <span className="ml-1.5 cursor-help italic text-muted-foreground/60">
+                            <button
+                              type="button"
+                              onClick={() => openPlaceholderDateEdit(e)}
+                              className="ml-1.5 inline-flex items-center gap-1 italic text-muted-foreground/60 hover:text-foreground"
+                            >
                               {fmtEarningsDateShort(e.earningsDate)}?
-                            </span>
+                              <Pencil className="h-2.5 w-2.5 opacity-50" />
+                            </button>
                           </TooltipTrigger>
                           <TooltipContent className="max-w-xs text-sm">
                             No confirmed earnings date for this quarter yet — this is a placeholder, not a real
-                            announcement date. Editing EM/Actual will prompt for the real date first.
+                            announcement date. Click to set the real date directly, or edit EM/Actual and it will
+                            prompt for the date too.
                           </TooltipContent>
                         </Tooltip>
                       </TooltipProvider>
@@ -1486,7 +1520,7 @@ export function CrushHistoryTable({
                       // without needing to re-run anything.
                       <span className="flex flex-wrap items-center gap-1 text-amber-300/90">
                         {quarterSuggestion === undefined ? (
-                          <>No confirmed date — Fetch EM History for a suggestion, or click EM/Actual to enter one.</>
+                          <>No confirmed date — Fetch EM History for a suggestion, or click the date/EM/Actual to enter one.</>
                         ) : quarterSuggestion.status === "suggested" ? (
                           <>
                             Yahoo suggests {fmtEarningsDateShort(quarterSuggestion.date!)}, session inferred:{" "}
@@ -1643,7 +1677,12 @@ export function CrushHistoryTable({
           {pendingResolve?.dateEditable ? (
             <p className="text-sm text-muted-foreground">
               This quarter has no confirmed earnings date yet. Enter the real announcement date from
-              ThinkorSwim before saving {pendingResolve?.field === "em" ? "the implied move" : "the actual move"}.
+              ThinkorSwim
+              {pendingResolve?.field === "em"
+                ? " before saving the implied move."
+                : pendingResolve?.field === "actual"
+                  ? " before saving the actual move."
+                  : "."}
             </p>
           ) : (
             <p className="text-sm text-muted-foreground">
