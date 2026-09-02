@@ -13,11 +13,46 @@
 //
 // No pre-print timing constraint (backward-looking, Finnhub-sourced) —
 // this can and does run any time after the print, unlike em-universe-seed.
+//
+// Row selection is two branches, not one (2026-09-04 retry fix):
+//   1. Recent (earnings_date within T1_RETRY_CUTOFF_DAYS) — the
+//      original T0/T1-adjacent "catch it soon after the print" case.
+//   2. Backlog (earnings_date older than that) — rows whose
+//      fiscal_quarter was null at the time they aged out of branch 1,
+//      then got backfilled later by the EDGAR fiscal-period resolver.
+//      Bounding branch 2 by earnings_date the same way branch 1 is
+//      would defeat its own purpose: a 10-Q/10-K can land well past 10
+//      days after earnings_date (up to the 40/45-day statutory
+//      deadline), so by the time fiscal_quarter is actually known, the
+//      row has long since aged out of any earnings_date-bound query.
+//      Without branch 2, EVERY quarter's freshest rows pass through the
+//      exact same unprotected window this repair just closed, and the
+//      backlog rebuilds itself. Branch 2 is instead throttled by
+//      RETRY_THROTTLE_DAYS — how long since eps-sweep itself last
+//      looked at this specific row — via earnings_capture_attempts,
+//      not by how old the row is. See RETRY_THROTTLE_DAYS below for why
+//      7, not the 45-60 days that bounds the EDGAR resolver itself.
 import { fetchFinnhubEarnings, pctChange } from "./encyclopedia";
 import { recordAncillaryAttempt, T1_RETRY_CUTOFF_DAYS } from "./earnings-capture-attempts";
 import { createServerClient } from "./supabase";
 
 const SWEEP_BUDGET_MS = 50_000;
+
+// Throttles branch 2 (backlog) retries — distinct from, and much
+// shorter than, the ~45-60 day window that bounds the EDGAR
+// fiscal-period resolver itself (that one is bounded by the SEC 10-Q
+// filing deadline: how long fiscal_quarter can plausibly take to
+// become knowable at all). This one is a pure efficiency throttle: once
+// fiscal_quarter DOES land, matching against Finnhub is a cheap,
+// deterministic lookup, so there's no reason for a row to wait a month
+// to be picked up. 7 days keeps a stuck row from being re-queried
+// against Finnhub daily forever (wasteful once "still no match" is
+// established), while still closing the loop within about a week of
+// fiscal_quarter actually landing — a full order of magnitude tighter
+// than the resolver's own give-up horizon, because retrying a resolved
+// case is cheap and re-attempting an unresolved one gains nothing by
+// waiting longer than this.
+const RETRY_THROTTLE_DAYS = 7;
 
 // Finnhub free-tier /stock/earnings returns the 4 most recent quarters
 // regardless of the requested window — a wide window here just ensures
@@ -69,19 +104,56 @@ export async function runEpsSweep(opts?: { dryRun?: boolean }): Promise<EpsSweep
   };
 
   const sb = createServerClient();
-  const res = await sb
+  const cols = "id,symbol,earnings_date,fiscal_quarter,fiscal_year,period_end,eps_surprise_pct,implied_move_source";
+
+  // Branch 1: recent, as before.
+  const recentRes = await sb
     .from("earnings_history")
-    .select("id,symbol,earnings_date,fiscal_quarter,fiscal_year,period_end,eps_surprise_pct,implied_move_source")
+    .select(cols)
     .gte("earnings_date", windowStart)
     .lte("earnings_date", today)
     .is("eps_surprise_pct", null);
-  if (res.error) {
+  if (recentRes.error) {
     report.ok = false;
-    report.errors.push({ symbol: "", earnings_date: "", reason: `query failed: ${res.error.message}` });
+    report.errors.push({ symbol: "", earnings_date: "", reason: `query failed: ${recentRes.error.message}` });
     return report;
   }
 
-  const rows = ((res.data ?? []) as Array<Candidate & { implied_move_source: string | null }>).filter(
+  // Branch 2: backlog — earnings_date older than the recent window,
+  // eps_surprise_pct still null. Not bounded by earnings_date at all;
+  // Finnhub's own data availability (via the exact-match logic below)
+  // is the natural limiter on whether a match can succeed, and
+  // RETRY_THROTTLE_DAYS below is the limiter on how often a given row
+  // gets re-attempted.
+  const backlogRes = await sb
+    .from("earnings_history")
+    .select(cols)
+    .lt("earnings_date", windowStart)
+    .is("eps_surprise_pct", null);
+  if (backlogRes.error) {
+    report.ok = false;
+    report.errors.push({ symbol: "", earnings_date: "", reason: `backlog query failed: ${backlogRes.error.message}` });
+    return report;
+  }
+  type RawRow = Candidate & { implied_move_source: string | null };
+  const backlogCandidates = (backlogRes.data ?? []) as RawRow[];
+
+  let backlogRows: RawRow[] = [];
+  if (backlogCandidates.length > 0) {
+    const throttleCutoff = new Date(Date.now() - RETRY_THROTTLE_DAYS * 86_400_000).toISOString();
+    const attemptsRes = await sb
+      .from("earnings_capture_attempts")
+      .select("earnings_history_id")
+      .in("earnings_history_id", backlogCandidates.map((r) => r.id))
+      .eq("capture_phase", "eps-sweep")
+      .gte("attempted_at", throttleCutoff);
+    const recentlyAttempted = new Set(
+      ((attemptsRes.data ?? []) as Array<{ earnings_history_id: string }>).map((a) => a.earnings_history_id),
+    );
+    backlogRows = backlogCandidates.filter((r) => !recentlyAttempted.has(r.id));
+  }
+
+  const rows = ([...((recentRes.data ?? []) as RawRow[]), ...backlogRows]).filter(
     // Manual-row guard: 'manual' means "hands off this row from any
     // automated writer" everywhere else in this pipeline (T0/T1 both
     // skip the whole row, not just the implied-move field) — same rule
