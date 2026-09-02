@@ -169,10 +169,21 @@ export async function runEpsSweep(opts?: { dryRun?: boolean }): Promise<EpsSweep
     }
     const symbol = row.symbol.toUpperCase();
     try {
+      // to=today (not a future bound) silently dropped exactly the
+      // candidates this sweep exists to find — confirmed live
+      // (2026-09-04): fetchFinnhubEarnings's own `period <= to` filter
+      // discarded CRM's correct Finnhub row because Finnhub's period
+      // label for it (2026-09-30) sits after "today" even though the
+      // real quarter was reported weeks earlier. Finnhub's period label
+      // is not a reliable date — that's the whole reason this sweep now
+      // matches by fiscal_quarter+fiscal_year instead of by date at
+      // all. A generous future bound here costs nothing: the exact-
+      // match logic below is what actually gates correctness, not this
+      // window.
       const finnhubRows = await fetchFinnhubEarnings(
         symbol,
         addDaysIso(today, -FINNHUB_LOOKBACK_DAYS),
-        today,
+        addDaysIso(today, 120),
       );
       if (finnhubRows.length === 0) {
         report.skipped.push({ symbol, earnings_date: row.earnings_date, reason: "finnhub_empty" });
