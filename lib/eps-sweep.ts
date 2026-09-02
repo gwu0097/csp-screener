@@ -12,7 +12,11 @@
 // uses — same computation, narrower trigger.
 //
 // No pre-print timing constraint (backward-looking, Finnhub-sourced) —
-// this can and does run any time after the print, unlike em-universe-seed.
+// this can run any time after the print. It deliberately DOES wait a
+// short while after: see SETTLING_DELAY_DAYS below — Finnhub's own
+// quarter/year labels for a just-reported quarter aren't reliable in the
+// first few days, so capturing too early doesn't just risk no data, it
+// risks confidently-wrong data.
 //
 // Row selection is two branches, not one (2026-09-04 retry fix):
 //   1. Recent (earnings_date within T1_RETRY_CUTOFF_DAYS) — the
@@ -53,6 +57,23 @@ const SWEEP_BUDGET_MS = 50_000;
 // case is cheap and re-attempting an unresolved one gains nothing by
 // waiting longer than this.
 const RETRY_THROTTLE_DAYS = 7;
+
+// Skip capturing EPS within this many days of earnings_date at all —
+// added 2026-09-02 after an audit found Finnhub's own quarter/year labels
+// for a just-reported quarter are not yet stable that early: of 28
+// verifiable rows whose ONLY-EVER capture attempt landed within 3 days of
+// earnings_date, 25 (89%) held the WRONG quarter's actual (confirmed live
+// against current Finnhub data — OKTA was the first found, e.g., but far
+// from the only one). A stratified re-check of rows captured later showed
+// 29/29 agreement at 6+ days, with the sole disagreement at 4 days
+// (HIMS) tracing to Finnhub revising its own published actual after the
+// fact — a different problem a settling delay can't fix, and rare enough
+// (1 case) not to justify pushing N further out on this evidence alone.
+// 7, not a new number, deliberately reuses RETRY_THROTTLE_DAYS's value: a
+// row skipped here for being too fresh falls straight into the same
+// backlog-retry path that already re-attempts every RETRY_THROTTLE_DAYS,
+// rather than needing a second, independently-tuned cutoff.
+const SETTLING_DELAY_DAYS = 7;
 
 // Finnhub free-tier /stock/earnings returns the 4 most recent quarters
 // regardless of the requested window — a wide window here just ensures
@@ -168,6 +189,22 @@ export async function runEpsSweep(opts?: { dryRun?: boolean }): Promise<EpsSweep
       break;
     }
     const symbol = row.symbol.toUpperCase();
+    const daysSincePrint = Math.round(
+      (Date.parse(today + "T00:00:00Z") - Date.parse(row.earnings_date + "T00:00:00Z")) / 86_400_000,
+    );
+    if (daysSincePrint < SETTLING_DELAY_DAYS) {
+      report.skipped.push({ symbol, earnings_date: row.earnings_date, reason: "too_recent_settling_delay" });
+      if (!dryRun) {
+        await recordAncillaryAttempt({
+          earningsHistoryId: row.id,
+          symbol,
+          earningsDate: row.earnings_date,
+          phase: "eps-sweep",
+          outcome: "too_recent_settling_delay",
+        }).catch(() => {});
+      }
+      continue;
+    }
     try {
       // to=today (not a future bound) silently dropped exactly the
       // candidates this sweep exists to find — confirmed live
