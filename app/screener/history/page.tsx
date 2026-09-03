@@ -1,13 +1,21 @@
 "use client";
 
-// Screener History — browsable log of past screener runs (append-only
-// since 2026-07-06). Left panel lists runs (newest first, ticker + date
-// filterable); right panel shows the selected run's full candidate
-// table, read-only. Uses /api/screener/results/history: list mode for
-// the left panel, ?id= detail mode for the right.
+// Screener History — reorganized by earnings event (2026-09-04), was
+// previously organized by scan run. One row per (symbol, earnings_date);
+// a ticker screened 3x in one day appears once. Backed by
+// /api/screener/history-by-event, which reconstructs "grade at scan"
+// from the last screener run before earnings_date per event (not the
+// last scan overall — see that route's header comment) and sources
+// EM/actual move from earnings_history, never from a candidate's live
+// stageThree.details.expectedMovePct.
+//
+// The old scan-centric browser still exists at
+// /api/screener/results/history and isn't deleted — this page's "N
+// scans" affordance surfaces the same underlying runs per event instead
+// of replacing that data.
 
-import { useEffect, useMemo, useState } from "react";
-import { Loader2 } from "lucide-react";
+import { Fragment, useEffect, useMemo, useState } from "react";
+import { ChevronDown, ChevronRight, Loader2 } from "lucide-react";
 import {
   Table,
   TableBody,
@@ -16,54 +24,35 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { ExpandedDetail } from "@/components/screener-view";
+import type { ScreenerResult } from "@/lib/screener";
 
-type SlimCandidate = { symbol: string; grade: string | null };
+type EventScan = { runId: string; screenedAt: string; grade: string | null };
 
-type RunSummary = {
-  id: string;
-  screenedAt: string | null;
-  vix: number | null;
-  pass1Count: number | null;
-  pass2Count: number | null;
-  graded: boolean;
-  candidateCount: number;
-  candidates: SlimCandidate[];
-};
-
-type DetailCandidate = {
+type EventRow = {
+  eventId: string;
   symbol: string;
-  grade: string | null;
-  price: number | null;
-  em_pct: number | null;
-  crush: string | null;
-  strike: number | null;
-  premium: number | null;
-  yield_pct: number | null;
-  recommendation: string | null;
+  earningsDate: string;
+  timing: string | null;
+  impliedMovePct: number | null;
+  actualMovePct: number | null;
+  ratio: number | null;
+  gradeAtScan: string | null;
+  // True when gradeAtScan is null but a scan DOES exist for this event
+  // — i.e. every scan we have happened on/after the print, so there is
+  // no clean pre-event grade at all, not just a missing one.
+  gradeAtScanIsPostPrint: boolean;
+  hasPosition: boolean;
+  scans: EventScan[];
+  drilldownCandidate: Record<string, unknown> | null;
+  drilldownScreenedAt: string | null;
 };
 
-type RunDetail = {
-  id: string;
-  screenedAt: string | null;
-  vix: number | null;
-  pass1Count: number | null;
-  pass2Count: number | null;
-  graded: boolean;
-  candidates: DetailCandidate[];
-};
-
-const PAGE_SIZE = 20;
-
-function fmtRunTime(iso: string | null): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleString("en-US", {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  }).replace(",", " ·");
+function todayIso(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+function daysAgoIso(days: number): string {
+  return new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
 }
 
 function gradeClass(g: string | null): string {
@@ -74,310 +63,280 @@ function gradeClass(g: string | null): string {
   return "text-muted-foreground";
 }
 
+function fmtPct(n: number | null, digits = 1): string {
+  if (n === null || !Number.isFinite(n)) return "—";
+  return `${(Math.abs(n) * 100).toFixed(digits)}%`;
+}
+function fmtSignedPct(n: number | null, digits = 1): string {
+  if (n === null || !Number.isFinite(n)) return "—";
+  const pct = n * 100;
+  return pct > 0 ? `+${pct.toFixed(digits)}%` : `${pct.toFixed(digits)}%`;
+}
+function fmtRatio(n: number | null): string {
+  if (n === null || !Number.isFinite(n)) return "—";
+  return `${n.toFixed(2)}x`;
+}
+function fmtDateShort(iso: string): string {
+  const [y, m, d] = iso.split("-").map(Number);
+  if (!y || !m || !d) return iso;
+  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  return `${MONTHS[m - 1]} ${d}`;
+}
+function fmtScanTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+// EM/actual are null for two structurally different reasons — "hasn't
+// happened yet" and "should have been captured and wasn't" — and
+// collapsing both to a blank cell hides exactly the distinction this
+// view exists to preserve (see the build request this route was written
+// for). today/tomorrow always reads as pending; further out without a
+// value is a real gap worth a different label.
+function emState(impliedMovePct: number | null, earningsDate: string, today: string): string {
+  if (impliedMovePct !== null) return fmtPct(impliedMovePct);
+  return earningsDate >= today ? "pending" : "not captured";
+}
+function actualState(actualMovePct: number | null, earningsDate: string, today: string): string {
+  if (actualMovePct !== null) return fmtSignedPct(actualMovePct);
+  const daysSince = Math.round(
+    (Date.parse(today + "T00:00:00Z") - Date.parse(earningsDate + "T00:00:00Z")) / 86_400_000,
+  );
+  if (daysSince <= 1) return "pending";
+  return "not captured";
+}
+
 export default function ScreenerHistoryPage() {
-  const [runs, setRuns] = useState<RunSummary[] | null>(null);
+  const [fromDate, setFromDate] = useState(daysAgoIso(7));
+  const [toDate, setToDate] = useState(todayIso());
+  const [events, setEvents] = useState<EventRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [detail, setDetail] = useState<RunDetail | null>(null);
-  const [detailLoading, setDetailLoading] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [expandedKey, setExpandedKey] = useState<string | null>(null);
+  const [expandedScansKey, setExpandedScansKey] = useState<string | null>(null);
   const [search, setSearch] = useState("");
-  const [fromDate, setFromDate] = useState("");
-  const [toDate, setToDate] = useState("");
-  const [visible, setVisible] = useState(PAGE_SIZE);
 
-  // Load the run list once.
   useEffect(() => {
     let cancelled = false;
-    (async () => {
-      try {
-        const res = await fetch("/api/screener/results/history?limit=100", {
-          cache: "no-store",
-        });
-        const json = (await res.json()) as { runs?: RunSummary[]; error?: string };
-        if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
-        if (!cancelled) {
-          // 0-candidate rows are pre-analysis auto-saves (Screen Today
-          // fired with nothing passing, or background snapshot writes)
-          // — nothing to browse, so they're dropped from the list.
-          const list = (json.runs ?? []).filter((r) => r.candidateCount > 0);
-          setRuns(list);
-          // Most recent run selected by default.
-          if (list.length > 0) setSelectedId(list[0].id);
-        }
-      } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : "Load failed");
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  // Load the selected run's detail.
-  useEffect(() => {
-    if (!selectedId) {
-      setDetail(null);
-      return;
-    }
-    let cancelled = false;
-    setDetailLoading(true);
+    setLoading(true);
+    setError(null);
     (async () => {
       try {
         const res = await fetch(
-          `/api/screener/results/history?id=${encodeURIComponent(selectedId)}`,
+          `/api/screener/history-by-event?from=${encodeURIComponent(fromDate)}&to=${encodeURIComponent(toDate)}`,
           { cache: "no-store" },
         );
-        const json = (await res.json()) as { run?: RunDetail; error?: string };
+        const json = (await res.json()) as { events?: EventRow[]; error?: string };
         if (!res.ok || json.error) throw new Error(json.error ?? `HTTP ${res.status}`);
-        if (!cancelled) setDetail(json.run ?? null);
-      } catch {
-        if (!cancelled) setDetail(null);
+        if (!cancelled) setEvents(json.events ?? []);
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : "Load failed");
       } finally {
-        if (!cancelled) setDetailLoading(false);
+        if (!cancelled) setLoading(false);
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [selectedId]);
+  }, [fromDate, toDate]);
 
-  const filteredRuns = useMemo(() => {
-    if (!runs) return [];
+  const today = todayIso();
+
+  const filtered = useMemo(() => {
+    if (!events) return [];
     const q = search.trim().toUpperCase();
-    return runs.filter((r) => {
-      if (q !== "" && !r.candidates.some((c) => c.symbol.includes(q))) return false;
-      const day = (r.screenedAt ?? "").slice(0, 10);
-      if (fromDate && day < fromDate) return false;
-      if (toDate && day > toDate) return false;
-      return true;
-    });
-  }, [runs, search, fromDate, toDate]);
-
-  // Keep the selection inside the filtered set so search doesn't leave
-  // a hidden run loaded in the right panel.
-  useEffect(() => {
-    if (!runs || filteredRuns.length === 0) return;
-    if (!filteredRuns.some((r) => r.id === selectedId)) {
-      setSelectedId(filteredRuns[0].id);
-    }
-  }, [filteredRuns, runs, selectedId]);
-
-  const shown = filteredRuns.slice(0, visible);
-  const filtersActive = search.trim() !== "" || fromDate !== "" || toDate !== "";
+    if (q === "") return events;
+    return events.filter((e) => e.symbol.includes(q));
+  }, [events, search]);
 
   return (
     <div className="space-y-4">
       <div>
         <h1 className="text-xl font-semibold">Screener History</h1>
         <p className="text-sm text-muted-foreground">
-          Every saved screener run — search a ticker to find the runs it appeared in
+          One row per earnings event, not per scan — grade at scan is from the last run before the print.
         </p>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          type="text"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Filter ticker…"
+          className="w-40 rounded border border-border bg-background px-3 py-1.5 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-foreground/40"
+        />
+        <input
+          type="date"
+          value={fromDate}
+          onChange={(e) => setFromDate(e.target.value)}
+          className="rounded border border-border bg-background px-2 py-1 text-sm"
+        />
+        <span className="text-muted-foreground">→</span>
+        <input
+          type="date"
+          value={toDate}
+          onChange={(e) => setToDate(e.target.value)}
+          className="rounded border border-border bg-background px-2 py-1 text-sm"
+        />
+        <button
+          type="button"
+          onClick={() => {
+            setFromDate(daysAgoIso(7));
+            setToDate(todayIso());
+          }}
+          className="rounded border border-border px-2 py-1 text-sm text-muted-foreground hover:bg-muted/20"
+        >
+          Last 7 days
+        </button>
       </div>
 
       {error ? (
         <div className="rounded border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-sm text-rose-200">
           {error}
         </div>
-      ) : runs === null ? (
+      ) : loading || events === null ? (
         <div className="flex items-center gap-2 py-10 text-muted-foreground">
-          <Loader2 className="h-4 w-4 animate-spin" /> Loading run history…
+          <Loader2 className="h-4 w-4 animate-spin" /> Loading…
         </div>
-      ) : runs.length === 0 ? (
+      ) : filtered.length === 0 ? (
         <div className="rounded border border-border bg-background/40 p-6 text-base text-muted-foreground">
-          No screener runs saved yet — run Screen Today on the Candidates page.
-          Runs are kept from 2026-07-06 onward.
+          No earnings events in this range{search.trim() !== "" ? ` matching "${search.trim().toUpperCase()}"` : ""}.
         </div>
       ) : (
-        <div className="flex flex-col gap-4 lg:flex-row">
-          {/* -------- Left panel: run list -------- */}
-          <div className="w-full shrink-0 space-y-2 lg:w-[300px]">
-            <input
-              type="text"
-              value={search}
-              onChange={(e) => {
-                setSearch(e.target.value);
-                setVisible(PAGE_SIZE);
-              }}
-              placeholder="Search ticker across runs…"
-              className="w-full rounded border border-border bg-background px-3 py-1.5 text-base placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-foreground/40"
-            />
-            <div className="flex items-center gap-1.5 text-sm">
-              <input
-                type="date"
-                value={fromDate}
-                onChange={(e) => setFromDate(e.target.value)}
-                className="w-full rounded border border-border bg-background px-2 py-1 text-sm"
-              />
-              <span className="text-muted-foreground">→</span>
-              <input
-                type="date"
-                value={toDate}
-                onChange={(e) => setToDate(e.target.value)}
-                className="w-full rounded border border-border bg-background px-2 py-1 text-sm"
-              />
-              {filtersActive && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSearch("");
-                    setFromDate("");
-                    setToDate("");
-                    setVisible(PAGE_SIZE);
-                  }}
-                  className="whitespace-nowrap rounded border border-border px-2 py-1 text-sm text-muted-foreground hover:bg-muted/20"
-                >
-                  Clear
-                </button>
-              )}
-            </div>
-
-            <div className="max-h-[600px] space-y-1.5 overflow-y-auto pr-1">
-              {shown.length === 0 ? (
-                <div className="rounded border border-border bg-background/40 p-4 text-sm text-muted-foreground">
-                  No runs match{search.trim() !== "" ? ` “${search.trim().toUpperCase()}”` : ""}.
-                </div>
-              ) : (
-                shown.map((r) => (
-                  <button
-                    key={r.id}
-                    type="button"
-                    onClick={() => setSelectedId(r.id)}
-                    className={
-                      "w-full rounded-md border px-3 py-2 text-left " +
-                      (r.id === selectedId
-                        ? "border-foreground/50 bg-foreground/5"
-                        : "border-border bg-background/40 hover:bg-muted/10")
-                    }
-                  >
-                    <div className="flex items-baseline justify-between">
-                      <span className="text-sm font-medium">
-                        {fmtRunTime(r.screenedAt)}
-                      </span>
-                      <span className="text-[11px] text-muted-foreground">
-                        {r.vix !== null ? `VIX ${Number(r.vix).toFixed(1)}` : "VIX —"}
-                      </span>
-                    </div>
-                    <div className="mt-0.5 flex items-baseline justify-between">
-                      <span className="text-[11px] text-muted-foreground">
-                        {r.candidateCount} candidate{r.candidateCount === 1 ? "" : "s"}
-                        {!r.graded && r.candidateCount > 0 ? " · ungraded" : ""}
-                      </span>
-                    </div>
-                    {r.candidates.length > 0 && (
-                      <div className="mt-1 truncate font-mono text-[11px]">
-                        {r.candidates.slice(0, 3).map((c, i) => (
-                          <span key={`${c.symbol}${i}`}>
-                            {i > 0 && <span className="text-muted-foreground"> · </span>}
-                            {c.symbol}
-                            {c.grade && (
-                              <span className={` ${gradeClass(c.grade)}`}> {c.grade}</span>
-                            )}
+        <div className="overflow-x-auto rounded border border-border">
+          <Table>
+            <TableHeader className="sticky top-0 z-10 bg-background">
+              <TableRow>
+                <TableHead>Symbol</TableHead>
+                <TableHead>Earnings</TableHead>
+                <TableHead>Timing</TableHead>
+                <TableHead>Grade at scan</TableHead>
+                <TableHead className="text-right">EM</TableHead>
+                <TableHead className="text-right">Actual</TableHead>
+                <TableHead className="text-right">Ratio</TableHead>
+                <TableHead>Position</TableHead>
+                <TableHead>Scans</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {filtered.map((e) => {
+                const key = e.eventId;
+                const isOpen = expandedKey === key;
+                const isScansOpen = expandedScansKey === key;
+                return (
+                  <Fragment key={key}>
+                    <TableRow
+                      className="cursor-pointer hover:bg-muted/10"
+                      onClick={() => setExpandedKey(isOpen ? null : key)}
+                    >
+                      <TableCell className="font-mono font-semibold">
+                        <span className="inline-flex items-center gap-1">
+                          {isOpen ? (
+                            <ChevronDown className="h-3 w-3 text-muted-foreground" />
+                          ) : (
+                            <ChevronRight className="h-3 w-3 text-muted-foreground" />
+                          )}
+                          {e.symbol}
+                        </span>
+                      </TableCell>
+                      <TableCell>{fmtDateShort(e.earningsDate)}</TableCell>
+                      <TableCell className="text-[11px] uppercase text-muted-foreground">
+                        {e.timing ?? "unknown"}
+                      </TableCell>
+                      <TableCell className={gradeClass(e.gradeAtScan)}>
+                        {e.gradeAtScan ?? (e.gradeAtScanIsPostPrint ? "post-print only" : "not scanned")}
+                      </TableCell>
+                      <TableCell className="text-right font-mono">
+                        {emState(e.impliedMovePct, e.earningsDate, today)}
+                      </TableCell>
+                      <TableCell
+                        className={`text-right font-mono ${e.actualMovePct !== null && e.actualMovePct !== 0 ? (e.actualMovePct > 0 ? "text-emerald-300" : "text-rose-300") : ""}`}
+                      >
+                        {actualState(e.actualMovePct, e.earningsDate, today)}
+                      </TableCell>
+                      <TableCell className="text-right font-mono">{fmtRatio(e.ratio)}</TableCell>
+                      <TableCell>
+                        {e.hasPosition ? (
+                          <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-300">
+                            traded
                           </span>
-                        ))}
-                      </div>
+                        ) : (
+                          <span className="text-[11px] text-muted-foreground">—</span>
+                        )}
+                      </TableCell>
+                      <TableCell onClick={(evt) => evt.stopPropagation()}>
+                        {e.scans.length > 0 ? (
+                          <button
+                            type="button"
+                            onClick={() => setExpandedScansKey(isScansOpen ? null : key)}
+                            className="rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-muted/20"
+                          >
+                            {e.scans.length} scan{e.scans.length === 1 ? "" : "s"}
+                          </button>
+                        ) : (
+                          <span className="text-[11px] text-muted-foreground">0 scans</span>
+                        )}
+                      </TableCell>
+                    </TableRow>
+
+                    {isScansOpen && (
+                      <TableRow key={`${key}-scans`}>
+                        <TableCell colSpan={9} className="bg-muted/20 py-2">
+                          <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px]">
+                            {e.scans.map((s) => (
+                              <span key={s.runId} className="font-mono">
+                                {fmtScanTime(s.screenedAt)}{" "}
+                                <span className={gradeClass(s.grade)}>{s.grade ?? "—"}</span>
+                                {s.screenedAt.slice(0, 10) >= e.earningsDate && (
+                                  <span className="ml-1 text-amber-400" title="Scanned on or after the print">
+                                    ⚠
+                                  </span>
+                                )}
+                              </span>
+                            ))}
+                          </div>
+                        </TableCell>
+                      </TableRow>
                     )}
-                  </button>
-                ))
-              )}
-              {filteredRuns.length > visible && (
-                <button
-                  type="button"
-                  onClick={() => setVisible((v) => v + PAGE_SIZE)}
-                  className="w-full rounded border border-border px-3 py-1.5 text-sm text-muted-foreground hover:bg-muted/20"
-                >
-                  Load {Math.min(PAGE_SIZE, filteredRuns.length - visible)} more (
-                  {filteredRuns.length - visible} older)
-                </button>
-              )}
-            </div>
-          </div>
 
-          {/* -------- Right panel: run detail -------- */}
-          <div className="min-w-0 flex-1">
-            {detailLoading ? (
-              <div className="flex items-center gap-2 py-10 text-muted-foreground">
-                <Loader2 className="h-4 w-4 animate-spin" /> Loading run…
-              </div>
-            ) : !detail ? (
-              <div className="rounded border border-border bg-background/40 p-6 text-base text-muted-foreground">
-                Select a run to view its candidates.
-              </div>
-            ) : (
-              <div className="space-y-3">
-                <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                  <span className="text-base font-semibold">
-                    {fmtRunTime(detail.screenedAt)}
-                  </span>
-                  <span className="text-sm text-muted-foreground">
-                    {detail.vix !== null ? `VIX ${Number(detail.vix).toFixed(1)}` : "VIX —"}
-                  </span>
-                  <span className="text-sm text-muted-foreground">
-                    {detail.candidates.length} candidate
-                    {detail.candidates.length === 1 ? "" : "s"}
-                    {detail.pass1Count !== null ? ` from ${detail.pass1Count} screened` : ""}
-                  </span>
-                  {!detail.graded && (
-                    <span className="rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[11px] text-amber-300">
-                      pre-analysis run
-                    </span>
-                  )}
-                </div>
-
-                {detail.candidates.length === 0 ? (
-                  <div className="rounded border border-border bg-background/40 p-6 text-base text-muted-foreground">
-                    This run produced no candidates.
-                  </div>
-                ) : (
-                  <div className="max-h-[600px] overflow-y-auto rounded border border-border">
-                    <Table>
-                      <TableHeader className="sticky top-0 z-10 bg-background">
-                        <TableRow>
-                          <TableHead>Symbol</TableHead>
-                          <TableHead>Grade</TableHead>
-                          <TableHead className="text-right">Price</TableHead>
-                          <TableHead className="text-right">EM%</TableHead>
-                          <TableHead>Crush</TableHead>
-                          <TableHead className="text-right">Strike</TableHead>
-                          <TableHead className="text-right">Premium</TableHead>
-                          <TableHead className="text-right">Yield</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {detail.candidates.map((c, i) => (
-                          <TableRow key={`${c.symbol}${i}`}>
-                            <TableCell className="font-mono font-semibold">
-                              {c.symbol}
-                            </TableCell>
-                            <TableCell className={`font-medium ${gradeClass(c.grade)}`}>
-                              {c.grade ?? "—"}
-                            </TableCell>
-                            <TableCell className="text-right">
-                              {c.price !== null ? `$${c.price.toFixed(2)}` : "—"}
-                            </TableCell>
-                            <TableCell className="text-right">
-                              {c.em_pct !== null ? `${(c.em_pct * 100).toFixed(1)}%` : "—"}
-                            </TableCell>
-                            <TableCell className={gradeClass(c.crush)}>
-                              {c.crush ?? "—"}
-                            </TableCell>
-                            <TableCell className="text-right">
-                              {c.strike !== null ? `$${c.strike}` : "—"}
-                            </TableCell>
-                            <TableCell className="text-right">
-                              {c.premium !== null ? `$${c.premium.toFixed(2)}` : "—"}
-                            </TableCell>
-                            <TableCell className="text-right">
-                              {c.yield_pct !== null ? `${c.yield_pct.toFixed(2)}%` : "—"}
-                            </TableCell>
-                          </TableRow>
-                        ))}
-                      </TableBody>
-                    </Table>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
+                    {isOpen && (
+                      <TableRow key={`${key}-detail`}>
+                        <TableCell colSpan={9} className="bg-muted/30">
+                          {e.drilldownCandidate ? (
+                            <>
+                              {e.gradeAtScanIsPostPrint && (
+                                <div className="mb-2 rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-300">
+                                  No scan exists before the print for this event — showing the nearest
+                                  available scan ({fmtScanTime(e.drilldownScreenedAt ?? "")}), which ran
+                                  on or after earnings_date and may reflect a post-print situation.
+                                </div>
+                              )}
+                              <ExpandedDetail
+                                r={e.drilldownCandidate as unknown as ScreenerResult}
+                                analyzing={false}
+                                onAnalyze={null}
+                                strikeOverride={null}
+                                onSelectStrike={() => {}}
+                                onResetStrike={() => {}}
+                                screenedAt={e.drilldownScreenedAt ? new Date(e.drilldownScreenedAt) : null}
+                              />
+                            </>
+                          ) : (
+                            <div className="p-4 text-sm text-muted-foreground">
+                              No scan data available for this event — it was never screened (e.g. a
+                              manually-tracked position).
+                            </div>
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </Fragment>
+                );
+              })}
+            </TableBody>
+          </Table>
         </div>
       )}
     </div>

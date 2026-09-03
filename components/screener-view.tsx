@@ -3362,7 +3362,13 @@ function FundamentalsBar({ symbol }: { symbol: string }) {
   );
 }
 
-function ExpandedDetail({
+// Exported for reuse by the Screener History page's per-event drill-down
+// (app/screener/history/page.tsx) — same detail view the live screener
+// shows, fed a stored candidate JSON from screener_results.candidates
+// instead of a live ScreenerResult. Interactive props (analyze, strike
+// override) are no-ops there; onAnalysisSaved/analysisIndex are omitted
+// the same way the sandbox tester call site already omits them.
+export function ExpandedDetail({
   r,
   analyzing,
   onAnalyze,
