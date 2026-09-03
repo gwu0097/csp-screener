@@ -90,6 +90,43 @@ const SETTLING_DELAY_DAYS = 7;
 // quota once a day.
 const VERIFY_BATCH_SIZE = 40;
 
+// One-time priority ordering for the 25 rows the 2026-09-02 early-capture
+// audit directly confirmed wrong against live Finnhub data (OKTA plus 24
+// others captured within 3 days of earnings_date, before Finnhub's own
+// labels had settled) — see EDGAR_EARNINGS_DATE_SPEC.md's companion
+// follow-up for the full list and methodology. The rest of the 713-row
+// verify backlog is unverified, not confirmed wrong, so these go first.
+// Self-cleaning: once a row here is re-verified, it drops out of the
+// verify candidate pool entirely (last_verified_at gets stamped), so
+// this set naturally becomes inert without needing removal.
+const PRIORITY_VERIFY_ROWS = new Set([
+  "OKTA|2026-08-26",
+  "ADSK|2026-08-27",
+  "AMAT|2026-08-13",
+  "CBRS|2026-08-12",
+  "CRWD|2026-08-26",
+  "DE|2026-08-20",
+  "FIGR|2026-08-13",
+  "GTLB|2026-09-01",
+  "HRL|2026-08-27",
+  "KEYS|2026-08-18",
+  "LGN|2026-08-13",
+  "NDSN|2026-08-19",
+  "NTAP|2026-09-02",
+  "NVDA|2026-08-26",
+  "RBRK|2026-08-27",
+  "TJX|2026-08-19",
+  "TOL|2026-08-18",
+  "VEEV|2026-08-26",
+  "WMT|2026-08-20",
+  "BOX|2026-08-25",
+  "HD|2026-08-18",
+  "LOW|2026-08-19",
+  "TGT|2026-08-19",
+  "ULTA|2026-08-27",
+  "WSM|2026-08-25",
+]);
+
 // Finnhub free-tier /stock/earnings returns the 4 most recent quarters
 // regardless of the requested window — a wide window here just ensures
 // the requested range doesn't itself exclude the row client-side.
@@ -243,17 +280,24 @@ export async function runEpsSweep(opts?: { dryRun?: boolean }): Promise<EpsSweep
       const res = await sb.from("earnings_history").select(verifyCols).in("id", chunk);
       if (!res.error) fetched.push(...((res.data ?? []) as VerifyRow[]));
     }
+    const isPriority = (r: RawRow) => PRIORITY_VERIFY_ROWS.has(`${r.symbol.toUpperCase()}|${r.earnings_date}`);
     verifyRows = fetched
       .filter((r) => {
         const resolvedAt = resolvedAtById.get(r.id);
         if (!resolvedAt) return false;
         return r.last_verified_at === null || r.last_verified_at < resolvedAt;
       })
-      // Oldest earnings_date first so the backlog drains in a stable,
+      // Priority rows first (see PRIORITY_VERIFY_ROWS), then oldest
+      // earnings_date so the rest of the backlog drains in a stable,
       // predictable order across runs instead of an arbitrary subset
       // each day (fetch order isn't guaranteed stable across the
       // chunked .in() calls above).
-      .sort((a, b) => (a.earnings_date < b.earnings_date ? -1 : a.earnings_date > b.earnings_date ? 1 : 0))
+      .sort((a, b) => {
+        const pa = isPriority(a) ? 0 : 1;
+        const pb = isPriority(b) ? 0 : 1;
+        if (pa !== pb) return pa - pb;
+        return a.earnings_date < b.earnings_date ? -1 : a.earnings_date > b.earnings_date ? 1 : 0;
+      })
       .slice(0, VERIFY_BATCH_SIZE);
   }
 
