@@ -36,7 +36,7 @@
 //      looked at this specific row — via earnings_capture_attempts,
 //      not by how old the row is. See RETRY_THROTTLE_DAYS below for why
 //      7, not the 45-60 days that bounds the EDGAR resolver itself.
-import { fetchFinnhubEarnings, pctChange } from "./encyclopedia";
+import { fetchFinnhubEarningsResult, pctChange } from "./encyclopedia";
 import { recordAncillaryAttempt, T1_RETRY_CUTOFF_DAYS } from "./earnings-capture-attempts";
 import { createServerClient } from "./supabase";
 
@@ -74,6 +74,21 @@ const RETRY_THROTTLE_DAYS = 7;
 // backlog-retry path that already re-attempts every RETRY_THROTTLE_DAYS,
 // rather than needing a second, independently-tuned cutoff.
 const SETTLING_DELAY_DAYS = 7;
+
+// Caps how many branch-3 (verify) rows one sweep run will attempt.
+// Finnhub's plan limit is 60 requests per rolling window (confirmed live
+// 2026-09-03 via the x-ratelimit-limit response header), shared across
+// EVERY Finnhub-dependent feature on this app, not just this sweep — a
+// 708-row backlog processed in one request blew straight through it and
+// the run silently logged ~700 rows as "no Finnhub data" when the real
+// cause was 429s. This isn't a pacing problem a shorter per-call delay
+// can fix inside one 60s serverless invocation (708 rows at even a
+// perfect 60/min pace is ~12 minutes); it's a batch-size problem. Capped
+// low enough to leave real headroom for T0/T1 and everything else
+// sharing the same key, so the backlog drains in batches over the
+// existing daily cron cadence instead of racing other features for
+// quota once a day.
+const VERIFY_BATCH_SIZE = 40;
 
 // Finnhub free-tier /stock/earnings returns the 4 most recent quarters
 // regardless of the requested window — a wide window here just ensures
@@ -228,11 +243,18 @@ export async function runEpsSweep(opts?: { dryRun?: boolean }): Promise<EpsSweep
       const res = await sb.from("earnings_history").select(verifyCols).in("id", chunk);
       if (!res.error) fetched.push(...((res.data ?? []) as VerifyRow[]));
     }
-    verifyRows = fetched.filter((r) => {
-      const resolvedAt = resolvedAtById.get(r.id);
-      if (!resolvedAt) return false;
-      return r.last_verified_at === null || r.last_verified_at < resolvedAt;
-    });
+    verifyRows = fetched
+      .filter((r) => {
+        const resolvedAt = resolvedAtById.get(r.id);
+        if (!resolvedAt) return false;
+        return r.last_verified_at === null || r.last_verified_at < resolvedAt;
+      })
+      // Oldest earnings_date first so the backlog drains in a stable,
+      // predictable order across runs instead of an arbitrary subset
+      // each day (fetch order isn't guaranteed stable across the
+      // chunked .in() calls above).
+      .sort((a, b) => (a.earnings_date < b.earnings_date ? -1 : a.earnings_date > b.earnings_date ? 1 : 0))
+      .slice(0, VERIFY_BATCH_SIZE);
   }
 
   const seenIds = new Set<string>();
@@ -283,12 +305,60 @@ export async function runEpsSweep(opts?: { dryRun?: boolean }): Promise<EpsSweep
       // all. A generous future bound here costs nothing: the exact-
       // match logic below is what actually gates correctness, not this
       // window.
-      const finnhubRows = await fetchFinnhubEarnings(
+      const finnhubResult = await fetchFinnhubEarningsResult(
         symbol,
         addDaysIso(today, -FINNHUB_LOOKBACK_DAYS),
         addDaysIso(today, 120),
       );
-      if (finnhubRows.length === 0) {
+
+      if (finnhubResult.status === "rate_limited") {
+        // Circuit breaker, not a per-row skip: every remaining candidate
+        // this run would hit the same 429 (the limit is account-wide,
+        // shared with T0/T1/screener/everything else on this key) —
+        // continuing would just burn the rest of the run logging
+        // identical failures. Stop now; nothing here was verified, so
+        // last_verified_at is untouched and every unprocessed row is
+        // eligible again on the next run.
+        report.skipped.push({ symbol, earnings_date: row.earnings_date, reason: "finnhub_rate_limited" });
+        if (!dryRun) {
+          await recordAncillaryAttempt({
+            earningsHistoryId: row.id,
+            symbol,
+            earningsDate: row.earnings_date,
+            phase: "eps-sweep",
+            outcome: "finnhub_rate_limited",
+          }).catch(() => {});
+        }
+        report.budget_exhausted = true;
+        break;
+      }
+      if (
+        finnhubResult.status === "network_error" ||
+        finnhubResult.status === "malformed" ||
+        finnhubResult.status === "http_error"
+      ) {
+        // Distinct from finnhub_empty: this is a failed check, not a
+        // completed one that found nothing. Goes to report.errors (not
+        // skipped) so it's visible, and does NOT stamp last_verified_at —
+        // retry on a later run rather than treating this as verified.
+        const message =
+          finnhubResult.status === "http_error"
+            ? `finnhub_${finnhubResult.status}_${finnhubResult.httpStatus}: ${finnhubResult.message}`
+            : `finnhub_${finnhubResult.status}: ${finnhubResult.message}`;
+        report.errors.push({ symbol, earnings_date: row.earnings_date, reason: message });
+        if (!dryRun) {
+          await recordAncillaryAttempt({
+            earningsHistoryId: row.id,
+            symbol,
+            earningsDate: row.earnings_date,
+            phase: "eps-sweep",
+            outcome: finnhubResult.status,
+            errorMessage: message,
+          }).catch(() => {});
+        }
+        continue;
+      }
+      if (finnhubResult.status === "empty") {
         report.skipped.push({ symbol, earnings_date: row.earnings_date, reason: "finnhub_empty" });
         if (!dryRun) {
           await recordAncillaryAttempt({
@@ -321,6 +391,7 @@ export async function runEpsSweep(opts?: { dryRun?: boolean }): Promise<EpsSweep
       // one is visibly incomplete and self-heals once fiscal_quarter is
       // backfilled (see the accompanying repair plan). When neither
       // identifier resolves, skip and log why rather than guess.
+      const finnhubRows = finnhubResult.rows;
       let match: (typeof finnhubRows)[number] | null = null;
       if (row.fiscal_quarter !== null && row.fiscal_year !== null) {
         match =

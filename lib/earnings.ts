@@ -108,6 +108,42 @@ function parseAndDedupeCalendarRows(rows: FinnhubCalendarEntry[]): EarningsCalen
   }));
 }
 
+// Typed so callers that need to react differently to different failure
+// modes can (e.g. eps-sweep's verify branch backing off on a rate limit
+// instead of treating it identically to a genuine empty result) — added
+// 2026-09-03 after a 708-row verification pass silently logged almost
+// every row as "no Finnhub data" when the real cause was 429s the old
+// finnhubGet couldn't distinguish from an empty response. See the
+// FinnhubEarningsResult type in lib/encyclopedia.ts for the caller side.
+export class FinnhubHttpError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly path: string,
+    bodySnippet: string,
+  ) {
+    super(`Finnhub ${path} failed: ${status} ${bodySnippet}`);
+    this.name = "FinnhubHttpError";
+  }
+}
+export class FinnhubRateLimitError extends FinnhubHttpError {
+  constructor(path: string, bodySnippet: string, public readonly retryAfterSeconds: number | null) {
+    super(429, path, bodySnippet);
+    this.name = "FinnhubRateLimitError";
+  }
+}
+export class FinnhubNetworkError extends Error {
+  constructor(path: string, cause: unknown) {
+    super(`Finnhub ${path} network error: ${cause instanceof Error ? cause.message : String(cause)}`);
+    this.name = "FinnhubNetworkError";
+  }
+}
+export class FinnhubParseError extends Error {
+  constructor(path: string, cause: unknown) {
+    super(`Finnhub ${path} returned malformed JSON: ${cause instanceof Error ? cause.message : String(cause)}`);
+    this.name = "FinnhubParseError";
+  }
+}
+
 export async function finnhubGet<T>(path: string, params: Record<string, string | number | undefined> = {}): Promise<T> {
   if (!FINNHUB_KEY) throw new Error("FINNHUB_API_KEY is not set");
   const url = new URL(`${FINNHUB_BASE}${path}`);
@@ -117,13 +153,31 @@ export async function finnhubGet<T>(path: string, params: Record<string, string 
   }
   url.searchParams.set("token", FINNHUB_KEY);
 
-  const res = await fetch(url.toString(), { cache: "no-store" });
+  let res: Response;
+  try {
+    res = await fetch(url.toString(), { cache: "no-store" });
+  } catch (e) {
+    console.error(`[finnhub] ${path} network error: ${e instanceof Error ? e.message : e}`);
+    throw new FinnhubNetworkError(path, e);
+  }
+
   if (!res.ok) {
     const text = await res.text();
     console.error(`[finnhub] ${path} HTTP ${res.status}: ${text.slice(0, 200)}`);
-    throw new Error(`Finnhub ${path} failed: ${res.status} ${text}`);
+    if (res.status === 429) {
+      const retryAfterHeader = res.headers.get("retry-after");
+      const parsed = retryAfterHeader ? Number(retryAfterHeader) : NaN;
+      throw new FinnhubRateLimitError(path, text.slice(0, 200), Number.isFinite(parsed) ? parsed : null);
+    }
+    throw new FinnhubHttpError(res.status, path, text.slice(0, 200));
   }
-  return (await res.json()) as T;
+
+  try {
+    return (await res.json()) as T;
+  } catch (e) {
+    console.error(`[finnhub] ${path} malformed JSON: ${e instanceof Error ? e.message : e}`);
+    throw new FinnhubParseError(path, e);
+  }
 }
 
 // Shared response cache for Finnhub endpoints that are effectively

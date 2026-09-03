@@ -18,7 +18,14 @@
 //     screener has actually watched a position through earnings.
 //   - sector_performance_pct, analyst_sentiment, news_summary (Phase 2).
 import { createServerClient } from "@/lib/supabase";
-import { finnhubGet, getTodayEarnings } from "@/lib/earnings";
+import {
+  finnhubGet,
+  getTodayEarnings,
+  FinnhubRateLimitError,
+  FinnhubNetworkError,
+  FinnhubParseError,
+  FinnhubHttpError,
+} from "@/lib/earnings";
 import { getHistoricalPrices } from "@/lib/yahoo";
 import {
   getOptionsChain,
@@ -235,11 +242,25 @@ export async function getMissingEarningsDates(
 
 // ---------- Finnhub earnings ingestion ----------
 
-export async function fetchFinnhubEarnings(
+// Discriminated result for callers that need to react differently to
+// *why* there are no rows — a 429 means "back off, this symbol isn't
+// actually empty," a genuine empty response means "confirmed, safe to
+// treat as no data." fetchFinnhubEarnings (below) collapses all of these
+// to [] for existing callers that only ever cared about the row list;
+// new callers (lib/eps-sweep.ts's verify branch) use this directly.
+export type FinnhubEarningsResult =
+  | { status: "ok"; rows: FinnhubEarningsRow[] }
+  | { status: "empty" } // well-formed response, genuinely zero matching rows
+  | { status: "rate_limited"; retryAfterSeconds: number | null }
+  | { status: "network_error"; message: string }
+  | { status: "malformed"; message: string }
+  | { status: "http_error"; httpStatus: number; message: string };
+
+export async function fetchFinnhubEarningsResult(
   symbol: string,
   from: string,
   to: string,
-): Promise<FinnhubEarningsRow[]> {
+): Promise<FinnhubEarningsResult> {
   const sym = symbol.toUpperCase();
   try {
     // Finnhub free-tier /stock/earnings returns the 4 most recent quarters
@@ -252,15 +273,42 @@ export async function fetchFinnhubEarnings(
       to,
     });
     await sleep(FINNHUB_RATE_DELAY_MS);
-    return Array.isArray(rows)
+    const filtered = Array.isArray(rows)
       ? rows.filter((r) => typeof r.period === "string" && r.period >= from && r.period <= to)
       : [];
+    return filtered.length > 0 ? { status: "ok", rows: filtered } : { status: "empty" };
   } catch (e) {
+    if (e instanceof FinnhubRateLimitError) {
+      return { status: "rate_limited", retryAfterSeconds: e.retryAfterSeconds };
+    }
+    if (e instanceof FinnhubNetworkError) {
+      return { status: "network_error", message: e.message };
+    }
+    if (e instanceof FinnhubParseError) {
+      return { status: "malformed", message: e.message };
+    }
+    if (e instanceof FinnhubHttpError) {
+      return { status: "http_error", httpStatus: e.status, message: e.message };
+    }
     console.warn(
       `[encyclopedia] Finnhub /stock/earnings(${sym}, ${from}..${to}) failed: ${e instanceof Error ? e.message : e}`,
     );
-    return [];
+    return { status: "network_error", message: e instanceof Error ? e.message : String(e) };
   }
+}
+
+// Back-compat wrapper — collapses every non-"ok" outcome to [], exactly
+// the prior behavior, so updateEncyclopedia and other existing callers
+// that only ever consumed the row array don't need to change. Prefer
+// fetchFinnhubEarningsResult for any new caller that needs to tell a
+// rate limit apart from a genuine empty result.
+export async function fetchFinnhubEarnings(
+  symbol: string,
+  from: string,
+  to: string,
+): Promise<FinnhubEarningsRow[]> {
+  const result = await fetchFinnhubEarningsResult(symbol, from, to);
+  return result.status === "ok" ? result.rows : [];
 }
 
 // ---------- Yahoo price action ----------
