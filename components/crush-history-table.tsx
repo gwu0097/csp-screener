@@ -743,7 +743,32 @@ export function CrushHistoryTable({
       cursor = previousQuarter(cursor);
     }
   }
-  const pinnedEm = todayEmPct ?? upcoming?.impliedMovePct ?? null;
+  // Stored T0 baseline takes priority once it exists: it's the pinned
+  // pre-event implied move, captured ahead of the print specifically so
+  // it can't be contaminated by the reaction. todayEmPct is a LIVE
+  // stage-3 straddle read off whatever the chain looks like right now —
+  // for an already-reported name that's post-crush, not a second
+  // opinion on the baseline. Falls back to the live read only when this
+  // row hasn't been T0-captured yet (upcoming.impliedMovePct is null),
+  // which is the one case where the live read is all there is. Found
+  // live 2026-09-03: CIEN's pinned row showed a 3.4% live post-crush
+  // read (todayEmPct) instead of its 11.4% T0 baseline, and the
+  // similar-EM footer inherited the same wrong number — see the divergence
+  // note below for why the fix doesn't just silently prefer one value.
+  const pinnedEm = upcoming?.impliedMovePct ?? todayEmPct ?? null;
+  // A stored baseline exists AND the live chain currently reads
+  // meaningfully differently — exactly the crush this table exists to
+  // surface. Deliberately not folded into pinnedEm's fallback chain:
+  // overwriting the pinned value with whatever the chain reads today
+  // would make the crush invisible instead of visible. Same ±2pp
+  // tolerance as the similar-EM matcher, for the same reason (a couple
+  // points is noise; more than that is signal).
+  const liveVsStoredDivergence =
+    upcoming?.impliedMovePct != null &&
+    todayEmPct !== null &&
+    Math.abs(todayEmPct - upcoming.impliedMovePct) > SIMILAR_EM_TOLERANCE
+      ? { stored: upcoming.impliedMovePct, live: todayEmPct }
+      : null;
   const pinnedActual = upcoming?.actualMovePct ?? null;
   const pinnedRatio = upcoming?.ratio ?? null;
   const pinnedGrade = upcoming?.grade ?? null;
@@ -1102,11 +1127,14 @@ export function CrushHistoryTable({
     setPendingResolve(null);
   }
 
+  // pinnedEm, not todayEmPct — the footer must compare against the same
+  // value the pinned row displays (see pinnedEm above), or the two can
+  // disagree about which quarters are "similar" to what's on screen.
   const similar: CrushHistoryEvent[] = [];
-  if (todayEmPct !== null) {
+  if (pinnedEm !== null) {
     for (const e of sorted) {
       if (e.impliedMovePct === null) continue;
-      if (Math.abs(e.impliedMovePct - todayEmPct) <= SIMILAR_EM_TOLERANCE) {
+      if (Math.abs(e.impliedMovePct - pinnedEm) <= SIMILAR_EM_TOLERANCE) {
         similar.push(e);
       }
     }
@@ -1275,6 +1303,20 @@ export function CrushHistoryTable({
               </td>
               <td className="px-2 py-1 text-right font-mono text-amber-200">
                 {fmtPct(pinnedEm)}
+                {liveVsStoredDivergence && (
+                  <TooltipProvider delayDuration={200}>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <span className="ml-1 cursor-help text-amber-400">⚠</span>
+                      </TooltipTrigger>
+                      <TooltipContent className="max-w-xs text-sm">
+                        Showing the pinned pre-event baseline ({fmtPct(liveVsStoredDivergence.stored)}). The
+                        live chain currently reads {fmtPct(liveVsStoredDivergence.live)} — likely the
+                        post-earnings reaction, not a correction to the baseline.
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                )}
               </td>
               <td
                 className={`px-2 py-1 text-right font-mono ${pinnedActual === null ? "text-muted-foreground" : signedPctCls(pinnedActual)}`}
@@ -1304,9 +1346,9 @@ export function CrushHistoryTable({
             )}
             {displayRows.map((e) => {
               const isSimilar =
-                todayEmPct !== null &&
+                pinnedEm !== null &&
                 e.impliedMovePct !== null &&
-                Math.abs(e.impliedMovePct - todayEmPct) <= SIMILAR_EM_TOLERANCE;
+                Math.abs(e.impliedMovePct - pinnedEm) <= SIMILAR_EM_TOLERANCE;
               const isF = e.grade === "F";
               const isManual = e.impliedMoveSource === "manual";
               const isPlaceholder = placeholderDates.has(e.earningsDate);
@@ -1630,12 +1672,12 @@ export function CrushHistoryTable({
 
       {/* Summary line */}
       <div className="mt-2 text-[11px] text-muted-foreground">
-        {todayEmPct === null ? (
+        {pinnedEm === null ? (
           <span>No live EM available — similar-EM comparisons disabled.</span>
         ) : similar.length === 0 ? (
           <span>
             No prior quarters within ±2pp of today&apos;s implied move
-            ({fmtPct(todayEmPct)}). Run the backfill to fill historical EM.
+            ({fmtPct(pinnedEm)}). Run the backfill to fill historical EM.
           </span>
         ) : (
           <span>

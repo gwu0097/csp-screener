@@ -2619,6 +2619,29 @@ export async function buildMaintenanceSymbolSets(): Promise<{
 // separately dropped Finnhub's real timing on the floor, leaving rows
 // (BMO included) tagged timing="unknown". lib/earnings-capture.ts
 // re-exports both for its own use and for existing importers.
+//
+// KNOWN GAP, not fixed here (documented 2026-09-03, found via a CIEN
+// display-bug investigation, not this gap itself): T0 fires once daily
+// at 15:45 ET (captureEarningsT0's own comment: "the canonical moment"),
+// which is before the print for an AMC reporter but hours AFTER it for
+// a BMO reporter announcing that same day. Neither this function nor
+// captureEarningsT0 excludes a same-day BMO candidate — `timing` is
+// carried through and stored, never used as a skip condition. The only
+// protection today is incidental: the today+tomorrow window below lets
+// a BMO name get captured a day early if it's already known to the
+// system by then, and captureEarningsT0's `iv_before !== null` gate
+// then blocks the same-day 15:45 ET run from overwriting that early
+// capture with a post-crush read. If the day-early capture is missed
+// (date not yet known, Schwab down that day, etc.), nothing stops the
+// same-day run from silently recording post-crush IV as the pre-event
+// baseline. A live scan of all 219 schwab_t0 rows against each symbol's
+// own historical median found no confirmed instance of this — but that
+// scan can't distinguish "never happened" from "happened, and nothing
+// records which expiry/timestamp was used to catch it" (implied_move_expiry
+// is null on all 219). A timing-keyed guard (skip if timing==="bmo" and
+// earnings_date===today) would not have caught the CIEN case that
+// prompted this note — Source 2 rows carry timing="unknown", not a real
+// BMO/AMC read, so a guard keyed on that field is incomplete by itself.
 export type T0Candidate = { symbol: string; earnings_date: string; timing: "amc" | "bmo" | "unknown" };
 
 // Pure selection — no Schwab calls, safe to call from anywhere (including
