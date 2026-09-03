@@ -34,7 +34,10 @@ import {
 import { ExpandedDetail } from "@/components/screener-view";
 import type { ScreenerResult } from "@/lib/screener";
 
-type EventScan = { runId: string; screenedAt: string; grade: string | null };
+type ScanVerdict = "pre" | "post" | "unknown";
+type EventScan = { runId: string; screenedAt: string; grade: string | null; verdict: ScanVerdict };
+
+type GradeAtScanStatus = "resolved" | "post_print_only" | "timing_unknown" | "not_scanned";
 
 type EventRow = {
   eventId: string;
@@ -45,10 +48,12 @@ type EventRow = {
   actualMovePct: number | null;
   ratio: number | null;
   gradeAtScan: string | null;
-  // True when gradeAtScan is null but a scan DOES exist for this event
-  // — i.e. every scan we have happened on/after the print, so there is
-  // no clean pre-event grade at all, not just a missing one.
-  gradeAtScanIsPostPrint: boolean;
+  // "resolved": gradeAtScan is a real pre-event read. "post_print_only":
+  // every scan is confirmed post-event (session-aware). "timing_unknown":
+  // a same-day scan exists but this row's own BMO/AMC timing isn't known,
+  // so it can't be classified either way — not the same as confirmed
+  // post-print. "not_scanned": zero scans at all.
+  gradeAtScanStatus: GradeAtScanStatus;
   hasPosition: boolean;
   scans: EventScan[];
   drilldownCandidate: Record<string, unknown> | null;
@@ -60,6 +65,12 @@ function todayIso(): string {
 }
 function daysAgoIso(days: number): string {
   return new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
+}
+
+function gradeAtScanLabel(status: GradeAtScanStatus): string {
+  if (status === "post_print_only") return "post-print only";
+  if (status === "timing_unknown") return "timing unknown";
+  return "not scanned";
 }
 
 function gradeClass(g: string | null): string {
@@ -333,7 +344,7 @@ export default function ScreenerHistoryPage() {
                                 {e.timing ?? "unknown"}
                               </TableCell>
                               <TableCell className={gradeClass(e.gradeAtScan)}>
-                                {e.gradeAtScan ?? (e.gradeAtScanIsPostPrint ? "post-print only" : "not scanned")}
+                                {e.gradeAtScan ?? gradeAtScanLabel(e.gradeAtScanStatus)}
                               </TableCell>
                               <TableCell className="text-right font-mono">
                                 {emState(e.impliedMovePct, e.earningsDate, today)}
@@ -376,12 +387,17 @@ export default function ScreenerHistoryPage() {
                                       <span key={s.runId} className="font-mono">
                                         {fmtScanTime(s.screenedAt)}{" "}
                                         <span className={gradeClass(s.grade)}>{s.grade ?? "—"}</span>
-                                        {s.screenedAt.slice(0, 10) >= e.earningsDate && (
-                                          <span
-                                            className="ml-1 text-amber-400"
-                                            title="Scanned on or after the print"
-                                          >
+                                        {s.verdict === "post" && (
+                                          <span className="ml-1 text-amber-400" title="Confirmed post-event scan">
                                             ⚠
+                                          </span>
+                                        )}
+                                        {s.verdict === "unknown" && (
+                                          <span
+                                            className="ml-1 text-sky-400"
+                                            title="Same-day scan, session (BMO/AMC) unknown — can't classify"
+                                          >
+                                            ?
                                           </span>
                                         )}
                                       </span>
@@ -396,12 +412,21 @@ export default function ScreenerHistoryPage() {
                                 <TableCell colSpan={COLSPAN} className="bg-muted/30">
                                   {e.drilldownCandidate ? (
                                     <>
-                                      {e.gradeAtScanIsPostPrint && (
+                                      {e.gradeAtScanStatus === "post_print_only" && (
                                         <div className="mb-2 rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-300">
-                                          No scan exists before the print for this event — showing the
-                                          nearest available scan ({fmtScanTime(e.drilldownScreenedAt ?? "")}
-                                          ), which ran on or after earnings_date and may reflect a
+                                          No pre-event scan exists for this event — showing the nearest
+                                          available scan ({fmtScanTime(e.drilldownScreenedAt ?? "")}),
+                                          confirmed to have run after the print and may reflect a
                                           post-print situation.
+                                        </div>
+                                      )}
+                                      {e.gradeAtScanStatus === "timing_unknown" && (
+                                        <div className="mb-2 rounded border border-sky-500/40 bg-sky-500/10 px-2 py-1 text-[11px] text-sky-300">
+                                          This event&apos;s BMO/AMC timing isn&apos;t known, and its only
+                                          scan ran the same day as the print — showing it (
+                                          {fmtScanTime(e.drilldownScreenedAt ?? "")}), but whether it&apos;s
+                                          pre- or post-event can&apos;t be determined without the real
+                                          session.
                                         </div>
                                       )}
                                       <ExpandedDetail
