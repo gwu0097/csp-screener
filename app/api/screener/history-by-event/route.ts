@@ -70,14 +70,27 @@ export async function GET(req: NextRequest) {
   const defaultFrom = new Date(Date.now() - 7 * 86_400_000).toISOString().slice(0, 10);
   const from = req.nextUrl.searchParams.get("from") || defaultFrom;
   const to = req.nextUrl.searchParams.get("to") || today;
+  const symbolParam = req.nextUrl.searchParams.get("symbol");
 
   const sb = createServerClient();
 
-  const ehRes = await sb
-    .from("earnings_history")
-    .select("id,symbol,earnings_date,timing,implied_move_pct,actual_move_pct")
-    .gte("earnings_date", from)
-    .lte("earnings_date", to);
+  // A ticker search must reach the whole history, not just whatever
+  // date range happens to be selected — the date pickers and search are
+  // two independent ways to scope the same table, not one filtering the
+  // other. Exact symbol match only: the shared Supabase wrapper has no
+  // ilike/substring filter (see lib/supabase.ts), and a personal app
+  // with a handful of thousand earnings_history rows doesn't need one —
+  // the user types a real ticker, not a fragment.
+  const ehRes = symbolParam
+    ? await sb
+        .from("earnings_history")
+        .select("id,symbol,earnings_date,timing,implied_move_pct,actual_move_pct")
+        .eq("symbol", symbolParam.toUpperCase())
+    : await sb
+        .from("earnings_history")
+        .select("id,symbol,earnings_date,timing,implied_move_pct,actual_move_pct")
+        .gte("earnings_date", from)
+        .lte("earnings_date", to);
   if (ehRes.error) {
     return NextResponse.json({ error: ehRes.error.message }, { status: 500 });
   }
