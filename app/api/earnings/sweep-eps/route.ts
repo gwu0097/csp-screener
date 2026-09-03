@@ -19,12 +19,18 @@ export const maxDuration = 60;
 // fetchImpliedMove).
 //
 // Auth: Authorization: Bearer $CRON_SECRET (same gate as capture-t0/t1).
-// Query: ?dryRun=1 computes and returns everything without writing.
+// Query: ?dryRun=1 (or "true") computes and returns everything without
+// writing. A safety flag that silently no-ops on anything but one exact
+// string is worse than no flag — confirmed live 2026-09-02, a manual
+// ?dryRun=true call fell through to a real (harmless, in that case) run
+// because only "1" was recognized. Accept the common truthy spellings
+// instead of one literal.
 export async function POST(req: NextRequest) {
   const denied = requireCronSecret(req);
   if (denied) return denied;
 
-  const dryRun = req.nextUrl.searchParams.get("dryRun") === "1";
+  const dryRunParam = (req.nextUrl.searchParams.get("dryRun") ?? "").toLowerCase();
+  const dryRun = dryRunParam === "1" || dryRunParam === "true";
   const report = await runEpsSweep({ dryRun });
   console.log(
     `[sweep-eps] ok=${report.ok} dryRun=${report.dryRun} candidates=${report.candidates} captured=${report.captured.length} skipped=${report.skipped.length} errors=${report.errors.length} budget_exhausted=${report.budget_exhausted}`,

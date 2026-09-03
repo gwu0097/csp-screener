@@ -174,13 +174,79 @@ export async function runEpsSweep(opts?: { dryRun?: boolean }): Promise<EpsSweep
     backlogRows = backlogCandidates.filter((r) => !recentlyAttempted.has(r.id));
   }
 
-  const rows = ([...((recentRes.data ?? []) as RawRow[]), ...backlogRows]).filter(
+  // Branch 3: verify — rows the EDGAR fiscal-period resolver actually
+  // corrected (a logged edgar-fiscal-period "resolved" attempt), not
+  // "any row with fiscal_quarter set." Most rows with fiscal_quarter
+  // already came from ordinary ingestion, long before that resolver
+  // existed, and were never touched by it — re-verifying all of those
+  // would be a much larger, unrelated job (confirmed live 2026-09-02:
+  // ~2,675 rows have fiscal_quarter set vs. 713 the resolver actually
+  // corrected). Unlike branches 1/2, this is NOT gated on
+  // eps_surprise_pct at all — the whole point is to reach rows that
+  // already hold a value, right or wrong, written before fiscal_quarter
+  // was corrected. eps_surprise_pct IS NULL can never see those again
+  // once any value lands there (confirmed live: 518 of the 713 corrected
+  // rows have zero eps-sweep attempts logged, frozen on pre-correction
+  // data indefinitely — see last_verified_at's column comment). The real
+  // gate here is last_verified_at: never verified under this regime, or
+  // verified before this row's own fiscal-period correction landed (the
+  // second case has zero matches today since the column is new, but
+  // matters the next time a row's fiscal_quarter is corrected after an
+  // earlier verification).
+  type VerifyRow = RawRow & { last_verified_at: string | null };
+  const resolvedAtById = new Map<string, string>();
+  {
+    let cursor = "";
+    while (true) {
+      let q = sb
+        .from("earnings_capture_attempts")
+        .select("earnings_history_id,attempted_at")
+        .eq("capture_phase", "edgar-fiscal-period")
+        .eq("outcome", "resolved")
+        .order("earnings_history_id", { ascending: true })
+        .limit(500);
+      if (cursor) q = q.gt("earnings_history_id", cursor);
+      const res = await q;
+      if (res.error) break;
+      const page = (res.data ?? []) as Array<{ earnings_history_id: string; attempted_at: string }>;
+      for (const a of page) {
+        const prev = resolvedAtById.get(a.earnings_history_id);
+        if (!prev || a.attempted_at > prev) resolvedAtById.set(a.earnings_history_id, a.attempted_at);
+      }
+      if (page.length < 500) break;
+      cursor = page[page.length - 1].earnings_history_id;
+    }
+  }
+  let verifyRows: RawRow[] = [];
+  if (resolvedAtById.size > 0) {
+    const resolvedIds = Array.from(resolvedAtById.keys());
+    const verifyCols = cols + ",last_verified_at";
+    const fetched: VerifyRow[] = [];
+    const CHUNK = 200;
+    for (let i = 0; i < resolvedIds.length; i += CHUNK) {
+      const chunk = resolvedIds.slice(i, i + CHUNK);
+      const res = await sb.from("earnings_history").select(verifyCols).in("id", chunk);
+      if (!res.error) fetched.push(...((res.data ?? []) as VerifyRow[]));
+    }
+    verifyRows = fetched.filter((r) => {
+      const resolvedAt = resolvedAtById.get(r.id);
+      if (!resolvedAt) return false;
+      return r.last_verified_at === null || r.last_verified_at < resolvedAt;
+    });
+  }
+
+  const seenIds = new Set<string>();
+  const rows: RawRow[] = [];
+  for (const r of [...((recentRes.data ?? []) as RawRow[]), ...backlogRows, ...verifyRows]) {
     // Manual-row guard: 'manual' means "hands off this row from any
     // automated writer" everywhere else in this pipeline (T0/T1 both
     // skip the whole row, not just the implied-move field) — same rule
     // applied here for consistency, not just for the EM field.
-    (r) => r.implied_move_source !== "manual",
-  );
+    if (r.implied_move_source === "manual") continue;
+    if (seenIds.has(r.id)) continue;
+    seenIds.add(r.id);
+    rows.push(r);
+  }
   report.candidates = rows.length;
 
   for (const row of rows) {
@@ -279,6 +345,19 @@ export async function runEpsSweep(opts?: { dryRun?: boolean }): Promise<EpsSweep
             phase: "eps-sweep",
             outcome: reason,
           }).catch(() => {});
+          // no_period_match means Finnhub DID have data and we DID check
+          // it against this row's fiscal identifiers — a completed
+          // verification, just not a match. Stamp last_verified_at so
+          // branch 3 doesn't re-check it on every run until fiscal_quarter
+          // changes again. no_fiscal_identifiers gets no stamp: there was
+          // nothing to check yet, not a completed verification.
+          if (reason === "no_period_match") {
+            const upd = await sb
+              .from("earnings_history")
+              .update({ last_verified_at: new Date().toISOString() })
+              .eq("id", row.id);
+            if (upd.error) throw new Error(upd.error.message);
+          }
         }
         continue;
       }
@@ -291,6 +370,7 @@ export async function runEpsSweep(opts?: { dryRun?: boolean }): Promise<EpsSweep
             eps_estimate: match.estimate,
             eps_actual: match.actual,
             eps_surprise_pct,
+            last_verified_at: new Date().toISOString(),
           })
           .eq("id", row.id);
         if (upd.error) throw new Error(upd.error.message);
