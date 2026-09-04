@@ -60,13 +60,16 @@ export async function POST(req: NextRequest) {
     console.log(
       `[robinhood-account-poll] ok=${report.ok} ${report.broker}: seen=${report.ordersSeen} executions=${report.executionsSeen} landed=${report.executionsLanded} trades=${report.tradesSubmitted} skipped=${report.skipped} errors=${report.errors.length}`,
     );
-    const alertSent = source === "courier" ? null : await postOutcomeAlert(source, report);
-    return NextResponse.json({ ok: report.ok, report, alertSent });
+    const alert = source === "courier" ? null : await postOutcomeAlert(source, report);
+    return NextResponse.json({ ok: report.ok, report, alertSent: alert?.ok ?? null, alertError: alert?.error ?? null });
   } catch (e) {
     const msg = e instanceof Error ? e.message : "unknown";
     console.error("[robinhood-account-poll] fatal:", msg);
-    const alertSent = source === "courier" ? null : await postOutcomeAlert(source, null, msg);
-    return NextResponse.json({ ok: false, error: msg, alertSent }, { status: 500 });
+    const alert = source === "courier" ? null : await postOutcomeAlert(source, null, msg);
+    return NextResponse.json(
+      { ok: false, error: msg, alertSent: alert?.ok ?? null, alertError: alert?.error ?? null },
+      { status: 500 },
+    );
   }
 }
 
@@ -86,13 +89,12 @@ async function postOutcomeAlert(
   source: string,
   report: RobinhoodPollReport | null,
   fatalError?: string,
-): Promise<boolean> {
+): Promise<{ ok: boolean; error?: string }> {
   const { sendDiscordAlert } = await import("@/lib/discord-alert");
   const via = source === "manual" ? "manually" : `via ${source}`;
 
   if (!report) {
-    const res = await sendDiscordAlert(`🔴 Robinhood fills import ${via} failed: ${fatalError ?? "unknown error"}`);
-    return res.ok;
+    return sendDiscordAlert(`🔴 Robinhood fills import ${via} failed: ${fatalError ?? "unknown error"}`);
   }
 
   const severity = classifySeverity(report.errors);
@@ -101,16 +103,13 @@ async function postOutcomeAlert(
       report.tradesSubmitted > 0
         ? `🟢 Robinhood fills imported ${via} — ${report.tradesSubmitted} fill${report.tradesSubmitted === 1 ? "" : "s"}.`
         : `🟢 Robinhood poll ${via} — no new fills.`;
-    const res = await sendDiscordAlert(msg, { mention: false });
-    return res.ok;
+    return sendDiscordAlert(msg, { mention: false });
   }
   if (severity === "warning") {
-    const res = await sendDiscordAlert(
+    return sendDiscordAlert(
       `🟡 Robinhood poll ${via}: ${report.errors.length} trade(s) couldn't auto-import — not part of a tracked position. Review and Dismiss in the activity panel.\n${report.errors.join("; ")}`,
       { mention: false },
     );
-    return res.ok;
   }
-  const res = await sendDiscordAlert(`🔴 Robinhood poll ${via} failed: ${report.errors.join("; ")}`);
-  return res.ok;
+  return sendDiscordAlert(`🔴 Robinhood poll ${via} failed: ${report.errors.join("; ")}`);
 }
