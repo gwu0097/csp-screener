@@ -21,6 +21,7 @@ import { UndoImportPopover } from "@/components/undo-import-popover";
 import type { ConfirmItem } from "@/components/expire-confirmation-modal";
 import { BROKER_ORDER, BROKER_LABEL } from "@/lib/brokers";
 import { SchwabTokenBanner } from "@/components/schwab-token-banner";
+import { CourierStatusLine } from "@/components/courier-status-line";
 import {
   SchwabActivityPanel,
   type ActivityItem,
@@ -1528,6 +1529,7 @@ export function PositionsView() {
       )}
 
       <SchwabTokenBanner />
+      <CourierStatusLine />
       <SchwabActivityPanel
         onImport={handleImportFromUnresolved}
         onImportAll={handleImportAllFromUnresolved}

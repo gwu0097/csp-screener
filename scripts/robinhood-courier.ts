@@ -56,6 +56,7 @@ function elapsedSeconds(): string {
 
 const CLAUDE_BIN = "/Users/raitsai/.local/bin/claude";
 const POLL_URL = "https://csp-screener.vercel.app/api/robinhood-account/poll-transactions";
+const ATTEMPT_URL = "https://csp-screener.vercel.app/api/robinhood-account/poll-attempt";
 // 7-day rolling lookback, not a strict cursor — an order created days
 // ago can still fill today, and idempotency is entirely execution_id
 // dedup on the server, so overlap is intentional. See
@@ -66,7 +67,30 @@ const STATE_DIR = resolve(homedir(), "Library/Application Support/csp-screener")
 const STATE_PATH = resolve(STATE_DIR, "robinhood-courier-state.json");
 
 type Severity = "ok" | "warning" | "failed";
-type State = { lastStatus: Severity | "unknown"; checkedAt: string; detail?: string };
+type State = {
+  lastStatus: Severity | "unknown";
+  checkedAt: string;
+  detail?: string;
+  // Runs of consecutive failed statuses, reset to 0 on anything else.
+  // Lets a persisting failure keep alerting (with the count) instead of
+  // going silent after the first ping — see fail() below.
+  consecutiveFailures?: number;
+};
+
+function ordinal(n: number): string {
+  const rem100 = n % 100;
+  if (rem100 >= 11 && rem100 <= 13) return `${n}th`;
+  switch (n % 10) {
+    case 1:
+      return `${n}st`;
+    case 2:
+      return `${n}nd`;
+    case 3:
+      return `${n}rd`;
+    default:
+      return `${n}th`;
+  }
+}
 
 function readState(): State {
   try {
@@ -156,12 +180,54 @@ async function main() {
   // isolated spikes). Written into the console line, not the state
   // file — state only ever holds the latest run, and a trend needs the
   // append-only log history.
-  async function fail(detail: string): Promise<void> {
+  // POSTs a bare failure record for runs that never reach POLL_URL at
+  // all (the headless `claude -p` call itself hanging/failing, JSON
+  // extraction failing, a missing account number) — those failure
+  // modes previously left zero trace in the database, only this
+  // script's local state file. Best-effort: a broken attempt-log call
+  // must never mask the original failure or throw out of fail().
+  async function logLocalAttempt(detail: string): Promise<void> {
+    try {
+      await fetch(ATTEMPT_URL, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${process.env.CRON_SECRET ?? ""}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          accountNumber: process.env.ROBINHOOD_ACCOUNT_NUMBER ?? null,
+          detail,
+          startedAt: new Date(SCRIPT_STARTED_AT).toISOString(),
+        }),
+      });
+    } catch {
+      // best-effort — don't let attempt-logging itself break the courier
+    }
+  }
+
+  // reachedServer=true for failures where POLL_URL already returned a
+  // response — those runs already have a real row from the deployed
+  // route's own insert (lib/robinhood-account-import.ts), so logging
+  // here again would just duplicate it.
+  async function fail(detail: string, opts?: { reachedServer?: boolean }): Promise<void> {
     console.error(`[robinhood-courier] duration=${elapsedSeconds()}s ${detail}`);
+    const consecutiveFailures = (prev.lastStatus === "failed" ? (prev.consecutiveFailures ?? 1) : 0) + 1;
     if (prev.lastStatus !== "failed") {
       await sendDiscordAlert(`🔴 Robinhood courier failing: ${detail}`);
+    } else {
+      // Dedup on the ok/warning/failed TRANSITION is right for avoiding
+      // spam, but total silence on a failure that just keeps persisting
+      // is not — see the 2026-09-04 incident where an 11:07am alert
+      // never recovered, so a 1:05pm failure sent nothing and Discord
+      // couldn't distinguish "still failing" from "never fired."
+      await sendDiscordAlert(
+        `🔴 Robinhood courier still failing (${ordinal(consecutiveFailures)} consecutive run): ${detail}`,
+      );
     }
-    writeState({ lastStatus: "failed", checkedAt: nowIso, detail });
+    if (!opts?.reachedServer) {
+      await logLocalAttempt(detail);
+    }
+    writeState({ lastStatus: "failed", checkedAt: nowIso, detail, consecutiveFailures });
     process.exitCode = 1;
   }
   async function warn(detail: string, count: number): Promise<void> {
@@ -172,7 +238,7 @@ async function main() {
         { mention: false },
       );
     }
-    writeState({ lastStatus: "warning", checkedAt: nowIso, detail });
+    writeState({ lastStatus: "warning", checkedAt: nowIso, detail, consecutiveFailures: 0 });
     // Not a script failure — the poll itself ran fine; exit code stays 0.
   }
   async function succeed(summary: string): Promise<void> {
@@ -180,7 +246,7 @@ async function main() {
     if (prev.lastStatus === "failed" || prev.lastStatus === "warning") {
       await sendDiscordAlert("🟢 Robinhood courier recovered — back to normal.", { mention: false });
     }
-    writeState({ lastStatus: "ok", checkedAt: nowIso });
+    writeState({ lastStatus: "ok", checkedAt: nowIso, consecutiveFailures: 0 });
   }
 
   // No hardcoded default — this repo is public and a Robinhood account
@@ -282,7 +348,7 @@ async function main() {
   // classified, regardless of what the body says.
   if (!res.ok) {
     const detail = json.error ?? `HTTP ${res.status}`;
-    await fail(`import failed — ${detail}`);
+    await fail(`import failed — ${detail}`, { reachedServer: true });
     return;
   }
 
@@ -297,7 +363,7 @@ async function main() {
       await warn(detail, allErrors.length);
       return;
     }
-    await fail(`import failed — ${detail}`);
+    await fail(`import failed — ${detail}`, { reachedServer: true });
     return;
   }
 
@@ -313,10 +379,27 @@ main().catch(async (e) => {
   try {
     const { sendDiscordAlert } = await import("../lib/discord-alert");
     const prev = readState();
+    const consecutiveFailures = (prev.lastStatus === "failed" ? (prev.consecutiveFailures ?? 1) : 0) + 1;
     if (prev.lastStatus !== "failed") {
       await sendDiscordAlert(`🔴 Robinhood courier: fatal error — ${msg}`);
+    } else {
+      await sendDiscordAlert(
+        `🔴 Robinhood courier: fatal error, still failing (${ordinal(consecutiveFailures)} consecutive run) — ${msg}`,
+      );
     }
-    writeState({ lastStatus: "failed", checkedAt: new Date().toISOString(), detail: msg });
+    writeState({ lastStatus: "failed", checkedAt: new Date().toISOString(), detail: msg, consecutiveFailures });
+    await fetch(ATTEMPT_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.CRON_SECRET ?? ""}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        accountNumber: process.env.ROBINHOOD_ACCOUNT_NUMBER ?? null,
+        detail: `fatal error — ${msg}`,
+        startedAt: new Date(SCRIPT_STARTED_AT).toISOString(),
+      }),
+    }).catch(() => {});
   } catch {
     // best-effort alert — don't mask the original failure
   }
