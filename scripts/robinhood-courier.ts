@@ -43,6 +43,17 @@ function loadEnvLocal(): void {
   }
 }
 
+// Module-level, not inside main() — the outer main().catch() fatal
+// handler needs the same clock, and a fatal error can happen before
+// main()'s own local timer would exist. Captures wall-clock from
+// process start to whichever exit path fires, covering the full
+// execFileSync call (the thing actually at risk of drifting toward the
+// 170s budget) plus everything around it.
+const SCRIPT_STARTED_AT = Date.now();
+function elapsedSeconds(): string {
+  return ((Date.now() - SCRIPT_STARTED_AT) / 1000).toFixed(1);
+}
+
 const CLAUDE_BIN = "/Users/raitsai/.local/bin/claude";
 const POLL_URL = "https://csp-screener.vercel.app/api/robinhood-account/poll-transactions";
 // 7-day rolling lookback, not a strict cursor — an order created days
@@ -137,8 +148,16 @@ async function main() {
   // the poller can't match to a tracked position (off-strategy, or
   // opened outside this app) is a "warning" — surfaced, no mention —
   // distinct from "failed" (something is actually broken).
+  // duration= on every line, success or failure, printed at the SAME
+  // position regardless of outcome so a plain `grep duration= | awk` can
+  // pull a trend later — the point of logging it at all (see the
+  // 2026-09-04 request: a 168s success and a 20s success looked
+  // identical, no way to tell drift toward the 170s budget from
+  // isolated spikes). Written into the console line, not the state
+  // file — state only ever holds the latest run, and a trend needs the
+  // append-only log history.
   async function fail(detail: string): Promise<void> {
-    console.error(`[robinhood-courier] ${detail}`);
+    console.error(`[robinhood-courier] duration=${elapsedSeconds()}s ${detail}`);
     if (prev.lastStatus !== "failed") {
       await sendDiscordAlert(`🔴 Robinhood courier failing: ${detail}`);
     }
@@ -146,7 +165,7 @@ async function main() {
     process.exitCode = 1;
   }
   async function warn(detail: string, count: number): Promise<void> {
-    console.warn(`[robinhood-courier] warning: ${detail}`);
+    console.warn(`[robinhood-courier] duration=${elapsedSeconds()}s warning: ${detail}`);
     if (prev.lastStatus !== "warning") {
       await sendDiscordAlert(
         `🟡 Robinhood courier: ${count} trade(s) couldn't auto-import because they aren't part of a tracked position — not necessarily broken, just off-strategy or opened outside this app. Review and Dismiss in the activity panel.\n${detail}`,
@@ -157,7 +176,7 @@ async function main() {
     // Not a script failure — the poll itself ran fine; exit code stays 0.
   }
   async function succeed(summary: string): Promise<void> {
-    console.log(`[robinhood-courier] ${summary}`);
+    console.log(`[robinhood-courier] duration=${elapsedSeconds()}s ${summary}`);
     if (prev.lastStatus === "failed" || prev.lastStatus === "warning") {
       await sendDiscordAlert("🟢 Robinhood courier recovered — back to normal.", { mention: false });
     }
@@ -290,7 +309,7 @@ async function main() {
 
 main().catch(async (e) => {
   const msg = e instanceof Error ? e.message : String(e);
-  console.error(`[robinhood-courier] fatal: ${msg}`);
+  console.error(`[robinhood-courier] duration=${elapsedSeconds()}s fatal: ${msg}`);
   try {
     const { sendDiscordAlert } = await import("../lib/discord-alert");
     const prev = readState();
