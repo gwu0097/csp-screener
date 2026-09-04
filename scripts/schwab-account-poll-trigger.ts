@@ -11,13 +11,19 @@
 // to have DISCORD_WEBHOOK_URL set; this mirrors the proven-working
 // scripts/schwab-weekly-health.ts pattern instead of assuming that.
 //
-// Alerts only on a state transition (ok/warning/failed), not on every
-// run in a bad state — a known-broken connection would otherwise spam
-// Discord 4x/day until reconnected. Three severities, not two: a
-// trade the poller can't match to a tracked position (off-strategy,
-// or opened outside this app) is a "warning" — surfaced, no mention —
-// distinct from a "failed" run where something is actually broken
-// (dead token, network failure, a real bug). See classifyErrors below.
+// This job runs 4x/day, not continuously — transition-only dedup
+// (alert on ok->failed but stay silent while failed persists) makes
+// "still failing," "ran clean," and "never fired" all indistinguishable
+// from Discord. Every run now posts its outcome; the state file is kept
+// only to track consecutiveFailures for the "(Nth consecutive run)"
+// label, not to decide whether to send. The one exception is the
+// WARNING severity: a trade the poller can't match to a tracked
+// position (off-strategy, or opened outside this app) means a trade is
+// sitting undismissed in the activity panel — a standing fact that
+// doesn't change run to run the way "did the poll work this cycle"
+// does, so warning stays transition-deduped (surfaced once, no
+// mention) rather than re-alerting every run it sits there. See
+// classifyErrors below.
 //
 // Run via com.csp.schwab-account-poll launchd agent, weekdays.
 // Usage: npx tsx scripts/schwab-account-poll-trigger.ts
@@ -41,7 +47,30 @@ const POLL_URL = "https://csp-screener.vercel.app/api/schwab-account/poll-transa
 const RECONNECT_URL = "https://csp-screener.vercel.app/settings";
 
 type Severity = "ok" | "warning" | "failed";
-type State = { lastStatus: Severity | "unknown"; checkedAt: string; detail?: string };
+type State = {
+  lastStatus: Severity | "unknown";
+  checkedAt: string;
+  detail?: string;
+  // Runs of consecutive failed statuses, reset to 0 on anything else.
+  // Used only to label "(Nth consecutive run)" — every failed run
+  // alerts regardless of this count, see main() below.
+  consecutiveFailures?: number;
+};
+
+function ordinal(n: number): string {
+  const rem100 = n % 100;
+  if (rem100 >= 11 && rem100 <= 13) return `${n}th`;
+  switch (n % 10) {
+    case 1:
+      return `${n}st`;
+    case 2:
+      return `${n}nd`;
+    case 3:
+      return `${n}rd`;
+    default:
+      return `${n}th`;
+  }
+}
 
 function readState(): State {
   try {
@@ -58,7 +87,16 @@ function writeState(s: State): void {
 type PollResponse = {
   ok?: boolean;
   error?: string;
-  reports?: Array<{ broker: string; ok: boolean; errors: string[] }>;
+  reports?: Array<{
+    broker: string;
+    ok: boolean;
+    errors: string[];
+    transactionsSeen?: number;
+    tradesSubmitted?: number;
+    expirationsRecorded?: number;
+    assignmentsRecorded?: number;
+    skipped?: number;
+  }>;
 };
 
 // A closing fill with no matching open position on file isn't a
@@ -87,6 +125,43 @@ async function main() {
   const prev = readState();
   const nowIso = new Date().toISOString();
 
+  async function fail(detail: string): Promise<void> {
+    console.error(`[schwab-account-poll-trigger] failed: ${detail}`);
+    const consecutiveFailures = (prev.consecutiveFailures ?? 0) + 1;
+    const streak = consecutiveFailures > 1 ? ` (${ordinal(consecutiveFailures)} consecutive run)` : "";
+    await sendDiscordAlert(`🔴 Schwab Account Data poll failing${streak}: ${detail}\nReconnect: ${RECONNECT_URL}`);
+    writeState({ lastStatus: "failed", checkedAt: nowIso, detail, consecutiveFailures });
+    process.exitCode = 1;
+  }
+  // Transition-deduped, unlike fail()/succeed() — a warning means a
+  // trade is sitting undismissed in the activity panel, a standing
+  // fact that doesn't change run to run, so re-alerting every 2 hours
+  // it sits there would just be noise. See the header comment.
+  async function warn(detail: string, count: number): Promise<void> {
+    console.warn(`[schwab-account-poll-trigger] warning: ${detail}`);
+    if (prev.lastStatus !== "warning") {
+      await sendDiscordAlert(
+        `🟡 Schwab Account Data poll: ${count} trade(s) couldn't auto-import because they aren't part of a tracked position — not necessarily broken, just off-strategy or opened outside this app. Review and Dismiss in the activity panel.\n${detail}`,
+        { mention: false },
+      );
+    }
+    writeState({ lastStatus: "warning", checkedAt: nowIso, detail, consecutiveFailures: 0 });
+    // Not a script failure — the poll itself ran fine; this is a
+    // data-level heads-up, not an execution error, so the exit code
+    // stays 0.
+  }
+  async function succeed(summary: string): Promise<void> {
+    console.log(`[schwab-account-poll-trigger] ${summary}`);
+    const prefix =
+      prev.lastStatus === "failed"
+        ? "🟢 Schwab Account Data poll recovered — connectivity restored.\n"
+        : prev.lastStatus === "warning"
+          ? "🟢 Schwab Account Data poll recovered from data warnings — no action was needed.\n"
+          : "🟢 Schwab Account Data poll ok — ";
+    await sendDiscordAlert(`${prefix}${summary}`, { mention: false });
+    writeState({ lastStatus: "ok", checkedAt: nowIso, consecutiveFailures: 0 });
+  }
+
   let res: Response;
   try {
     res = await fetch(POLL_URL, {
@@ -95,12 +170,7 @@ async function main() {
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    console.error(`[schwab-account-poll-trigger] request failed: ${msg}`);
-    if (prev.lastStatus !== "failed") {
-      await sendDiscordAlert(`🔴 Schwab Account Data poll: request failed (${msg}).`);
-    }
-    writeState({ lastStatus: "failed", checkedAt: nowIso, detail: msg });
-    process.exitCode = 1;
+    await fail(`request failed (${msg}).`);
     return;
   }
 
@@ -112,12 +182,7 @@ async function main() {
   // regardless of what the body says.
   if (!res.ok) {
     const detail = json.error ?? `HTTP ${res.status}`;
-    console.error(`[schwab-account-poll-trigger] failed: ${detail}`);
-    if (prev.lastStatus !== "failed") {
-      await sendDiscordAlert(`🔴 Schwab Account Data poll failing: ${detail}\nReconnect: ${RECONNECT_URL}`);
-    }
-    writeState({ lastStatus: "failed", checkedAt: nowIso, detail });
-    process.exitCode = 1;
+    await fail(detail);
     return;
   }
 
@@ -138,40 +203,19 @@ async function main() {
     const severity: Severity = allErrors.length > 0 ? classifyErrors(allErrors) : "failed";
 
     if (severity === "warning") {
-      console.warn(`[schwab-account-poll-trigger] warning: ${detail}`);
-      if (prev.lastStatus !== "warning") {
-        await sendDiscordAlert(
-          `🟡 Schwab Account Data poll: ${allErrors.length} trade(s) couldn't auto-import because they aren't part of a tracked position — not necessarily broken, just off-strategy or opened outside this app. Review and Dismiss in the activity panel.\n${detail}`,
-          { mention: false },
-        );
-      }
-      writeState({ lastStatus: "warning", checkedAt: nowIso, detail });
-      // Not a script failure — the poll itself ran fine; this is a
-      // data-level heads-up, not an execution error, so the exit code
-      // stays 0.
+      await warn(detail, allErrors.length);
       return;
     }
-
-    console.error(`[schwab-account-poll-trigger] failed: ${detail}`);
-    if (prev.lastStatus !== "failed") {
-      await sendDiscordAlert(`🔴 Schwab Account Data poll failing: ${detail}\nReconnect: ${RECONNECT_URL}`);
-    }
-    writeState({ lastStatus: "failed", checkedAt: nowIso, detail });
-    process.exitCode = 1;
+    await fail(detail);
     return;
   }
 
-  if (prev.lastStatus === "warning") {
-    await sendDiscordAlert(
-      "🟢 Schwab Account Data poll recovered from data warnings — no action was needed.",
-      { mention: false },
-    );
-  } else if (prev.lastStatus === "failed") {
-    await sendDiscordAlert("🟢 Schwab Account Data poll recovered — connectivity restored.", {
-      mention: false,
-    });
-  }
-  writeState({ lastStatus: "ok", checkedAt: nowIso });
+  const reports = json.reports ?? [];
+  const totalTrades = reports.reduce((s, r) => s + (r.tradesSubmitted ?? 0), 0);
+  const summary =
+    reports.map((r) => `${r.broker}: seen=${r.transactionsSeen ?? 0} trades=${r.tradesSubmitted ?? 0}`).join(", ") ||
+    "no accounts reported";
+  await succeed(`${totalTrades} trade(s) imported — ${summary}`);
 }
 
 main().catch((e) => {

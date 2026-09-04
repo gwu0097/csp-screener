@@ -164,14 +164,20 @@ async function main() {
   const prev = readState();
   const nowIso = new Date().toISOString();
 
-  // Alert only on a state transition (ok/warning/failed), not on every
-  // run in a bad state — a 2026-08-26 incident sent a separate Discord
-  // message for each of several consecutive scheduled failures before
-  // this was added, mirroring the dedup already built into
-  // scripts/schwab-account-poll-trigger.ts. Three severities: a trade
-  // the poller can't match to a tracked position (off-strategy, or
-  // opened outside this app) is a "warning" — surfaced, no mention —
-  // distinct from "failed" (something is actually broken).
+  // This job runs 4x/day, not continuously — transition-only dedup
+  // (alert on ok->failed but stay silent while failed persists) makes
+  // "still failing," "ran clean," and "never fired" all indistinguishable
+  // from Discord, which is exactly what happened 2026-09-04: an 11:07am
+  // failure alert never recovered, so the 1:05pm failure sent nothing.
+  // Every run now posts its outcome — the state file is kept only to
+  // track consecutiveFailures for the "(Nth consecutive run)" label, not
+  // to decide whether to send. The one exception is the WARNING severity
+  // (see warn() below): a warning means an off-strategy trade is sitting
+  // undismissed in the activity panel, a standing fact that doesn't
+  // change run to run the way "did the courier work this cycle" does —
+  // per-run posting there would just re-alert the same undismissed trade
+  // every 2 hours for as long as it sits there, so warning stays
+  // transition-deduped.
   // duration= on every line, success or failure, printed at the SAME
   // position regardless of outcome so a plain `grep duration= | awk` can
   // pull a trend later — the point of logging it at all (see the
@@ -211,25 +217,18 @@ async function main() {
   // here again would just duplicate it.
   async function fail(detail: string, opts?: { reachedServer?: boolean }): Promise<void> {
     console.error(`[robinhood-courier] duration=${elapsedSeconds()}s ${detail}`);
-    const consecutiveFailures = (prev.lastStatus === "failed" ? (prev.consecutiveFailures ?? 1) : 0) + 1;
-    if (prev.lastStatus !== "failed") {
-      await sendDiscordAlert(`🔴 Robinhood courier failing: ${detail}`);
-    } else {
-      // Dedup on the ok/warning/failed TRANSITION is right for avoiding
-      // spam, but total silence on a failure that just keeps persisting
-      // is not — see the 2026-09-04 incident where an 11:07am alert
-      // never recovered, so a 1:05pm failure sent nothing and Discord
-      // couldn't distinguish "still failing" from "never fired."
-      await sendDiscordAlert(
-        `🔴 Robinhood courier still failing (${ordinal(consecutiveFailures)} consecutive run): ${detail}`,
-      );
-    }
+    const consecutiveFailures = (prev.consecutiveFailures ?? 0) + 1;
+    const streak = consecutiveFailures > 1 ? ` (${ordinal(consecutiveFailures)} consecutive run)` : "";
+    await sendDiscordAlert(`🔴 Robinhood courier failing${streak}: ${detail}`);
     if (!opts?.reachedServer) {
       await logLocalAttempt(detail);
     }
     writeState({ lastStatus: "failed", checkedAt: nowIso, detail, consecutiveFailures });
     process.exitCode = 1;
   }
+  // Transition-deduped, unlike fail()/succeed() — see the header
+  // comment above for why a warning is a standing fact (an undismissed
+  // trade), not new per-run information.
   async function warn(detail: string, count: number): Promise<void> {
     console.warn(`[robinhood-courier] duration=${elapsedSeconds()}s warning: ${detail}`);
     if (prev.lastStatus !== "warning") {
@@ -243,9 +242,13 @@ async function main() {
   }
   async function succeed(summary: string): Promise<void> {
     console.log(`[robinhood-courier] duration=${elapsedSeconds()}s ${summary}`);
-    if (prev.lastStatus === "failed" || prev.lastStatus === "warning") {
-      await sendDiscordAlert("🟢 Robinhood courier recovered — back to normal.", { mention: false });
-    }
+    const prefix =
+      prev.lastStatus === "failed"
+        ? "🟢 Robinhood courier recovered — connectivity restored.\n"
+        : prev.lastStatus === "warning"
+          ? "🟢 Robinhood courier recovered from data warnings — no action was needed.\n"
+          : "🟢 Robinhood courier ok — ";
+    await sendDiscordAlert(`${prefix}${summary}`, { mention: false });
     writeState({ lastStatus: "ok", checkedAt: nowIso, consecutiveFailures: 0 });
   }
 
@@ -369,7 +372,7 @@ async function main() {
 
   const r = json.report;
   await succeed(
-    `ok — orders=${r?.ordersSeen ?? 0} executions=${r?.executionsSeen ?? 0} landed=${r?.executionsLanded ?? 0} submitted=${r?.tradesSubmitted ?? 0} skipped=${r?.skipped ?? 0}`,
+    `orders=${r?.ordersSeen ?? 0} executions=${r?.executionsSeen ?? 0} landed=${r?.executionsLanded ?? 0} submitted=${r?.tradesSubmitted ?? 0} skipped=${r?.skipped ?? 0}`,
   );
 }
 
@@ -379,14 +382,9 @@ main().catch(async (e) => {
   try {
     const { sendDiscordAlert } = await import("../lib/discord-alert");
     const prev = readState();
-    const consecutiveFailures = (prev.lastStatus === "failed" ? (prev.consecutiveFailures ?? 1) : 0) + 1;
-    if (prev.lastStatus !== "failed") {
-      await sendDiscordAlert(`🔴 Robinhood courier: fatal error — ${msg}`);
-    } else {
-      await sendDiscordAlert(
-        `🔴 Robinhood courier: fatal error, still failing (${ordinal(consecutiveFailures)} consecutive run) — ${msg}`,
-      );
-    }
+    const consecutiveFailures = (prev.consecutiveFailures ?? 0) + 1;
+    const streak = consecutiveFailures > 1 ? `, still failing (${ordinal(consecutiveFailures)} consecutive run)` : "";
+    await sendDiscordAlert(`🔴 Robinhood courier: fatal error${streak} — ${msg}`);
     writeState({ lastStatus: "failed", checkedAt: new Date().toISOString(), detail: msg, consecutiveFailures });
     await fetch(ATTEMPT_URL, {
       method: "POST",
