@@ -96,9 +96,47 @@ async function loadTickerMap(): Promise<Map<string, string>> {
   return tickerMapPromise;
 }
 
+// company_tickers.json only lists CURRENTLY active filers — a ticker
+// whose company has since been acquired, merged, or taken private drops
+// out of it even though SEC still has its full CIK and filing history
+// intact (confirmed 2026-09-05: ANSS/Synopsys, BK->BNY, CTRA, DFS/Capital
+// One, HES/Chevron, HOLX, IPG/Omnicom, JNPR/HPE, K/Kellanova, WBA/Sycamore
+// all resolve via this fallback despite failing the ticker-file lookup).
+// browse-edgar's action=getcompany accepts a ticker directly in the CIK=
+// param (a long-standing EDGAR quirk, not a documented API contract) and
+// searches the full historical company index, not just active listings.
+// Cheap in the common case: only reached when the ticker-file lookup
+// already missed, so this never adds latency to the normal path.
+//
+// Doesn't cover every case — Dayforce (ticker DAY) doesn't resolve this
+// way either and needed a company-NAME search instead (getCIK only has a
+// ticker to work with, so that fallback isn't available here). Separately,
+// BABA/NTES/NBIS resolve their CIK fine via this same fallback but hit an
+// unrelated gap — EDGAR's own fiscalYearEnd field is simply empty for
+// these specific foreign private issuers (confirmed directly against
+// their submissions.json) — see getFiscalYearEndMonth below, which this
+// fallback does NOT and cannot fix.
+async function getCIKForDelistedTicker(symbol: string): Promise<string | null> {
+  let res: Response;
+  try {
+    res = await fetch(
+      `${EDGAR_FILES_BASE}/cgi-bin/browse-edgar?action=getcompany&CIK=${encodeURIComponent(symbol.toUpperCase())}&type=10-K&dateb=&owner=include&count=1&output=atom`,
+      { headers: { "User-Agent": USER_AGENT }, cache: "no-store" },
+    );
+  } catch {
+    return null;
+  }
+  if (!res.ok) return null;
+  const text = await res.text().catch(() => "");
+  const match = text.match(/<cik>(\d{10})<\/cik>/);
+  return match ? match[1] : null;
+}
+
 export async function getCIK(symbol: string): Promise<string | null> {
   const map = await loadTickerMap();
-  return map.get(symbol.toUpperCase()) ?? null;
+  const fromTickerFile = map.get(symbol.toUpperCase());
+  if (fromTickerFile) return fromTickerFile;
+  return getCIKForDelistedTicker(symbol);
 }
 
 // Static per-company attribute — the submissions endpoint's top-level
