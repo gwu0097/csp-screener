@@ -39,6 +39,7 @@
 import { fetchFinnhubEarningsResult, pctChange } from "./encyclopedia";
 import { recordAncillaryAttempt, T1_RETRY_CUTOFF_DAYS } from "./earnings-capture-attempts";
 import { createServerClient } from "./supabase";
+import { getActiveCalibration, bumpCalibrationConfirmed, invalidateCalibration } from "./finnhub-fiscal-calibration";
 
 const SWEEP_BUDGET_MS = 50_000;
 
@@ -446,6 +447,42 @@ export async function runEpsSweep(opts?: { dryRun?: boolean }): Promise<EpsSweep
         match = finnhubRows.find((r) => r.period === row.period_end) ?? null;
       }
 
+      // Uncalibrated symbols behave exactly as above — this only runs
+      // when the direct match already failed AND this symbol has an
+      // active calibration on file (see lib/finnhub-fiscal-calibration.ts;
+      // the table starts empty and is only ever populated by deliberate,
+      // per-symbol audits — see migrations/2026-09-05-finnhub-fiscal-
+      // label-calibration.sql). Applies the calibrated delta to PREDICT
+      // Finnhub's label for this row, then checks whether that exact
+      // prediction exists in the response — an exact-match check against
+      // a computed prediction, not a fuzzy nearest-date guess (which is
+      // exactly the RKLB failure mode documented above).
+      let calibrationUsed: Awaited<ReturnType<typeof getActiveCalibration>> = null;
+      if (!match && row.fiscal_quarter !== null && row.fiscal_year !== null) {
+        const calibration = await getActiveCalibration(symbol);
+        if (calibration) {
+          const predictedQuarter = row.fiscal_quarter + calibration.quarterDelta;
+          const predictedYear = row.fiscal_year + calibration.yearDelta;
+          const calibratedMatch =
+            finnhubRows.find((r) => r.quarter === predictedQuarter && r.year === predictedYear) ?? null;
+          if (calibratedMatch) {
+            match = calibratedMatch;
+            calibrationUsed = calibration;
+          } else if (!dryRun) {
+            // Staleness signal, not a guess: the calibration predicted a
+            // specific label that doesn't exist in Finnhub's actual
+            // response for this symbol, meaning Finnhub's own labeling
+            // changed underneath it. Fail closed — invalidate now, fall
+            // through to the normal out_of_window/unmatched
+            // classification below rather than continuing to trust it.
+            await invalidateCalibration(
+              calibration.id,
+              `predicted quarter=${predictedQuarter}/year=${predictedYear} for ${symbol} ${row.earnings_date} not found in Finnhub's response`,
+            ).catch(() => {});
+          }
+        }
+      }
+
       if (!match) {
         let reason: "no_fiscal_identifiers" | "out_of_window" | "unmatched";
         if (row.fiscal_quarter === null && row.period_end === null) {
@@ -519,8 +556,15 @@ export async function runEpsSweep(opts?: { dryRun?: boolean }): Promise<EpsSweep
           symbol,
           earningsDate: row.earnings_date,
           phase: "eps-sweep",
-          outcome: "captured",
+          // Distinguished from a plain "captured" so it's visible later
+          // which successes actually depend on a calibration surviving
+          // — those rows would silently stop verifying (not silently
+          // mismatch) the day that calibration gets invalidated.
+          outcome: calibrationUsed ? "captured_via_calibration" : "captured",
         }).catch(() => {});
+        if (calibrationUsed) {
+          await bumpCalibrationConfirmed(calibrationUsed.id, row.id).catch(() => {});
+        }
       }
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
