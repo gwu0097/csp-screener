@@ -79,14 +79,26 @@ export async function POST(req: NextRequest) {
       `[robinhood-account-poll] ok=${report.ok} ${report.broker}: seen=${report.ordersSeen} executions=${report.executionsSeen} landed=${report.executionsLanded} trades=${report.tradesSubmitted} skipped=${report.skipped} errors=${report.errors.length}`,
     );
     const alert = source === "courier" ? null : await postOutcomeAlert(source, report);
-    return NextResponse.json({ ok: report.ok, report, alertSent: alert?.ok ?? null, alertError: alert?.error ?? null });
+    return NextResponse.json({
+      ok: report.ok,
+      report,
+      alertSent: alert?.ok ?? null,
+      alertError: alert?.error ?? null,
+      alertMessageId: alert?.messageId ?? null,
+    });
   } catch (e) {
     const msg = e instanceof Error ? e.message : "unknown";
     console.error("[robinhood-account-poll] fatal:", msg);
     await closeRunRowOnEarlyError(msg);
     const alert = source === "courier" ? null : await postOutcomeAlert(source, null, msg);
     return NextResponse.json(
-      { ok: false, error: msg, alertSent: alert?.ok ?? null, alertError: alert?.error ?? null },
+      {
+        ok: false,
+        error: msg,
+        alertSent: alert?.ok ?? null,
+        alertError: alert?.error ?? null,
+        alertMessageId: alert?.messageId ?? null,
+      },
       { status: 500 },
     );
   }
@@ -108,12 +120,20 @@ async function postOutcomeAlert(
   source: string,
   report: RobinhoodPollReport | null,
   fatalError?: string,
-): Promise<{ ok: boolean; error?: string }> {
+): Promise<{ ok: boolean; error?: string; messageId?: string }> {
   const { sendDiscordAlert } = await import("@/lib/discord-alert");
   const via = source === "manual" ? "manually" : `via ${source}`;
+  // returnId: true — a 200 with a message id back from Discord proves
+  // the message was actually created server-side, not just that our
+  // request was accepted. A bare "sent ok" from a fire-and-forget POST
+  // isn't the same claim (2026-09-04: asked to distinguish the two
+  // explicitly after the response and the channel disagreeing once
+  // already, on the earlier DISCORD_WEBHOOK_URL gap).
 
   if (!report) {
-    return sendDiscordAlert(`🔴 Robinhood fills import ${via} failed: ${fatalError ?? "unknown error"}`);
+    return sendDiscordAlert(`🔴 Robinhood fills import ${via} failed: ${fatalError ?? "unknown error"}`, {
+      returnId: true,
+    });
   }
 
   const severity = classifySeverity(report.errors);
@@ -122,13 +142,13 @@ async function postOutcomeAlert(
       report.tradesSubmitted > 0
         ? `🟢 Robinhood fills imported ${via} — ${report.tradesSubmitted} fill${report.tradesSubmitted === 1 ? "" : "s"}.`
         : `🟢 Robinhood poll ${via} — no new fills.`;
-    return sendDiscordAlert(msg, { mention: false });
+    return sendDiscordAlert(msg, { mention: false, returnId: true });
   }
   if (severity === "warning") {
     return sendDiscordAlert(
       `🟡 Robinhood poll ${via}: ${report.errors.length} trade(s) couldn't auto-import — not part of a tracked position. Review and Dismiss in the activity panel.\n${report.errors.join("; ")}`,
-      { mention: false },
+      { mention: false, returnId: true },
     );
   }
-  return sendDiscordAlert(`🔴 Robinhood poll ${via} failed: ${report.errors.join("; ")}`);
+  return sendDiscordAlert(`🔴 Robinhood poll ${via} failed: ${report.errors.join("; ")}`, { returnId: true });
 }
