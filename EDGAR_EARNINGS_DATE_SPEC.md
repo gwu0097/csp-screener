@@ -1,4 +1,40 @@
-# EDGAR Earnings-Date Resolution — spec for a future pass, not implemented
+# EDGAR Earnings-Date Resolution — sized 2026-09-05, declined, not implemented
+
+**Status: declined, not "not yet built."** Sized against the live population
+twice (2026-09-04 design, 2026-09-05 execution-readiness check) and found not
+worth building as specified. Read this section before treating anything below
+as open work.
+
+The target population is 872 rows (`unknown` 837 + `inferred` 35 —
+re-confirmed 2026-09-05, see Open Question 4's original 869-vs-1,022
+discrepancy; both prior numbers were stale). Of those, only 68 lack
+`actual_move_pct` at all; 67 are past-due, not just not-yet-happened. This
+function, AS SPECIFIED, only touches `earnings_date`/`date_confidence` — it
+deliberately leaves `timing` untouched (see "What confidence tier it would
+write" below). Checked directly against `lib/encyclopedia.ts:473-497`: the
+move-computation code refuses to compute a move without a real `bmo`/`amc`
+timing, returning `null` rather than guess. Of the 67 move-less rows, 63 have
+no usable timing (`NULL` or `'unknown'`) and would stay exactly as blocked
+after this ran as before it. The other 4 are recent in-flight rows blocked by
+normal capture latency, not date confidence, and would resolve on their own
+regardless of this work.
+
+**Net result: building this as specified would upgrade `date_confidence`
+metadata on a majority of the 872 rows (see the CIK/8-K coverage numbers
+below) but unlock zero new `actual_move_pct` values.** The real blocker for
+this population is missing `timing`, not the date. See "Timing sources
+investigated, none built" below for what was found instead — a materially
+different, larger piece of work than this spec describes, not something this
+function's scope naturally grows into.
+
+If anyone picks this back up: re-run the population/coverage numbers again
+first (they will have drifted since 2026-09-05), and decide on the timing
+problem BEFORE scoping a date-only pass — a date-only pass has already been
+shown to convert nothing.
+
+---
+
+## Original spec (2026-09-04), preserved below for context
 
 `lib/edgar-earnings-date.ts` was built 2026-09-04 alongside the fiscal_quarter
 repair (same shared client, same rate limiter) but never wired into a write
@@ -112,27 +148,91 @@ row doesn't get re-hit against SEC on every run.
 
 ## Open design questions — need resolving before implementation, not guessed at
 
-1. **Old-row pagination.** `resolveNearestEightK` only reads
-   `filings.recent`. For rows old enough to have rolled off that page, this
-   function returns `no_nearby_8k` indistinguishably from "no such filing
-   exists" — need to decide whether to fetch the paginated
-   `/submissions/CIK##########-submissions-{n}.json` files for old rows, or
-   accept that this function is only effective on recent-ish rows and scope
-   accordingly.
-2. **What counts as a "correction" worth writing vs. noise.** An 8-K's
+1. **Old-row pagination — RESOLVED 2026-09-05, smaller than feared.** Tested
+   `resolveNearestEightK` live against a stratified sample (all 29 rows from
+   2024, plus 60 random from 2025 and 20 from 2026 — 109 total, real SEC
+   calls, not simulated). `no_nearby_8k` (the actual pagination-wall failure)
+   hit only 10/109 (~9%), including just 3/29 (~10%) among the oldest 2024
+   rows. The dominant failure was `cik_not_found` (22/109, ~20%) — see #4
+   below, a different problem with its own fix. Paginating the older
+   `/submissions/CIK##########-submissions-{n}.json` files is not worth
+   building for this population; the "recent" page already covers it.
+2. **What counts as a "correction" worth writing vs. noise.** Still open —
+   moot now given the decision to decline, but if revisited: an 8-K's
    `filingDate` can legitimately lag the actual earnings call by a day (a
    press release goes out, the 8-K attaching it files the next business
    day) — need a tolerance band for "close enough, don't touch `timing`
    inference" vs. "this is actually a different date," not just the raw
    `gapDays` value passed through unfiltered.
-3. **`EarningsHistoryWritePath` enum migration.** Needs its own migration
-   adding `'edgar-earnings-date'` (or whatever name is chosen) before any
-   write — not assumed done by the existing `capture_phase` constraint
-   change, which is a different enum.
-4. **Re-verify the target population at build time.** The 869-vs-1,022
-   discrepancy above is unresolved — re-run the `date_confidence` breakdown
-   query fresh rather than trusting either number in this document by the
-   time this is built.
+3. **`EarningsHistoryWritePath` enum migration.** Still open — moot now
+   given the decision to decline. Needs its own migration adding
+   `'edgar-earnings-date'` (or whatever name is chosen) before any write —
+   not assumed done by the existing `capture_phase` constraint change, which
+   is a different enum.
+4. **Re-verify the target population at build time — RESOLVED 2026-09-05.**
+   872 rows (`unknown` 837 + `inferred` 35), re-confirmed live. Neither 869
+   nor 1,022 was current by the time this was actually sized; re-count again
+   if this is ever revisited, the number will have drifted further.
+5. **CIK resolution — fixed 2026-09-05, independently of the decision to
+   decline the rest of this work.** `resolveCik` (`lib/edgar-client.ts`) only
+   checked `company_tickers.json`, which excludes tickers that have since
+   been acquired/merged/delisted even though SEC still has their full CIK
+   and filing history. Ported the same browse-edgar fallback already added
+   to `lib/sec-edgar.ts`'s `getCIK` — see that file's `getCIKForDelistedTicker`
+   comment for the mechanism. Tested against the 527 distinct symbols in
+   this population: 512/527 resolved before the fix, 526/527 after. This fix
+   shipped (it's cheap and correct on its own) even though the date resolver
+   itself did not.
 
-Don't start implementation until these are resolved — they change what gets
-written, not just how.
+Implementation is declined — see the top of this document. These open
+questions are preserved for whoever reopens this, not because anyone should
+act on them now.
+
+## Timing sources investigated 2026-09-05, none built
+
+The real blocker for this population turned out to be `timing`, not
+`earnings_date` (see the top of this document). Three candidate sources for
+filling `timing` were sized, read-only, before concluding none should be
+built as part of reviving this spec:
+
+- **Finnhub's calendar `hour` field** (`timing_source='finnhub_hour'`,
+  `lib/encyclopedia.ts:2649-2665`) — **~0% coverage for backfill.** Finnhub's
+  free-tier `/calendar/earnings` is forward-only (`lib/encyclopedia.ts:1065-1077`,
+  `lib/yahoo.ts:684-685`); it can supply timing for new events going forward,
+  never for the 812 rows already stuck. Never independently audited for
+  correctness either.
+- **Yahoo's timestamp heuristic** (`timing_source='yahoo_timestamp_heuristic'`,
+  `lib/encyclopedia.ts:1078-1168`) — **~0.4% actionable, and already excluded
+  from this population by design.** A real prior run
+  (`backfill-earnings-timing-report.json`) found 757/1,011 candidates had no
+  Yahoo calendar entry, 249 were unverifiable against stored prices, and only
+  4 were cleanly written. A confirmed-wrong case exists (RVTY: heuristic said
+  BMO, real price action showed AMC). `scripts/backfill-earnings-timing.ts`
+  already refuses to run against `inferred`/`unknown`-tier rows — "deriving
+  timing against a date we don't trust would be building on sand" — so this
+  source was already ruled out for exactly this population before this sizing
+  pass even started.
+- **8-K `acceptanceDateTime` as a BMO/AMC proxy — the only source with real
+  reach, not yet built.** This spec previously stated (a few paragraphs
+  above) that "8-Ks don't carry a time-of-day field in the submissions API's
+  `recent` block" — **that claim is wrong**, confirmed by fetching the live
+  API. `acceptanceDateTime` is present in the exact same `filings.recent`
+  block `resolveNearestEightK` already parses, at zero extra request cost.
+  Tested on a 35-row sample of already-8-K-matched rows: 34/35 (97%)
+  classified unambiguously as BMO/AMC via a plain ET-hour cutoff. Reliability
+  is conditional on the match being same-day: 73/77 (95%) of successful 8-K
+  matches in the broader sample were `gapDays=0`; one off-day match (TPR,
+  8-day gap) pulled an unrelated 8-K with a nonsensical acceptance time —
+  confirmed evidence that trusting a multi-day-gap match without a same-day
+  restriction would produce exactly the "plausible-looking wrong number"
+  failure this document already worries about for `earnings_date` itself.
+  Bounded coverage estimate: roughly 70-75% of the 872-row population, once
+  restricted to same-day 8-K matches only.
+
+Not built because: even with acceptanceDateTime, this becomes a materially
+different, larger piece of work than the date-only pass this spec describes
+(a new `timing_source` value, a same-day-only trust gate, and — per "What
+confidence tier it would write" above — the existing design already
+deliberately avoids claiming `timing` confidence alongside `date_confidence`
+upgrades, which would need to change). If this is worth building, size it as
+its own thing with its own spec, not as a natural extension of this one.
