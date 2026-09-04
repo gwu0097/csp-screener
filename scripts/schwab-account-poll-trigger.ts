@@ -6,10 +6,12 @@
 // with zero notification, since only the WEEKLY Saturday health check
 // alerts, and it had already run days before the failure started.
 // Discord alerting runs from here (a local script using .env.local),
-// not from the deployed route itself — no app/api/* route in this
-// codebase posts to Discord, so Vercel's runtime env isn't confirmed
-// to have DISCORD_WEBHOOK_URL set; this mirrors the proven-working
-// scripts/schwab-weekly-health.ts pattern instead of assuming that.
+// not from the deployed route itself, mirroring the proven-working
+// scripts/schwab-weekly-health.ts pattern. (One deployed route now
+// posts its own alert too — app/api/robinhood-account/poll-transactions
+// — added 2026-09-04 specifically to cover calls that bypass the
+// courier. That route requires DISCORD_WEBHOOK_URL/DISCORD_PING_USER_ID
+// in Vercel's production env, same names as .env.local.)
 //
 // This job runs 4x/day, not continuously — transition-only dedup
 // (alert on ok->failed but stay silent while failed persists) makes

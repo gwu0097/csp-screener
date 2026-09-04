@@ -295,20 +295,39 @@ async function main() {
     // ETIMEDOUT here means execFileSync's own `timeout` option killed a
     // process that HAD started and was still running past the 170s
     // budget — not a process that failed to launch, and not a dead MCP
-    // connection. Confirmed directly (2026-09-04): a spawnSync child
-    // killed by timeout reports exactly this code, after running for
-    // the full timeout duration, not near-instantly. `claude mcp list`
-    // checks the CLI's persistent server registration, which has
-    // nothing to do with one invocation's own round-trip latency — each
-    // headless call opens and tears down its own MCP session fresh, so
-    // there's no persistent connection here to be "reconnected." Live
-    // check the same day this was fixed: `claude mcp list` showed
-    // robinhood as Connected while these calls were timing out.
+    // connection. `claude mcp list` checks the CLI's persistent server
+    // registration, which has nothing to do with one invocation's own
+    // round-trip latency — each headless call opens and tears down its
+    // own MCP session fresh, so there's no persistent connection here
+    // to be "reconnected."
+    //
+    // A bare "ETIMEDOUT" says a kill happened, not what the process was
+    // doing when it was killed — a genuinely stuck call (hung on the
+    // MCP round trip, zero progress) and one that's simply outgrown the
+    // 170s budget (real work, just slow) need different fixes, and the
+    // message alone can't distinguish them. execFileSync's thrown error
+    // carries .stdout/.stderr with whatever the child had written
+    // before the kill (confirmed empirically, 2026-09-04: a `sleep`
+    // child killed by timeout still reports its pre-kill stdout/stderr
+    // on the caught error) — surfacing that turns "it timed out" into
+    // "it timed out after producing X" or "it timed out having produced
+    // nothing," which is the actual diagnostic signal.
     const code = (e as NodeJS.ErrnoException).code;
+    const rawStdout = (e as { stdout?: string | Buffer | null }).stdout;
+    const rawStderr = (e as { stderr?: string | Buffer | null }).stderr;
+    const stdoutText = typeof rawStdout === "string" ? rawStdout : (rawStdout?.toString("utf8") ?? "");
+    const stderrText = typeof rawStderr === "string" ? rawStderr : (rawStderr?.toString("utf8") ?? "");
+    const captured =
+      [
+        stdoutText.trim() ? `stdout (${stdoutText.length} chars, last 300 shown): ...${stdoutText.slice(-300)}` : null,
+        stderrText.trim() ? `stderr (${stderrText.length} chars, last 300 shown): ...${stderrText.slice(-300)}` : null,
+      ]
+        .filter((s): s is string => s !== null)
+        .join(" | ") || "nothing captured — the process produced no stdout or stderr before being killed";
     const detail =
       code === "ETIMEDOUT"
-        ? `headless Claude call started but didn't finish within the 170s budget (${msg}). The process ran, it was just slow this time — check for scheduling overlap (schwab-account-poll fires 5 min before every one of this job's runs) or general system load around the fire time, not the MCP connection (\`claude mcp list\` reflects the CLI's registration, not this run's latency).`
-        : `headless Claude call failed (${msg}, code=${code ?? "unknown"}).`;
+        ? `headless Claude call started but didn't finish within the 170s budget (${msg}). ${captured}`
+        : `headless Claude call failed (${msg}, code=${code ?? "unknown"}). ${captured}`;
     await fail(detail);
     return;
   }
@@ -325,7 +344,7 @@ async function main() {
   let res: Response;
   try {
     res = await fetch(
-      `${POLL_URL}?accountNumber=${encodeURIComponent(ACCOUNT_NUMBER)}&lookbackSince=${encodeURIComponent(lookbackSince)}`,
+      `${POLL_URL}?accountNumber=${encodeURIComponent(ACCOUNT_NUMBER)}&lookbackSince=${encodeURIComponent(lookbackSince)}&source=courier`,
       {
         method: "POST",
         headers: {
