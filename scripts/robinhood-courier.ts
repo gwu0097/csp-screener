@@ -204,9 +204,24 @@ async function main() {
     );
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    await fail(
-      `headless Claude call failed (${msg}). If this persists, the Robinhood MCP connection likely needs reconnecting — run \`claude mcp list\` to check.`,
-    );
+    // ETIMEDOUT here means execFileSync's own `timeout` option killed a
+    // process that HAD started and was still running past the 170s
+    // budget — not a process that failed to launch, and not a dead MCP
+    // connection. Confirmed directly (2026-09-04): a spawnSync child
+    // killed by timeout reports exactly this code, after running for
+    // the full timeout duration, not near-instantly. `claude mcp list`
+    // checks the CLI's persistent server registration, which has
+    // nothing to do with one invocation's own round-trip latency — each
+    // headless call opens and tears down its own MCP session fresh, so
+    // there's no persistent connection here to be "reconnected." Live
+    // check the same day this was fixed: `claude mcp list` showed
+    // robinhood as Connected while these calls were timing out.
+    const code = (e as NodeJS.ErrnoException).code;
+    const detail =
+      code === "ETIMEDOUT"
+        ? `headless Claude call started but didn't finish within the 170s budget (${msg}). The process ran, it was just slow this time — check for scheduling overlap (schwab-account-poll fires 5 min before every one of this job's runs) or general system load around the fire time, not the MCP connection (\`claude mcp list\` reflects the CLI's registration, not this run's latency).`
+        : `headless Claude call failed (${msg}, code=${code ?? "unknown"}).`;
+    await fail(detail);
     return;
   }
 
