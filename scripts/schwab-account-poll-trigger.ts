@@ -75,7 +75,9 @@ type PollResponse = {
 // lib/schwab-account-import.ts both produce for this case.
 function classifyErrors(errors: string[]): Severity {
   if (errors.length === 0) return "ok";
-  return errors.every((e) => /no matching open position/i.test(e)) ? "warning" : "failed";
+  return errors.every((e) => /no matching open position|no open stock_long position/i.test(e))
+    ? "warning"
+    : "failed";
 }
 
 async function main() {
@@ -159,8 +161,15 @@ async function main() {
     return;
   }
 
-  if (prev.lastStatus === "failed" || prev.lastStatus === "warning") {
-    await sendDiscordAlert("🟢 Schwab Account Data poll recovered — back to normal.", { mention: false });
+  if (prev.lastStatus === "warning") {
+    await sendDiscordAlert(
+      "🟢 Schwab Account Data poll recovered from data warnings — no action was needed.",
+      { mention: false },
+    );
+  } else if (prev.lastStatus === "failed") {
+    await sendDiscordAlert("🟢 Schwab Account Data poll recovered — connectivity restored.", {
+      mention: false,
+    });
   }
   writeState({ lastStatus: "ok", checkedAt: nowIso });
 }

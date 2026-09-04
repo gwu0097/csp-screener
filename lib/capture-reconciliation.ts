@@ -16,12 +16,13 @@ import { createServerClient } from "./supabase";
 import { writeOutcomeChunk, type OutcomeRow } from "./local-chain-store";
 import { sendDiscordAlert } from "./discord-alert";
 import { upsertHealthRollup, type CaptureHealthDailyRow, type OutstandingSymbol } from "./capture-health";
+import { isNyseHoliday } from "./market-holidays";
 
 const LOOKBACK_DAYS = 5;
 
 function isBday(d: Date): boolean {
   const day = d.getUTCDay();
-  return day !== 0 && day !== 6;
+  return day !== 0 && day !== 6 && !isNyseHoliday(d.toISOString().slice(0, 10));
 }
 function addBdays(iso: string, n: number): string {
   const d = new Date(iso + "T00:00:00Z");
@@ -157,7 +158,10 @@ export async function reconcileMissedCaptures(
           });
         }
       }
-      if (!dryRun) {
+      // A quiet day with nothing due (no capture was ever scheduled to
+      // fire) is not a failure — only page when symbols were actually
+      // missed.
+      if (!dryRun && due.length > 0) {
         await sendDiscordAlert(
           `🔴 Post-earnings capture: NO RUN recorded for ${dateIso} (found during reconciliation on ${todayIso}). ` +
             `${due.length} symbols were due and got MISSED rows.`,
@@ -186,6 +190,11 @@ export async function reconcileMissedCaptures(
           outstanding: [],
           reconciled_at: now,
         });
+        await sendDiscordAlert(
+          `🔴 Post-earnings capture: ${missedRows.length} symbol(s) for ${dateIso} never reached a terminal ` +
+            `outcome (found during reconciliation on ${todayIso}) and got MISSED rows.\n` +
+            `Symbols: ${healthRow.outstanding.map((o) => o.symbol).join(", ")}`,
+        );
       }
     }
   }

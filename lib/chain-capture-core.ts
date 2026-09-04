@@ -164,13 +164,30 @@ export async function runChainCapture(
       run_finished_at: runFinishedAt,
     });
 
-    const failedCount = (counts.errored ?? 0) + (counts.schwab_disconnected ?? 0);
-    if (candidates.length > 0 && failedCount / candidates.length > FAILURE_ALERT_THRESHOLD) {
+    // schwab_disconnected and errored are kept separate rather than
+    // summed into one "failed" ratio — schwab_disconnected is a real
+    // outage signal, but errored also catches permanent 400s (delisted/
+    // invalid symbols per classifyError's comment above), a data-quality
+    // condition that shouldn't read as an outage just because it landed
+    // on the same day as a few bad tickers.
+    const disconnectedCount = counts.schwab_disconnected ?? 0;
+    const erroredCount = counts.errored ?? 0;
+    if (candidates.length > 0 && disconnectedCount / candidates.length > FAILURE_ALERT_THRESHOLD) {
       await sendDiscordAlert(
-        `🔴 ${label} capture: ${failedCount}/${candidates.length} due symbols failed ` +
-          `(${Math.round((failedCount / candidates.length) * 100)}%) for ${captureDate}.\n` +
-          `fired=${counts.fired ?? 0} errored=${counts.errored ?? 0} disconnected=${counts.schwab_disconnected ?? 0} ` +
+        `🔴 ${label} capture: ${disconnectedCount}/${candidates.length} due symbols failed due to Schwab ` +
+          `disconnection (${Math.round((disconnectedCount / candidates.length) * 100)}%) for ${captureDate}.\n` +
+          `fired=${counts.fired ?? 0} errored=${erroredCount} disconnected=${disconnectedCount} ` +
           `suppressed=${counts.suppressed ?? 0}\nOutstanding: ${outstanding.length}`,
+      );
+    }
+    if (candidates.length > 0 && erroredCount / candidates.length > FAILURE_ALERT_THRESHOLD) {
+      await sendDiscordAlert(
+        `🟡 ${label} capture: ${erroredCount}/${candidates.length} due symbols errored ` +
+          `(${Math.round((erroredCount / candidates.length) * 100)}%) for ${captureDate} — often delisted/invalid ` +
+          `symbols (permanent 400s), not necessarily an outage. Check the outcome log if this looks unusual.\n` +
+          `fired=${counts.fired ?? 0} errored=${erroredCount} disconnected=${disconnectedCount} ` +
+          `suppressed=${counts.suppressed ?? 0}\nOutstanding: ${outstanding.length}`,
+        { mention: false },
       );
     }
   }
