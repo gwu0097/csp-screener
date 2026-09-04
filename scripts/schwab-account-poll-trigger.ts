@@ -13,19 +13,19 @@
 // courier. That route requires DISCORD_WEBHOOK_URL/DISCORD_PING_USER_ID
 // in Vercel's production env, same names as .env.local.)
 //
-// This job runs 4x/day, not continuously — transition-only dedup
-// (alert on ok->failed but stay silent while failed persists) makes
-// "still failing," "ran clean," and "never fired" all indistinguishable
-// from Discord. Every run now posts its outcome; the state file is kept
-// only to track consecutiveFailures for the "(Nth consecutive run)"
-// label, not to decide whether to send. The one exception is the
-// WARNING severity: a trade the poller can't match to a tracked
-// position (off-strategy, or opened outside this app) means a trade is
-// sitting undismissed in the activity panel — a standing fact that
-// doesn't change run to run the way "did the poll work this cycle"
-// does, so warning stays transition-deduped (surfaced once, no
-// mention) rather than re-alerting every run it sits there. See
-// classifyErrors below.
+// One Discord message per run, posted at start and edited in place at
+// completion — not silence-until-transition (which made "still
+// failing," "ran clean," and "never fired" indistinguishable — a
+// 2026-09-04 Robinhood incident showed this exact failure mode) and
+// not two separate messages per run (the start and end of one run are
+// the same event, not two pieces of information). The state file is
+// kept only to track consecutiveFailures for the "(Nth consecutive
+// run)" label, never to decide whether to post. Unlike the Robinhood
+// courier, this script has no multi-minute in-flight window (the
+// entire poll is one synchronous HTTP call that normally finishes in
+// seconds) and no comparable timeout ceiling that's been drifting, so
+// it doesn't get a "running" row on the Positions page or a
+// budget-warning check — there's nothing here for either to detect.
 //
 // Run via com.csp.schwab-account-poll launchd agent, weekdays.
 // Usage: npx tsx scripts/schwab-account-poll-trigger.ts
@@ -43,6 +43,8 @@ function loadEnvLocal(): void {
   }
 }
 
+let startMessageId: string | null = null;
+
 const STATE_DIR = resolve(homedir(), "Library/Application Support/csp-screener");
 const STATE_PATH = resolve(STATE_DIR, "schwab-account-poll-state.json");
 const POLL_URL = "https://csp-screener.vercel.app/api/schwab-account/poll-transactions";
@@ -55,7 +57,7 @@ type State = {
   detail?: string;
   // Runs of consecutive failed statuses, reset to 0 on anything else.
   // Used only to label "(Nth consecutive run)" — every failed run
-  // alerts regardless of this count, see main() below.
+  // alerts regardless of this count, see fail() below.
   consecutiveFailures?: number;
 };
 
@@ -72,6 +74,22 @@ function ordinal(n: number): string {
     default:
       return `${n}th`;
   }
+}
+
+// "1:05pm" — no leading zero on the hour, no space before am/pm. This
+// runs on the user's own Mac via launchd, so the system's local
+// timezone (not UTC) is exactly the right one to render in.
+function fmtClock(d: Date): string {
+  let h = d.getHours();
+  const m = d.getMinutes();
+  const ampm = h >= 12 ? "pm" : "am";
+  h = h % 12 || 12;
+  return `${h}:${String(m).padStart(2, "0")}${ampm}`;
+}
+
+function truncateWithNote(s: string, maxLen: number): string {
+  if (s.length <= maxLen) return s;
+  return `${s.slice(0, maxLen)}... [truncated, ${s.length} chars total]`;
 }
 
 function readState(): State {
@@ -122,31 +140,44 @@ function classifyErrors(errors: string[]): Severity {
 
 async function main() {
   loadEnvLocal();
-  const { sendDiscordAlert } = await import("../lib/discord-alert");
+  const { sendDiscordAlert, editDiscordAlert } = await import("../lib/discord-alert");
 
   const prev = readState();
   const nowIso = new Date().toISOString();
 
-  async function fail(detail: string): Promise<void> {
-    console.error(`[schwab-account-poll-trigger] failed: ${detail}`);
+  const startClock = fmtClock(new Date());
+  const startPost = await sendDiscordAlert(`🔵 ${startClock} — Schwab Account Data poll starting`, {
+    mention: false,
+    returnId: true,
+  });
+  startMessageId = startPost.messageId ?? null;
+
+  async function finish(text: string, opts?: { mention?: boolean }): Promise<void> {
+    if (startMessageId) {
+      const res = await editDiscordAlert(startMessageId, text, opts);
+      if (res.ok) return;
+    }
+    await sendDiscordAlert(text, opts);
+  }
+
+  async function fail(outcomePhrase: string, detail: string): Promise<void> {
+    console.error(`[schwab-account-poll-trigger] ${outcomePhrase}: ${detail}`);
     const consecutiveFailures = (prev.consecutiveFailures ?? 0) + 1;
     const streak = consecutiveFailures > 1 ? ` (${ordinal(consecutiveFailures)} consecutive run)` : "";
-    await sendDiscordAlert(`🔴 Schwab Account Data poll failing${streak}: ${detail}\nReconnect: ${RECONNECT_URL}`);
+    const endClock = fmtClock(new Date());
+    await finish(
+      `🔴 ${endClock} — Schwab Account Data poll ${outcomePhrase}${streak}.\n${detail}\nReconnect: ${RECONNECT_URL}`,
+    );
     writeState({ lastStatus: "failed", checkedAt: nowIso, detail, consecutiveFailures });
     process.exitCode = 1;
   }
-  // Transition-deduped, unlike fail()/succeed() — a warning means a
-  // trade is sitting undismissed in the activity panel, a standing
-  // fact that doesn't change run to run, so re-alerting every 2 hours
-  // it sits there would just be noise. See the header comment.
   async function warn(detail: string, count: number): Promise<void> {
     console.warn(`[schwab-account-poll-trigger] warning: ${detail}`);
-    if (prev.lastStatus !== "warning") {
-      await sendDiscordAlert(
-        `🟡 Schwab Account Data poll: ${count} trade(s) couldn't auto-import because they aren't part of a tracked position — not necessarily broken, just off-strategy or opened outside this app. Review and Dismiss in the activity panel.\n${detail}`,
-        { mention: false },
-      );
-    }
+    const endClock = fmtClock(new Date());
+    await finish(
+      `🟡 ${endClock} — Schwab Account Data poll finished: ${count} trade(s) couldn't auto-import — not part of a tracked position. Review and Dismiss in the activity panel.\n${detail}`,
+      { mention: false },
+    );
     writeState({ lastStatus: "warning", checkedAt: nowIso, detail, consecutiveFailures: 0 });
     // Not a script failure — the poll itself ran fine; this is a
     // data-level heads-up, not an execution error, so the exit code
@@ -154,13 +185,8 @@ async function main() {
   }
   async function succeed(summary: string): Promise<void> {
     console.log(`[schwab-account-poll-trigger] ${summary}`);
-    const prefix =
-      prev.lastStatus === "failed"
-        ? "🟢 Schwab Account Data poll recovered — connectivity restored.\n"
-        : prev.lastStatus === "warning"
-          ? "🟢 Schwab Account Data poll recovered from data warnings — no action was needed.\n"
-          : "🟢 Schwab Account Data poll ok — ";
-    await sendDiscordAlert(`${prefix}${summary}`, { mention: false });
+    const endClock = fmtClock(new Date());
+    await finish(`🟢 ${endClock} — Schwab Account Data poll finished — ${summary}`, { mention: false });
     writeState({ lastStatus: "ok", checkedAt: nowIso, consecutiveFailures: 0 });
   }
 
@@ -172,19 +198,29 @@ async function main() {
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    await fail(`request failed (${msg}).`);
+    await fail("request failed", msg);
     return;
   }
 
-  const json = (await res.json().catch(() => ({}))) as PollResponse;
+  // Read the raw body FIRST so a non-JSON or unparseable response
+  // (e.g. a Vercel error page on a 500) still has its actual content
+  // available for the alert, rather than silently collapsing to a
+  // bare status code.
+  const rawBody = await res.text().catch(() => "");
+  let json: PollResponse = {};
+  try {
+    json = JSON.parse(rawBody);
+  } catch {
+    // leave json empty — handled via rawBody below
+  }
   console.log(`[schwab-account-poll-trigger] ${nowIso} status=${res.status} ok=${json.ok}`);
 
   // A non-2xx HTTP status (e.g. the route's own 500 on a fatal
   // exception) is always a real failure — never content-classified,
   // regardless of what the body says.
   if (!res.ok) {
-    const detail = json.error ?? `HTTP ${res.status}`;
-    await fail(detail);
+    const bodyPreview = rawBody.trim() ? truncateWithNote(rawBody, 500) : "(empty body)";
+    await fail("failed", `HTTP ${res.status}. Response: ${bodyPreview}`);
     return;
   }
 
@@ -193,12 +229,12 @@ async function main() {
       ? [json.error]
       : (json.reports ?? []).filter((r) => !r.ok).flatMap((r) => r.errors);
     const detail =
-      json.error ??
-      ((json.reports ?? [])
-        .filter((r) => !r.ok)
-        .map((r) => `${r.broker}: ${r.errors.join("; ")}`)
-        .join(" | ") ||
-        `ok=false with no error detail (HTTP ${res.status})`);
+      allErrors.length > 0
+        ? ((json.reports ?? [])
+            .filter((r) => !r.ok)
+            .map((r) => `${r.broker}: ${r.errors.join("; ")}`)
+            .join(" | ") || allErrors.join("; "))
+        : `ok=false with no error strings in the response (HTTP ${res.status}). Raw: ${truncateWithNote(rawBody, 400)}`;
     // No captured error strings despite ok=false is itself an
     // anomaly — classify as failed, not a silent "ok" via an empty
     // classifyErrors([]) call.
@@ -208,7 +244,7 @@ async function main() {
       await warn(detail, allErrors.length);
       return;
     }
-    await fail(detail);
+    await fail("failed", detail);
     return;
   }
 
@@ -220,8 +256,25 @@ async function main() {
   await succeed(`${totalTrades} trade(s) imported — ${summary}`);
 }
 
-main().catch((e) => {
+main().catch(async (e) => {
   const msg = e instanceof Error ? e.message : String(e);
   console.error(`[schwab-account-poll-trigger] fatal: ${msg}`);
+  try {
+    const { sendDiscordAlert, editDiscordAlert } = await import("../lib/discord-alert");
+    const prev = readState();
+    const consecutiveFailures = (prev.consecutiveFailures ?? 0) + 1;
+    const streak = consecutiveFailures > 1 ? ` (${ordinal(consecutiveFailures)} consecutive run)` : "";
+    const endClock = fmtClock(new Date());
+    const text = `🔴 ${endClock} — Schwab Account Data poll fatal error${streak}.\n${msg}`;
+    if (startMessageId) {
+      const editRes = await editDiscordAlert(startMessageId, text);
+      if (!editRes.ok) await sendDiscordAlert(text);
+    } else {
+      await sendDiscordAlert(text);
+    }
+    writeState({ lastStatus: "failed", checkedAt: new Date().toISOString(), detail: msg, consecutiveFailures });
+  } catch {
+    // best-effort alert — don't mask the original failure
+  }
   process.exitCode = 1;
 });

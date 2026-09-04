@@ -12,6 +12,12 @@
 // Admin-only, same convention as SchwabTokenBanner — the route itself
 // 401s for non-admins, so a failed fetch here is silently ignored
 // rather than shown as an error.
+//
+// Fetched once on mount, no polling: a page refresh showing current
+// state (including "running since HH:MM" while a courier run is still
+// in flight — see run_finished_at handling below) is enough; watching
+// it flip live isn't worth a client polling loop (2026-09-04, explicit
+// user call).
 
 import { useEffect, useState } from "react";
 
@@ -55,6 +61,21 @@ function StatusItem({ label, run }: { label: string; run: CourierRun }) {
   if (!run) {
     return <span className="text-muted-foreground">{label}: no run recorded</span>;
   }
+  // run_finished_at stays NULL for the lifetime of an in-flight run —
+  // see app/api/robinhood-account/poll-run-start. This is a snapshot at
+  // page-load time (no client polling), so a run that's still going
+  // when you refresh shows as running; it won't flip to "finished" on
+  // its own until you reload.
+  if (run.runFinishedAt === null) {
+    return (
+      <span className="inline-flex items-center gap-1.5">
+        <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-sky-500" />
+        <span className="text-muted-foreground">
+          {label}: running since {fmtTime(run.runStartedAt)}
+        </span>
+      </span>
+    );
+  }
   const stale = isStale(run.runStartedAt);
   const dotColor = !run.ok ? "bg-rose-500" : stale ? "bg-amber-500" : "bg-emerald-500";
   const summary = !run.ok
@@ -89,10 +110,8 @@ export function CourierStatusLine() {
       }
     };
     load();
-    const intervalId = setInterval(load, 5 * 60 * 1000);
     return () => {
       cancelled = true;
-      clearInterval(intervalId);
     };
   }, []);
 

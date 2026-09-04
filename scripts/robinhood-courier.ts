@@ -48,15 +48,36 @@ function loadEnvLocal(): void {
 // main()'s own local timer would exist. Captures wall-clock from
 // process start to whichever exit path fires, covering the full
 // execFileSync call (the thing actually at risk of drifting toward the
-// 170s budget) plus everything around it.
+// budget) plus everything around it.
 const SCRIPT_STARTED_AT = Date.now();
-function elapsedSeconds(): string {
-  return ((Date.now() - SCRIPT_STARTED_AT) / 1000).toFixed(1);
+function elapsedSeconds(): number {
+  return (Date.now() - SCRIPT_STARTED_AT) / 1000;
 }
+
+// The message posted at run start, edited in place to the final result
+// at whichever exit path fires — one message per run, not two. Also
+// readable from main().catch() below, which has no other way to reach
+// the same message. runRowId is the equivalent thread for the DB-side
+// "running" placeholder (see poll-run-start below).
+let startMessageId: string | null = null;
+let runRowId: string | null = null;
 
 const CLAUDE_BIN = "/Users/raitsai/.local/bin/claude";
 const POLL_URL = "https://csp-screener.vercel.app/api/robinhood-account/poll-transactions";
 const ATTEMPT_URL = "https://csp-screener.vercel.app/api/robinhood-account/poll-attempt";
+const RUN_START_URL = "https://csp-screener.vercel.app/api/robinhood-account/poll-run-start";
+// Was 170_000 (raised once already from 90_000 after a 2026-08-27
+// diagnostic clocked a good run at 93.6s). Round-trip latency has
+// roughly doubled again since then — a live repro on 2026-09-04
+// completed successfully in 173.8s, and the same day's scheduled runs
+// were landing right on the 170s line (one killed at 170.4s, one
+// succeeded at 173.8s, same latency either way). 500s is a safety
+// valve against a run that's genuinely wedged, not a drift-detection
+// mechanism — the start/finish Discord messages and the 80%-budget
+// warning below do the actual detecting, so the ceiling itself doesn't
+// need to be tight.
+const CLAUDE_TIMEOUT_MS = 500_000;
+const BUDGET_WARNING_RATIO = 0.8;
 // 7-day rolling lookback, not a strict cursor — an order created days
 // ago can still fill today, and idempotency is entirely execution_id
 // dedup on the server, so overlap is intentional. See
@@ -72,8 +93,8 @@ type State = {
   checkedAt: string;
   detail?: string;
   // Runs of consecutive failed statuses, reset to 0 on anything else.
-  // Lets a persisting failure keep alerting (with the count) instead of
-  // going silent after the first ping — see fail() below.
+  // Used only to label "(Nth consecutive run)" — every failed run
+  // alerts regardless of this count, see fail() below.
   consecutiveFailures?: number;
 };
 
@@ -90,6 +111,22 @@ function ordinal(n: number): string {
     default:
       return `${n}th`;
   }
+}
+
+// "1:05pm" — no leading zero on the hour, no space before am/pm. This
+// runs on the user's own Mac via launchd, so the system's local
+// timezone (not UTC) is exactly the right one to render in.
+function fmtClock(d: Date): string {
+  let h = d.getHours();
+  const m = d.getMinutes();
+  const ampm = h >= 12 ? "pm" : "am";
+  h = h % 12 || 12;
+  return `${h}:${String(m).padStart(2, "0")}${ampm}`;
+}
+
+function truncateWithNote(s: string, maxLen: number): string {
+  if (s.length <= maxLen) return s;
+  return `${s.slice(0, maxLen)}... [truncated, ${s.length} chars total]`;
 }
 
 function readState(): State {
@@ -160,32 +197,58 @@ function extractFirstJsonValue(text: string): string {
 
 async function main() {
   loadEnvLocal();
-  const { sendDiscordAlert } = await import("../lib/discord-alert");
+  const { sendDiscordAlert, editDiscordAlert } = await import("../lib/discord-alert");
   const prev = readState();
   const nowIso = new Date().toISOString();
 
-  // This job runs 4x/day, not continuously — transition-only dedup
-  // (alert on ok->failed but stay silent while failed persists) makes
-  // "still failing," "ran clean," and "never fired" all indistinguishable
-  // from Discord, which is exactly what happened 2026-09-04: an 11:07am
-  // failure alert never recovered, so the 1:05pm failure sent nothing.
-  // Every run now posts its outcome — the state file is kept only to
-  // track consecutiveFailures for the "(Nth consecutive run)" label, not
-  // to decide whether to send. The one exception is the WARNING severity
-  // (see warn() below): a warning means an off-strategy trade is sitting
-  // undismissed in the activity panel, a standing fact that doesn't
-  // change run to run the way "did the courier work this cycle" does —
-  // per-run posting there would just re-alert the same undismissed trade
-  // every 2 hours for as long as it sits there, so warning stays
-  // transition-deduped.
-  // duration= on every line, success or failure, printed at the SAME
-  // position regardless of outcome so a plain `grep duration= | awk` can
-  // pull a trend later — the point of logging it at all (see the
-  // 2026-09-04 request: a 168s success and a 20s success looked
-  // identical, no way to tell drift toward the 170s budget from
-  // isolated spikes). Written into the console line, not the state
-  // file — state only ever holds the latest run, and a trend needs the
-  // append-only log history.
+  // This job runs 4x/day, not continuously — one message per run,
+  // posted at start and edited in place at completion, rather than
+  // silence-until-transition (which made "still failing," "ran
+  // clean," and "never fired" indistinguishable from Discord — see the
+  // 2026-09-04 incident where an 11:07am failure alert never
+  // recovered, so the 1:05pm failure sent nothing) or two separate
+  // messages per run (which would double the channel's volume for no
+  // extra information, since the start and end of one run are the same
+  // event). The state file is kept only to track consecutiveFailures
+  // for the "(Nth consecutive run)" label, never to decide whether to
+  // post.
+  const startClock = fmtClock(new Date(SCRIPT_STARTED_AT));
+  const startPost = await sendDiscordAlert(`🔵 ${startClock} — Robinhood courier starting`, {
+    mention: false,
+    returnId: true,
+  });
+  startMessageId = startPost.messageId ?? null;
+
+  // Best-effort "running" placeholder for the Positions page — see
+  // app/api/robinhood-account/poll-run-start. Independent of the
+  // Discord post above: either can fail without affecting the other.
+  try {
+    const runStartRes = await fetch(RUN_START_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.CRON_SECRET ?? ""}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ accountNumber: process.env.ROBINHOOD_ACCOUNT_NUMBER ?? null }),
+    });
+    const runStartJson = (await runStartRes.json().catch(() => null)) as { runRowId?: string } | null;
+    runRowId = runStartJson?.runRowId ?? null;
+  } catch {
+    // best-effort — a failure here shouldn't block the actual courier run
+  }
+
+  // Edits the start placeholder to its final text; falls back to a
+  // fresh post if there's no message id to edit (the start post itself
+  // failed) or the edit call fails for some other reason, so the
+  // outcome is never silently lost.
+  async function finish(text: string, opts?: { mention?: boolean }): Promise<void> {
+    if (startMessageId) {
+      const res = await editDiscordAlert(startMessageId, text, opts);
+      if (res.ok) return;
+    }
+    await sendDiscordAlert(text, opts);
+  }
+
   // POSTs a bare failure record for runs that never reach POLL_URL at
   // all (the headless `claude -p` call itself hanging/failing, JSON
   // extraction failing, a missing account number) — those failure
@@ -204,6 +267,7 @@ async function main() {
           accountNumber: process.env.ROBINHOOD_ACCOUNT_NUMBER ?? null,
           detail,
           startedAt: new Date(SCRIPT_STARTED_AT).toISOString(),
+          runRowId: runRowId ?? undefined,
         }),
       });
     } catch {
@@ -213,42 +277,47 @@ async function main() {
 
   // reachedServer=true for failures where POLL_URL already returned a
   // response — those runs already have a real row from the deployed
-  // route's own insert (lib/robinhood-account-import.ts), so logging
-  // here again would just duplicate it.
-  async function fail(detail: string, opts?: { reachedServer?: boolean }): Promise<void> {
-    console.error(`[robinhood-courier] duration=${elapsedSeconds()}s ${detail}`);
+  // route's own insert/update (lib/robinhood-account-import.ts), so
+  // logging here again would just duplicate it.
+  async function fail(
+    outcomePhrase: string,
+    detail: string,
+    opts?: { reachedServer?: boolean },
+  ): Promise<void> {
+    console.error(`[robinhood-courier] duration=${elapsedSeconds().toFixed(1)}s ${outcomePhrase}: ${detail}`);
     const consecutiveFailures = (prev.consecutiveFailures ?? 0) + 1;
     const streak = consecutiveFailures > 1 ? ` (${ordinal(consecutiveFailures)} consecutive run)` : "";
-    await sendDiscordAlert(`🔴 Robinhood courier failing${streak}: ${detail}`);
+    const endClock = fmtClock(new Date());
+    await finish(`🔴 ${endClock} — Robinhood courier ${outcomePhrase}${streak}.\n${detail}`);
     if (!opts?.reachedServer) {
       await logLocalAttempt(detail);
     }
     writeState({ lastStatus: "failed", checkedAt: nowIso, detail, consecutiveFailures });
     process.exitCode = 1;
   }
-  // Transition-deduped, unlike fail()/succeed() — see the header
-  // comment above for why a warning is a standing fact (an undismissed
-  // trade), not new per-run information.
   async function warn(detail: string, count: number): Promise<void> {
-    console.warn(`[robinhood-courier] duration=${elapsedSeconds()}s warning: ${detail}`);
-    if (prev.lastStatus !== "warning") {
-      await sendDiscordAlert(
-        `🟡 Robinhood courier: ${count} trade(s) couldn't auto-import because they aren't part of a tracked position — not necessarily broken, just off-strategy or opened outside this app. Review and Dismiss in the activity panel.\n${detail}`,
-        { mention: false },
-      );
-    }
+    console.warn(`[robinhood-courier] duration=${elapsedSeconds().toFixed(1)}s warning: ${detail}`);
+    const endClock = fmtClock(new Date());
+    await finish(
+      `🟡 ${endClock} — Robinhood courier finished: ${count} trade(s) couldn't auto-import — not part of a tracked position. Review and Dismiss in the activity panel.\n${detail}`,
+      { mention: false },
+    );
     writeState({ lastStatus: "warning", checkedAt: nowIso, detail, consecutiveFailures: 0 });
     // Not a script failure — the poll itself ran fine; exit code stays 0.
   }
-  async function succeed(summary: string): Promise<void> {
-    console.log(`[robinhood-courier] duration=${elapsedSeconds()}s ${summary}`);
-    const prefix =
-      prev.lastStatus === "failed"
-        ? "🟢 Robinhood courier recovered — connectivity restored.\n"
-        : prev.lastStatus === "warning"
-          ? "🟢 Robinhood courier recovered from data warnings — no action was needed.\n"
-          : "🟢 Robinhood courier ok — ";
-    await sendDiscordAlert(`${prefix}${summary}`, { mention: false });
+  async function succeed(fillsCount: number, summary: string): Promise<void> {
+    const elapsedS = elapsedSeconds();
+    console.log(`[robinhood-courier] duration=${elapsedS.toFixed(1)}s ok — ${summary}`);
+    const endClock = fmtClock(new Date());
+    const fillsText = fillsCount > 0 ? `${fillsCount} fill${fillsCount === 1 ? "" : "s"} imported` : "no new fills";
+    const budgetSeconds = CLAUDE_TIMEOUT_MS / 1000;
+    const overBudgetLine =
+      elapsedS > budgetSeconds * BUDGET_WARNING_RATIO
+        ? ` ⚠️ ${Math.round(elapsedS)}s — ${Math.round((elapsedS / budgetSeconds) * 100)}% of the ${budgetSeconds}s budget, drifting close to the ceiling again.`
+        : ` (${Math.round(elapsedS)}s)`;
+    await finish(`🟢 ${endClock} — Robinhood courier finished, ${fillsText}.${overBudgetLine}\n${summary}`, {
+      mention: overBudgetLine.includes("⚠️"),
+    });
     writeState({ lastStatus: "ok", checkedAt: nowIso, consecutiveFailures: 0 });
   }
 
@@ -257,7 +326,7 @@ async function main() {
   // ACCOUNT_BROKER_MAP does. Lives only in the untracked .env.local.
   const ACCOUNT_NUMBER = process.env.ROBINHOOD_ACCOUNT_NUMBER ?? "";
   if (!ACCOUNT_NUMBER) {
-    await fail("ROBINHOOD_ACCOUNT_NUMBER not set in .env.local, aborting");
+    await fail("aborted", "ROBINHOOD_ACCOUNT_NUMBER not set in .env.local.");
     return;
   }
 
@@ -279,22 +348,16 @@ async function main() {
 
   let stdout: string;
   try {
-    // 90s was too tight — a 2026-08-27 diagnostic timed a genuinely
-    // successful headless call at 93.6s (fetching + the MCP round
-    // trip both vary in latency), so real calls were spuriously
-    // ETIMEDOUT-ing at the old limit. This isn't the whole-script
-    // budget: launchd fires this job every 2 hours, so there's ample
-    // room.
     stdout = execFileSync(
       CLAUDE_BIN,
       ["-p", prompt, "--allowedTools", "mcp__robinhood__get_option_orders"],
-      { encoding: "utf8", timeout: 170_000, maxBuffer: 10 * 1024 * 1024 },
+      { encoding: "utf8", timeout: CLAUDE_TIMEOUT_MS, maxBuffer: 10 * 1024 * 1024 },
     );
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     // ETIMEDOUT here means execFileSync's own `timeout` option killed a
-    // process that HAD started and was still running past the 170s
-    // budget — not a process that failed to launch, and not a dead MCP
+    // process that HAD started and was still running past the budget —
+    // not a process that failed to launch, and not a dead MCP
     // connection. `claude mcp list` checks the CLI's persistent server
     // registration, which has nothing to do with one invocation's own
     // round-trip latency — each headless call opens and tears down its
@@ -304,14 +367,12 @@ async function main() {
     // A bare "ETIMEDOUT" says a kill happened, not what the process was
     // doing when it was killed — a genuinely stuck call (hung on the
     // MCP round trip, zero progress) and one that's simply outgrown the
-    // 170s budget (real work, just slow) need different fixes, and the
+    // budget (real work, just slow) need different fixes, and the
     // message alone can't distinguish them. execFileSync's thrown error
     // carries .stdout/.stderr with whatever the child had written
-    // before the kill (confirmed empirically, 2026-09-04: a `sleep`
-    // child killed by timeout still reports its pre-kill stdout/stderr
-    // on the caught error) — surfacing that turns "it timed out" into
-    // "it timed out after producing X" or "it timed out having produced
-    // nothing," which is the actual diagnostic signal.
+    // before the kill (confirmed empirically, 2026-09-04) — surfacing
+    // that turns "it timed out" into "it timed out after producing X"
+    // or "it timed out having produced nothing."
     const code = (e as NodeJS.ErrnoException).code;
     const rawStdout = (e as { stdout?: string | Buffer | null }).stdout;
     const rawStderr = (e as { stderr?: string | Buffer | null }).stderr;
@@ -319,16 +380,17 @@ async function main() {
     const stderrText = typeof rawStderr === "string" ? rawStderr : (rawStderr?.toString("utf8") ?? "");
     const captured =
       [
-        stdoutText.trim() ? `stdout (${stdoutText.length} chars, last 300 shown): ...${stdoutText.slice(-300)}` : null,
-        stderrText.trim() ? `stderr (${stderrText.length} chars, last 300 shown): ...${stderrText.slice(-300)}` : null,
+        stdoutText.trim() ? `stdout (${stdoutText.length} chars): ${truncateWithNote(stdoutText, 400)}` : null,
+        stderrText.trim() ? `stderr (${stderrText.length} chars): ${truncateWithNote(stderrText, 400)}` : null,
       ]
         .filter((s): s is string => s !== null)
         .join(" | ") || "nothing captured — the process produced no stdout or stderr before being killed";
-    const detail =
-      code === "ETIMEDOUT"
-        ? `headless Claude call started but didn't finish within the 170s budget (${msg}). ${captured}`
-        : `headless Claude call failed (${msg}, code=${code ?? "unknown"}). ${captured}`;
-    await fail(detail);
+
+    if (code === "ETIMEDOUT") {
+      await fail(`timed out after ${Math.round(CLAUDE_TIMEOUT_MS / 1000)}s`, captured);
+    } else {
+      await fail("headless Claude call failed", `${msg} (code=${code ?? "unknown"}). ${captured}`);
+    }
     return;
   }
 
@@ -337,14 +399,17 @@ async function main() {
     rawJson = extractFirstJsonValue(stdout);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    await fail(`claude -p output wasn't parseable JSON (${msg}) — nothing submitted.`);
+    await fail(
+      "output wasn't parseable JSON",
+      `${msg} — nothing submitted. Raw output (${stdout.length} chars): ${truncateWithNote(stdout, 500)}`,
+    );
     return;
   }
 
   let res: Response;
   try {
     res = await fetch(
-      `${POLL_URL}?accountNumber=${encodeURIComponent(ACCOUNT_NUMBER)}&lookbackSince=${encodeURIComponent(lookbackSince)}&source=courier`,
+      `${POLL_URL}?accountNumber=${encodeURIComponent(ACCOUNT_NUMBER)}&lookbackSince=${encodeURIComponent(lookbackSince)}&source=courier${runRowId ? `&runRowId=${encodeURIComponent(runRowId)}` : ""}`,
       {
         method: "POST",
         headers: {
@@ -356,28 +421,40 @@ async function main() {
     );
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    await fail(`POST to poll-transactions failed (${msg}).`);
+    await fail("POST to poll-transactions failed", msg);
     return;
   }
 
-  const json = (await res.json().catch(() => ({}))) as {
+  // Read the raw body FIRST so a non-JSON or unparseable response
+  // (e.g. a Vercel error page on a 500) still has its actual content
+  // available for the alert, rather than silently collapsing to a
+  // bare status code.
+  const rawBody = await res.text().catch(() => "");
+  let json: {
     ok?: boolean;
     report?: { ordersSeen: number; executionsSeen: number; executionsLanded: number; tradesSubmitted: number; skipped: number; errors: string[] };
     error?: string;
-  };
+  } = {};
+  try {
+    json = JSON.parse(rawBody);
+  } catch {
+    // leave json empty — handled via rawBody below
+  }
 
   // A non-2xx HTTP status is always a real failure — never content-
   // classified, regardless of what the body says.
   if (!res.ok) {
-    const detail = json.error ?? `HTTP ${res.status}`;
-    await fail(`import failed — ${detail}`, { reachedServer: true });
+    const bodyPreview = rawBody.trim() ? truncateWithNote(rawBody, 500) : "(empty body)";
+    await fail("import failed", `HTTP ${res.status}. Response: ${bodyPreview}`, { reachedServer: true });
     return;
   }
 
   if (!json.ok) {
     const allErrors = json.error ? [json.error] : (json.report?.errors ?? []);
     const detail =
-      json.error ?? ((json.report?.errors ?? []).join("; ") || `ok=false with no error detail (HTTP ${res.status})`);
+      allErrors.length > 0
+        ? allErrors.join("; ")
+        : `ok=false with no error strings in the response (HTTP ${res.status}). Raw: ${truncateWithNote(rawBody, 400)}`;
     // No captured error strings despite ok=false is itself an anomaly
     // — classify as failed, not a silent "ok" via classifyErrors([]).
     const severity: Severity = allErrors.length > 0 ? classifyErrors(allErrors) : "failed";
@@ -385,25 +462,33 @@ async function main() {
       await warn(detail, allErrors.length);
       return;
     }
-    await fail(`import failed — ${detail}`, { reachedServer: true });
+    await fail("import failed", detail, { reachedServer: true });
     return;
   }
 
   const r = json.report;
   await succeed(
+    r?.tradesSubmitted ?? 0,
     `orders=${r?.ordersSeen ?? 0} executions=${r?.executionsSeen ?? 0} landed=${r?.executionsLanded ?? 0} submitted=${r?.tradesSubmitted ?? 0} skipped=${r?.skipped ?? 0}`,
   );
 }
 
 main().catch(async (e) => {
   const msg = e instanceof Error ? e.message : String(e);
-  console.error(`[robinhood-courier] duration=${elapsedSeconds()}s fatal: ${msg}`);
+  console.error(`[robinhood-courier] duration=${elapsedSeconds().toFixed(1)}s fatal: ${msg}`);
   try {
-    const { sendDiscordAlert } = await import("../lib/discord-alert");
+    const { sendDiscordAlert, editDiscordAlert } = await import("../lib/discord-alert");
     const prev = readState();
     const consecutiveFailures = (prev.consecutiveFailures ?? 0) + 1;
-    const streak = consecutiveFailures > 1 ? `, still failing (${ordinal(consecutiveFailures)} consecutive run)` : "";
-    await sendDiscordAlert(`🔴 Robinhood courier: fatal error${streak} — ${msg}`);
+    const streak = consecutiveFailures > 1 ? ` (${ordinal(consecutiveFailures)} consecutive run)` : "";
+    const endClock = fmtClock(new Date());
+    const text = `🔴 ${endClock} — Robinhood courier fatal error${streak}.\n${msg}`;
+    if (startMessageId) {
+      const editRes = await editDiscordAlert(startMessageId, text);
+      if (!editRes.ok) await sendDiscordAlert(text);
+    } else {
+      await sendDiscordAlert(text);
+    }
     writeState({ lastStatus: "failed", checkedAt: new Date().toISOString(), detail: msg, consecutiveFailures });
     await fetch(ATTEMPT_URL, {
       method: "POST",
@@ -415,6 +500,7 @@ main().catch(async (e) => {
         accountNumber: process.env.ROBINHOOD_ACCOUNT_NUMBER ?? null,
         detail: `fatal error — ${msg}`,
         startedAt: new Date(SCRIPT_STARTED_AT).toISOString(),
+        runRowId: runRowId ?? undefined,
       }),
     }).catch(() => {});
   } catch {

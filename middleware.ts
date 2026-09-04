@@ -24,6 +24,7 @@ const PUBLIC_PATHS = new Set([
   "/api/schwab-account/poll-transactions",
   "/api/robinhood-account/poll-transactions",
   "/api/robinhood-account/poll-attempt",
+  "/api/robinhood-account/poll-run-start",
 ]);
 
 function secret(): Uint8Array {

@@ -236,7 +236,7 @@ export type RobinhoodPollReport = {
 
 export async function ingestAndProcessRobinhoodOrders(
   rawBody: unknown,
-  opts: { accountNumber: string; lookbackSince?: string },
+  opts: { accountNumber: string; lookbackSince?: string; runRowId?: string },
 ): Promise<RobinhoodPollReport> {
   const sb = createServerClient();
   const adminUserId = await resolveAdminUserId();
@@ -453,7 +453,7 @@ export async function ingestAndProcessRobinhoodOrders(
 
   report.ok = errors.length === 0;
 
-  await sb.from("robinhood_account_poll_runs").insert({
+  const runRow = {
     account_number: accountNumber,
     broker: "robinhood",
     lookback_since: opts?.lookbackSince ?? null,
@@ -466,7 +466,16 @@ export async function ingestAndProcessRobinhoodOrders(
     errors: report.errors.length > 0 ? report.errors : null,
     ok: report.ok,
     run_finished_at: new Date().toISOString(),
-  });
+  };
+  // A "running" placeholder row (see /api/robinhood-account/poll-run-
+  // start) already exists for this run — close it out in place rather
+  // than inserting a second row, or the Positions page's "running
+  // since..." state would never clear.
+  if (opts?.runRowId) {
+    await sb.from("robinhood_account_poll_runs").update(runRow).eq("id", opts.runRowId);
+  } else {
+    await sb.from("robinhood_account_poll_runs").insert(runRow);
+  }
 
   return report;
 }

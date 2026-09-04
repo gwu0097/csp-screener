@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireCronSecret } from "@/lib/cron-auth";
+import { createServerClient } from "@/lib/supabase";
 import { ingestAndProcessRobinhoodOrders, type RobinhoodPollReport } from "@/lib/robinhood-account-import";
 
 export const dynamic = "force-dynamic";
@@ -41,7 +42,22 @@ export async function POST(req: NextRequest) {
   const accountNumber = req.nextUrl.searchParams.get("accountNumber");
   const lookbackSince = req.nextUrl.searchParams.get("lookbackSince") ?? undefined;
   const source = req.nextUrl.searchParams.get("source") ?? "manual";
+  const runRowId = req.nextUrl.searchParams.get("runRowId") ?? undefined;
+
+  // Any early return below skips ingestAndProcessRobinhoodOrders' own
+  // update of the running placeholder (see poll-run-start) — close it
+  // out here instead, or the Positions page shows "running" forever.
+  async function closeRunRowOnEarlyError(detail: string): Promise<void> {
+    if (!runRowId) return;
+    const sb = createServerClient();
+    await sb
+      .from("robinhood_account_poll_runs")
+      .update({ error_count: 1, errors: [detail], ok: false, run_finished_at: new Date().toISOString() })
+      .eq("id", runRowId);
+  }
+
   if (!accountNumber) {
+    await closeRunRowOnEarlyError("accountNumber query param required");
     return NextResponse.json({ ok: false, error: "accountNumber query param required" }, { status: 400 });
   }
 
@@ -49,14 +65,16 @@ export async function POST(req: NextRequest) {
   try {
     rawBody = await req.text();
   } catch {
+    await closeRunRowOnEarlyError("failed to read request body");
     return NextResponse.json({ ok: false, error: "failed to read request body" }, { status: 400 });
   }
   if (!rawBody.trim()) {
+    await closeRunRowOnEarlyError("empty body");
     return NextResponse.json({ ok: false, error: "empty body" }, { status: 400 });
   }
 
   try {
-    const report = await ingestAndProcessRobinhoodOrders(rawBody, { accountNumber, lookbackSince });
+    const report = await ingestAndProcessRobinhoodOrders(rawBody, { accountNumber, lookbackSince, runRowId });
     console.log(
       `[robinhood-account-poll] ok=${report.ok} ${report.broker}: seen=${report.ordersSeen} executions=${report.executionsSeen} landed=${report.executionsLanded} trades=${report.tradesSubmitted} skipped=${report.skipped} errors=${report.errors.length}`,
     );
@@ -65,6 +83,7 @@ export async function POST(req: NextRequest) {
   } catch (e) {
     const msg = e instanceof Error ? e.message : "unknown";
     console.error("[robinhood-account-poll] fatal:", msg);
+    await closeRunRowOnEarlyError(msg);
     const alert = source === "courier" ? null : await postOutcomeAlert(source, null, msg);
     return NextResponse.json(
       { ok: false, error: msg, alertSent: alert?.ok ?? null, alertError: alert?.error ?? null },

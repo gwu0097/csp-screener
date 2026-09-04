@@ -30,12 +30,34 @@ export async function POST(req: NextRequest) {
     accountNumber?: string;
     detail?: string;
     startedAt?: string;
+    runRowId?: string;
   } | null;
   if (!body?.detail) {
     return NextResponse.json({ ok: false, error: "detail is required" }, { status: 400 });
   }
 
   const sb = createServerClient();
+  // If the courier already created a "running" placeholder for this run
+  // (see /api/robinhood-account/poll-run-start), close that same row out
+  // rather than inserting a second one — the Positions page reads only
+  // the latest row per broker, so a stray still-"running" row left
+  // behind by a call that skipped this update would misreport forever.
+  if (body.runRowId) {
+    const res = await sb
+      .from("robinhood_account_poll_runs")
+      .update({
+        error_count: 1,
+        errors: [body.detail],
+        ok: false,
+        run_finished_at: new Date().toISOString(),
+      })
+      .eq("id", body.runRowId);
+    if (res.error) {
+      return NextResponse.json({ ok: false, error: res.error.message }, { status: 500 });
+    }
+    return NextResponse.json({ ok: true });
+  }
+
   const res = await sb.from("robinhood_account_poll_runs").insert({
     account_number: body.accountNumber ?? null,
     broker: "robinhood",
