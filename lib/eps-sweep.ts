@@ -447,10 +447,30 @@ export async function runEpsSweep(opts?: { dryRun?: boolean }): Promise<EpsSweep
       }
 
       if (!match) {
-        const reason =
-          row.fiscal_quarter === null && row.period_end === null
-            ? "no_fiscal_identifiers"
-            : "no_period_match";
+        let reason: "no_fiscal_identifiers" | "out_of_window" | "unmatched";
+        if (row.fiscal_quarter === null && row.period_end === null) {
+          reason = "no_fiscal_identifiers";
+        } else {
+          // "no_period_match" used to cover both of these, but they're
+          // opposite findings: a row whose target period predates
+          // everything Finnhub returned is a SOURCE LIMITATION (Finnhub's
+          // /stock/earnings returns ~4 most recent quarters regardless of
+          // the requested window — an old row's quarter is simply never
+          // in there, and retrying gains nothing since that window is
+          // always anchored to now, not to the row's own period). A row
+          // whose target period falls WITHIN Finnhub's returned range but
+          // still didn't match is a real DISAGREEMENT worth investigating
+          // — our stamped fiscal identifiers may be wrong, or Finnhub's
+          // own labeling is inconsistent for this row. finnhubRows is
+          // guaranteed non-empty here (the "empty" status returned
+          // earlier). See migrations/2026-09-04-split-no-period-match.sql.
+          const targetPeriod = row.period_end ?? row.earnings_date;
+          const oldestFinnhubPeriod = finnhubRows.reduce(
+            (min, r) => (r.period < min ? r.period : min),
+            finnhubRows[0].period,
+          );
+          reason = targetPeriod < oldestFinnhubPeriod ? "out_of_window" : "unmatched";
+        }
         report.skipped.push({ symbol, earnings_date: row.earnings_date, reason });
         if (!dryRun) {
           await recordAncillaryAttempt({
@@ -460,20 +480,17 @@ export async function runEpsSweep(opts?: { dryRun?: boolean }): Promise<EpsSweep
             phase: "eps-sweep",
             outcome: reason,
           }).catch(() => {});
-          // no_period_match means Finnhub DID have data and we DID check
-          // it against this row's fiscal identifiers — a completed
-          // verification, just not a match. Stamp last_verified_at so
+          // out_of_window and unmatched both mean Finnhub DID respond and
+          // we DID check this row's fiscal identifiers against it — a
+          // completed verification either way, just with different
+          // implications. Stamp last_verified_at + last_verified_status so
           // branch 3 doesn't re-check it on every run until fiscal_quarter
-          // changes again. no_fiscal_identifiers gets no stamp: there was
+          // changes again. no_fiscal_identifiers gets neither: there was
           // nothing to check yet, not a completed verification.
-          // last_verified_status carries WHAT that check concluded — a
-          // reader of last_verified_at alone can't distinguish "checked
-          // and confirmed" from "checked and inconclusive" without this
-          // (see migrations/2026-09-04-earnings-history-last-verified-status.sql).
-          if (reason === "no_period_match") {
+          if (reason !== "no_fiscal_identifiers") {
             const upd = await sb
               .from("earnings_history")
-              .update({ last_verified_at: new Date().toISOString(), last_verified_status: "no_period_match" })
+              .update({ last_verified_at: new Date().toISOString(), last_verified_status: reason })
               .eq("id", row.id);
             if (upd.error) throw new Error(upd.error.message);
           }
