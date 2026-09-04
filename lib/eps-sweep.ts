@@ -466,10 +466,14 @@ export async function runEpsSweep(opts?: { dryRun?: boolean }): Promise<EpsSweep
           // branch 3 doesn't re-check it on every run until fiscal_quarter
           // changes again. no_fiscal_identifiers gets no stamp: there was
           // nothing to check yet, not a completed verification.
+          // last_verified_status carries WHAT that check concluded — a
+          // reader of last_verified_at alone can't distinguish "checked
+          // and confirmed" from "checked and inconclusive" without this
+          // (see migrations/2026-09-04-earnings-history-last-verified-status.sql).
           if (reason === "no_period_match") {
             const upd = await sb
               .from("earnings_history")
-              .update({ last_verified_at: new Date().toISOString() })
+              .update({ last_verified_at: new Date().toISOString(), last_verified_status: "no_period_match" })
               .eq("id", row.id);
             if (upd.error) throw new Error(upd.error.message);
           }
@@ -486,6 +490,7 @@ export async function runEpsSweep(opts?: { dryRun?: boolean }): Promise<EpsSweep
             eps_actual: match.actual,
             eps_surprise_pct,
             last_verified_at: new Date().toISOString(),
+            last_verified_status: "captured",
           })
           .eq("id", row.id);
         if (upd.error) throw new Error(upd.error.message);
