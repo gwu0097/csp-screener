@@ -74,6 +74,39 @@ async function loadCikMap(): Promise<Map<string, string>> {
   return map;
 }
 
+// company_tickers.json only lists CURRENTLY active filers — a ticker
+// whose company has since been acquired, merged, or taken private drops
+// out of it even though SEC still has its full CIK and filing history
+// intact. Ported from the identical fix in lib/sec-edgar.ts's getCIK
+// (confirmed 2026-09-05: resolveFiscalPeriod/resolveNearestEightK both
+// route through THIS file's resolveCik, not lib/sec-edgar.ts's getCIK —
+// those are two separate, independent EDGAR clients, not one shared
+// chokepoint, so the earlier fix never reached this population).
+// Duplicated rather than unified into one client: that's a larger
+// refactor than this fix needs. Tested against the 527 distinct symbols
+// in the earnings-date target population: 512 resolve without this
+// fallback, 526 with it.
+//
+// browse-edgar's action=getcompany accepts a ticker directly in the
+// CIK= param (a long-standing EDGAR quirk, not a documented API
+// contract) and searches the full historical company index, not just
+// active listings. Reuses this file's own throttledFetch so the
+// fallback shares the same rate limit as every other call here, rather
+// than opening a second pacing clock.
+async function resolveCikForDelistedTicker(symbol: string): Promise<string | null> {
+  try {
+    const res = await throttledFetch(
+      `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${encodeURIComponent(symbol.toUpperCase())}&type=10-K&dateb=&owner=include&count=1&output=atom`,
+    );
+    if (!res.ok) return null;
+    const text = await res.text();
+    const match = text.match(/<cik>(\d{10})<\/cik>/);
+    return match ? match[1] : null;
+  } catch {
+    return null;
+  }
+}
+
 // Fetched once per process — company_tickers.json is one file covering
 // every US-listed ticker (a few thousand rows), not worth re-fetching
 // per symbol. Both edgar-fiscal-period.ts and edgar-earnings-date.ts
@@ -82,7 +115,9 @@ export async function resolveCik(symbol: string): Promise<EdgarResult<string>> {
   if (!cikMapPromise) cikMapPromise = loadCikMap();
   const map = await cikMapPromise;
   const cik = map.get(symbol.toUpperCase());
-  return cik ? { resolved: true, value: cik } : { resolved: false, reason: "cik_not_found" };
+  if (cik) return { resolved: true, value: cik };
+  const fallback = await resolveCikForDelistedTicker(symbol);
+  return fallback ? { resolved: true, value: fallback } : { resolved: false, reason: "cik_not_found" };
 }
 
 // Shared with both EDGAR callers so a repair/backfill script logs its
