@@ -116,6 +116,27 @@ function effectiveOptionBroker(
   return optionType === "call" && direction === "short" ? "covered_calls" : accountBroker;
 }
 
+// Close-fill counterpart, deliberately NOT taking `direction` — fixed
+// 2026-09-04 after a CRM close landed under broker=schwab2 while its
+// open sat under covered_calls, so the close matcher's exact-broker
+// filter (lib/bulk-create-trades.ts) found nothing. `direction` above
+// is the sign of the CURRENT fill's cash flow, not the position's held
+// direction: correct at open time (sell-to-open a call IS a short
+// call), but for a close it's the mechanical opposite (buy-to-close a
+// short call has positive amount, i.e. computes as "long") — feeding
+// that into the same check as opens silently un-routes the position
+// from covered_calls back to the plain account broker. A call is
+// categorically a covered call once it exists as a position, regardless
+// of which fill is being processed right now — same rule the
+// RECEIVE_AND_DELIVER branch below already uses for assignment/expiry
+// (rdBroker), which is why that branch was never affected by this bug.
+function effectiveOptionBrokerForClose(
+  accountBroker: "schwab" | "schwab2",
+  optionType: "put" | "call",
+): string {
+  return optionType === "call" ? "covered_calls" : accountBroker;
+}
+
 export type PollReport = {
   broker: "schwab" | "schwab2";
   accountNumber: string;
@@ -298,7 +319,10 @@ async function pollOneAccount(
             optionType,
             ...(action === "open" ? { direction } : {}),
             premium: Math.abs(leg.price ?? 0),
-            broker: effectiveOptionBroker(broker, optionType, direction),
+            broker:
+              action === "open"
+                ? effectiveOptionBroker(broker, optionType, direction)
+                : effectiveOptionBrokerForClose(broker, optionType),
             timePlaced: txn.time.replace(/\+0000$/, ""),
             notes: `Schwab auto-import (activity ${txn.activityId})`,
             // Schwab's own unique id for this transaction — one TRADE

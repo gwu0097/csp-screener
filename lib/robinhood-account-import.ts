@@ -340,7 +340,25 @@ export async function ingestAndProcessRobinhoodOrders(
     // this same contract will also resolve to. Mirrors the identical
     // fix in lib/schwab-account-import.ts's effectiveOptionBroker —
     // see that comment for the 2026-08-30 incident this prevents.
-    const effectiveBroker = row.option_type === "call" && direction === "short" ? "covered_calls" : "robinhood";
+    //
+    // direction is only consulted for OPENS — fixed 2026-09-04 alongside
+    // the identical Schwab bug (see effectiveOptionBrokerForClose there
+    // for the full reasoning). For a CLOSE, `direction` is the sign of
+    // THIS fill (buy-to-close a short call computes as "long", the
+    // mechanical opposite of the position's real direction), not the
+    // position's held direction — using it for close-side bucket
+    // routing silently un-routes the close from covered_calls back to
+    // "robinhood", where the matcher in lib/bulk-create-trades.ts can
+    // never find the position. A call is categorically a covered call
+    // once it exists, regardless of which fill is being processed.
+    const effectiveBroker =
+      action === "open"
+        ? row.option_type === "call" && direction === "short"
+          ? "covered_calls"
+          : "robinhood"
+        : row.option_type === "call"
+          ? "covered_calls"
+          : "robinhood";
     pending.push({
       row: { id: row.id, execution_id: row.execution_id },
       input: {
