@@ -212,27 +212,67 @@ built as part of reviving this spec:
   timing against a date we don't trust would be building on sand" — so this
   source was already ruled out for exactly this population before this sizing
   pass even started.
-- **8-K `acceptanceDateTime` as a BMO/AMC proxy — the only source with real
-  reach, not yet built.** This spec previously stated (a few paragraphs
-  above) that "8-Ks don't carry a time-of-day field in the submissions API's
-  `recent` block" — **that claim is wrong**, confirmed by fetching the live
-  API. `acceptanceDateTime` is present in the exact same `filings.recent`
-  block `resolveNearestEightK` already parses, at zero extra request cost.
-  Tested on a 35-row sample of already-8-K-matched rows: 34/35 (97%)
-  classified unambiguously as BMO/AMC via a plain ET-hour cutoff. Reliability
-  is conditional on the match being same-day: 73/77 (95%) of successful 8-K
-  matches in the broader sample were `gapDays=0`; one off-day match (TPR,
-  8-day gap) pulled an unrelated 8-K with a nonsensical acceptance time —
-  confirmed evidence that trusting a multi-day-gap match without a same-day
-  restriction would produce exactly the "plausible-looking wrong number"
-  failure this document already worries about for `earnings_date` itself.
-  Bounded coverage estimate: roughly 70-75% of the 872-row population, once
-  restricted to same-day 8-K matches only.
+- **8-K `acceptanceDateTime` as a BMO/AMC proxy — real reach, validated
+  against ground truth 2026-09-05, not reliable enough to build.** This spec
+  previously stated (a few paragraphs above) that "8-Ks don't carry a
+  time-of-day field in the submissions API's `recent` block" — **that claim
+  is wrong**, confirmed by fetching the live API. `acceptanceDateTime` is
+  present in the exact same `filings.recent` block `resolveNearestEightK`
+  already parses, at zero extra request cost. Across the 812-row population:
+  736/812 (91%) find a nearby 8-K, and 536/812 (66%) classify as
+  unambiguous BMO/AMC via a plain ET-hour cutoff ("clean" — 342 BMO, 194 AMC).
+  The remaining 276 split into 184 boundary (9:00-9:45 or 16:00-16:15 ET), 16
+  intraday (accepted during market hours — not the earnings 8-K), 70 with no
+  nearby 8-K, and 6 with no CIK.
 
-Not built because: even with acceptanceDateTime, this becomes a materially
-different, larger piece of work than the date-only pass this spec describes
-(a new `timing_source` value, a same-day-only trust gate, and — per "What
-confidence tier it would write" above — the existing design already
-deliberately avoids claiming `timing` confidence alongside `date_confidence`
-upgrades, which would need to change). If this is worth building, size it as
-its own thing with its own spec, not as a natural extension of this one.
+  **An earlier 35-row spot-check reported 34/35 (97%) "classified
+  unambiguously" — that number measured the wrong thing.** It checked
+  whether the ET-hour cutoff produced a confident bucket (clean vs.
+  ambiguous), not whether the bucket was correct. It is not a validation and
+  should not have been read as one.
+
+  The real validation, run against the 136 rows where `timing_source='manual'`
+  — timing hand-corrected via actual price-path divergence review,
+  independent of any 8-K data — found **79/99 (80%) agreement** on the rows
+  that landed in a "clean" bucket. The 20 disagreements are not scattered
+  noise; they split into two systematic, per-company failure modes:
+    - 13 cases: 8-K accepted 6:00-8:20am ET, real timing was AMC (the
+      release happened the evening before; the company doesn't file the
+      formal 8-K until the next pre-market morning). TER shows this on all 4
+      of its instances in the sample — a filing habit, not noise.
+    - 7 cases (NTAP, DUK, CTVA, LDOS, FRT, TYL, UDR): 8-K accepted
+      4:20-5:47pm ET, real timing was BMO (same-day early release, 8-K not
+      filed until end of business that evening).
+
+  These sit interleaved minute-by-minute with correctly-classified rows in
+  the identical time band (e.g. LDOS's wrong-BMO case at 17.71 ET sits
+  between two correctly-classified AMC rows at 17.64 and 17.74) — no
+  threshold retuning separates them, because the deciding factor is a given
+  company's filing-lag convention, not time of day. Applying this ~20% error
+  rate to the 536 "clean" rows in the 812-row population means roughly
+  **107 of them would silently compute the wrong close pair** — with nothing
+  in the data flagging which ones. That is the exact "plausible-looking
+  wrong number, worse than null" failure this document already worried about
+  for `earnings_date` itself, now confirmed for `timing`.
+
+Not built because: the validated accuracy (80% on the reachable subset) isn't
+close to good enough given a wrong call is worse than a gap, and even a
+reliable version of this would be a materially different, larger piece of
+work than the date-only pass this spec describes (a new `timing_source`
+value, a same-day-only trust gate, and — per "What confidence tier it would
+write" above — the existing design already deliberately avoids claiming
+`timing` confidence alongside `date_confidence` upgrades, which would need
+to change). If this is worth building, size it as its own thing with its own
+spec, not as a natural extension of this one.
+
+**A possible future path, explicitly not proposed:** the errors above are
+per-company (TER always lags a day; NTAP/DUK/CTVA/FRT/LDOS/TYL/UDR always
+file late-same-day), the same shape as the `finnhub_fiscal_label_calibration`
+table built 2026-09-04 for the fiscal-label shift problem. A per-symbol
+filing-lag calibration could in principle correct most of this. It isn't
+proposed here because it would need per-symbol ground truth to calibrate
+against — confirmed-correct timing for multiple instances of the same
+symbol — and that is exactly what's scarce in this population (136 rows
+total, most symbols appearing once or twice). Noted so it isn't
+rediscovered as an untried idea; it was considered and set aside for lack of
+calibration material, not overlooked.
