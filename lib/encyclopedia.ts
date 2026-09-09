@@ -2002,6 +2002,14 @@ export async function captureEarningsT0(
       price_before,
       implied_move_pct,
       implied_move_source: "schwab_t0",
+      // Which contract this reading came from and what ET calendar day
+      // it was read on — previously unrecorded (implied_move_expiry was
+      // null on all 219 schwab_t0 rows), which is exactly the
+      // information the CIEN (2026-09-03) and CPRT (2026-09-09)
+      // diagnoses each had to reconstruct indirectly from a ratio
+      // instead of reading directly.
+      implied_move_expiry: expiryIso,
+      implied_move_read_date: todayEasternIso(),
       iv_before,
       two_x_em_strike,
       timing_source:

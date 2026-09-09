@@ -111,27 +111,37 @@ export async function recordCaptureAttempt(opts: {
   }
 }
 
-// Three consecutive too_early_capture outcomes with materially the same
-// iv_crush_magnitude, spanning at least 2 distinct ET sessions, means the
-// inputs never changed between attempts — a genuine too-early capture
-// resolves as the market reprices and iv_after moves session to session;
-// a corrupted T0 baseline produces the same degenerate ratio every time
-// because iv_before dominates the math and is fixed at T0. Two matching
-// prior attempts (3 total including the one just computed) is the
-// threshold: TECH hit this exact pattern 11 times over 34 hours before a
-// manual check caught it and hand-set t1_unrecoverable (2026-08-13,
-// scripts/scratchpad fix-tech.sql) — checkAndMarkCorruptedBaseline below
-// makes that check automatic, so a future corrupted baseline gets the
-// accurate reason within a day instead of retrying under the misleading
-// "too_early_capture" label for the rest of the 10-day cutoff window.
+// N consecutive too_early_capture outcomes that never once cross to
+// iv_after < iv_before (iv_crush_magnitude stays negative every time),
+// spanning at least 2 distinct ET sessions, is what a corrupted T0
+// baseline produces: iv_before was measured too early/off the wrong
+// contract, so it undercounts the true pre-earnings IV, and every live
+// iv_after read since keeps landing above it. A genuine too-early
+// capture doesn't have that property — its magnitude drifts toward
+// zero and then positive as the crush settles in from one session to
+// the next, so it doesn't stay on the wrong side of zero for days.
+//
+// This replaced an earlier "materially the same magnitude across
+// attempts" check (matching within 0.001) that could never fire:
+// iv_after is a live quote, so the magnitude moves every attempt by
+// construction — two independent live reads landing within 0.001 of
+// each other never happens whether the baseline is good or corrupted.
+// Confirmed live: CPRT (2026-09-02) ran 12 too_early_capture attempts
+// over 6 days, all magnitude negative (-0.12 to -0.33), no two ever
+// within 0.001 — the old check never fired for it. TECH's one existing
+// corrupted_t0_baseline row (2026-08-11) predates this function
+// entirely; it was hand-set via scripts/scratchpad fix-tech.sql before
+// checkAndMarkCorruptedBaseline shipped (2026-08-13), so it isn't
+// evidence the old check ever fired either — this detector has never
+// actually caught a row in production.
 export const CORRUPTED_BASELINE_CONSECUTIVE_THRESHOLD = 3;
 
-// iv_crush_magnitude is a ratio between two IV readings, not a price —
-// two genuinely independent live quotes landing within 0.001 (0.1
-// percentage point) of each other by chance across separate sessions is
-// implausible, while still loose enough to absorb float noise between
-// identical inputs.
-export const CORRUPTED_BASELINE_MAGNITUDE_TOLERANCE = 0.001;
+// A negative iv_crush_magnitude means iv_after read ABOVE iv_before —
+// structurally impossible for a genuine crush that just hasn't
+// finished settling (that case bottoms out near zero, not below it).
+// -0.02 sits comfortably past ordinary live-quote noise around zero so
+// a magnitude that's negative only by a hair doesn't trip this.
+export const CORRUPTED_BASELINE_NEGATIVE_FLOOR = -0.02;
 
 function etSessionDate(iso: string): string {
   return new Intl.DateTimeFormat("en-CA", {
@@ -142,13 +152,31 @@ function etSessionDate(iso: string): string {
   }).format(new Date(iso));
 }
 
+// Shared predicate: given the most recent CORRUPTED_BASELINE_CONSECUTIVE_THRESHOLD
+// t1 attempts for a row (ordered newest-first), are they all
+// too_early_capture with a magnitude below the negative floor, spanning
+// 2+ ET sessions? Used both live (checkAndMarkCorruptedBaseline, with
+// the in-flight attempt prepended since it isn't recorded yet) and
+// retroactively (markT1RowsUnrecoverable, over already-recorded rows).
+function isPersistentNegativeMagnitude(
+  rows: Array<{ outcome: string; error_message: string | null; attempted_at: string }>,
+): boolean {
+  if (rows.length < CORRUPTED_BASELINE_CONSECUTIVE_THRESHOLD) return false;
+  const recent = rows.slice(0, CORRUPTED_BASELINE_CONSECUTIVE_THRESHOLD);
+  if (!recent.every((r) => r.outcome === "too_early_capture")) return false;
+  const magnitudes = recent.map((r) => (r.error_message !== null ? Number(r.error_message) : NaN));
+  if (magnitudes.some((m) => !Number.isFinite(m))) return false;
+  if (!magnitudes.every((m) => m < CORRUPTED_BASELINE_NEGATIVE_FLOOR)) return false;
+  const sessions = new Set(recent.map((r) => etSessionDate(r.attempted_at)));
+  return sessions.size >= 2;
+}
+
 // Called from inside captureEarningsT1's too_early_capture branch
 // (lib/encyclopedia.ts), before it returns to its caller. Looks at the
 // last CORRUPTED_BASELINE_CONSECUTIVE_THRESHOLD-1 recorded t1 attempts
-// for this row; if all of them are also too_early_capture with a
-// matching magnitude (stored in error_message by the caller) and,
-// together with the attempt happening right now, span more than one ET
-// session, marks the row unrecoverable with the accurate reason instead
+// for this row; if together with the attempt happening right now they
+// show persistent negative magnitude (see isPersistentNegativeMagnitude
+// above), marks the row unrecoverable with the accurate reason instead
 // of leaving it to retry under the generic label. Deliberately does NOT
 // null iv_before the way the one-off manual fix for TECH did — this
 // keeps the corrupted value visible for diagnosis; t1_unrecoverable=true
@@ -176,19 +204,12 @@ export async function checkAndMarkCorruptedBaseline(opts: {
     return { marked: false };
   }
   const priorRows = (res.data ?? []) as Array<{ outcome: string; error_message: string | null; attempted_at: string }>;
-  if (priorRows.length < priorCount) return { marked: false };
-  if (!priorRows.every((r) => r.outcome === "too_early_capture")) return { marked: false };
-
-  const priorMagnitudes = priorRows.map((r) => (r.error_message !== null ? Number(r.error_message) : NaN));
-  if (priorMagnitudes.some((m) => !Number.isFinite(m))) return { marked: false };
-  const allSame = priorMagnitudes.every(
-    (m) => Math.abs(m - opts.currentMagnitude) < CORRUPTED_BASELINE_MAGNITUDE_TOLERANCE,
-  );
-  if (!allSame) return { marked: false };
-
-  const sessions = new Set(priorRows.map((r) => etSessionDate(r.attempted_at)));
-  sessions.add(etSessionDate(new Date().toISOString()));
-  if (sessions.size < 2) return { marked: false };
+  const currentRow = {
+    outcome: "too_early_capture",
+    error_message: String(opts.currentMagnitude),
+    attempted_at: new Date().toISOString(),
+  };
+  if (!isPersistentNegativeMagnitude([currentRow, ...priorRows])) return { marked: false };
 
   const upd = await sb
     .from("earnings_history")
@@ -254,7 +275,37 @@ export async function markT1RowsUnrecoverable(
 
   const marked: Array<{ symbol: string; earnings_date: string; reason: string }> = [];
   for (const r of rows) {
-    const reason = r.t1_last_failure_reason ?? "never_attempted";
+    let reason = r.t1_last_failure_reason ?? "never_attempted";
+    // A row aging out under the generic too_early_capture label may
+    // actually be a corrupted baseline that checkAndMarkCorruptedBaseline
+    // should have already caught mid-flight (see its comment) — but
+    // didn't, e.g. because an unrelated outcome (invalid_volatility_quote,
+    // schwab_disconnected, ...) fell inside the most recent N attempts
+    // and broke the required run of too_early_capture outcomes. Re-check
+    // the same negative-magnitude signal here so the reason recorded at
+    // cutoff still points a future reader at the baseline instead of
+    // implying "just needed more retries."
+    if (reason === "too_early_capture") {
+      const attempts = await sb
+        .from("earnings_capture_attempts")
+        .select("outcome,error_message,attempted_at")
+        .eq("symbol", r.symbol)
+        .eq("earnings_date", r.earnings_date)
+        .eq("capture_phase", "t1")
+        .order("attempted_at", { ascending: false })
+        .limit(CORRUPTED_BASELINE_CONSECUTIVE_THRESHOLD);
+      if (attempts.error) {
+        console.warn(
+          `[earnings-capture-attempts] cutoff negative-magnitude check failed for ${r.symbol}/${r.earnings_date}: ${attempts.error.message}`,
+        );
+      } else if (
+        isPersistentNegativeMagnitude(
+          (attempts.data ?? []) as Array<{ outcome: string; error_message: string | null; attempted_at: string }>,
+        )
+      ) {
+        reason = "t1_exhausted_negative_magnitude_suspect_baseline";
+      }
+    }
     const upd = await sb
       .from("earnings_history")
       .update({ t1_unrecoverable: true, t1_unrecoverable_reason: reason })
