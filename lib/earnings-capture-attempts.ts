@@ -22,7 +22,12 @@ export type CapturePhase = "t0" | "t1";
 // "t1" vs "everything else"). Logged through the same table anyway, per
 // the capture-attempts audit's own principle: a symbol failing
 // repeatedly should be visible, not silent.
-export type AncillaryPhase = "em-seed" | "eps-sweep";
+//
+// filing-8k (2026-09-09): the Earnings Reports Stage A courier
+// (lib/filing-analysis-capture.ts) — pulls the 8-K earnings-release
+// exhibit and runs the guidance/commentary analysis. Same reasoning:
+// not a T0/T1 phase, still wants the same attempt audit trail.
+export type AncillaryPhase = "em-seed" | "eps-sweep" | "filing-8k";
 
 // Insert-only counterpart to recordCaptureAttempt — no earnings_history
 // patch, so it's safe for phases that aren't a T0/T1 capture.

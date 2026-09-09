@@ -293,7 +293,7 @@ export function ResearchStockView({ symbol }: { symbol: string }) {
           <TabsTrigger value="overview">📋 Overview</TabsTrigger>
           <TabsTrigger value="catalysts">🎯 Catalysts</TabsTrigger>
           <TabsTrigger value="valuation">📊 Valuation</TabsTrigger>
-          <TabsTrigger value="tenk">📄 10-K</TabsTrigger>
+          <TabsTrigger value="tenk">📄 Earnings Reports</TabsTrigger>
           <TabsTrigger value="risk">⚠️ Risk</TabsTrigger>
           <TabsTrigger value="sentiment">👥 Sentiment</TabsTrigger>
         </TabsList>
