@@ -13,6 +13,19 @@
 //                        earnings_history row, same guards as normal)
 //   --force-symbol=SYM   bypasses candidate selection entirely, no
 //                        earnings_history dependency — manual diagnostic
+//   --backfill-symbol=SYM --quarters=N [--force-accession=ACC]
+//                        walks the last N item-2.02 8-Ks for SYM
+//                        (listRecentEarningsFilings, no freshness gate)
+//                        and runs Stage A against each one not already
+//                        captured with cards. No earnings_history_id
+//                        dependency for discovery; still auto-links on
+//                        an exact same-day match. --force-accession
+//                        re-runs one specific already-captured accession
+//                        even though it has cards (e.g. re-running a
+//                        quarter after a validation-logic fix). No
+//                        Discord post — watched, manual, one symbol at a
+//                        time
+//                        (2026-09-10 Deep Research backfill).
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -68,7 +81,7 @@ function cardCounts(payload: CardsPayload): string {
 }
 
 type CardRunOutcome =
-  | { status: "captured"; analysisChars: number; countsSummary: string; droppedCount: number; droppedDetail: string[] }
+  | { status: "captured"; analysisChars: number; countsSummary: string; droppedCount: number; droppedDetail: string[]; basisDefaultedCount: number; basisDefaultedDetail: string[] }
   | { status: "claude_failed"; detail: string }
   | { status: "invalid_output"; detail: string };
 
@@ -81,6 +94,7 @@ async function runCardsPipeline(opts: {
   filingDate: string;
   pressText: string;
   notesPrefix: string;
+  accessionNumber: string;
 }): Promise<CardRunOutcome> {
   const { buildCardsPrompt, parseAndValidateCards, renderCardsAsText } = await import("../lib/earnings-analysis-cards");
   const prompt = buildCardsPrompt(opts.symbol, opts.quarter, opts.pressText);
@@ -110,16 +124,24 @@ async function runCardsPipeline(opts: {
         .join(" | ")}`,
     );
   }
+  if (result.basisDefaulted.length > 0) {
+    console.warn(
+      `[filing-analysis-stage-a] ${opts.symbol}: defaulted basis→inferred on ${result.basisDefaulted.length} card(s) (kept, not dropped): ${result.basisDefaulted
+        .map((d) => `[${d.section}] "${d.title}" (raw=${d.rawBasis})`)
+        .join(" | ")}`,
+    );
+  }
   console.log(`[filing-analysis-stage-a] ${opts.symbol}: cards — ${cardCounts(result.payload)}`);
 
   const analysisText = renderCardsAsText(result.payload);
-  const notes = `${opts.notesPrefix}, pressText_chars=${opts.pressText.length}, claude_call_s=${callSeconds.toFixed(1)}, cards=[${cardCounts(result.payload)}], dropped=${result.dropped.length}`;
+  const notes = `${opts.notesPrefix}, pressText_chars=${opts.pressText.length}, claude_call_s=${callSeconds.toFixed(1)}, cards=[${cardCounts(result.payload)}], dropped=${result.dropped.length}, basis_defaulted=${result.basisDefaulted.length}`;
   const ins = await opts.sb.from("filing_analyses").upsert(
     {
       symbol: opts.symbol.toUpperCase(),
       filing_type: "8-K",
       period: opts.quarter,
       filing_date: opts.filingDate,
+      accession_number: opts.accessionNumber,
       analysis_text: analysisText,
       cards: result.payload,
       notes,
@@ -136,6 +158,8 @@ async function runCardsPipeline(opts: {
     countsSummary: cardCounts(result.payload),
     droppedCount: result.dropped.length,
     droppedDetail: result.dropped.map((d) => `[${d.section}] "${d.title}": ${d.reason}`),
+    basisDefaultedCount: result.basisDefaulted.length,
+    basisDefaultedDetail: result.basisDefaulted.map((d) => `[${d.section}] "${d.title}" (raw=${d.rawBasis})`),
   };
 }
 
@@ -190,6 +214,7 @@ async function runForceSymbol(symbol: string): Promise<void> {
     filingDate: captured.filingDate,
     pressText: captured.pressText,
     notesPrefix,
+    accessionNumber: captured.accessionNumber,
   });
   if (outcome.status === "captured") {
     console.log(
@@ -203,12 +228,117 @@ async function runForceSymbol(symbol: string): Promise<void> {
   }
 }
 
+// --backfill-symbol=SYM --quarters=N: walk the last N item-2.02 8-Ks for
+// a symbol regardless of the 5-day candidate window or earnings_history
+// existence, and run Stage A on each one not already captured with
+// cards. A filing already in earnings_releases (by accession_number)
+// whose linked filing_analyses period already has non-null cards is
+// skipped without spending a Perplexity call; a filing whose
+// earnings_releases row exists but has no cards yet (e.g. captured
+// pre-redesign) is re-run — accession_number is the identity, not the
+// derived quarter label, since the quarter isn't known until after
+// extraction. No CIK, or a CIK with zero item-2.02 8-Ks on file, is
+// reported as excluded (foreign private issuer filing 6-K/20-F) rather
+// than as a failure. No Discord post — watched, manual, one symbol at
+// a time, matching --force-symbol's convention.
+async function runBackfillSymbol(symbol: string, quarters: number, forceAccession?: string): Promise<void> {
+  const { captureStageAReleaseForSymbol } = await import("../lib/filing-analysis-capture");
+  const { listRecentEarningsFilings } = await import("../lib/earnings-release-capture");
+  const { createServerClient } = await import("../lib/supabase");
+  const sb = createServerClient();
+  const sym = symbol.toUpperCase();
+
+  console.log(`[filing-analysis-stage-a] --backfill-symbol=${sym} quarters=${quarters}: listing recent item-2.02 8-Ks…`);
+  const listed = await listRecentEarningsFilings(sym, quarters);
+  if (!listed.ok) {
+    console.log(`[filing-analysis-stage-a] RESULT: ${sym} EXCLUDED — no EDGAR CIK (likely a foreign private issuer filing 6-K/20-F, or delisted)`);
+    return;
+  }
+  if (listed.filings.length === 0) {
+    console.log(`[filing-analysis-stage-a] RESULT: ${sym} EXCLUDED — CIK found but zero item-2.02 8-Ks on file (foreign private issuer filing 6-K, or no earnings 8-Ks exist)`);
+    return;
+  }
+  if (listed.filings.length < quarters) {
+    console.log(`[filing-analysis-stage-a] NOTE: ${sym} has only ${listed.filings.length} item-2.02 8-K(s) on file, not ${quarters} — thin filing history, walking what exists`);
+  }
+
+  for (const f of listed.filings) {
+    const existingRelease = await sb
+      .from("earnings_releases")
+      .select("quarter")
+      .eq("symbol", sym)
+      .eq("accession_number", f.accessionNumber);
+    const existingQuarter = (existingRelease.data?.[0] as { quarter?: string } | undefined)?.quarter;
+    if (existingQuarter) {
+      const existingAnalysis = await sb
+        .from("filing_analyses")
+        .select("cards")
+        .eq("symbol", sym)
+        .eq("filing_type", "8-K")
+        .eq("period", existingQuarter);
+      if ((existingAnalysis.data?.[0] as { cards?: unknown } | undefined)?.cards && f.accessionNumber !== forceAccession) {
+        console.log(`[filing-analysis-stage-a] ${sym} ${existingQuarter} (${f.accessionNumber}, filed ${f.filingDate}): already captured with cards — SKIPPING`);
+        continue;
+      }
+      if (f.accessionNumber === forceAccession) {
+        console.log(`[filing-analysis-stage-a] ${sym} ${existingQuarter} (${f.accessionNumber}, filed ${f.filingDate}): --force-accession override — re-running despite existing cards`);
+      }
+    }
+
+    console.log(`[filing-analysis-stage-a] ${sym} ${f.accessionNumber} (filed ${f.filingDate}): capturing…`);
+    const captured = await captureStageAReleaseForSymbol(sym, { accessionNumber: f.accessionNumber, nearFilingDateHint: f.filingDate });
+    if (!captured.ok) {
+      const o = captured.outcome;
+      console.log(`[filing-analysis-stage-a] RESULT: ${sym} ${f.filingDate} — no_release_found (reason=${o.outcome === "no_release_found" ? o.reason : "?"}) — ${o.outcome === "no_release_found" ? o.detail : "unknown"}`);
+      continue;
+    }
+    console.log(`[filing-analysis-stage-a] ${sym} ${captured.quarter}: release captured, pressText=${captured.pressText.length} chars, exhibit_source=${captured.exhibitSource}`);
+    const nearest = captured.nearestMatch;
+    const linkNote = captured.linkedEarningsHistoryId
+      ? `LINKED id=${captured.linkedEarningsHistoryId}`
+      : nearest
+        ? `found id=${nearest.id} (${nearest.dayDiff}d${nearest.uniqueAtDistance ? "" : ", tied"}) — NOT linked`
+        : "no matching earnings_history row within 5 days";
+    console.log(`[filing-analysis-stage-a] ${sym} ${captured.quarter}: earnings_history: ${linkNote}`);
+
+    const notesPrefix = `auto: filing-analysis-stage-a v1 [--backfill-symbol], ${sym} ${captured.quarter}, earnings_history_id=${captured.linkedEarningsHistoryId ?? (nearest ? `${nearest.id} (found, not linked)` : "none")}, exhibit_source=${captured.exhibitSource}`;
+    const outcome = await runCardsPipeline({
+      sb,
+      symbol: sym,
+      quarter: captured.quarter,
+      filingDate: captured.filingDate,
+      pressText: captured.pressText,
+      notesPrefix,
+      accessionNumber: captured.accessionNumber,
+    });
+    if (outcome.status === "captured") {
+      console.log(`[filing-analysis-stage-a] RESULT: ${sym} ${captured.quarter} CAPTURED — ${outcome.countsSummary}, dropped=${outcome.droppedCount}, basis_defaulted=${outcome.basisDefaultedCount}`);
+      if (outcome.droppedDetail.length > 0) {
+        console.log(`[filing-analysis-stage-a]   DROPPED: ${outcome.droppedDetail.join(" | ")}`);
+      }
+      if (outcome.basisDefaultedDetail.length > 0) {
+        console.log(`[filing-analysis-stage-a]   BASIS DEFAULTED: ${outcome.basisDefaultedDetail.join(" | ")}`);
+      }
+    } else {
+      console.log(`[filing-analysis-stage-a] RESULT: ${sym} ${captured.quarter} — ${outcome.status}: ${outcome.detail}`);
+    }
+  }
+}
+
 async function main() {
   const dryRun = process.argv.includes("--dry");
   const symbolArg = process.argv.find((a) => a.startsWith("--symbol="))?.split("=")[1];
   const forceSymbolArg = process.argv.find((a) => a.startsWith("--force-symbol="))?.split("=")[1];
+  const backfillSymbolArg = process.argv.find((a) => a.startsWith("--backfill-symbol="))?.split("=")[1];
   if (forceSymbolArg) {
     await runForceSymbol(forceSymbolArg);
+    return;
+  }
+  if (backfillSymbolArg) {
+    const quartersArg = process.argv.find((a) => a.startsWith("--quarters="))?.split("=")[1];
+    const quarters = quartersArg ? Number.parseInt(quartersArg, 10) : 4;
+    const forceAccession = process.argv.find((a) => a.startsWith("--force-accession="))?.split("=")[1];
+    await runBackfillSymbol(backfillSymbolArg, quarters, forceAccession);
     return;
   }
   const { selectStageACandidates, selectStageACandidateBySymbol, captureStageARelease, isLastStageARetryDay } =
@@ -268,6 +398,7 @@ async function main() {
       filingDate: captured.filingDate,
       pressText: captured.pressText,
       notesPrefix,
+      accessionNumber: captured.accessionNumber,
     });
     if (outcome.status !== "captured") {
       console.warn(`[filing-analysis-stage-a] ${candidate.symbol}: ${outcome.status} — ${outcome.detail}`);

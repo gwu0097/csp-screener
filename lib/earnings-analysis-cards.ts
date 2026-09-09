@@ -170,6 +170,14 @@ export function verifyMetricEvidence(evidenceItems: string[], sourceText: string
 
 export type DroppedCard = { section: SectionKey; title: string; reason: string };
 export type VerificationLogEntry = { section: SectionKey; title: string } & EvidenceVerification;
+// A card whose basis field was missing/malformed — a schema-completeness
+// miss, not a bad claim. Defaulted to "inferred" (the conservative
+// choice: it asserts nothing about what the filing said, so a wrong
+// default under-claims rather than over-claims) and kept rather than
+// dropped. Logged separately so its frequency can be tracked across a
+// run — see the 2026-09-10 SNOW Q4 2026 review, where dropping cost 3
+// of 4 red_flags over one omitted field.
+export type BasisDefaultedCard = { section: SectionKey; title: string; rawBasis: string };
 
 export type ParseResult =
   | {
@@ -177,6 +185,7 @@ export type ParseResult =
       payload: CardsPayload;
       dropped: DroppedCard[];
       verificationLog: VerificationLogEntry[];
+      basisDefaulted: BasisDefaultedCard[];
     }
   | { ok: false; reason: string };
 
@@ -207,6 +216,7 @@ export function parseAndValidateCards(
 
   const dropped: DroppedCard[] = [];
   const verificationLog: VerificationLogEntry[] = [];
+  const basisDefaulted: BasisDefaultedCard[] = [];
 
   function validateOne(section: SectionKey, raw: unknown, requireSeverity: boolean): Card | null {
     if (!raw || typeof raw !== "object") {
@@ -229,10 +239,13 @@ export function parseAndValidateCards(
       dropped.push({ section, title, reason: "missing argument" });
       return null;
     }
-    const basis = c.basis;
-    if (basis !== "stated" && basis !== "inferred") {
-      dropped.push({ section, title, reason: `invalid basis: ${JSON.stringify(basis)}` });
-      return null;
+    const rawBasis = c.basis;
+    let basis: CardBasis;
+    if (rawBasis === "stated" || rawBasis === "inferred") {
+      basis = rawBasis;
+    } else {
+      basisDefaulted.push({ section, title, rawBasis: JSON.stringify(rawBasis) });
+      basis = "inferred";
     }
     const rawEvidence = c.metric_evidence;
     const metricEvidence = Array.isArray(rawEvidence)
@@ -301,7 +314,7 @@ export function parseAndValidateCards(
     sections,
   };
 
-  return { ok: true, payload, dropped, verificationLog };
+  return { ok: true, payload, dropped, verificationLog, basisDefaulted };
 }
 
 // Flattened plain-text rendering of a cards payload, generated in code

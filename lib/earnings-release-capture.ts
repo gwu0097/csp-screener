@@ -79,6 +79,32 @@ function pickEarningsExhibitBySize(
   return { url: candidates[0].url, name: candidates[0].name };
 }
 
+// Content gate for a size_fallback pick only (2026-09-10, HOOD Rule 606
+// incident). Regex hits stay trusted as-is — near-zero ambiguity when
+// they match. Size-fallback only means "the largest non-primary HTML
+// document in this filing," which can legitimately be something other
+// than an earnings release (HOOD files a monthly Rule 606 order-routing
+// report under item 2.02 alongside its real quarterly earnings 8-K; its
+// filename doesn't match the regex, so it fell through to size_fallback
+// and got fed to Perplexity, which returned plausible-looking earnings
+// figures anyway rather than failing — see the 2026-09-10 incident
+// writeup). Verified live: the real HOOD Rule 606 document contains
+// zero "$" characters and none of the phrases below. Cheap, generic
+// (not HOOD-specific), and only gates the already-lower-confidence path.
+const EARNINGS_VOCAB_PATTERNS: RegExp[] = [
+  /total\s+(net\s+)?revenues?/i,
+  /diluted\s+(earnings|net\s+income)/i,
+  /earnings\s+per\s+share/i,
+  /(first|second|third|fourth)\s+quarter\s+(results|20\d\d)/i,
+  /guidance/i,
+];
+
+function looksLikeEarningsRelease(text: string): boolean {
+  const dollarCount = (text.match(/\$/g) ?? []).length;
+  const vocabHits = EARNINGS_VOCAB_PATTERNS.filter((re) => re.test(text)).length;
+  return dollarCount >= 3 && vocabHits >= 1;
+}
+
 type ExtractedRelease = {
   quarter?: string;
   period_end?: string;
@@ -207,7 +233,26 @@ export type EarningsReleaseCaptureFailureReason =
   | "perplexity_failed"
   | "perplexity_bad_json"
   | "missing_required_fields"
+  | "quarter_mismatch"
   | "db_error";
+
+// Structurally-derived quarter identity — earnings_history's own
+// fiscal_quarter/fiscal_year/period_end (see lib/edgar-fiscal-period.ts),
+// supplied by a caller that has already resolved an exact, unique link
+// to that row. When present, this REPLACES Perplexity's free-text
+// "quarter" guess entirely rather than merely checking it — Perplexity
+// is still asked for the field (harmless), but its answer is never used
+// for identity. Built 2026-09-10 after the same real document, asked
+// twice, returned two different quarters and (the second time) another
+// filing's real figures — a label a generative call produces isn't
+// safe to key a write on, no matter how it's cross-checked after the
+// fact. period_end still flows through the sanity guard below even
+// when it comes from this hint, so a bad hint can't silently bypass it.
+export type QuarterLabelHint = {
+  fiscalQuarter: number;
+  fiscalYear: number;
+  periodEnd: string; // YYYY-MM-DD
+};
 
 // Finds the newest earnings (item 2.02) 8-K within 90 days, its press-
 // release exhibit, extracts structured numbers via Perplexity, and
@@ -227,6 +272,16 @@ export async function fetchAndStoreEarningsRelease(
     // retry on the next run. The manual "Fetch latest 8-K" button
     // passes nothing and keeps the original 200-char behavior exactly.
     minPressTextChars?: number;
+    // Target one SPECIFIC prior filing by accession number (2026-09-10,
+    // for the Deep Research backfill — walking the last N quarters, not
+    // just the newest). When set, the 90-day freshness gate is skipped
+    // entirely (a backfill target is deliberately old) and only that
+    // one filing is considered, instead of "walk from newest until an
+    // exhibit is found."
+    accessionNumber?: string;
+    // See QuarterLabelHint above — when present, overrides Perplexity's
+    // quarter/period_end entirely rather than just cross-checking it.
+    quarterLabelHint?: QuarterLabelHint | null;
   } = {},
 ): Promise<EarningsReleaseCaptureResult> {
   const sym = symbol.trim().toUpperCase();
@@ -237,26 +292,47 @@ export async function fetchAndStoreEarningsRelease(
     return { ok: false, status: 404, error: "No EDGAR CIK for this symbol", reason: "no_cik" };
   }
   const recent = await getRecentFilings(cik, ["8-K"], 25, { requireItem: "2.02" });
-  const cutoff = Date.now() - NINETY_DAYS_MS;
-  const within90 = recent.filter((f) => {
-    const t = new Date(f.filingDate + "T12:00:00Z").getTime();
-    return Number.isFinite(t) && t >= cutoff;
-  });
-  console.log(
-    `[earnings-release-capture] ${sym}: earnings (item 2.02) 8-Ks in last 90 days = ${within90.length} of ${recent.length} total. Most recent: ${
-      within90
-        .slice(0, 5)
-        .map((f) => `${f.filingDate} (${f.accessionNumber}) [${f.items.join(",")}]`)
-        .join(", ") || "(none)"
-    }`,
-  );
+
+  let within90: SecFiling[];
+  if (opts.accessionNumber) {
+    const target = recent.find((f) => f.accessionNumber === opts.accessionNumber);
+    within90 = target ? [target] : [];
+    console.log(
+      `[earnings-release-capture] ${sym}: targeted accession ${opts.accessionNumber} — ${target ? `found, filed ${target.filingDate}` : "NOT FOUND in item-2.02 8-K list"}`,
+    );
+  } else {
+    const cutoff = Date.now() - NINETY_DAYS_MS;
+    within90 = recent.filter((f) => {
+      const t = new Date(f.filingDate + "T12:00:00Z").getTime();
+      return Number.isFinite(t) && t >= cutoff;
+    });
+    console.log(
+      `[earnings-release-capture] ${sym}: earnings (item 2.02) 8-Ks in last 90 days = ${within90.length} of ${recent.length} total. Most recent: ${
+        within90
+          .slice(0, 5)
+          .map((f) => `${f.filingDate} (${f.accessionNumber}) [${f.items.join(",")}]`)
+          .join(", ") || "(none)"
+      }`,
+    );
+  }
   if (within90.length === 0) {
-    return { ok: false, status: 404, error: "No earnings 8-K (item 2.02) filed in the last 90 days", reason: "not_yet_filed" };
+    return {
+      ok: false,
+      status: 404,
+      error: opts.accessionNumber
+        ? `Targeted accession ${opts.accessionNumber} not found among item-2.02 8-Ks`
+        : "No earnings 8-K (item 2.02) filed in the last 90 days",
+      reason: "not_yet_filed",
+    };
   }
 
   let chosen: SecFiling | null = null;
   let exhibit: { url: string; name: string } | null = null;
   let exhibitSource: "regex" | "size_fallback" | null = null;
+  // Set only on the size_fallback path, where the content gate below
+  // already fetched the text to test it — reused so that candidate
+  // isn't fetched twice.
+  let pressTextFromGate: string | null = null;
   for (const f of within90) {
     // One fetch (index.json, carries size) feeds both the regex pass
     // and the size fallback — no second request when the fallback
@@ -289,6 +365,16 @@ export async function fetchAndStoreEarningsRelease(
         .slice(0, 6)
         .join(", ")}${files.length > 6 ? ", …" : ""}] → ${hit ? `MATCH ${hit.name} (${source})` : "no exhibit match"}`,
     );
+    if (hit && source === "size_fallback") {
+      const preview = await fetchFilingTextPlain(hit.url, 60_000);
+      if (!preview || !looksLikeEarningsRelease(preview)) {
+        console.log(
+          `[earnings-release-capture] ${sym}: size_fallback candidate ${hit.name} failed the earnings-content gate (not an earnings release) — trying next filing`,
+        );
+        continue;
+      }
+      pressTextFromGate = preview;
+    }
     if (hit) {
       chosen = f;
       exhibit = hit;
@@ -307,7 +393,7 @@ export async function fetchAndStoreEarningsRelease(
   }
   console.log(`[earnings-release-capture] ${sym}: chose ${chosen.accessionNumber} exhibit=${exhibit.name}`);
 
-  const pressText = await fetchFilingTextPlain(exhibit.url, 60_000);
+  const pressText = pressTextFromGate ?? (await fetchFilingTextPlain(exhibit.url, 60_000));
   const minChars = opts.minPressTextChars ?? 200;
   if (!pressText || pressText.length < minChars) {
     return {
@@ -336,8 +422,15 @@ export async function fetchAndStoreEarningsRelease(
     };
   }
 
-  const quarter = str(parsed.quarter);
-  const periodEnd = str(parsed.period_end);
+  // Identity (quarter, period_end) comes from the structural hint when
+  // the caller supplied one (an exact, unique earnings_history match —
+  // see QuarterLabelHint above); Perplexity's own quarter/period_end
+  // fields are only the fallback for the (today, rarer) case where no
+  // such link exists yet, never a cross-check against an already-
+  // trusted hint.
+  const hint = opts.quarterLabelHint ?? null;
+  const quarter = hint ? `Q${hint.fiscalQuarter} ${hint.fiscalYear}` : str(parsed.quarter);
+  const periodEnd = hint ? hint.periodEnd : str(parsed.period_end);
   if (!quarter || !periodEnd) {
     return {
       ok: false,
@@ -347,6 +440,34 @@ export async function fetchAndStoreEarningsRelease(
     };
   }
   const reportedDate = str(parsed.reported_date) ?? chosen.filingDate;
+
+  // Sanity guard, independent of source (hint or Perplexity): a
+  // quarter's period_end must fall strictly before the 8-K that reports
+  // it, and not implausibly long before it. Deliberately period_end-vs-
+  // filing-date, not a fiscal-vs-calendar quarter-number comparison —
+  // the latter breaks for any fiscal-year-offset filer (SNOW's real
+  // "Q2 2027" is JULY 2026, which is calendar "Q2 2026" under this
+  // codebase's own report-date heuristic — a false mismatch). A date
+  // relationship has no such ambiguity. Built 2026-09-10 after the same
+  // HOOD document, asked twice, returned quarter="Q1 2026" the second
+  // time with period_end 2026-03-31 — 49 days AFTER its own 2026-02-10
+  // filing date, a logical impossibility this check catches directly.
+  const filingDateMs = new Date(chosen.filingDate + "T00:00:00Z").getTime();
+  const periodEndMs = new Date(periodEnd + "T00:00:00Z").getTime();
+  const daysBeforeFiling = (filingDateMs - periodEndMs) / 86_400_000;
+  if (!Number.isFinite(daysBeforeFiling) || daysBeforeFiling < 0 || daysBeforeFiling > 100) {
+    const msg = `⚠️ Stage A quarter-mismatch guard fired: ${sym} asserted quarter="${quarter}" period_end=${periodEnd} but filed ${chosen.filingDate} (accession ${chosen.accessionNumber}) — ${
+      Number.isFinite(daysBeforeFiling) ? `${daysBeforeFiling.toFixed(0)}d gap (must be 0-100)` : "unparseable date"
+    }. Write refused.`;
+    console.warn(`[earnings-release-capture] ${msg}`);
+    try {
+      const { sendDiscordAlert } = await import("./discord-alert");
+      await sendDiscordAlert(msg, { mention: true });
+    } catch {
+      /* best effort — the refused write and console.warn are the record of truth */
+    }
+    return { ok: false, status: 502, error: msg, reason: "quarter_mismatch" };
+  }
 
   const rawMetrics: Record<string, unknown> = { ...(parsed.key_metrics ?? {}) };
   const adjEbitda = num(parsed.adj_ebitda_millions);
@@ -394,4 +515,20 @@ export async function fetchAndStoreEarningsRelease(
     pressText,
     row,
   };
+}
+
+// Lists the last N item-2.02 8-Ks for a symbol, no freshness gate —
+// for the backfill driver (2026-09-10) to know which accession numbers
+// to walk. No CIK / no filings both come back as an empty array; the
+// caller distinguishes those the same way it already has to distinguish
+// "not yet filed" from a real failure elsewhere in this module.
+export async function listRecentEarningsFilings(
+  symbol: string,
+  limit: number,
+): Promise<{ ok: true; filings: SecFiling[] } | { ok: false; reason: "no_cik" }> {
+  const sym = symbol.trim().toUpperCase();
+  const cik = await getCIK(sym);
+  if (!cik) return { ok: false, reason: "no_cik" };
+  const filings = await getRecentFilings(cik, ["8-K"], limit, { requireItem: "2.02" });
+  return { ok: true, filings };
 }

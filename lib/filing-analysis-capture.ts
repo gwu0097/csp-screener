@@ -16,7 +16,28 @@ import { recordAncillaryAttempt } from "./earnings-capture-attempts";
 import {
   fetchAndStoreEarningsRelease,
   type EarningsReleaseCaptureFailureReason,
+  type QuarterLabelHint,
 } from "./earnings-release-capture";
+
+// Reads the structural quarter identity off an earnings_history row —
+// see QuarterLabelHint's own comment for why this replaces Perplexity's
+// free-text quarter guess rather than merely cross-checking it. Returns
+// null when the row hasn't been fiscal-calibrated yet (see
+// lib/edgar-fiscal-period.ts / scripts/backfill-fiscal-period-data.ts);
+// callers fall back to Perplexity's guess plus the write-time guard in
+// that case, not a hard failure.
+async function resolveQuarterLabelHintById(earningsHistoryId: string): Promise<QuarterLabelHint | null> {
+  const sb = createServerClient();
+  const res = await sb
+    .from("earnings_history")
+    .select("fiscal_quarter,fiscal_year,period_end")
+    .eq("id", earningsHistoryId)
+    .limit(1);
+  if (res.error || !res.data || res.data.length === 0) return null;
+  const r = res.data[0] as { fiscal_quarter: number | null; fiscal_year: number | null; period_end: string | null };
+  if (r.fiscal_quarter === null || r.fiscal_year === null || r.period_end === null) return null;
+  return { fiscalQuarter: r.fiscal_quarter, fiscalYear: r.fiscal_year, periodEnd: r.period_end };
+}
 
 export const FILING_STAGE_A_RETRY_DAYS = 5;
 
@@ -181,12 +202,21 @@ export type StageAOutcome =
 export async function captureStageARelease(
   candidate: StageACandidate,
 ): Promise<
-  | { ok: true; quarter: string; filingDate: string; pressText: string; exhibitSource: "regex" | "size_fallback" }
+  | {
+      ok: true;
+      quarter: string;
+      filingDate: string;
+      pressText: string;
+      exhibitSource: "regex" | "size_fallback";
+      accessionNumber: string;
+    }
   | { ok: false; outcome: StageAOutcome }
 > {
+  const quarterLabelHint = await resolveQuarterLabelHintById(candidate.earningsHistoryId);
   const result = await fetchAndStoreEarningsRelease(candidate.symbol, {
     earningsHistoryId: candidate.earningsHistoryId,
     minPressTextChars: MIN_EXHIBIT_CHARS,
+    quarterLabelHint,
   });
   await recordAncillaryAttempt({
     earningsHistoryId: candidate.earningsHistoryId,
@@ -207,6 +237,7 @@ export async function captureStageARelease(
     filingDate: result.filingDate,
     pressText: result.pressText,
     exhibitSource: result.exhibitSource,
+    accessionNumber: result.accessionNumber,
   };
 }
 
@@ -265,6 +296,16 @@ export async function findNearestEarningsHistoryRow(
 // certain about.
 export async function captureStageAReleaseForSymbol(
   symbol: string,
+  opts: {
+    accessionNumber?: string;
+    // The targeted accession's own filing date, when the caller already
+    // knows it ahead of the fetch (the backfill driver does — it comes
+    // straight from listRecentEarningsFilings). Lets this path resolve
+    // an exact-match quarterLabelHint the SAME way the candidate-driven
+    // path does, instead of falling back to Perplexity's free-text
+    // guess for every backfilled quarter.
+    nearFilingDateHint?: string;
+  } = {},
 ): Promise<
   | {
       ok: true;
@@ -274,10 +315,22 @@ export async function captureStageAReleaseForSymbol(
       exhibitSource: "regex" | "size_fallback";
       linkedEarningsHistoryId: string | null;
       nearestMatch: { id: string; earningsDate: string; dayDiff: number; uniqueAtDistance: boolean } | null;
+      accessionNumber: string;
     }
   | { ok: false; outcome: StageAOutcome }
 > {
-  const result = await fetchAndStoreEarningsRelease(symbol, { minPressTextChars: MIN_EXHIBIT_CHARS });
+  let quarterLabelHint: QuarterLabelHint | null = null;
+  if (opts.nearFilingDateHint) {
+    const nearest = await findNearestEarningsHistoryRow(symbol, opts.nearFilingDateHint);
+    if (nearest && nearest.dayDiff === 0 && nearest.uniqueAtDistance) {
+      quarterLabelHint = await resolveQuarterLabelHintById(nearest.id);
+    }
+  }
+  const result = await fetchAndStoreEarningsRelease(symbol, {
+    minPressTextChars: MIN_EXHIBIT_CHARS,
+    accessionNumber: opts.accessionNumber,
+    quarterLabelHint,
+  });
   if (!result.ok) {
     return {
       ok: false,
@@ -292,7 +345,7 @@ export async function captureStageAReleaseForSymbol(
       .from("earnings_releases")
       .update({ earnings_history_id: nearest.id })
       .eq("symbol", symbol.toUpperCase())
-      .eq("quarter", result.quarter);
+      .eq("accession_number", result.accessionNumber);
     if (!patch.error) linkedEarningsHistoryId = nearest.id;
     else console.warn(`[filing-analysis-capture] ${symbol}: earnings_history_id link patch failed: ${patch.error.message}`);
   }
@@ -302,6 +355,7 @@ export async function captureStageAReleaseForSymbol(
     filingDate: result.filingDate,
     pressText: result.pressText,
     exhibitSource: result.exhibitSource,
+    accessionNumber: result.accessionNumber,
     linkedEarningsHistoryId,
     nearestMatch: nearest,
   };
