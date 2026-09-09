@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
+import type { CardsPayload } from "@/lib/earnings-analysis-cards";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -7,6 +8,10 @@ export const revalidate = 0;
 // Pasted Claude analyses per filing (filing_analyses table).
 //   GET  → all rows for the symbol, newest filing first
 //   POST → save a new analysis { filing_type, period, filing_date?, analysis_text }
+//
+// cards is null for a manually pasted row (that flow only ever writes
+// analysis_text) and populated for an automated Stage A row — see
+// migrations/2026-09-10-filing-analyses-cards.sql.
 
 export type FilingAnalysisRow = {
   id: string;
@@ -15,6 +20,7 @@ export type FilingAnalysisRow = {
   period: string;
   filing_date: string | null;
   analysis_text: string;
+  cards: CardsPayload | null;
   reviewed_at: string;
   notes: string | null;
 };
@@ -112,6 +118,14 @@ export async function POST(req: NextRequest, { params }: Params) {
         period,
         filing_date: filingDate,
         analysis_text: analysisText,
+        // A manual paste is always prose. Explicitly null cards rather
+        // than omitting it — an upsert only touches columns present in
+        // the payload, so a re-paste over a previously AUTOMATED
+        // (card-based) row would otherwise leave the stale cards JSON
+        // in place, and the renderer prefers cards over analysis_text
+        // whenever cards is non-null (would keep showing the old
+        // automated cards instead of the human's new prose).
+        cards: null,
         // reviewed_at defaults to now() on INSERT only — an upsert's
         // conflict path is an UPDATE, so it has to be set explicitly
         // here or a replace would silently keep the old timestamp.

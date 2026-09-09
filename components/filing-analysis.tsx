@@ -13,6 +13,7 @@ import { Check, Loader2, Sparkles, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { FilingAnalysisRow } from "@/app/api/research/[symbol]/analyses/route";
+import { EarningsCardsView } from "@/components/earnings-cards";
 
 export type FilingAnalysis = FilingAnalysisRow;
 
@@ -192,7 +193,11 @@ export function AnalysisViewPanel({
         </button>
       </div>
 
-      <MarkdownBody text={analysis.analysis_text} />
+      {analysis.cards ? (
+        <EarningsCardsView cards={analysis.cards} />
+      ) : (
+        <MarkdownBody text={analysis.analysis_text} />
+      )}
 
       <div className="mt-2 border-t border-border/50 pt-2">
         {!noteOpen ? (
