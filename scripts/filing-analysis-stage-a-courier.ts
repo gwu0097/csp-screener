@@ -116,9 +116,7 @@ type RunResult =
 // was added to avoid. No Discord post — this is a manual, watched run,
 // not an unattended one.
 async function runForceSymbol(symbol: string): Promise<void> {
-  const { captureStageAReleaseForSymbol, findNearestEarningsHistoryRow } = await import(
-    "../lib/filing-analysis-capture"
-  );
+  const { captureStageAReleaseForSymbol } = await import("../lib/filing-analysis-capture");
   const { createServerClient } = await import("../lib/supabase");
   const sb = createServerClient();
 
@@ -131,12 +129,16 @@ async function runForceSymbol(symbol: string): Promise<void> {
   }
   console.log(`[filing-analysis-stage-a] release captured: ${symbol} ${captured.quarter}, filed ${captured.filingDate}, pressText=${captured.pressText.length} chars`);
 
-  const nearest = await findNearestEarningsHistoryRow(symbol, captured.filingDate);
-  console.log(
-    nearest
-      ? `[filing-analysis-stage-a] earnings_history: found id=${nearest.id} earnings_date=${nearest.earningsDate} (${nearest.dayDiff}d from filing date) — NOT linked (bypassed candidate selection)`
-      : `[filing-analysis-stage-a] earnings_history: no row within 5 days of ${captured.filingDate} — no matching row exists`,
-  );
+  const nearest = captured.nearestMatch;
+  if (captured.linkedEarningsHistoryId) {
+    console.log(`[filing-analysis-stage-a] earnings_history: LINKED id=${captured.linkedEarningsHistoryId} (exact same-day match, unique)`);
+  } else if (nearest) {
+    console.log(
+      `[filing-analysis-stage-a] earnings_history: found id=${nearest.id} earnings_date=${nearest.earningsDate} (${nearest.dayDiff}d from filing date${nearest.uniqueAtDistance ? "" : ", tied with another row"}) — NOT linked`,
+    );
+  } else {
+    console.log(`[filing-analysis-stage-a] earnings_history: no row within 5 days of ${captured.filingDate} — no matching row exists`);
+  }
 
   const prompt = buildPrompt(symbol, captured.quarter, captured.pressText);
   const callStart = Date.now();
@@ -162,7 +164,7 @@ async function runForceSymbol(symbol: string): Promise<void> {
   }
 
   const analysisText = claudeOut.trim();
-  const notes = `auto: filing-analysis-stage-a v1 [--force-symbol diagnostic], ${symbol} ${captured.quarter}, earnings_history_id=${nearest ? nearest.id : "none"}, pressText_chars=${captured.pressText.length}, claude_call_s=${callSeconds.toFixed(1)}`;
+  const notes = `auto: filing-analysis-stage-a v1 [--force-symbol diagnostic], ${symbol} ${captured.quarter}, earnings_history_id=${captured.linkedEarningsHistoryId ?? (nearest ? `${nearest.id} (found, not linked)` : "none")}, pressText_chars=${captured.pressText.length}, claude_call_s=${callSeconds.toFixed(1)}`;
   const ins = await sb.from("filing_analyses").insert({
     symbol: symbol.toUpperCase(),
     filing_type: "8-K",
