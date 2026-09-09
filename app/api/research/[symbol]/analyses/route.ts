@@ -99,15 +99,26 @@ export async function POST(req: NextRequest, { params }: Params) {
   }
 
   const sb = createServerClient();
+  // Upsert on (symbol, filing_type, period) — a re-paste (a corrected
+  // analysis for a filing that already has one) replaces the existing
+  // row instead of erroring on the unique constraint or accumulating a
+  // duplicate (migrations/2026-09-09-filing-analyses-unique-constraint.sql).
   const r = await sb
     .from("filing_analyses")
-    .insert({
-      symbol,
-      filing_type: filingType,
-      period,
-      filing_date: filingDate,
-      analysis_text: analysisText,
-    })
+    .upsert(
+      {
+        symbol,
+        filing_type: filingType,
+        period,
+        filing_date: filingDate,
+        analysis_text: analysisText,
+        // reviewed_at defaults to now() on INSERT only — an upsert's
+        // conflict path is an UPDATE, so it has to be set explicitly
+        // here or a replace would silently keep the old timestamp.
+        reviewed_at: new Date().toISOString(),
+      },
+      { onConflict: "symbol,filing_type,period" },
+    )
     .select("*");
   if (r.error) {
     return NextResponse.json({ error: r.error.message }, { status: 500 });

@@ -165,14 +165,18 @@ async function runForceSymbol(symbol: string): Promise<void> {
 
   const analysisText = claudeOut.trim();
   const notes = `auto: filing-analysis-stage-a v1 [--force-symbol diagnostic], ${symbol} ${captured.quarter}, earnings_history_id=${captured.linkedEarningsHistoryId ?? (nearest ? `${nearest.id} (found, not linked)` : "none")}, pressText_chars=${captured.pressText.length}, claude_call_s=${callSeconds.toFixed(1)}`;
-  const ins = await sb.from("filing_analyses").insert({
-    symbol: symbol.toUpperCase(),
-    filing_type: "8-K",
-    period: captured.quarter,
-    filing_date: captured.filingDate,
-    analysis_text: analysisText,
-    notes,
-  });
+  const ins = await sb.from("filing_analyses").upsert(
+    {
+      symbol: symbol.toUpperCase(),
+      filing_type: "8-K",
+      period: captured.quarter,
+      filing_date: captured.filingDate,
+      analysis_text: analysisText,
+      notes,
+      reviewed_at: new Date().toISOString(),
+    },
+    { onConflict: "symbol,filing_type,period" },
+  );
   if (ins.error) {
     console.log(`[filing-analysis-stage-a] RESULT: write_failed — ${ins.error.message}`);
     return;
@@ -264,14 +268,22 @@ async function main() {
 
     const analysisText = claudeOut.trim();
     const notes = `auto: filing-analysis-stage-a v1, ${candidate.symbol} ${captured.quarter}, earnings_history_id=${candidate.earningsHistoryId}, pressText_chars=${captured.pressText.length}, claude_call_s=${callSeconds.toFixed(1)}`;
-    const ins = await sb.from("filing_analyses").insert({
-      symbol: candidate.symbol,
-      filing_type: "8-K",
-      period: captured.quarter,
-      filing_date: captured.filingDate,
-      analysis_text: analysisText,
-      notes,
-    });
+    // Upsert on (symbol, filing_type, period) — a re-run (retry, or a
+    // corrected re-analysis) replaces the prior row instead of
+    // accumulating a duplicate (migrations/2026-09-09-filing-analyses-
+    // unique-constraint.sql).
+    const ins = await sb.from("filing_analyses").upsert(
+      {
+        symbol: candidate.symbol,
+        filing_type: "8-K",
+        period: captured.quarter,
+        filing_date: captured.filingDate,
+        analysis_text: analysisText,
+        notes,
+        reviewed_at: new Date().toISOString(),
+      },
+      { onConflict: "symbol,filing_type,period" },
+    );
     if (ins.error) {
       console.warn(`[filing-analysis-stage-a] ${candidate.symbol}: filing_analyses insert failed: ${ins.error.message}`);
       results.push({ symbol: candidate.symbol, quarter: captured.quarter, status: "write_failed", detail: ins.error.message, pingWorthy: true });
