@@ -316,7 +316,17 @@ export async function POST(
     const cik = await getCIK(symbol);
     const facts = cik ? await getCompanyFacts(cik) : null;
     const rawAnnual = extractAnnualMetrics(facts, 5);
-    const rawQuarterly = extractQuarterlyMetrics(facts, 6);
+    // 12, not the old 6 -- extractQuarterlyMetrics only truncates the
+    // already-fetched companyfacts payload above (getCompanyFacts is
+    // called once regardless of this number, SEC doesn't paginate it),
+    // so this is free. 6 could only ever show YoY growth on its 2 most
+    // recent rows (growth needs a value 4 quarters back, out of range
+    // for all but the newest 2 of 6); 12 gives 8. Confirmed live
+    // against real NFLX data (2026-09-10) that this does NOT fill the
+    // Q4 derivation nulls -- those come from a genuine FY-vs-quarterly
+    // EPS share-basis mismatch (see extractQuarterlyMetrics' own
+    // negative-derivation-guard comment), unrelated to window size.
+    const rawQuarterly = extractQuarterlyMetrics(facts, 12);
     const reporting = getReportingInfo(facts);
     // Foreign filers report in their native currency under ifrs-full.
     // Convert annual + quarterly figures into USD so YoY ratios +
