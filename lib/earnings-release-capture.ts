@@ -132,7 +132,10 @@ ${pressText}
 """`;
 }
 
-function extractJsonObject(s: string): unknown | null {
+// Exported — also used by lib/earnings-analysis-cards.ts to parse the
+// claude -p card-generation response, same balanced-brace/code-fence
+// handling, no reason to duplicate it a third time in this codebase.
+export function extractJsonObject(s: string): unknown | null {
   const trimmed = s.replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
   const start = trimmed.indexOf("{");
   if (start < 0) return null;

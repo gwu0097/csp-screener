@@ -1,20 +1,24 @@
 // Earnings Reports Stage A courier. Runs headless Claude Code (the
 // user's Claude subscription, no API key — same mechanism proven by
 // scripts/robinhood-courier.ts) to read an 8-K earnings-release exhibit
-// whole (inline argv prompt, no tool calls — see the 2026-09-09 design
-// review: 17-20s for a full 10-Q this size, this is a fraction of that)
-// and produce the guidance-range / management-commentary half of the
-// Earnings Reports analysis. Items 3-4 (litigation/subsequent-events,
-// what-changed-vs-last-quarter) are Stage B, once the 10-Q lands — not
-// built yet.
+// whole (inline argv prompt, no tool calls) and produce structured
+// signal cards (lib/earnings-analysis-cards.ts — the 2026-09-10
+// Qualtrim-style redesign). Litigation/subsequent-events and the full
+// quarter-over-quarter comparison are Stage B, once the 10-Q lands —
+// not built yet.
 //
-// Run via a dedicated launchd agent (not yet created/loaded — this
-// script is meant to be run manually first to confirm one real pass
-// end to end), once daily, weekdays. Usage: npx tsx
-// scripts/filing-analysis-stage-a-courier.ts [--dry]
+// Run via a dedicated launchd agent, once daily, weekdays. Usage:
+// npx tsx scripts/filing-analysis-stage-a-courier.ts [--dry]
+//   --symbol=SYM         candidate-path override (still requires an
+//                        earnings_history row, same guards as normal)
+//   --force-symbol=SYM   bypasses candidate selection entirely, no
+//                        earnings_history dependency — manual diagnostic
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { execFileSync } from "node:child_process";
+// Type-only — erased at compile time, doesn't trigger module evaluation.
+import type { CardsPayload, SectionKey } from "../lib/earnings-analysis-cards";
+import type { RestClient } from "../lib/supabase";
 
 function loadEnvLocal(): void {
   const content = readFileSync(resolve(process.cwd(), ".env.local"), "utf8");
@@ -33,8 +37,20 @@ function elapsedSeconds(): number {
 }
 
 const CLAUDE_BIN = "/Users/raitsai/.local/bin/claude";
-const CLAUDE_TIMEOUT_MS = 120_000; // generous vs. the ~17-20s measured for a much larger document
+// Card generation is far heavier than the old 2-section GUIDANCE/
+// COMMENTARY prompt (~17-20s) -- measured 98.2s for NFLX (41K chars)
+// and a timeout past 120s for SNOW (50K chars) during the 2026-09-10
+// calibration run. 240s gives real headroom above the largest observed
+// case rather than the old budget's now-stale comment.
+const CLAUDE_TIMEOUT_MS = 240_000;
 const RUN_BUDGET_MS = 600_000; // stop starting new candidates past this, matches T0/T1's per-run budget philosophy
+
+// Whether a "stated" card whose metric_evidence doesn't verify against
+// the source text gets DROPPED (true) or just logged for calibration
+// (false) — see lib/earnings-analysis-cards.ts's verifyMetricEvidence.
+// Set from the 2026-09-10 NFLX/SNOW calibration run; flip only after
+// checking the false-positive rate on a real run, per that review.
+const ENFORCE_STATED_VERIFICATION = true;
 
 function todayEasternIso(): string {
   return new Intl.DateTimeFormat("en-CA", {
@@ -45,76 +61,102 @@ function todayEasternIso(): string {
   }).format(new Date());
 }
 
-function buildPrompt(symbol: string, quarter: string, pressText: string): string {
-  return `You are producing part of a post-mortem "Earnings Reports" entry for a long-term stock holder — NOT a pre-trade research pitch. The reader already knows the raw numbers (revenue, EPS, margins are shown elsewhere); your job is the qualitative half of ONE quarter's picture: ${symbol} ${quarter}.
+const SECTION_KEYS: SectionKey[] = ["ai_generated_insights", "what_changed_this_quarter", "red_flags", "strengths"];
 
-Answer exactly two things, each as its own labeled section. Be specific and cite real figures/dates from the text — do not paraphrase into vague language. If something isn't disclosed in this document, say so explicitly as "Not disclosed in this release" — that is a valid, required answer, not something to omit or guess around.
-
-=== GUIDANCE ===
-Next quarter's (and full-year, if given) guided range exactly as stated — the actual numbers/percentages, not just "guidance was raised." If the release compares to previous guidance, state both. If no guidance is given in this document, say so explicitly.
-
-=== COMMENTARY ===
-Management's own characterization of demand this quarter — tone, and specifically what they attribute the results to (a named product, a macro factor, a customer segment, pricing, etc.), in their own words where it matters. Two or three sentences. Not a general summary of the whole release — only the demand/attribution framing.
-
-This analysis is INCOMPLETE by design — litigation/subsequent-events and the quarter-over-quarter comparison are added later once the 10-Q filing lands (days after this release). Do not attempt those here and do not apologize for their absence; just answer GUIDANCE and COMMENTARY.
-
-Press release text (SEC EDGAR, live-fetched, HTML-stripped):
-
-${pressText}`;
+function cardCounts(payload: CardsPayload): string {
+  return SECTION_KEYS.map((k) => `${k}=${payload.sections[k].length}`).join(", ");
 }
 
-// Reject anything that doesn't look like a real answer before it ever
-// reaches filing_analyses — catches a claude -p call that errored,
-// refused, or returned something degenerate, distinct from the input-side
-// MIN_EXHIBIT_CHARS guard in lib/filing-analysis-capture.ts.
-function looksLikeValidAnalysis(text: string): { ok: boolean; reason?: string } {
-  const trimmed = text.trim();
-  if (trimmed.length < 200) return { ok: false, reason: `too short (${trimmed.length} chars)` };
-  if (!/GUIDANCE/i.test(trimmed) || !/COMMENTARY/i.test(trimmed)) {
-    return { ok: false, reason: "missing required GUIDANCE/COMMENTARY sections" };
+type CardRunOutcome =
+  | { status: "captured"; analysisChars: number; countsSummary: string; droppedCount: number; droppedDetail: string[] }
+  | { status: "claude_failed"; detail: string }
+  | { status: "invalid_output"; detail: string };
+
+// Shared by both call sites (candidate-driven loop and --force-symbol)
+// so the card-generation/validation/write logic exists exactly once.
+async function runCardsPipeline(opts: {
+  sb: RestClient;
+  symbol: string;
+  quarter: string;
+  filingDate: string;
+  pressText: string;
+  notesPrefix: string;
+}): Promise<CardRunOutcome> {
+  const { buildCardsPrompt, parseAndValidateCards, renderCardsAsText } = await import("../lib/earnings-analysis-cards");
+  const prompt = buildCardsPrompt(opts.symbol, opts.quarter, opts.pressText);
+  let claudeOut: string;
+  const callStart = Date.now();
+  try {
+    claudeOut = execFileSync(CLAUDE_BIN, ["-p", prompt, "--allowedTools", ""], {
+      encoding: "utf8",
+      timeout: CLAUDE_TIMEOUT_MS,
+      maxBuffer: 10 * 1024 * 1024,
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { status: "claude_failed", detail: msg };
   }
-  const refusalMarkers = [
-    "i cannot", "i can't", "i'm not able to", "as an ai",
-  ];
-  const head = trimmed.slice(0, 300).toLowerCase();
-  if (refusalMarkers.some((m) => head.includes(m))) {
-    return { ok: false, reason: "response reads as a refusal" };
+  const callSeconds = (Date.now() - callStart) / 1000;
+  console.log(`[filing-analysis-stage-a] ${opts.symbol}: claude -p returned in ${callSeconds.toFixed(1)}s, ${claudeOut.length} chars`);
+
+  const result = parseAndValidateCards(claudeOut, opts.pressText, { enforceStatedVerification: ENFORCE_STATED_VERIFICATION });
+  if (!result.ok) {
+    return { status: "invalid_output", detail: result.reason };
   }
-  return { ok: true };
+  if (result.dropped.length > 0) {
+    console.warn(
+      `[filing-analysis-stage-a] ${opts.symbol}: dropped ${result.dropped.length} card(s): ${result.dropped
+        .map((d) => `[${d.section}] "${d.title}" — ${d.reason}`)
+        .join(" | ")}`,
+    );
+  }
+  console.log(`[filing-analysis-stage-a] ${opts.symbol}: cards — ${cardCounts(result.payload)}`);
+
+  const analysisText = renderCardsAsText(result.payload);
+  const notes = `${opts.notesPrefix}, pressText_chars=${opts.pressText.length}, claude_call_s=${callSeconds.toFixed(1)}, cards=[${cardCounts(result.payload)}], dropped=${result.dropped.length}`;
+  const ins = await opts.sb.from("filing_analyses").upsert(
+    {
+      symbol: opts.symbol.toUpperCase(),
+      filing_type: "8-K",
+      period: opts.quarter,
+      filing_date: opts.filingDate,
+      analysis_text: analysisText,
+      cards: result.payload,
+      notes,
+      reviewed_at: new Date().toISOString(),
+    },
+    { onConflict: "symbol,filing_type,period" },
+  );
+  if (ins.error) {
+    return { status: "invalid_output", detail: `write_failed: ${ins.error.message}` };
+  }
+  return {
+    status: "captured",
+    analysisChars: analysisText.length,
+    countsSummary: cardCounts(result.payload),
+    droppedCount: result.dropped.length,
+    droppedDetail: result.dropped.map((d) => `[${d.section}] "${d.title}": ${d.reason}`),
+  };
 }
 
 // pingWorthy distinguishes "log it, don't page" from "this needs a
-// look" (2026-09-09, per the COO false-alert review — same reasoning
-// as the T1 corrupted-baseline detector: an alert firing on the
-// expected, non-broken state trains the channel to be ignored).
-// - captured: never pings, success.
-// - pending: "not_yet_filed" and still inside the retry window — the
-//   8-K legitimately doesn't exist yet for a same-week reporter.
-//   Routine, logged only.
-// - no_release_found (every other reason) / claude_failed /
-//   invalid_output / write_failed: always pings — something that WAS
-//   available failed to process, or the retry window is closing with
-//   still nothing found.
+// look" (2026-09-09, per the COO false-alert review). captured with
+// zero dropped cards never pings; a dropped card is not the designed
+// state (unlike "not yet filed"), so it pings even on an otherwise-
+// successful run — that visibility into unsupported claims is the
+// whole point of tracking drops (2026-09-10 review).
 type RunResult =
-  | { symbol: string; quarter: string; status: "captured"; analysisChars: number; pingWorthy: false }
+  | { symbol: string; quarter: string; status: "captured"; analysisChars: number; countsSummary: string; droppedCount: number; droppedDetail: string[]; pingWorthy: boolean }
   | { symbol: string; quarter?: string; status: "pending"; detail: string; pingWorthy: false }
-  | {
-      symbol: string;
-      quarter?: string;
-      status: "no_release_found" | "claude_failed" | "invalid_output" | "write_failed";
-      detail: string;
-      pingWorthy: true;
-    };
+  | { symbol: string; quarter?: string; status: "no_release_found" | "claude_failed" | "invalid_output" | "write_failed"; detail: string; pingWorthy: true };
 
 // --force-symbol=SYM: manual diagnostic run against a symbol regardless
 // of earnings_history/candidate-window state — same shape as the
 // existing manual "Fetch latest 8-K" UI button (no earnings_history
-// dependency, no attempt logging), plus the claude -p analysis Stage A
-// adds. Never writes an earnings_history_id link — a candidate found
-// this way is reported, not attached, since guessing the link outside
-// the normal selectStageACandidates path is exactly what that column
-// was added to avoid. No Discord post — this is a manual, watched run,
-// not an unattended one.
+// dependency, no attempt logging), plus the claude -p card generation
+// Stage A adds. Never writes an earnings_history_id link unless it's an
+// exact, unique same-day match. No Discord post — this is a manual,
+// watched run, not an unattended one.
 async function runForceSymbol(symbol: string): Promise<void> {
   const { captureStageAReleaseForSymbol } = await import("../lib/filing-analysis-capture");
   const { createServerClient } = await import("../lib/supabase");
@@ -140,48 +182,25 @@ async function runForceSymbol(symbol: string): Promise<void> {
     console.log(`[filing-analysis-stage-a] earnings_history: no row within 5 days of ${captured.filingDate} — no matching row exists`);
   }
 
-  const prompt = buildPrompt(symbol, captured.quarter, captured.pressText);
-  const callStart = Date.now();
-  let claudeOut: string;
-  try {
-    claudeOut = execFileSync(CLAUDE_BIN, ["-p", prompt, "--allowedTools", ""], {
-      encoding: "utf8",
-      timeout: CLAUDE_TIMEOUT_MS,
-      maxBuffer: 10 * 1024 * 1024,
-    });
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    console.log(`[filing-analysis-stage-a] RESULT: claude_failed — ${msg}`);
-    return;
+  const notesPrefix = `auto: filing-analysis-stage-a v1 [--force-symbol diagnostic], ${symbol} ${captured.quarter}, earnings_history_id=${captured.linkedEarningsHistoryId ?? (nearest ? `${nearest.id} (found, not linked)` : "none")}, exhibit_source=${captured.exhibitSource}`;
+  const outcome = await runCardsPipeline({
+    sb,
+    symbol,
+    quarter: captured.quarter,
+    filingDate: captured.filingDate,
+    pressText: captured.pressText,
+    notesPrefix,
+  });
+  if (outcome.status === "captured") {
+    console.log(
+      `[filing-analysis-stage-a] RESULT: captured — filing_analyses row written (${outcome.analysisChars} chars), ${outcome.countsSummary}, dropped=${outcome.droppedCount}`,
+    );
+    if (outcome.droppedDetail.length > 0) {
+      console.log(`[filing-analysis-stage-a] DROPPED CARDS:\n  ${outcome.droppedDetail.join("\n  ")}`);
+    }
+  } else {
+    console.log(`[filing-analysis-stage-a] RESULT: ${outcome.status} — ${outcome.detail}`);
   }
-  const callSeconds = (Date.now() - callStart) / 1000;
-  console.log(`[filing-analysis-stage-a] claude -p returned in ${callSeconds.toFixed(1)}s, ${claudeOut.length} chars`);
-
-  const valid = looksLikeValidAnalysis(claudeOut);
-  if (!valid.ok) {
-    console.log(`[filing-analysis-stage-a] RESULT: invalid_output — ${valid.reason} — NOT writing to filing_analyses`);
-    return;
-  }
-
-  const analysisText = claudeOut.trim();
-  const notes = `auto: filing-analysis-stage-a v1 [--force-symbol diagnostic], ${symbol} ${captured.quarter}, earnings_history_id=${captured.linkedEarningsHistoryId ?? (nearest ? `${nearest.id} (found, not linked)` : "none")}, exhibit_source=${captured.exhibitSource}, pressText_chars=${captured.pressText.length}, claude_call_s=${callSeconds.toFixed(1)}`;
-  const ins = await sb.from("filing_analyses").upsert(
-    {
-      symbol: symbol.toUpperCase(),
-      filing_type: "8-K",
-      period: captured.quarter,
-      filing_date: captured.filingDate,
-      analysis_text: analysisText,
-      notes,
-      reviewed_at: new Date().toISOString(),
-    },
-    { onConflict: "symbol,filing_type,period" },
-  );
-  if (ins.error) {
-    console.log(`[filing-analysis-stage-a] RESULT: write_failed — ${ins.error.message}`);
-    return;
-  }
-  console.log(`[filing-analysis-stage-a] RESULT: captured — filing_analyses row written (${analysisText.length} chars)`);
 }
 
 async function main() {
@@ -234,92 +253,65 @@ async function main() {
       results.push({ symbol: candidate.symbol, status: "no_release_found", detail, pingWorthy: true });
       continue;
     }
-    console.log(`[filing-analysis-stage-a] ${candidate.symbol}: release captured (${candidate.symbol} ${captured.quarter}), pressText=${captured.pressText.length} chars`);
+    console.log(`[filing-analysis-stage-a] ${candidate.symbol}: release captured (${candidate.symbol} ${captured.quarter}), pressText=${captured.pressText.length} chars, exhibit_source=${captured.exhibitSource}`);
 
     if (dryRun) {
       console.log(`[filing-analysis-stage-a] ${candidate.symbol}: dry run — skipping claude -p and DB write`);
       continue;
     }
 
-    const prompt = buildPrompt(candidate.symbol, captured.quarter, captured.pressText);
-    let claudeOut: string;
-    const callStart = Date.now();
-    try {
-      claudeOut = execFileSync(CLAUDE_BIN, ["-p", prompt, "--allowedTools", ""], {
-        encoding: "utf8",
-        timeout: CLAUDE_TIMEOUT_MS,
-        maxBuffer: 10 * 1024 * 1024,
-      });
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      console.warn(`[filing-analysis-stage-a] ${candidate.symbol}: claude -p failed after ${((Date.now() - callStart) / 1000).toFixed(1)}s: ${msg}`);
-      results.push({ symbol: candidate.symbol, quarter: captured.quarter, status: "claude_failed", detail: msg, pingWorthy: true });
+    const notesPrefix = `auto: filing-analysis-stage-a v1, ${candidate.symbol} ${captured.quarter}, earnings_history_id=${candidate.earningsHistoryId}, exhibit_source=${captured.exhibitSource}`;
+    const outcome = await runCardsPipeline({
+      sb,
+      symbol: candidate.symbol,
+      quarter: captured.quarter,
+      filingDate: captured.filingDate,
+      pressText: captured.pressText,
+      notesPrefix,
+    });
+    if (outcome.status !== "captured") {
+      console.warn(`[filing-analysis-stage-a] ${candidate.symbol}: ${outcome.status} — ${outcome.detail}`);
+      results.push({ symbol: candidate.symbol, quarter: captured.quarter, status: outcome.status, detail: outcome.detail, pingWorthy: true });
       continue;
     }
-    const callSeconds = (Date.now() - callStart) / 1000;
-    console.log(`[filing-analysis-stage-a] ${candidate.symbol}: claude -p returned in ${callSeconds.toFixed(1)}s, ${claudeOut.length} chars`);
-
-    const valid = looksLikeValidAnalysis(claudeOut);
-    if (!valid.ok) {
-      console.warn(`[filing-analysis-stage-a] ${candidate.symbol}: output rejected — ${valid.reason}`);
-      results.push({ symbol: candidate.symbol, quarter: captured.quarter, status: "invalid_output", detail: valid.reason ?? "unknown", pingWorthy: true });
-      continue;
-    }
-
-    const analysisText = claudeOut.trim();
-    const notes = `auto: filing-analysis-stage-a v1, ${candidate.symbol} ${captured.quarter}, earnings_history_id=${candidate.earningsHistoryId}, exhibit_source=${captured.exhibitSource}, pressText_chars=${captured.pressText.length}, claude_call_s=${callSeconds.toFixed(1)}`;
-    // Upsert on (symbol, filing_type, period) — a re-run (retry, or a
-    // corrected re-analysis) replaces the prior row instead of
-    // accumulating a duplicate (migrations/2026-09-09-filing-analyses-
-    // unique-constraint.sql).
-    const ins = await sb.from("filing_analyses").upsert(
-      {
-        symbol: candidate.symbol,
-        filing_type: "8-K",
-        period: captured.quarter,
-        filing_date: captured.filingDate,
-        analysis_text: analysisText,
-        notes,
-        reviewed_at: new Date().toISOString(),
-      },
-      { onConflict: "symbol,filing_type,period" },
-    );
-    if (ins.error) {
-      console.warn(`[filing-analysis-stage-a] ${candidate.symbol}: filing_analyses insert failed: ${ins.error.message}`);
-      results.push({ symbol: candidate.symbol, quarter: captured.quarter, status: "write_failed", detail: ins.error.message, pingWorthy: true });
-      continue;
-    }
-    console.log(`[filing-analysis-stage-a] ${candidate.symbol}: filing_analyses row written (${analysisText.length} chars)`);
-    results.push({ symbol: candidate.symbol, quarter: captured.quarter, status: "captured", analysisChars: analysisText.length, pingWorthy: false });
+    console.log(`[filing-analysis-stage-a] ${candidate.symbol}: filing_analyses row written (${outcome.analysisChars} chars), ${outcome.countsSummary}, dropped=${outcome.droppedCount}`);
+    results.push({
+      symbol: candidate.symbol,
+      quarter: captured.quarter,
+      status: "captured",
+      analysisChars: outcome.analysisChars,
+      countsSummary: outcome.countsSummary,
+      droppedCount: outcome.droppedCount,
+      droppedDetail: outcome.droppedDetail,
+      pingWorthy: outcome.droppedCount > 0,
+    });
   }
 
-  const captured = results.filter((r) => r.status === "captured").length;
-  const pending = results.filter((r) => r.status === "pending").length;
+  const capturedCount = results.filter((r) => r.status === "captured").length;
+  const pendingCount = results.filter((r) => r.status === "pending").length;
+  const totalDropped = results.reduce((n, r) => (r.status === "captured" ? n + r.droppedCount : n), 0);
   const needsAttention = results.some((r) => r.pingWorthy);
-  const summary = results.length === 0
-    ? "no candidates"
-    : results
-        .map((r) =>
-          r.status === "captured"
-            ? `${r.symbol} ✅ (${r.analysisChars} chars)`
-            : r.status === "pending"
-              ? `${r.symbol} ⏳ pending — not yet filed`
-              : `${r.symbol} ⚠️ ${r.status}: ${r.detail}`,
-        )
-        .join("\n");
-  // Lead icon reflects the most severe thing in this run: any
-  // ping-worthy result wins over an all-pending or all-captured run,
-  // which wins over an empty candidate list.
+  const summaryLines = results.length === 0
+    ? ["no candidates"]
+    : results.map((r) => {
+        if (r.status === "captured") {
+          const dropNote = r.droppedCount > 0 ? ` ⚠️ ${r.droppedCount} dropped: ${r.droppedDetail.join("; ")}` : "";
+          return `${r.symbol} ✅ (${r.analysisChars} chars, ${r.countsSummary})${dropNote}`;
+        }
+        if (r.status === "pending") return `${r.symbol} ⏳ pending — not yet filed`;
+        return `${r.symbol} ⚠️ ${r.status}: ${r.detail}`;
+      });
+  const summary = summaryLines.join("\n");
   const leadIcon = dryRun
     ? "🔵 [dry run] "
     : needsAttention
       ? "⚠️ "
       : results.length === 0
         ? "⚪ "
-        : pending === results.length
+        : pendingCount === results.length
           ? "⏳ "
           : "✅ ";
-  const finalText = `${leadIcon}Earnings Reports Stage A — ${elapsedSeconds().toFixed(1)}s, ${candidates.length} candidate(s), ${captured} captured${pending > 0 ? `, ${pending} pending` : ""}\n${summary}`;
+  const finalText = `${leadIcon}Earnings Reports Stage A — ${elapsedSeconds().toFixed(1)}s, ${candidates.length} candidate(s), ${capturedCount} captured${pendingCount > 0 ? `, ${pendingCount} pending` : ""}${totalDropped > 0 ? `, ${totalDropped} card(s) dropped` : ""}\n${summary}`;
   console.log(`[filing-analysis-stage-a] ${finalText.replace(/\n/g, " | ")}`);
   if (startMessageId) {
     const editRes = await editDiscordAlert(startMessageId, finalText, { mention: needsAttention });
