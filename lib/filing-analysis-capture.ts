@@ -13,7 +13,10 @@
 // measured lag distribution the way T1's 10-day 10-Q window is.
 import { createServerClient } from "./supabase";
 import { recordAncillaryAttempt } from "./earnings-capture-attempts";
-import { fetchAndStoreEarningsRelease } from "./earnings-release-capture";
+import {
+  fetchAndStoreEarningsRelease,
+  type EarningsReleaseCaptureFailureReason,
+} from "./earnings-release-capture";
 
 export const FILING_STAGE_A_RETRY_DAYS = 5;
 
@@ -50,6 +53,19 @@ function addDaysIso(iso: string, days: number): string {
   const d = new Date(iso + "T00:00:00Z");
   d.setUTCDate(d.getUTCDate() + days);
   return d.toISOString().slice(0, 10);
+}
+
+// True once today is the LAST day selectStageACandidates would still
+// offer this earnings_date (its earnings_date equals the window's
+// floor, today - FILING_STAGE_A_RETRY_DAYS) — tomorrow it ages out of
+// the query entirely. A no_release_found outcome before this point is
+// the expected state for a same-week AMC/BMO reporter (the 8-K
+// legitimately doesn't exist yet); only once the window is about to
+// close does "still nothing" mean something worth a human look, same
+// distinction as T1's corrupted-baseline detector firing on persistent
+// signal rather than every retry (2026-09-09).
+export function isLastStageARetryDay(earningsDate: string, todayEt: string): boolean {
+  return earningsDate === addDaysIso(todayEt, -FILING_STAGE_A_RETRY_DAYS);
 }
 
 // Pure selection — no EDGAR/Perplexity/claude calls, safe to call from
@@ -143,12 +159,16 @@ export async function selectStageACandidateBySymbol(symbol: string): Promise<Sta
 // fetch failed, AND now (with minPressTextChars passed through) a
 // document too short to trust. All of them share the same property
 // that matters for retry: nothing was written, so the candidate stays
-// eligible next run. result.error carries the specific reason
-// (including the exact char count on a too-short document) through to
-// the caller unchanged.
+// eligible next run. result.error carries the specific detail
+// (including the exact char count on a too-short document); `reason`
+// carries the machine-readable classification a caller needs to decide
+// whether this is worth a human's attention — only "not_yet_filed" is
+// ever routine (the 8-K genuinely doesn't exist yet for a same-week
+// reporter), every other reason means something that WAS available
+// failed to process (see EarningsReleaseCaptureFailureReason).
 export type StageAOutcome =
   | { symbol: string; outcome: "captured"; quarter: string; strippedChars: number; analysisChars: number }
-  | { symbol: string; outcome: "no_release_found"; detail: string }
+  | { symbol: string; outcome: "no_release_found"; detail: string; reason: EarningsReleaseCaptureFailureReason }
   | { symbol: string; outcome: "claude_failed"; detail: string }
   | { symbol: string; outcome: "write_failed"; detail: string };
 
@@ -176,7 +196,10 @@ export async function captureStageARelease(
     outcome: result.ok ? "captured" : result.error,
   });
   if (!result.ok) {
-    return { ok: false, outcome: { symbol: candidate.symbol, outcome: "no_release_found", detail: result.error } };
+    return {
+      ok: false,
+      outcome: { symbol: candidate.symbol, outcome: "no_release_found", detail: result.error, reason: result.reason },
+    };
   }
   return { ok: true, quarter: result.quarter, filingDate: result.filingDate, pressText: result.pressText };
 }

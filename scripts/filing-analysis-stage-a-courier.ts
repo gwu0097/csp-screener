@@ -83,16 +83,34 @@ function looksLikeValidAnalysis(text: string): { ok: boolean; reason?: string } 
   return { ok: true };
 }
 
+// pingWorthy distinguishes "log it, don't page" from "this needs a
+// look" (2026-09-09, per the COO false-alert review — same reasoning
+// as the T1 corrupted-baseline detector: an alert firing on the
+// expected, non-broken state trains the channel to be ignored).
+// - captured: never pings, success.
+// - pending: "not_yet_filed" and still inside the retry window — the
+//   8-K legitimately doesn't exist yet for a same-week reporter.
+//   Routine, logged only.
+// - no_release_found (every other reason) / claude_failed /
+//   invalid_output / write_failed: always pings — something that WAS
+//   available failed to process, or the retry window is closing with
+//   still nothing found.
 type RunResult =
-  | { symbol: string; quarter: string; status: "captured"; analysisChars: number }
-  | { symbol: string; quarter?: string; status: "no_release_found" | "claude_failed" | "invalid_output" | "write_failed"; detail: string };
+  | { symbol: string; quarter: string; status: "captured"; analysisChars: number; pingWorthy: false }
+  | { symbol: string; quarter?: string; status: "pending"; detail: string; pingWorthy: false }
+  | {
+      symbol: string;
+      quarter?: string;
+      status: "no_release_found" | "claude_failed" | "invalid_output" | "write_failed";
+      detail: string;
+      pingWorthy: true;
+    };
 
 async function main() {
   const dryRun = process.argv.includes("--dry");
   const symbolArg = process.argv.find((a) => a.startsWith("--symbol="))?.split("=")[1];
-  const { selectStageACandidates, selectStageACandidateBySymbol, captureStageARelease } = await import(
-    "../lib/filing-analysis-capture"
-  );
+  const { selectStageACandidates, selectStageACandidateBySymbol, captureStageARelease, isLastStageARetryDay } =
+    await import("../lib/filing-analysis-capture");
   const { createServerClient } = await import("../lib/supabase");
   const { sendDiscordAlert, editDiscordAlert } = await import("../lib/discord-alert");
 
@@ -121,15 +139,16 @@ async function main() {
     const captured = await captureStageARelease(candidate);
     if (!captured.ok) {
       const o = captured.outcome;
-      // no_release_found covers every pre-write failure, including a
-      // too-short document (result.error then reads "Press release
-      // exhibit too short (N chars, floor 3000)") — see
-      // lib/filing-analysis-capture.ts's MIN_EXHIBIT_CHARS comment for
-      // why that check has to happen before fetchAndStoreEarningsRelease
-      // writes anything, not after.
+      if (o.outcome === "no_release_found" && o.reason === "not_yet_filed" && !isLastStageARetryDay(candidate.earningsDate, todayEt)) {
+        // Expected state for a same-week reporter — the 8-K hasn't
+        // posted yet. Log only; will retry tomorrow within the window.
+        console.log(`[filing-analysis-stage-a] ${candidate.symbol}: pending — not yet filed, retries through ${candidate.earningsDate}`);
+        results.push({ symbol: candidate.symbol, status: "pending", detail: "not yet filed", pingWorthy: false });
+        continue;
+      }
       const detail = o.outcome === "no_release_found" ? o.detail : `unexpected outcome: ${o.outcome}`;
       console.warn(`[filing-analysis-stage-a] ${candidate.symbol}: ${o.outcome} — ${detail}`);
-      results.push({ symbol: candidate.symbol, status: "no_release_found", detail });
+      results.push({ symbol: candidate.symbol, status: "no_release_found", detail, pingWorthy: true });
       continue;
     }
     console.log(`[filing-analysis-stage-a] ${candidate.symbol}: release captured (${candidate.symbol} ${captured.quarter}), pressText=${captured.pressText.length} chars`);
@@ -151,7 +170,7 @@ async function main() {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       console.warn(`[filing-analysis-stage-a] ${candidate.symbol}: claude -p failed after ${((Date.now() - callStart) / 1000).toFixed(1)}s: ${msg}`);
-      results.push({ symbol: candidate.symbol, quarter: captured.quarter, status: "claude_failed", detail: msg });
+      results.push({ symbol: candidate.symbol, quarter: captured.quarter, status: "claude_failed", detail: msg, pingWorthy: true });
       continue;
     }
     const callSeconds = (Date.now() - callStart) / 1000;
@@ -160,7 +179,7 @@ async function main() {
     const valid = looksLikeValidAnalysis(claudeOut);
     if (!valid.ok) {
       console.warn(`[filing-analysis-stage-a] ${candidate.symbol}: output rejected — ${valid.reason}`);
-      results.push({ symbol: candidate.symbol, quarter: captured.quarter, status: "invalid_output", detail: valid.reason ?? "unknown" });
+      results.push({ symbol: candidate.symbol, quarter: captured.quarter, status: "invalid_output", detail: valid.reason ?? "unknown", pingWorthy: true });
       continue;
     }
 
@@ -176,24 +195,46 @@ async function main() {
     });
     if (ins.error) {
       console.warn(`[filing-analysis-stage-a] ${candidate.symbol}: filing_analyses insert failed: ${ins.error.message}`);
-      results.push({ symbol: candidate.symbol, quarter: captured.quarter, status: "write_failed", detail: ins.error.message });
+      results.push({ symbol: candidate.symbol, quarter: captured.quarter, status: "write_failed", detail: ins.error.message, pingWorthy: true });
       continue;
     }
     console.log(`[filing-analysis-stage-a] ${candidate.symbol}: filing_analyses row written (${analysisText.length} chars)`);
-    results.push({ symbol: candidate.symbol, quarter: captured.quarter, status: "captured", analysisChars: analysisText.length });
+    results.push({ symbol: candidate.symbol, quarter: captured.quarter, status: "captured", analysisChars: analysisText.length, pingWorthy: false });
   }
 
   const captured = results.filter((r) => r.status === "captured").length;
+  const pending = results.filter((r) => r.status === "pending").length;
+  const needsAttention = results.some((r) => r.pingWorthy);
   const summary = results.length === 0
     ? "no candidates"
-    : results.map((r) => r.status === "captured" ? `${r.symbol} ✅ (${r.analysisChars} chars)` : `${r.symbol} ⚠️ ${r.status}: ${r.detail}`).join("\n");
-  const finalText = `${dryRun ? "🔵 [dry run] " : captured === results.length && results.length > 0 ? "✅ " : results.length === 0 ? "⚪ " : "⚠️ "}Earnings Reports Stage A — ${elapsedSeconds().toFixed(1)}s, ${candidates.length} candidate(s), ${captured} captured\n${summary}`;
+    : results
+        .map((r) =>
+          r.status === "captured"
+            ? `${r.symbol} ✅ (${r.analysisChars} chars)`
+            : r.status === "pending"
+              ? `${r.symbol} ⏳ pending — not yet filed`
+              : `${r.symbol} ⚠️ ${r.status}: ${r.detail}`,
+        )
+        .join("\n");
+  // Lead icon reflects the most severe thing in this run: any
+  // ping-worthy result wins over an all-pending or all-captured run,
+  // which wins over an empty candidate list.
+  const leadIcon = dryRun
+    ? "🔵 [dry run] "
+    : needsAttention
+      ? "⚠️ "
+      : results.length === 0
+        ? "⚪ "
+        : pending === results.length
+          ? "⏳ "
+          : "✅ ";
+  const finalText = `${leadIcon}Earnings Reports Stage A — ${elapsedSeconds().toFixed(1)}s, ${candidates.length} candidate(s), ${captured} captured${pending > 0 ? `, ${pending} pending` : ""}\n${summary}`;
   console.log(`[filing-analysis-stage-a] ${finalText.replace(/\n/g, " | ")}`);
   if (startMessageId) {
-    const editRes = await editDiscordAlert(startMessageId, finalText, { mention: captured < results.length });
-    if (!editRes.ok) await sendDiscordAlert(finalText, { mention: captured < results.length });
+    const editRes = await editDiscordAlert(startMessageId, finalText, { mention: needsAttention });
+    if (!editRes.ok) await sendDiscordAlert(finalText, { mention: needsAttention });
   } else {
-    await sendDiscordAlert(finalText, { mention: captured < results.length });
+    await sendDiscordAlert(finalText, { mention: needsAttention });
   }
 }
 

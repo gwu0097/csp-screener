@@ -147,7 +147,23 @@ export type EarningsReleaseCaptureResult =
       pressText: string;
       row: Record<string, unknown>;
     }
-  | { ok: false; status: number; error: string; scanned?: number; rawSnippet?: string };
+  | { ok: false; status: number; error: string; reason: EarningsReleaseCaptureFailureReason; scanned?: number; rawSnippet?: string };
+
+// Machine-readable failure classification, alongside the human-readable
+// `error` string — added 2026-09-09 so a caller (Stage A's courier)
+// can tell "the 8-K legitimately doesn't exist yet" (not_yet_filed)
+// apart from every other reason, instead of string-matching prose.
+// Only not_yet_filed is ever routine; everything else means something
+// that WAS available failed to process cleanly and is worth a look.
+export type EarningsReleaseCaptureFailureReason =
+  | "no_cik"
+  | "not_yet_filed"
+  | "no_exhibit_found"
+  | "document_too_short"
+  | "perplexity_failed"
+  | "perplexity_bad_json"
+  | "missing_required_fields"
+  | "db_error";
 
 // Finds the newest earnings (item 2.02) 8-K within 90 days, its press-
 // release exhibit, extracts structured numbers via Perplexity, and
@@ -174,7 +190,7 @@ export async function fetchAndStoreEarningsRelease(
   const cik = await getCIK(sym);
   console.log(`[earnings-release-capture] ${sym}: CIK=${cik ?? "(none)"}`);
   if (!cik) {
-    return { ok: false, status: 404, error: "No EDGAR CIK for this symbol" };
+    return { ok: false, status: 404, error: "No EDGAR CIK for this symbol", reason: "no_cik" };
   }
   const recent = await getRecentFilings(cik, ["8-K"], 25, { requireItem: "2.02" });
   const cutoff = Date.now() - NINETY_DAYS_MS;
@@ -191,7 +207,7 @@ export async function fetchAndStoreEarningsRelease(
     }`,
   );
   if (within90.length === 0) {
-    return { ok: false, status: 404, error: "No earnings 8-K (item 2.02) filed in the last 90 days" };
+    return { ok: false, status: 404, error: "No earnings 8-K (item 2.02) filed in the last 90 days", reason: "not_yet_filed" };
   }
 
   let chosen: SecFiling | null = null;
@@ -216,6 +232,7 @@ export async function fetchAndStoreEarningsRelease(
       ok: false,
       status: 404,
       error: "Could not find an earnings press-release exhibit in any recent 8-K",
+      reason: "no_exhibit_found",
       scanned: within90.length,
     };
   }
@@ -228,6 +245,7 @@ export async function fetchAndStoreEarningsRelease(
       ok: false,
       status: 502,
       error: `Press release exhibit too short (${pressText?.length ?? 0} chars, floor ${minChars})`,
+      reason: "document_too_short",
     };
   }
 
@@ -236,17 +254,28 @@ export async function fetchAndStoreEarningsRelease(
     label: `fetch-8k:${sym}`,
   });
   if (!ppl) {
-    return { ok: false, status: 502, error: "Perplexity extraction failed" };
+    return { ok: false, status: 502, error: "Perplexity extraction failed", reason: "perplexity_failed" };
   }
   const parsed = extractJsonObject(ppl.text) as ExtractedRelease | null;
   if (!parsed) {
-    return { ok: false, status: 502, error: "Perplexity returned non-JSON", rawSnippet: ppl.text.slice(0, 400) };
+    return {
+      ok: false,
+      status: 502,
+      error: "Perplexity returned non-JSON",
+      reason: "perplexity_bad_json",
+      rawSnippet: ppl.text.slice(0, 400),
+    };
   }
 
   const quarter = str(parsed.quarter);
   const periodEnd = str(parsed.period_end);
   if (!quarter || !periodEnd) {
-    return { ok: false, status: 502, error: "Extracted release is missing quarter or period_end" };
+    return {
+      ok: false,
+      status: 502,
+      error: "Extracted release is missing quarter or period_end",
+      reason: "missing_required_fields",
+    };
   }
   const reportedDate = str(parsed.reported_date) ?? chosen.filingDate;
 
@@ -280,7 +309,7 @@ export async function fetchAndStoreEarningsRelease(
   const sb = createServerClient();
   const upsert = await sb.from("earnings_releases").upsert(row, { onConflict: "symbol,quarter" });
   if (upsert.error) {
-    return { ok: false, status: 500, error: `DB upsert failed: ${upsert.error.message}` };
+    return { ok: false, status: 500, error: `DB upsert failed: ${upsert.error.message}`, reason: "db_error" };
   }
 
   return {
