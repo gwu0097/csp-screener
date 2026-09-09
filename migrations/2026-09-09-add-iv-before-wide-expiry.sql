@@ -1,0 +1,15 @@
+-- Flags T0 captures whose selected expiry landed well beyond the front
+-- week (no closer listed contract existed at capture time). Mirrors the
+-- iv_crush_cross_contract precedent (2026-08-12): a heuristic
+-- data-quality flag stored alongside the reading, not a refusal --
+-- confirmed via CPRT/FIVE/NTAP/WOOF/GWRE's actual chain snapshots
+-- (2026-09-09 audit) that a wide expiry is often the ONLY one listed
+-- for a given symbol at that moment, not a capture bug, so refusing the
+-- write would silently stop baseline capture forever for those names.
+-- The earnings-vol signal a wide-expiry straddle carries is diluted by
+-- the extra weeks of non-event life in the contract, which is a real,
+-- distinct reason iv_crush_magnitude can be small/noisy/negative even
+-- with a correctly-timed, correctly-selected capture -- this column
+-- lets that be queried and excluded from aggregates instead of
+-- silently blended in.
+alter table earnings_history add column if not exists iv_before_wide_expiry boolean not null default false;

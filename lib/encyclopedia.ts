@@ -1808,6 +1808,26 @@ function nextWeekdayOnOrAfterIso(iso: string): string {
   return d.toISOString().slice(0, 10);
 }
 
+// Mirrors nextWeekdayOnOrAfterIso above but rolling backward — used by
+// the BMO session-timing guard, where the correct T0 session is
+// earnings_date-1: for a Monday BMO print, earnings_date-1 is Sunday,
+// which is never a real trading session, so the check needs the prior
+// Friday instead.
+function previousWeekdayOnOrBeforeIso(iso: string): string {
+  const d = new Date(iso + "T00:00:00Z");
+  const day = d.getUTCDay();
+  if (day === 0) d.setUTCDate(d.getUTCDate() - 2);
+  else if (day === 6) d.setUTCDate(d.getUTCDate() - 1);
+  return d.toISOString().slice(0, 10);
+}
+
+// Whole-day difference, b - a, for two YYYY-MM-DD ISO dates.
+function daysBetweenIso(a: string, b: string): number {
+  const da = new Date(a + "T00:00:00Z").getTime();
+  const db = new Date(b + "T00:00:00Z").getTime();
+  return Math.round((db - da) / 86400000);
+}
+
 function earliestChainExpiryOnOrAfter(
   chain: SchwabOptionsChain,
   minIso: string,
@@ -1842,6 +1862,17 @@ export type T0Result =
     }
   | { captured: false; skipped: true; reason: string };
 
+// How many days past minExpiryIso (earnings_date+1, rolled onto a
+// weekday) the actually-selected expiry can land before it's flagged as
+// wide. Not a refusal: confirmed 2026-09-09 via CPRT/FIVE/NTAP/WOOF/
+// GWRE's real chain snapshots that landing beyond this is often the
+// ONLY expiry listed for a given symbol at capture time (e.g. GWRE,
+// already documented as monthly-only) — refusing would silently stop
+// baseline capture forever for those names. 9 days comfortably covers
+// a normal weekly cadence (worst case a holiday-shifted Friday) while
+// still catching the ~20% of schwab_t0 rows landing 16+ days out.
+const FRONT_WEEK_MAX_DAYS = 9;
+
 export async function captureEarningsT0(
   symbol: string,
   earningsDate: string,
@@ -1874,6 +1905,36 @@ export async function captureEarningsT0(
   // (15:45 ET on report day) and overwrites the earlier estimate.
   if (row && row.iv_before !== null) {
     return { captured: false, skipped: true, reason: "already_captured" };
+  }
+
+  // Session-timing guard (2026-09-09, CPRT incident): the canonical T0
+  // moment is timing-dependent, not "any day at or before the print" —
+  // AMC's correct session is earnings_date itself (~15 min before that
+  // day's close); BMO's is the PRIOR trading day (BMO prints before
+  // that day's open, so same-day-of is already post-print, and 2+ days
+  // early is stale). A flat "more than N days early" cutoff can't
+  // express this: BMO's correct session IS one day early, so the same
+  // numeric distance is valid for one timing and wrong for the other.
+  // CPRT was captured on earnings_date-1 for an AMC row via the manual
+  // ?symbol=&date=&timing= path — refused here regardless of caller;
+  // dryRun is exempt since it never writes and exists precisely for
+  // previewing an off-session call during testing.
+  const effectiveTiming: "amc" | "bmo" | "unknown" =
+    timing !== "unknown" ? timing : (row?.timing ?? "unknown");
+  const sessionEt = todayEasternIso();
+  const bmoSession = previousWeekdayOnOrBeforeIso(addDaysIso(earningsDate, -1));
+  const validSessions =
+    effectiveTiming === "amc"
+      ? [earningsDate]
+      : effectiveTiming === "bmo"
+        ? [bmoSession]
+        : [bmoSession, earningsDate];
+  if (!dryRun && !validSessions.includes(sessionEt)) {
+    console.warn(
+      `[encyclopedia:T0] ${sym} ${earningsDate} (${effectiveTiming}): refused — captured on ${sessionEt}, ` +
+        `valid session(s) [${validSessions.join(", ")}]. Not writing — a correctly-timed run will pick this up.`,
+    );
+    return { captured: false, skipped: true, reason: "premature_capture_session" };
   }
 
   const connected = await isSchwabConnected()
@@ -1911,6 +1972,7 @@ export async function captureEarningsT0(
   if (!expiryIso) {
     return { captured: false, skipped: true, reason: "no_options_data" };
   }
+  const wideExpiry = daysBetweenIso(minExpiryIso, expiryIso) > FRONT_WEEK_MAX_DAYS;
 
   const legs = atmLegs(chain, expiryIso);
   if (!legs) {
@@ -2011,6 +2073,12 @@ export async function captureEarningsT0(
       implied_move_expiry: expiryIso,
       implied_move_read_date: todayEasternIso(),
       iv_before,
+      // Flag (not refuse — see FRONT_WEEK_MAX_DAYS above): a wide
+      // expiry dilutes the earnings-vol signal in iv_before/iv_after
+      // relative to the contract's non-event life, which is a real,
+      // separate reason iv_crush_magnitude can read small/noisy/
+      // negative even on a correctly-timed, correctly-selected capture.
+      iv_before_wide_expiry: wideExpiry,
       two_x_em_strike,
       timing_source:
         timing !== "unknown" ? "finnhub_hour" : (row?.timing_source ?? null),
