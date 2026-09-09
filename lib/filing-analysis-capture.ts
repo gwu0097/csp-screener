@@ -22,10 +22,21 @@ export const FILING_STAGE_A_RETRY_DAYS = 5;
 // far more likely a broken/redirected/interstitial fetch than a
 // legitimately terse release — guards the exact "silently-empty stdin
 // produces an analysis of nothing" failure mode (2026-09-09 design
-// review). Distinct from, and stricter than, fetchAndStoreEarningsRelease's
-// own 200-char floor, which only guards the Perplexity numeric
-// extraction, not whether the document is fit to hand a model as "the
-// filing."
+// review).
+//
+// Passed into fetchAndStoreEarningsRelease as minPressTextChars, NOT
+// checked separately after the fact — checking it after that call
+// returns is too late: that function has already run Perplexity and
+// written+linked the earnings_releases row by the time it returns, so
+// a post-hoc check here would only skip the claude -p step while still
+// permanently marking the candidate handled (earnings_history_id now
+// linked, selectStageACandidates would never offer it again). Caught
+// on review (2026-09-09) before the plist was loaded — the original
+// version had exactly that gap: a 200-2,999-char document would get
+// its numbers written and get silently retired from retry, with only
+// a one-time Discord post as the record. Passing the floor in means a
+// short document is refused before any write happens, so it stays
+// eligible for retry on the next run.
 export const MIN_EXHIBIT_CHARS = 3_000;
 
 export type StageACandidate = {
@@ -127,10 +138,17 @@ export async function selectStageACandidateBySymbol(symbol: string): Promise<Sta
   return { earningsHistoryId: r.id, symbol: r.symbol, earningsDate: r.earnings_date, timing: r.timing };
 }
 
+// "no_release_found" covers every pre-write failure from
+// fetchAndStoreEarningsRelease — no matching 8-K, exhibit not found,
+// fetch failed, AND now (with minPressTextChars passed through) a
+// document too short to trust. All of them share the same property
+// that matters for retry: nothing was written, so the candidate stays
+// eligible next run. result.error carries the specific reason
+// (including the exact char count on a too-short document) through to
+// the caller unchanged.
 export type StageAOutcome =
   | { symbol: string; outcome: "captured"; quarter: string; strippedChars: number; analysisChars: number }
   | { symbol: string; outcome: "no_release_found"; detail: string }
-  | { symbol: string; outcome: "document_too_short"; strippedChars: number }
   | { symbol: string; outcome: "claude_failed"; detail: string }
   | { symbol: string; outcome: "write_failed"; detail: string };
 
@@ -148,6 +166,7 @@ export async function captureStageARelease(
 > {
   const result = await fetchAndStoreEarningsRelease(candidate.symbol, {
     earningsHistoryId: candidate.earningsHistoryId,
+    minPressTextChars: MIN_EXHIBIT_CHARS,
   });
   await recordAncillaryAttempt({
     earningsHistoryId: candidate.earningsHistoryId,
@@ -158,12 +177,6 @@ export async function captureStageARelease(
   });
   if (!result.ok) {
     return { ok: false, outcome: { symbol: candidate.symbol, outcome: "no_release_found", detail: result.error } };
-  }
-  if (result.pressText.length < MIN_EXHIBIT_CHARS) {
-    return {
-      ok: false,
-      outcome: { symbol: candidate.symbol, outcome: "document_too_short", strippedChars: result.pressText.length },
-    };
   }
   return { ok: true, quarter: result.quarter, filingDate: result.filingDate, pressText: result.pressText };
 }

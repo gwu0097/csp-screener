@@ -157,7 +157,17 @@ export type EarningsReleaseCaptureResult =
 // consumer never has to fall back to a nearest-date join.
 export async function fetchAndStoreEarningsRelease(
   symbol: string,
-  opts: { earningsHistoryId?: string | null } = {},
+  opts: {
+    earningsHistoryId?: string | null;
+    // Stricter floor than the default 200 chars, for callers (Stage A)
+    // that want the write itself refused — not just a downstream step
+    // skipped — on a document too short to trust. Checked before
+    // Perplexity runs and before any DB write, so a rejected document
+    // never gets linked via earnings_history_id and stays eligible for
+    // retry on the next run. The manual "Fetch latest 8-K" button
+    // passes nothing and keeps the original 200-char behavior exactly.
+    minPressTextChars?: number;
+  } = {},
 ): Promise<EarningsReleaseCaptureResult> {
   const sym = symbol.trim().toUpperCase();
 
@@ -212,8 +222,13 @@ export async function fetchAndStoreEarningsRelease(
   console.log(`[earnings-release-capture] ${sym}: chose ${chosen.accessionNumber} exhibit=${exhibit.name}`);
 
   const pressText = await fetchFilingTextPlain(exhibit.url, 60_000);
-  if (!pressText || pressText.length < 200) {
-    return { ok: false, status: 502, error: "Failed to fetch or parse the press release exhibit" };
+  const minChars = opts.minPressTextChars ?? 200;
+  if (!pressText || pressText.length < minChars) {
+    return {
+      ok: false,
+      status: 502,
+      error: `Press release exhibit too short (${pressText?.length ?? 0} chars, floor ${minChars})`,
+    };
   }
 
   const ppl = await askPerplexityRaw(buildPrompt(sym, pressText), {

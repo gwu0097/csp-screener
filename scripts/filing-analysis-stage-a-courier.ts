@@ -85,12 +85,12 @@ function looksLikeValidAnalysis(text: string): { ok: boolean; reason?: string } 
 
 type RunResult =
   | { symbol: string; quarter: string; status: "captured"; analysisChars: number }
-  | { symbol: string; quarter?: string; status: "no_release_found" | "document_too_short" | "claude_failed" | "invalid_output" | "write_failed"; detail: string };
+  | { symbol: string; quarter?: string; status: "no_release_found" | "claude_failed" | "invalid_output" | "write_failed"; detail: string };
 
 async function main() {
   const dryRun = process.argv.includes("--dry");
   const symbolArg = process.argv.find((a) => a.startsWith("--symbol="))?.split("=")[1];
-  const { selectStageACandidates, selectStageACandidateBySymbol, captureStageARelease, MIN_EXHIBIT_CHARS } = await import(
+  const { selectStageACandidates, selectStageACandidateBySymbol, captureStageARelease } = await import(
     "../lib/filing-analysis-capture"
   );
   const { createServerClient } = await import("../lib/supabase");
@@ -121,17 +121,15 @@ async function main() {
     const captured = await captureStageARelease(candidate);
     if (!captured.ok) {
       const o = captured.outcome;
-      if (o.outcome === "no_release_found") {
-        console.warn(`[filing-analysis-stage-a] ${candidate.symbol}: no_release_found — ${o.detail}`);
-        results.push({ symbol: candidate.symbol, status: "no_release_found", detail: o.detail });
-      } else if (o.outcome === "document_too_short") {
-        const detail = `stripped text only ${o.strippedChars} chars (floor ${MIN_EXHIBIT_CHARS})`;
-        console.warn(`[filing-analysis-stage-a] ${candidate.symbol}: document_too_short — ${detail}`);
-        results.push({ symbol: candidate.symbol, status: "document_too_short", detail });
-      } else {
-        console.warn(`[filing-analysis-stage-a] ${candidate.symbol}: unexpected outcome ${o.outcome}`);
-        results.push({ symbol: candidate.symbol, status: "claude_failed", detail: `unexpected outcome: ${o.outcome}` });
-      }
+      // no_release_found covers every pre-write failure, including a
+      // too-short document (result.error then reads "Press release
+      // exhibit too short (N chars, floor 3000)") — see
+      // lib/filing-analysis-capture.ts's MIN_EXHIBIT_CHARS comment for
+      // why that check has to happen before fetchAndStoreEarningsRelease
+      // writes anything, not after.
+      const detail = o.outcome === "no_release_found" ? o.detail : `unexpected outcome: ${o.outcome}`;
+      console.warn(`[filing-analysis-stage-a] ${candidate.symbol}: ${o.outcome} — ${detail}`);
+      results.push({ symbol: candidate.symbol, status: "no_release_found", detail });
       continue;
     }
     console.log(`[filing-analysis-stage-a] ${candidate.symbol}: release captured (${candidate.symbol} ${captured.quarter}), pressText=${captured.pressText.length} chars`);
