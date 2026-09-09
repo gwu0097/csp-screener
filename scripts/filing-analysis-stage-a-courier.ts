@@ -106,9 +106,86 @@ type RunResult =
       pingWorthy: true;
     };
 
+// --force-symbol=SYM: manual diagnostic run against a symbol regardless
+// of earnings_history/candidate-window state — same shape as the
+// existing manual "Fetch latest 8-K" UI button (no earnings_history
+// dependency, no attempt logging), plus the claude -p analysis Stage A
+// adds. Never writes an earnings_history_id link — a candidate found
+// this way is reported, not attached, since guessing the link outside
+// the normal selectStageACandidates path is exactly what that column
+// was added to avoid. No Discord post — this is a manual, watched run,
+// not an unattended one.
+async function runForceSymbol(symbol: string): Promise<void> {
+  const { captureStageAReleaseForSymbol, findNearestEarningsHistoryRow } = await import(
+    "../lib/filing-analysis-capture"
+  );
+  const { createServerClient } = await import("../lib/supabase");
+  const sb = createServerClient();
+
+  console.log(`[filing-analysis-stage-a] --force-symbol=${symbol}: capturing release (bypassing candidate selection)…`);
+  const captured = await captureStageAReleaseForSymbol(symbol);
+  if (!captured.ok) {
+    const o = captured.outcome;
+    console.log(`[filing-analysis-stage-a] RESULT: no_release_found (reason=${o.outcome === "no_release_found" ? o.reason : "?"}) — ${o.outcome === "no_release_found" ? o.detail : "unknown"}`);
+    return;
+  }
+  console.log(`[filing-analysis-stage-a] release captured: ${symbol} ${captured.quarter}, filed ${captured.filingDate}, pressText=${captured.pressText.length} chars`);
+
+  const nearest = await findNearestEarningsHistoryRow(symbol, captured.filingDate);
+  console.log(
+    nearest
+      ? `[filing-analysis-stage-a] earnings_history: found id=${nearest.id} earnings_date=${nearest.earningsDate} (${nearest.dayDiff}d from filing date) — NOT linked (bypassed candidate selection)`
+      : `[filing-analysis-stage-a] earnings_history: no row within 5 days of ${captured.filingDate} — no matching row exists`,
+  );
+
+  const prompt = buildPrompt(symbol, captured.quarter, captured.pressText);
+  const callStart = Date.now();
+  let claudeOut: string;
+  try {
+    claudeOut = execFileSync(CLAUDE_BIN, ["-p", prompt, "--allowedTools", ""], {
+      encoding: "utf8",
+      timeout: CLAUDE_TIMEOUT_MS,
+      maxBuffer: 10 * 1024 * 1024,
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.log(`[filing-analysis-stage-a] RESULT: claude_failed — ${msg}`);
+    return;
+  }
+  const callSeconds = (Date.now() - callStart) / 1000;
+  console.log(`[filing-analysis-stage-a] claude -p returned in ${callSeconds.toFixed(1)}s, ${claudeOut.length} chars`);
+
+  const valid = looksLikeValidAnalysis(claudeOut);
+  if (!valid.ok) {
+    console.log(`[filing-analysis-stage-a] RESULT: invalid_output — ${valid.reason} — NOT writing to filing_analyses`);
+    return;
+  }
+
+  const analysisText = claudeOut.trim();
+  const notes = `auto: filing-analysis-stage-a v1 [--force-symbol diagnostic], ${symbol} ${captured.quarter}, earnings_history_id=${nearest ? nearest.id : "none"}, pressText_chars=${captured.pressText.length}, claude_call_s=${callSeconds.toFixed(1)}`;
+  const ins = await sb.from("filing_analyses").insert({
+    symbol: symbol.toUpperCase(),
+    filing_type: "8-K",
+    period: captured.quarter,
+    filing_date: captured.filingDate,
+    analysis_text: analysisText,
+    notes,
+  });
+  if (ins.error) {
+    console.log(`[filing-analysis-stage-a] RESULT: write_failed — ${ins.error.message}`);
+    return;
+  }
+  console.log(`[filing-analysis-stage-a] RESULT: captured — filing_analyses row written (${analysisText.length} chars)`);
+}
+
 async function main() {
   const dryRun = process.argv.includes("--dry");
   const symbolArg = process.argv.find((a) => a.startsWith("--symbol="))?.split("=")[1];
+  const forceSymbolArg = process.argv.find((a) => a.startsWith("--force-symbol="))?.split("=")[1];
+  if (forceSymbolArg) {
+    await runForceSymbol(forceSymbolArg);
+    return;
+  }
   const { selectStageACandidates, selectStageACandidateBySymbol, captureStageARelease, isLastStageARetryDay } =
     await import("../lib/filing-analysis-capture");
   const { createServerClient } = await import("../lib/supabase");

@@ -203,3 +203,60 @@ export async function captureStageARelease(
   }
   return { ok: true, quarter: result.quarter, filingDate: result.filingDate, pressText: result.pressText };
 }
+
+// Read-only: is there an earnings_history row for this symbol whose
+// earnings_date is within a few days of the 8-K's filing date? Purely
+// informational for a manual diagnostic run (captureStageAReleaseForSymbol
+// never writes this link itself) — reports whether one exists without
+// guessing at attaching it, since a guessed match outside the normal
+// candidate-selection path is exactly the kind of silent assumption the
+// earnings_history_id column was added to avoid.
+export async function findNearestEarningsHistoryRow(
+  symbol: string,
+  nearIso: string,
+  withinDays = 5,
+): Promise<{ id: string; earningsDate: string; dayDiff: number } | null> {
+  const sb = createServerClient();
+  const since = addDaysIso(nearIso, -withinDays);
+  const until = addDaysIso(nearIso, withinDays);
+  const res = await sb
+    .from("earnings_history")
+    .select("id,earnings_date")
+    .eq("symbol", symbol.toUpperCase())
+    .gte("earnings_date", since)
+    .lte("earnings_date", until);
+  if (res.error) return null;
+  const rows = (res.data ?? []) as Array<{ id: string; earnings_date: string }>;
+  if (rows.length === 0) return null;
+  const withDiff = rows.map((r) => ({
+    id: r.id,
+    earningsDate: r.earnings_date,
+    dayDiff: Math.abs(new Date(r.earnings_date + "T00:00:00Z").getTime() - new Date(nearIso + "T00:00:00Z").getTime()) / 86_400_000,
+  }));
+  withDiff.sort((a, b) => a.dayDiff - b.dayDiff);
+  return withDiff[0];
+}
+
+// Direct-symbol variant for a manual diagnostic run — no earnings_history
+// dependency at all, matching the existing manual "Fetch latest 8-K"
+// button exactly (same reason it also skips recordAncillaryAttempt: that
+// table's earnings_date column is not-null and there may be no
+// earnings_history row in scope to anchor it to). Never stamps
+// earnings_history_id — a caller that wants to report whether a
+// plausible earnings_history row exists should look it up separately,
+// as information, not as a write.
+export async function captureStageAReleaseForSymbol(
+  symbol: string,
+): Promise<
+  | { ok: true; quarter: string; filingDate: string; pressText: string }
+  | { ok: false; outcome: StageAOutcome }
+> {
+  const result = await fetchAndStoreEarningsRelease(symbol, { minPressTextChars: MIN_EXHIBIT_CHARS });
+  if (!result.ok) {
+    return {
+      ok: false,
+      outcome: { symbol: symbol.toUpperCase(), outcome: "no_release_found", detail: result.error, reason: result.reason },
+    };
+  }
+  return { ok: true, quarter: result.quarter, filingDate: result.filingDate, pressText: result.pressText };
+}
