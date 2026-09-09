@@ -11,7 +11,7 @@ import {
   filingArchiveDirUrl,
   getCIK,
   getRecentFilings,
-  listFilingFiles,
+  listFilingFilesWithSize,
   type SecFiling,
 } from "./sec-edgar";
 import { askPerplexityRaw } from "./perplexity";
@@ -41,6 +41,42 @@ function pickEarningsExhibit(
     if (hit) return { url: hit.url, name: hit.name };
   }
   return null;
+}
+
+// EDGAR's auto-generated rendered-XBRL-viewer files (R1.htm, R2.htm, ...)
+// — small boilerplate, never the actual exhibit, must be excluded from
+// the size comparison below or one of these could occasionally outrank
+// a genuinely small real exhibit.
+const XBRL_VIEWER_FILE_PATTERN = /^R\d+\.html?$/i;
+
+// Fallback when filename matching finds nothing (2026-09-09 audit:
+// verified four independent, unrelated naming failures — NVDA's "pr"
+// abbreviation, ELF's exhibit number without an "ex" prefix, CBRS's
+// filename truncated by EDGAR mid-word, DG's exhibit missing its
+// sub-number — no single regex tweak covers all four, and widening the
+// pattern to fit them risks a fifth false match). The real signal that
+// held across all four: the actual exhibit is always dramatically
+// larger than the boilerplate 8-K body (7-20x, in the four cases
+// checked), and EDGAR's own filing metadata already names that body
+// (primaryDocument) — no guessing needed to exclude it.
+//
+// Deliberately NOT a replacement for the regex, which is unambiguous
+// and cheap when it hits (~80% of filers per the 2026-09-09 sample) —
+// this only runs once that's already failed.
+function pickEarningsExhibitBySize(
+  files: Array<{ url: string; name: string; size: number }>,
+  primaryDocument: string,
+): { url: string; name: string } | null {
+  const candidates = files.filter((f) => {
+    const lower = f.name.toLowerCase();
+    if (!(lower.endsWith(".htm") || lower.endsWith(".html"))) return false;
+    if (f.name === primaryDocument) return false;
+    if (XBRL_VIEWER_FILE_PATTERN.test(f.name)) return false;
+    return true;
+  });
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => b.size - a.size);
+  return { url: candidates[0].url, name: candidates[0].name };
 }
 
 type ExtractedRelease = {
@@ -141,6 +177,11 @@ export type EarningsReleaseCaptureResult =
       filingDate: string;
       exhibitUrl: string;
       archiveUrl: string;
+      // "regex" when the filename heuristic matched directly;
+      // "size_fallback" when it didn't and the largest non-primary
+      // .htm/.html file was used instead — a caller should flag rows
+      // sourced this way as less certain than a clean regex hit.
+      exhibitSource: "regex" | "size_fallback";
       // The stripped press-release text this call already fetched —
       // returned so a second-stage caller (the Stage A filing-analysis
       // courier) doesn't have to re-fetch the same document.
@@ -212,18 +253,43 @@ export async function fetchAndStoreEarningsRelease(
 
   let chosen: SecFiling | null = null;
   let exhibit: { url: string; name: string } | null = null;
+  let exhibitSource: "regex" | "size_fallback" | null = null;
   for (const f of within90) {
-    const files = await listFilingFiles(cik, f.accessionNumber);
-    const hit = pickEarningsExhibit(files);
+    // One fetch (index.json, carries size) feeds both the regex pass
+    // and the size fallback — no second request when the fallback
+    // fires. pickEarningsExhibit only reads {url,name}; the extra
+    // `size` field is ignored there and used only by the fallback.
+    //
+    // index.json lists EVERY file in the filing — XBRL exhibits,
+    // images, the index/txt wrappers — unlike the old listFilingFiles,
+    // which implicitly filtered to document files via its href regex.
+    // Caught live (2026-09-09, DG): without restoring that filter here,
+    // the regex matched tm2623914d1_ex99-1img001.jpg — an image whose
+    // filename happens to contain "ex99-1" — before ever reaching the
+    // real .htm exhibit. Restrict to .htm/.html for both the regex and
+    // size-fallback passes; fetchFilingTextPlain only knows how to
+    // strip HTML anyway, so anything else would mishandle downstream
+    // even if it somehow matched.
+    const files = (await listFilingFilesWithSize(cik, f.accessionNumber)).filter((x) => {
+      const lower = x.name.toLowerCase();
+      return lower.endsWith(".htm") || lower.endsWith(".html");
+    });
+    let hit = pickEarningsExhibit(files);
+    let source: "regex" | "size_fallback" = "regex";
+    if (!hit) {
+      hit = pickEarningsExhibitBySize(files, f.primaryDocument);
+      if (hit) source = "size_fallback";
+    }
     console.log(
       `[earnings-release-capture] ${sym}: ${f.filingDate} ${f.accessionNumber} — ${files.length} files [${files
         .map((x) => x.name)
         .slice(0, 6)
-        .join(", ")}${files.length > 6 ? ", …" : ""}] → ${hit ? `MATCH ${hit.name}` : "no exhibit match"}`,
+        .join(", ")}${files.length > 6 ? ", …" : ""}] → ${hit ? `MATCH ${hit.name} (${source})` : "no exhibit match"}`,
     );
     if (hit) {
       chosen = f;
       exhibit = hit;
+      exhibitSource = source;
       break;
     }
   }
@@ -319,6 +385,9 @@ export async function fetchAndStoreEarningsRelease(
     filingDate: chosen.filingDate,
     exhibitUrl: exhibit.url,
     archiveUrl: filingArchiveDirUrl(cik, chosen.accessionNumber),
+    // Guaranteed non-null here: the only path to this point set it
+    // alongside chosen/exhibit in the same loop iteration.
+    exhibitSource: exhibitSource ?? "regex",
     pressText,
     row,
   };

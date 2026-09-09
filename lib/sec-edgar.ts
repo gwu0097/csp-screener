@@ -922,6 +922,46 @@ export async function listFilingFiles(
   return out;
 }
 
+// Same purpose as listFilingFiles, but via the filing's index.json
+// (EDGAR's own machine-readable directory listing) instead of scraping
+// the HTML page, because it carries file size — the fallback exhibit
+// heuristic in lib/earnings-release-capture.ts needs that and the
+// filename alone doesn't provide it. One extra fetch, only paid on the
+// path where filename matching has already failed.
+export type FilingFileWithSize = { url: string; name: string; size: number };
+
+export async function listFilingFilesWithSize(
+  cik: string,
+  accessionNumber: string,
+): Promise<FilingFileWithSize[]> {
+  const dir = filingArchiveDirUrl(cik, accessionNumber);
+  let res: Response;
+  try {
+    res = await fetch(`${dir}/index.json`, {
+      headers: DEFAULT_HEADERS,
+      cache: "no-store",
+    });
+  } catch {
+    return [];
+  }
+  if (!res.ok) return [];
+  let json: { directory?: { item?: Array<{ name?: string; size?: number | string }> } };
+  try {
+    json = (await res.json()) as typeof json;
+  } catch {
+    return [];
+  }
+  const items = json.directory?.item ?? [];
+  const out: FilingFileWithSize[] = [];
+  for (const it of items) {
+    if (!it.name) continue;
+    const size = typeof it.size === "number" ? it.size : Number(it.size);
+    if (!Number.isFinite(size)) continue;
+    out.push({ url: `${dir}/${it.name}`, name: it.name, size });
+  }
+  return out;
+}
+
 // Fetches a filing-archive HTML file and returns it stripped to plain
 // text (script/style removed, tags collapsed, whitespace normalized)
 // so it can be passed to an LLM extractor without burning tokens on

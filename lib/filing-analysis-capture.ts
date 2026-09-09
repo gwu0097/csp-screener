@@ -181,7 +181,7 @@ export type StageAOutcome =
 export async function captureStageARelease(
   candidate: StageACandidate,
 ): Promise<
-  | { ok: true; quarter: string; filingDate: string; pressText: string }
+  | { ok: true; quarter: string; filingDate: string; pressText: string; exhibitSource: "regex" | "size_fallback" }
   | { ok: false; outcome: StageAOutcome }
 > {
   const result = await fetchAndStoreEarningsRelease(candidate.symbol, {
@@ -201,7 +201,13 @@ export async function captureStageARelease(
       outcome: { symbol: candidate.symbol, outcome: "no_release_found", detail: result.error, reason: result.reason },
     };
   }
-  return { ok: true, quarter: result.quarter, filingDate: result.filingDate, pressText: result.pressText };
+  return {
+    ok: true,
+    quarter: result.quarter,
+    filingDate: result.filingDate,
+    pressText: result.pressText,
+    exhibitSource: result.exhibitSource,
+  };
 }
 
 // Is there an earnings_history row for this symbol whose earnings_date
@@ -260,7 +266,15 @@ export async function findNearestEarningsHistoryRow(
 export async function captureStageAReleaseForSymbol(
   symbol: string,
 ): Promise<
-  | { ok: true; quarter: string; filingDate: string; pressText: string; linkedEarningsHistoryId: string | null; nearestMatch: { id: string; earningsDate: string; dayDiff: number; uniqueAtDistance: boolean } | null }
+  | {
+      ok: true;
+      quarter: string;
+      filingDate: string;
+      pressText: string;
+      exhibitSource: "regex" | "size_fallback";
+      linkedEarningsHistoryId: string | null;
+      nearestMatch: { id: string; earningsDate: string; dayDiff: number; uniqueAtDistance: boolean } | null;
+    }
   | { ok: false; outcome: StageAOutcome }
 > {
   const result = await fetchAndStoreEarningsRelease(symbol, { minPressTextChars: MIN_EXHIBIT_CHARS });
@@ -287,6 +301,7 @@ export async function captureStageAReleaseForSymbol(
     quarter: result.quarter,
     filingDate: result.filingDate,
     pressText: result.pressText,
+    exhibitSource: result.exhibitSource,
     linkedEarningsHistoryId,
     nearestMatch: nearest,
   };

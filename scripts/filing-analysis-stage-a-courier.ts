@@ -127,7 +127,7 @@ async function runForceSymbol(symbol: string): Promise<void> {
     console.log(`[filing-analysis-stage-a] RESULT: no_release_found (reason=${o.outcome === "no_release_found" ? o.reason : "?"}) — ${o.outcome === "no_release_found" ? o.detail : "unknown"}`);
     return;
   }
-  console.log(`[filing-analysis-stage-a] release captured: ${symbol} ${captured.quarter}, filed ${captured.filingDate}, pressText=${captured.pressText.length} chars`);
+  console.log(`[filing-analysis-stage-a] release captured: ${symbol} ${captured.quarter}, filed ${captured.filingDate}, pressText=${captured.pressText.length} chars, exhibit_source=${captured.exhibitSource}`);
 
   const nearest = captured.nearestMatch;
   if (captured.linkedEarningsHistoryId) {
@@ -164,7 +164,7 @@ async function runForceSymbol(symbol: string): Promise<void> {
   }
 
   const analysisText = claudeOut.trim();
-  const notes = `auto: filing-analysis-stage-a v1 [--force-symbol diagnostic], ${symbol} ${captured.quarter}, earnings_history_id=${captured.linkedEarningsHistoryId ?? (nearest ? `${nearest.id} (found, not linked)` : "none")}, pressText_chars=${captured.pressText.length}, claude_call_s=${callSeconds.toFixed(1)}`;
+  const notes = `auto: filing-analysis-stage-a v1 [--force-symbol diagnostic], ${symbol} ${captured.quarter}, earnings_history_id=${captured.linkedEarningsHistoryId ?? (nearest ? `${nearest.id} (found, not linked)` : "none")}, exhibit_source=${captured.exhibitSource}, pressText_chars=${captured.pressText.length}, claude_call_s=${callSeconds.toFixed(1)}`;
   const ins = await sb.from("filing_analyses").upsert(
     {
       symbol: symbol.toUpperCase(),
@@ -267,7 +267,7 @@ async function main() {
     }
 
     const analysisText = claudeOut.trim();
-    const notes = `auto: filing-analysis-stage-a v1, ${candidate.symbol} ${captured.quarter}, earnings_history_id=${candidate.earningsHistoryId}, pressText_chars=${captured.pressText.length}, claude_call_s=${callSeconds.toFixed(1)}`;
+    const notes = `auto: filing-analysis-stage-a v1, ${candidate.symbol} ${captured.quarter}, earnings_history_id=${candidate.earningsHistoryId}, exhibit_source=${captured.exhibitSource}, pressText_chars=${captured.pressText.length}, claude_call_s=${callSeconds.toFixed(1)}`;
     // Upsert on (symbol, filing_type, period) — a re-run (retry, or a
     // corrected re-analysis) replaces the prior row instead of
     // accumulating a duplicate (migrations/2026-09-09-filing-analyses-
