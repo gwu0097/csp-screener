@@ -390,7 +390,7 @@ export function extractAnnualMetrics(
   const netIncome = pickBestEntries(facts, CONCEPT_NET_INCOME, PREFERRED_MONEY_UNITS);
   const eps = pickBestEntries(
     facts,
-    [...CONCEPT_EPS_BASIC, ...CONCEPT_EPS_DILUTED],
+    [...CONCEPT_EPS_DILUTED, ...CONCEPT_EPS_BASIC],
     PREFERRED_SHARE_UNITS,
   );
   const cash = pickBestEntries(facts, CONCEPT_CASH, PREFERRED_MONEY_UNITS);
@@ -675,7 +675,7 @@ export function extractQuarterlyMetrics(
   );
   const eps = pickBestQuarterlyEntries(
     facts,
-    [...CONCEPT_EPS_BASIC, ...CONCEPT_EPS_DILUTED],
+    [...CONCEPT_EPS_DILUTED, ...CONCEPT_EPS_BASIC],
     PREFERRED_SHARE_UNITS,
   );
 
