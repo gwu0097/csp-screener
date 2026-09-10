@@ -87,7 +87,7 @@ export type OpenPositionClientView = {
   badgeTooltip: string;
   ruleFired: string;
   postEarningsRec: PostEarningsRecView | null;
-  tradeType?: "clean" | "rolled" | "recovery_play" | null;
+  tradeType?: "clean" | "rolled" | "recovery_play" | "swing" | null;
   tradeTypeSource?: "auto" | "user" | null;
   fills: Fill[];
   expiryStatus: "active" | "needs_verification" | "pending";
@@ -1049,6 +1049,7 @@ export function PositionCard(props: Props) {
               <option value="clean">Clean CSP</option>
               <option value="rolled">Rolled recovery</option>
               <option value="recovery_play">Recovery play</option>
+              <option value="swing">Swing trade</option>
             </select>
             <button
               type="button"

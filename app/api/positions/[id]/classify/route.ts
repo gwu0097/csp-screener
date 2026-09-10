@@ -12,7 +12,7 @@ export const revalidate = 0;
 // it source='user' so retroactive re-runs and import-time detection
 // never clobber the manual verdict.
 
-const VALID_TYPES = new Set(["clean", "rolled", "recovery_play"]);
+const VALID_TYPES = new Set(["clean", "rolled", "recovery_play", "swing"]);
 
 export async function POST(
   req: NextRequest,
@@ -33,7 +33,7 @@ export async function POST(
   const tradeType = typeof body.trade_type === "string" ? body.trade_type : "";
   if (!VALID_TYPES.has(tradeType)) {
     return NextResponse.json(
-      { error: "trade_type must be clean | rolled | recovery_play" },
+      { error: "trade_type must be clean | rolled | recovery_play | swing" },
       { status: 400 },
     );
   }

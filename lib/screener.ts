@@ -441,11 +441,13 @@ export type ThreeLayerGrade = {
     cleanCount?: number;
     rolledCount?: number;
     recoveryCount?: number;
+    swingCount?: number;
     tickerLevel?: {
       campaigns: number;
       clean: number;
       rolled: number;
       recovery: number;
+      swing: number;
     };
     sampleWeight?: number;
     sector?: {
@@ -455,6 +457,7 @@ export type ThreeLayerGrade = {
       avgRoc: number | null;
       dropWinRate: number | null;
       recoveryCount: number;
+      swingCount: number;
     } | null;
     // Risk Score's event-scoped prior-loss input — see PersonalHistory.
     // priorCspEarningsLoss / lib/campaigns.ts's hasPriorCspEarningsLoss.
@@ -590,6 +593,10 @@ export type PersonalHistory = {
   cleanCount?: number;
   rolledCount?: number;
   recoveryCount?: number;
+  // Deliberate directional bets via deep-ITM options, reclassified by
+  // hand — excluded from CSP grading like recoveryCount, tracked
+  // separately (2026-09-10). See TRADE_TYPE_SEVERITY's comment.
+  swingCount?: number;
   // THIS symbol's own campaign counts, present at every scope. At
   // sector scope the top-level fields hold SECTOR aggregates — the UI
   // needs both to attribute numbers correctly (a sector count labelled
@@ -599,6 +606,7 @@ export type PersonalHistory = {
     clean: number;
     rolled: number;
     recovery: number;
+    swing: number;
   };
   // Sample-size confidence for the ticker evidence: 1.0 (5+ campaigns),
   // 0.5 (2-4, "small sample"), 0.25 (1, "very limited data"), 0 (none).
@@ -614,6 +622,7 @@ export type PersonalHistory = {
     avgRoc: number | null;
     dropWinRate: number | null;
     recoveryCount: number;
+    swingCount: number;
   } | null;
   // Risk Score's "prior documented loss on this ticker" input
   // (lib/risk-score.ts) — event-scoped via the campaigns table
@@ -3086,7 +3095,7 @@ type PersonalRow = {
 // — recovery_play contamination is exactly why the exclusion below
 // exists, so it dominates a milder rolled/clean chain sharing the same
 // campaign. Mirrors lib/campaigns.ts's mostSevereType.
-const TRADE_TYPE_SEVERITY: Record<string, number> = { clean: 0, rolled: 1, recovery_play: 2 };
+const TRADE_TYPE_SEVERITY: Record<string, number> = { clean: 0, rolled: 1, recovery_play: 2, swing: 3 };
 
 type PersonalStats = {
   tradeCount: number;
@@ -3096,6 +3105,13 @@ type PersonalStats = {
   cleanCount: number;
   rolledCount: number;
   recoveryCount: number;
+  // Deliberate directional bet via a deep-ITM option, reclassified by
+  // hand (never auto-detected — see lib/trade-chains.ts's TradeType
+  // comment). Excluded from CSP grading exactly like recovery_play, but
+  // counted separately so the summary text doesn't conflate "risk
+  // mitigation on a losing CSP" with "an intentional swing trade"
+  // (2026-09-10).
+  swingCount: number;
 };
 
 // Campaign-aware stats. Positions are grouped into campaigns
@@ -3166,6 +3182,7 @@ function personalStats(rows: PersonalRow[]): PersonalStats {
   let cleanCount = 0;
   let rolledCount = 0;
   let recoveryCount = 0;
+  let swingCount = 0;
   let wBoost = 0;
   let winBoost = 0;
   let wDrop = 0;
@@ -3180,6 +3197,10 @@ function personalStats(rows: PersonalRow[]): PersonalStats {
     if (agg.type === "recovery_play") {
       recoveryCount += 1;
       continue; // excluded from CSP grading entirely
+    }
+    if (agg.type === "swing") {
+      swingCount += 1;
+      continue; // excluded from CSP grading entirely — same reason, different bucket
     }
     const boostW = agg.type === "rolled" ? 0.5 : 1.0;
     if (agg.type === "rolled") rolledCount += 1;
@@ -3201,6 +3222,7 @@ function personalStats(rows: PersonalRow[]): PersonalStats {
       cleanCount,
       rolledCount,
       recoveryCount,
+      swingCount,
     };
   }
   const winRate = wBoost > 0 ? (winBoost / wBoost) * 100 : null;
@@ -3208,7 +3230,7 @@ function personalStats(rows: PersonalRow[]): PersonalStats {
   const wSum = rocW.reduce((s, x) => s + x.w, 0);
   const avgRoc =
     wSum > 0 ? rocW.reduce((s, x) => s + x.roc * x.w, 0) / wSum : null;
-  return { tradeCount, winRate, avgRoc, dropWinRate, cleanCount, rolledCount, recoveryCount };
+  return { tradeCount, winRate, avgRoc, dropWinRate, cleanCount, rolledCount, recoveryCount, swingCount };
 }
 
 const NO_HISTORY: PersonalHistory = {
@@ -3222,6 +3244,7 @@ const NO_HISTORY: PersonalHistory = {
   cleanCount: 0,
   rolledCount: 0,
   recoveryCount: 0,
+  swingCount: 0,
   priorCspEarningsLoss: false,
 };
 
@@ -3249,6 +3272,7 @@ export async function getPersonalHistory(
       clean: ticker.cleanCount,
       rolled: ticker.rolledCount,
       recovery: ticker.recoveryCount,
+      swing: ticker.swingCount,
     };
     const sampleWeight =
       ticker.tradeCount >= 5 ? 1.0 : ticker.tradeCount >= 2 ? 0.5 : ticker.tradeCount === 1 ? 0.25 : 0;
@@ -3291,6 +3315,7 @@ export async function getPersonalHistory(
               avgRoc: sec.avgRoc,
               dropWinRate: sec.dropWinRate,
               recoveryCount: sec.recoveryCount,
+              swingCount: sec.swingCount,
             };
             sectorStatsFull = sec;
           }
@@ -3323,6 +3348,7 @@ export async function getPersonalHistory(
         cleanCount: sectorStatsFull.cleanCount,
         rolledCount: sectorStatsFull.rolledCount,
         recoveryCount: sector.recoveryCount,
+        swingCount: sector.swingCount,
         dataInsufficient: false,
         scope: "sector",
         sectorIndustry: industry,
@@ -3934,7 +3960,7 @@ export function calculateThreeLayerGrade(
           : " → no modifier (sector evidence can only drop, at <45% win)";
       const t = history.tickerLevel;
       const tickerBit = t
-        ? `${t.clean} clean campaign${t.clean === 1 ? "" : "s"} on this ticker (need 5+)${t.recovery > 0 ? `, ${t.recovery} recovery play${t.recovery === 1 ? "" : "s"} excluded from CSP grading` : ""}. `
+        ? `${t.clean} clean campaign${t.clean === 1 ? "" : "s"} on this ticker (need 5+)${t.recovery > 0 ? `, ${t.recovery} recovery play${t.recovery === 1 ? "" : "s"} excluded from CSP grading` : ""}${t.swing > 0 ? `, ${t.swing} swing trade${t.swing === 1 ? "" : "s"} excluded from CSP grading` : ""}. `
         : "";
       historyLines.push(
         `${tickerBit}Sector evidence — ${history.sectorIndustry ?? "industry"}: ${history.tradeCount} campaigns, ${wr.toFixed(0)}% win rate, ${roc.toFixed(2)}% avg ROC${mod}.`,
@@ -3953,8 +3979,8 @@ export function calculateThreeLayerGrade(
             ? " (small sample — half weight; boost needs sector corroboration)"
             : " (very limited data — quarter weight; can only corroborate a drop)";
       const breakdown =
-        (history.rolledCount ?? 0) > 0 || (history.recoveryCount ?? 0) > 0
-          ? ` [${history.cleanCount ?? history.tradeCount} clean${(history.rolledCount ?? 0) > 0 ? ` · ${history.rolledCount} rolled (half-weight)` : ""}${(history.recoveryCount ?? 0) > 0 ? ` · ${history.recoveryCount} recovery play${(history.recoveryCount ?? 0) === 1 ? "" : "s"} excluded` : ""}]`
+        (history.rolledCount ?? 0) > 0 || (history.recoveryCount ?? 0) > 0 || (history.swingCount ?? 0) > 0
+          ? ` [${history.cleanCount ?? history.tradeCount} clean${(history.rolledCount ?? 0) > 0 ? ` · ${history.rolledCount} rolled (half-weight)` : ""}${(history.recoveryCount ?? 0) > 0 ? ` · ${history.recoveryCount} recovery play${(history.recoveryCount ?? 0) === 1 ? "" : "s"} excluded` : ""}${(history.swingCount ?? 0) > 0 ? ` · ${history.swingCount} swing trade${(history.swingCount ?? 0) === 1 ? "" : "s"} excluded` : ""}]`
           : "";
       historyLines.push(
         `${history.tradeCount} campaign${history.tradeCount === 1 ? "" : "s"} on this ticker: ${wr.toFixed(0)}% win rate, ${roc.toFixed(2)}% avg ROC${breakdown}${caveat}${mod}.`,
@@ -3967,8 +3993,17 @@ export function calculateThreeLayerGrade(
     }
   } else {
     const excluded =
-      (history.recoveryCount ?? 0) > 0
-        ? ` ${history.recoveryCount} recovery play${(history.recoveryCount ?? 0) === 1 ? "" : "s"} on this ticker excluded from CSP grading.`
+      (history.recoveryCount ?? 0) > 0 || (history.swingCount ?? 0) > 0
+        ? ` ${[
+            (history.recoveryCount ?? 0) > 0
+              ? `${history.recoveryCount} recovery play${(history.recoveryCount ?? 0) === 1 ? "" : "s"}`
+              : null,
+            (history.swingCount ?? 0) > 0
+              ? `${history.swingCount} swing trade${(history.swingCount ?? 0) === 1 ? "" : "s"}`
+              : null,
+          ]
+            .filter(Boolean)
+            .join(" and ")} on this ticker excluded from CSP grading.`
         : "";
     historyLines.push(
       `Insufficient history — ${history.tradeCount} countable campaign${history.tradeCount === 1 ? "" : "s"} on this ticker (need 5+; sector fallback needs 10+ industry campaigns).${excluded} No modifier applied.`,
@@ -4074,6 +4109,7 @@ export function calculateThreeLayerGrade(
       cleanCount: history.cleanCount,
       rolledCount: history.rolledCount,
       recoveryCount: history.recoveryCount,
+      swingCount: history.swingCount,
       tickerLevel: history.tickerLevel,
       sampleWeight: history.sampleWeight,
       sector: history.sector ?? null,

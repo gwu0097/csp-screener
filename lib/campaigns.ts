@@ -194,8 +194,10 @@ function tradingDaysBetween(fromIso: string, toIso: string): number {
 // Most-severe-wins when a campaign's member chains disagree on type —
 // recovery_play contamination is exactly why the exclusion in
 // personalStats exists, so it dominates a milder rolled/clean chain in
-// the same campaign.
-const TYPE_SEVERITY: Record<string, number> = { clean: 0, rolled: 1, recovery_play: 2 };
+// the same campaign. swing (manual-only, never auto-detected — see
+// lib/trade-chains.ts's TradeType comment) is excluded the same way,
+// so it's ranked alongside recovery_play (2026-09-10).
+const TYPE_SEVERITY: Record<string, number> = { clean: 0, rolled: 1, recovery_play: 2, swing: 3 };
 function mostSevereType(types: string[]): string {
   let best = "clean";
   for (const t of types) {

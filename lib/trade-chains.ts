@@ -19,10 +19,18 @@
 //                   through assignment into a deep-ITM re-entry, or a
 //                   position was held ≥3 days after the stock traded
 //                   ≥8% through the strike.
+//   swing         — never auto-detected (there's no algorithmic signal
+//                   for "I meant to do this"): a deliberate directional
+//                   bet via a deep-ITM option, reclassified by hand from
+//                   the recovery_play banner (2026-09-10). Excluded from
+//                   CSP grading like recovery_play, but tracked as its
+//                   own count so the two reasons for exclusion — risk
+//                   mitigation on a losing CSP vs. an intentional swing
+//                   — don't get conflated in the summary.
 import { randomUUID } from "node:crypto";
 import { createServerClient } from "@/lib/supabase";
 
-export type TradeType = "clean" | "rolled" | "recovery_play";
+export type TradeType = "clean" | "rolled" | "recovery_play" | "swing";
 
 export type ChainPosition = {
   id: string;
