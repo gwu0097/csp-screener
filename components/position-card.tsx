@@ -3,7 +3,9 @@
 import { useEffect, useState } from "react";
 import { ArrowRightLeft, ChevronRight, ExternalLink, ListChecks, Loader2, Pencil, Plus, Trash2, X } from "lucide-react";
 import Link from "next/link";
+import * as SelectPrimitive from "@radix-ui/react-select";
 import { Button } from "@/components/ui/button";
+import { Select, SelectContent, SelectItem } from "@/components/ui/select";
 import {
   Tooltip,
   TooltipContent,
@@ -213,7 +215,10 @@ type Props =
 // spacing/dot).
 //
 // Desktop (sm+, 10 cols, left → right):
-//   1. 24px               post-earnings dot
+//   1. 64px               trade-type pill (CSP/Rolled/Recovery/Swing)
+//                          + post-earnings dot. 24px on mobile — a
+//                          colored dot only, no room for the label
+//                          (2026-09-10 revision, see tradeTypeBadgeClasses).
 //   2. minmax(80px,  8fr) STRIKE   right
 //   3. minmax(70px,  7fr) EXPIRY   right
 //   4. minmax(50px,  5fr) QTY      right
@@ -241,13 +246,16 @@ type Props =
 // truncation) always render in full; the surrounding cell never
 // clips overflow. fr weights distribute leftover space.
 //
-// Sum at tablet (10 cols): 544px columns + 72 gap + 24 pad = 640
-// → fits 768 iPad portrait with ~128px headroom.
-// Sum at desktop (12 cols): 634px + 88 gap + 24 pad = 746
+// Sum at tablet (10 cols): 584px columns + 72 gap + 24 pad = 680
+// → fits 768 iPad portrait with ~88px headroom (was ~128px before the
+//   trade-type column widened 24→64).
+// Sum at desktop (12 cols): 674px + 88 gap + 24 pad = 786
 // → fits any laptop / desktop with room.
 // Sum at mobile (7 cols):  384 + 48 + 24 = 456
 // → slightly over a 375px iPhone; row scrolls horizontally if
-//   needed, but the visible cells aren't truncated.
+//   needed, but the visible cells aren't truncated. First column stays
+//   24px on mobile (unchanged) — only sm+ widened, since mobile shows
+//   the dot-only trigger, not the labeled pill.
 export const COLLAPSED_ROW_GRID =
   // gap-1.5 below sm (6 px) so the mobile row fits an iPhone 15
   // viewport; gap-2 (8 px) restored at sm+ for the iPad / desktop
@@ -258,8 +266,8 @@ export const COLLAPSED_ROW_GRID =
   // sum (24+55+40+65+45+45+90 + 6×6 gap + 24 padding = 414 px) fits
   // an iPhone 15 (390 − 32 container = 358 px) much more closely.
   "grid-cols-[24px_minmax(55px,8fr)_minmax(40px,5fr)_minmax(65px,9fr)_minmax(45px,6fr)_minmax(45px,7fr)_minmax(90px,12fr)] " +
-  "sm:grid-cols-[24px_minmax(60px,8fr)_minmax(55px,7fr)_minmax(40px,5fr)_minmax(50px,6fr)_minmax(70px,9fr)_minmax(45px,6fr)_minmax(55px,7fr)_minmax(45px,7fr)_minmax(100px,12fr)] " +
-  "lg:grid-cols-[24px_minmax(60px,8fr)_minmax(55px,7fr)_minmax(40px,5fr)_minmax(50px,6fr)_minmax(50px,6fr)_minmax(70px,9fr)_minmax(45px,6fr)_minmax(55px,7fr)_minmax(40px,5fr)_minmax(45px,7fr)_minmax(100px,12fr)]";
+  "sm:grid-cols-[64px_minmax(60px,8fr)_minmax(55px,7fr)_minmax(40px,5fr)_minmax(50px,6fr)_minmax(70px,9fr)_minmax(45px,6fr)_minmax(55px,7fr)_minmax(45px,7fr)_minmax(100px,12fr)] " +
+  "lg:grid-cols-[64px_minmax(60px,8fr)_minmax(55px,7fr)_minmax(40px,5fr)_minmax(50px,6fr)_minmax(50px,6fr)_minmax(70px,9fr)_minmax(45px,6fr)_minmax(55px,7fr)_minmax(40px,5fr)_minmax(45px,7fr)_minmax(100px,12fr)]";
 
 // ---------- small helpers ----------
 
@@ -285,23 +293,41 @@ function gradeColor(g: string | null | undefined): string {
   return "bg-muted/40 text-muted-foreground border-border";
 }
 
-// Trade-type swatch (2026-09-10) — same hues as screener-view.tsx's
-// tradeTypeBadge, kept in sync by hand since the two files don't share
-// a color util. "clean" is deliberately muted (not bright emerald) —
-// most rows are clean, and the control needs to stay unobtrusive there
-// so rolled/recovery/swing (the exceptions worth scanning for) still
-// pop when they occur.
-function tradeTypeSwatchColor(t: string): string {
-  if (t === "rolled") return "bg-amber-400";
-  if (t === "recovery_play") return "bg-rose-400";
-  if (t === "swing") return "bg-sky-400";
-  return "bg-muted-foreground/30";
+// Trade-type badge (2026-09-10, revised same day after feedback that a
+// bare color dot with a native <select> was both illegible — a native
+// select's option list ignores the app's dark theme entirely, rendering
+// black-on-white — and too small to read the current classification
+// at a glance). Same hues as screener-view.tsx's tradeTypeBadge, kept
+// in sync by hand since the two files don't share a color util.
+// "clean" is deliberately muted (not bright emerald) — most rows are
+// clean, and the control needs to stay unobtrusive there so rolled/
+// recovery/swing (the exceptions worth scanning for) still pop.
+//
+// Dual-mode by breakpoint, not two separate elements: below sm the
+// classes render a small solid-color dot (matching the original
+// swatch, and the tight mobile column budget — see COLLAPSED_ROW_GRID)
+// with the text hidden; at sm+ the same element becomes a bordered,
+// labeled pill sized like the row's own Close/Assigned buttons.
+function tradeTypeBadgeClasses(t: string): string {
+  if (t === "rolled")
+    return "bg-amber-400 sm:bg-amber-500/10 sm:border-amber-500/40 sm:text-amber-300 sm:hover:border-amber-400/60";
+  if (t === "recovery_play")
+    return "bg-rose-400 sm:bg-rose-500/10 sm:border-rose-500/40 sm:text-rose-300 sm:hover:border-rose-400/60";
+  if (t === "swing")
+    return "bg-sky-400 sm:bg-sky-500/10 sm:border-sky-500/40 sm:text-sky-300 sm:hover:border-sky-400/60";
+  return "bg-muted-foreground/30 sm:bg-background/60 sm:border-border/60 sm:text-muted-foreground sm:hover:border-foreground/40 sm:hover:text-foreground";
 }
 function tradeTypeLabel(t: string): string {
   if (t === "rolled") return "Rolled recovery";
   if (t === "recovery_play") return "Recovery play";
   if (t === "swing") return "Swing trade";
   return "Clean CSP";
+}
+function tradeTypeShortLabel(t: string): string {
+  if (t === "rolled") return "Rolled";
+  if (t === "recovery_play") return "Recovery";
+  if (t === "swing") return "Swing";
+  return "CSP";
 }
 
 // Status pill classes. Brighter than the old palette so a glance at
@@ -674,35 +700,48 @@ export function PositionCard(props: Props) {
               set and never resurfaces if it was set wrong (e.g. a
               deliberate ITM swing entry auto-flagged recovery_play,
               confirmed as-is by mistake, or a plain "clean" row that
-              was actually a swing from the start). A native <select>
-              styled as a small colored swatch — appearance-none hides
-              the arrow/text so it fits the same 24px slot the dot used
-              alone; the post-earnings dot becomes a small corner badge
-              on top of it when both exist, rather than competing for
-              the same space. Open positions only, matching the banner's
-              existing scope — closed positions don't expose reclassify. */}
-        <div className="relative flex h-4 w-4 items-center justify-center">
+              was actually a swing from the start).
+              Revised same day: a native <select> renders its option
+              list with the OS's own (light) chrome regardless of the
+              app's dark theme — illegible — and a bare color dot with
+              no text hid which classification was actually set. Now a
+              real Radix Select (components/ui/select.tsx, already
+              theme-aware) with a custom small trigger: a colored dot on
+              mobile (unchanged from before, keeps the tight mobile
+              column budget — see COLLAPSED_ROW_GRID), a labeled pill
+              (CSP/Rolled/Recovery/Swing) at sm+, sized like the row's
+              own Close/Assigned buttons. The post-earnings dot still
+              sits as a small corner badge on top of it. Open positions
+              only, matching the banner's existing scope — closed
+              positions don't expose reclassify. */}
+        <div className="relative flex h-4 w-4 items-center justify-center sm:h-auto sm:w-auto sm:justify-start">
           {open ? (
-            <select
+            <Select
               value={(localTradeType ?? open.tradeType) ?? "clean"}
               disabled={typeSaving}
-              onClick={(e) => e.stopPropagation()}
-              onChange={(e) => {
-                e.stopPropagation();
-                void classifyTradeType(e.target.value);
-              }}
-              title={`Trade type: ${tradeTypeLabel((localTradeType ?? open.tradeType) ?? "clean")} — click to reclassify`}
-              aria-label="Trade type classification"
-              className={cn(
-                "h-2.5 w-2.5 cursor-pointer appearance-none rounded-full border-0 p-0 text-transparent outline-none",
-                tradeTypeSwatchColor((localTradeType ?? open.tradeType) ?? "clean"),
-              )}
+              onValueChange={(v) => void classifyTradeType(v)}
             >
-              <option value="clean">Clean CSP</option>
-              <option value="rolled">Rolled recovery</option>
-              <option value="recovery_play">Recovery play</option>
-              <option value="swing">Swing trade</option>
-            </select>
+              <SelectPrimitive.Trigger
+                onClick={(e) => e.stopPropagation()}
+                title={`Trade type: ${tradeTypeLabel((localTradeType ?? open.tradeType) ?? "clean")} — click to reclassify`}
+                aria-label="Trade type classification"
+                className={cn(
+                  "flex h-2.5 w-2.5 cursor-pointer items-center justify-center rounded-full border-0 p-0 text-transparent outline-none",
+                  "sm:h-auto sm:w-auto sm:rounded sm:border sm:px-1 sm:py-0.5 sm:text-[9px] sm:font-semibold sm:uppercase sm:tracking-wider",
+                  tradeTypeBadgeClasses((localTradeType ?? open.tradeType) ?? "clean"),
+                )}
+              >
+                <SelectPrimitive.Value>
+                  {tradeTypeShortLabel((localTradeType ?? open.tradeType) ?? "clean")}
+                </SelectPrimitive.Value>
+              </SelectPrimitive.Trigger>
+              <SelectContent onClick={(e) => e.stopPropagation()}>
+                <SelectItem value="clean">Clean CSP</SelectItem>
+                <SelectItem value="rolled">Rolled recovery</SelectItem>
+                <SelectItem value="recovery_play">Recovery play</SelectItem>
+                <SelectItem value="swing">Swing trade</SelectItem>
+              </SelectContent>
+            </Select>
           ) : null}
           {p.postEarningsRec ? (
             <RecDot
