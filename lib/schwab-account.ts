@@ -120,6 +120,53 @@ export class SchwabAcctApiError extends Error {
   }
 }
 
+// Thrown when Schwab's own servers don't respond in time — distinct
+// from SchwabAcctApiError (Schwab responded, just with a non-2xx) so a
+// caller/alert can say "Schwab didn't answer" rather than misreport a
+// hang as some other kind of API failure.
+export class SchwabAcctTimeoutError extends Error {
+  constructor(label: string, ms: number) {
+    super(`Schwab acct request timed out after ${ms}ms: ${label}`);
+    this.name = "SchwabAcctTimeoutError";
+  }
+}
+
+// 2026-09-10 incident: neither fetch call in this file had a client-
+// side timeout, so when Schwab's servers didn't respond, the request
+// just hung until Vercel's own maxDuration killed the whole function —
+// producing a bare, unattributed "FUNCTION_INVOCATION_TIMEOUT" 504 with
+// no indication of which call was stuck or why. This wraps every
+// network call in this file with an AbortController so a hang fails
+// fast, inside the function's own error handling, with a message that
+// names the actual request. 10s per call, chosen against maxDuration=60
+// on the poll route: worst case is one token-refresh attempt (10s,
+// never retried on a timeout — see refreshAcctAccessTokenWithRetry,
+// which only retries a genuine 400/401) plus one getAccountNumbers call
+// (10s) plus a transactions fetch per account, currently 2 accounts
+// (2x10s) = 40s worst case, leaving real headroom for the function's
+// own DB writes and JSON handling.
+const SCHWAB_ACCT_TIMEOUT_MS = 10_000;
+
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  label: string,
+  timeoutMs = SCHWAB_ACCT_TIMEOUT_MS,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (e) {
+    if (e instanceof Error && e.name === "AbortError") {
+      throw new SchwabAcctTimeoutError(label, timeoutMs);
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function postTokenRequest(body: URLSearchParams): Promise<TokenResponse> {
   const grantType = body.get("grant_type");
   console.log("[schwab-acct-token] POST", `${OAUTH_BASE}/token`, {
@@ -128,15 +175,19 @@ async function postTokenRequest(body: URLSearchParams): Promise<TokenResponse> {
     clientIdPresent: Boolean(CLIENT_ID),
     clientSecretPresent: Boolean(CLIENT_SECRET),
   });
-  const res = await fetch(`${OAUTH_BASE}/token`, {
-    method: "POST",
-    headers: {
-      Authorization: basicAuthHeader(),
-      "Content-Type": "application/x-www-form-urlencoded",
+  const res = await fetchWithTimeout(
+    `${OAUTH_BASE}/token`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: basicAuthHeader(),
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: body.toString(),
+      cache: "no-store",
     },
-    body: body.toString(),
-    cache: "no-store",
-  });
+    `POST oauth/token (${grantType})`,
+  );
   const text = await res.text();
   console.log("[schwab-acct-token] response status:", res.status, "body length:", text.length);
   if (!res.ok) {
@@ -396,14 +447,18 @@ async function schwabAcctFetch<T>(
       url.searchParams.set(k, String(v));
     }
   }
-  const res = await fetch(url.toString(), {
-    method,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/json",
+  const res = await fetchWithTimeout(
+    url.toString(),
+    {
+      method,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/json",
+      },
+      cache: "no-store",
     },
-    cache: "no-store",
-  });
+    `${method} ${url.pathname}`,
+  );
   if (!res.ok) {
     const text = await res.text();
     if (res.status === 401) {
