@@ -540,9 +540,25 @@ function accentFor(key: string): AccountAccent {
   return ACCOUNT_ACCENT[key] ?? ACCOUNT_ACCENT.other;
 }
 
+// "clean" (including unset — a position defaults to clean until
+// reclassified, matching the swatch's own default in position-card.tsx)
+// is the actual CSP strategy. rolled/recovery_play/swing are capital
+// deployed outside it — a defensive roll, a recovery attempt, or a
+// deliberate directional swing entry — tracked in their own bucket
+// (2026-09-10) so neither number silently absorbs the other: "how much
+// I can make from my CSP positions" shouldn't include a swing trade's
+// premium, and "what's the rest doing" shouldn't be lost inside one
+// blended total.
+function isCspTradeType(tradeType: string | null | undefined): boolean {
+  return (tradeType ?? "clean") === "clean";
+}
+
 // Per-broker stats derived from the open positions in that group.
 function computeBrokerStats(items: OpenPositionClientView[]): {
   maxProfit: number;
+  maxProfitCsp: number;
+  maxProfitOther: number;
+  hasOtherContributor: boolean;
   maxProfitMissing: number;
   unrealized: number;
   unrealizedAvailable: boolean;
@@ -550,14 +566,19 @@ function computeBrokerStats(items: OpenPositionClientView[]): {
   const contributors = items.filter(
     (p) => p.avgPremiumSold !== null && Number.isFinite(p.avgPremiumSold),
   );
-  const maxProfit = contributors.reduce(
-    (s, p) => s + (p.avgPremiumSold as number) * p.remainingContracts * 100,
-    0,
-  );
+  const premiumOf = (p: OpenPositionClientView) =>
+    (p.avgPremiumSold as number) * p.remainingContracts * 100;
+  const maxProfit = contributors.reduce((s, p) => s + premiumOf(p), 0);
+  const otherContributors = contributors.filter((p) => !isCspTradeType(p.tradeType));
+  const maxProfitOther = otherContributors.reduce((s, p) => s + premiumOf(p), 0);
+  const maxProfitCsp = maxProfit - maxProfitOther;
   const liveItems = items.filter((p) => p.pnlDollars !== null);
   const unrealized = liveItems.reduce((s, p) => s + (p.pnlDollars ?? 0), 0);
   return {
     maxProfit,
+    maxProfitCsp,
+    maxProfitOther,
+    hasOtherContributor: otherContributors.length > 0,
     maxProfitMissing: items.length - contributors.length,
     unrealized,
     unrealizedAvailable: liveItems.length > 0,
@@ -1293,10 +1314,14 @@ export function PositionsView() {
   const maxProfitContributors = statsPositions.filter(
     (p) => p.avgPremiumSold !== null && Number.isFinite(p.avgPremiumSold),
   );
-  const maxProfit = maxProfitContributors.reduce(
-    (sum, p) => sum + (p.avgPremiumSold as number) * p.remainingContracts * 100,
-    0,
-  );
+  const maxProfitPremiumOf = (p: OpenPositionClientView) =>
+    (p.avgPremiumSold as number) * p.remainingContracts * 100;
+  const maxProfit = maxProfitContributors.reduce((sum, p) => sum + maxProfitPremiumOf(p), 0);
+  // Same CSP-vs-other split as computeBrokerStats — see isCspTradeType.
+  const maxProfitOtherContributors = maxProfitContributors.filter((p) => !isCspTradeType(p.tradeType));
+  const maxProfitOther = maxProfitOtherContributors.reduce((sum, p) => sum + maxProfitPremiumOf(p), 0);
+  const maxProfitCsp = maxProfit - maxProfitOther;
+  const hasOtherContributor = maxProfitOtherContributors.length > 0;
   const maxProfitMissing = statsPositions.length - maxProfitContributors.length;
 
   const brokerGroups = groupByBroker(positions);
@@ -1344,10 +1369,12 @@ export function PositionsView() {
             <div className="flex flex-wrap items-baseline gap-x-5 gap-y-1 text-base">
               {statsPositions.length > 0 && (
                 <div>
-                  <span className="text-muted-foreground">Max Profit </span>
+                  <span className="text-muted-foreground">
+                    {hasOtherContributor ? "Max CSP Profit " : "Max Profit "}
+                  </span>
                   <span className="font-mono text-base font-semibold text-emerald-300">
                     {maxProfitContributors.length > 0
-                      ? fmtDollarsSigned(maxProfit)
+                      ? fmtDollarsSigned(maxProfitCsp)
                       : "—"}
                   </span>
                   {maxProfitMissing > 0 && (
@@ -1355,6 +1382,17 @@ export function PositionsView() {
                       ({maxProfitMissing} excluded)
                     </span>
                   )}
+                </div>
+              )}
+              {hasOtherContributor && (
+                <div>
+                  <span className="text-muted-foreground">Max Other Profit </span>
+                  <span
+                    className="font-mono text-base font-semibold text-sky-300"
+                    title="Rolled recovery, recovery play, and swing trades — outside the CSP strategy, still counted toward overall performance"
+                  >
+                    {fmtDollarsSigned(maxProfitOther)}
+                  </span>
                 </div>
               )}
               {statsPositions.length > 0 && (
@@ -1651,11 +1689,13 @@ export function PositionsView() {
                   {group.contractCount} {group.contractCount === 1 ? "contract" : "contracts"}
                 </span>
               </div>
-              <div className="flex items-baseline gap-4 text-base">
+              <div className="flex flex-wrap items-baseline gap-4 text-base">
                 <div>
-                  <span className="text-muted-foreground">Max Profit </span>
+                  <span className="text-muted-foreground">
+                    {stats.hasOtherContributor ? "Max CSP Profit " : "Max Profit "}
+                  </span>
                   <span className="font-mono font-semibold text-emerald-300">
-                    {fmtDollarsSigned(stats.maxProfit)}
+                    {fmtDollarsSigned(stats.maxProfitCsp)}
                   </span>
                   {stats.maxProfitMissing > 0 && (
                     <span className="ml-1 text-sm text-muted-foreground/70">
@@ -1663,6 +1703,17 @@ export function PositionsView() {
                     </span>
                   )}
                 </div>
+                {stats.hasOtherContributor && (
+                  <div>
+                    <span className="text-muted-foreground">Max Other Profit </span>
+                    <span
+                      className="font-mono font-semibold text-sky-300"
+                      title="Rolled recovery, recovery play, and swing trades — outside the CSP strategy, still counted toward overall performance"
+                    >
+                      {fmtDollarsSigned(stats.maxProfitOther)}
+                    </span>
+                  </div>
+                )}
                 <div>
                   <span className="text-muted-foreground">Unrealized </span>
                   {stats.unrealizedAvailable ? (
