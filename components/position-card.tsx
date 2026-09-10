@@ -285,6 +285,25 @@ function gradeColor(g: string | null | undefined): string {
   return "bg-muted/40 text-muted-foreground border-border";
 }
 
+// Trade-type swatch (2026-09-10) — same hues as screener-view.tsx's
+// tradeTypeBadge, kept in sync by hand since the two files don't share
+// a color util. "clean" is deliberately muted (not bright emerald) —
+// most rows are clean, and the control needs to stay unobtrusive there
+// so rolled/recovery/swing (the exceptions worth scanning for) still
+// pop when they occur.
+function tradeTypeSwatchColor(t: string): string {
+  if (t === "rolled") return "bg-amber-400";
+  if (t === "recovery_play") return "bg-rose-400";
+  if (t === "swing") return "bg-sky-400";
+  return "bg-muted-foreground/30";
+}
+function tradeTypeLabel(t: string): string {
+  if (t === "rolled") return "Rolled recovery";
+  if (t === "recovery_play") return "Recovery play";
+  if (t === "swing") return "Swing trade";
+  return "Clean CSP";
+}
+
 // Status pill classes. Brighter than the old palette so a glance at
 // the row tells you exactly what the position needs. EMERGENCY_CUT is
 // the only one that pulses — it's the user's signal to drop everything
@@ -649,9 +668,51 @@ export function PositionCard(props: Props) {
         onClick={() => setExpanded((v) => !v)}
         className={cn(COLLAPSED_ROW_GRID, "py-1.5")}
       >
-        {/* 1. Post-earnings dot */}
-        <div className="flex h-4 w-4 items-center justify-center">
-          {p.postEarningsRec ? <RecDot rec={p.postEarningsRec} /> : null}
+        {/* 1. Trade-type classification + post-earnings dot. Always-
+              available reclassification (2026-09-10) — not just the
+              one-time confirm banner, which disappears once a type is
+              set and never resurfaces if it was set wrong (e.g. a
+              deliberate ITM swing entry auto-flagged recovery_play,
+              confirmed as-is by mistake, or a plain "clean" row that
+              was actually a swing from the start). A native <select>
+              styled as a small colored swatch — appearance-none hides
+              the arrow/text so it fits the same 24px slot the dot used
+              alone; the post-earnings dot becomes a small corner badge
+              on top of it when both exist, rather than competing for
+              the same space. Open positions only, matching the banner's
+              existing scope — closed positions don't expose reclassify. */}
+        <div className="relative flex h-4 w-4 items-center justify-center">
+          {open ? (
+            <select
+              value={(localTradeType ?? open.tradeType) ?? "clean"}
+              disabled={typeSaving}
+              onClick={(e) => e.stopPropagation()}
+              onChange={(e) => {
+                e.stopPropagation();
+                void classifyTradeType(e.target.value);
+              }}
+              title={`Trade type: ${tradeTypeLabel((localTradeType ?? open.tradeType) ?? "clean")} — click to reclassify`}
+              aria-label="Trade type classification"
+              className={cn(
+                "h-2.5 w-2.5 cursor-pointer appearance-none rounded-full border-0 p-0 text-transparent outline-none",
+                tradeTypeSwatchColor((localTradeType ?? open.tradeType) ?? "clean"),
+              )}
+            >
+              <option value="clean">Clean CSP</option>
+              <option value="rolled">Rolled recovery</option>
+              <option value="recovery_play">Recovery play</option>
+              <option value="swing">Swing trade</option>
+            </select>
+          ) : null}
+          {p.postEarningsRec ? (
+            <RecDot
+              rec={p.postEarningsRec}
+              size={cn(
+                "h-1.5 w-1.5",
+                open ? "absolute -right-0.5 -top-0.5 ring-1 ring-background" : "",
+              )}
+            />
+          ) : null}
         </div>
         {/* 2. Strike — appends a small "LONG" pill for bought-to-open
               positions. Short rows render unchanged (the historical
@@ -1210,13 +1271,13 @@ export function PositionCard(props: Props) {
 
 // ---------- subcomponents ----------
 
-function RecDot({ rec }: { rec: PostEarningsRecView }) {
+function RecDot({ rec, size = "h-2.5 w-2.5" }: { rec: PostEarningsRecView; size?: string }) {
   return (
     <TooltipProvider delayDuration={150}>
       <Tooltip>
         <TooltipTrigger asChild>
           <span
-            className={cn("block h-2.5 w-2.5 rounded-full", recDotColor(rec))}
+            className={cn("block rounded-full", size, recDotColor(rec))}
             aria-label={`Post-earnings: ${rec.recommendation}`}
           />
         </TooltipTrigger>
