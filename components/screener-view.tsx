@@ -3526,13 +3526,20 @@ export function ExpandedDetail({
   const liveTicker = (() => {
     if (!chainCampaigns) return null;
     const countable = chainCampaigns.filter(
-      (c) => c.trade_type !== "recovery_play" && c.trade_type !== "swing" && !c.still_open,
+      (c) =>
+        c.trade_type !== "recovery_play" &&
+        c.trade_type !== "swing" &&
+        c.trade_type !== "speculative" &&
+        !c.still_open,
     );
     const recovery = chainCampaigns.filter(
       (c) => c.trade_type === "recovery_play" && !c.still_open,
     ).length;
     const swing = chainCampaigns.filter(
       (c) => c.trade_type === "swing" && !c.still_open,
+    ).length;
+    const speculative = chainCampaigns.filter(
+      (c) => c.trade_type === "speculative" && !c.still_open,
     ).length;
     const clean = countable.filter((c) => c.trade_type !== "rolled").length;
     const rolled = countable.length - clean;
@@ -3546,6 +3553,7 @@ export function ExpandedDetail({
       rolled,
       recovery,
       swing,
+      speculative,
       winRate: countable.length > 0 ? (wins / countable.length) * 100 : null,
       avgRoc: rocs.length > 0 ? rocs.reduce((a, b) => a + b, 0) / rocs.length : null,
     };
@@ -6341,6 +6349,8 @@ function tradeTypeBadge(t: string): { label: string; cls: string } {
     return { label: "Recovery Play", cls: "border-rose-500/40 bg-rose-500/10 text-rose-300" };
   if (t === "swing")
     return { label: "Swing Trade", cls: "border-sky-500/40 bg-sky-500/10 text-sky-300" };
+  if (t === "speculative")
+    return { label: "Speculative", cls: "border-violet-500/40 bg-violet-500/10 text-violet-300" };
   if (t === "rolled")
     return { label: "Rolled", cls: "border-amber-500/40 bg-amber-500/10 text-amber-300" };
   return { label: "Clean", cls: "border-emerald-500/40 bg-emerald-500/10 text-emerald-300" };

@@ -89,7 +89,7 @@ export type OpenPositionClientView = {
   badgeTooltip: string;
   ruleFired: string;
   postEarningsRec: PostEarningsRecView | null;
-  tradeType?: "clean" | "rolled" | "recovery_play" | "swing" | null;
+  tradeType?: "clean" | "rolled" | "recovery_play" | "swing" | "speculative" | null;
   tradeTypeSource?: "auto" | "user" | null;
   fills: Fill[];
   expiryStatus: "active" | "needs_verification" | "pending";
@@ -315,18 +315,22 @@ function tradeTypeBadgeClasses(t: string): string {
     return "bg-rose-400 sm:bg-rose-500/10 sm:border-rose-500/40 sm:text-rose-300 sm:hover:border-rose-400/60";
   if (t === "swing")
     return "bg-sky-400 sm:bg-sky-500/10 sm:border-sky-500/40 sm:text-sky-300 sm:hover:border-sky-400/60";
+  if (t === "speculative")
+    return "bg-violet-400 sm:bg-violet-500/10 sm:border-violet-500/40 sm:text-violet-300 sm:hover:border-violet-400/60";
   return "bg-muted-foreground/30 sm:bg-background/60 sm:border-border/60 sm:text-muted-foreground sm:hover:border-foreground/40 sm:hover:text-foreground";
 }
 function tradeTypeLabel(t: string): string {
   if (t === "rolled") return "Rolled recovery";
   if (t === "recovery_play") return "Recovery play";
   if (t === "swing") return "Swing trade";
+  if (t === "speculative") return "Speculative";
   return "Clean CSP";
 }
 function tradeTypeShortLabel(t: string): string {
   if (t === "rolled") return "Rolled";
   if (t === "recovery_play") return "Recovery";
   if (t === "swing") return "Swing";
+  if (t === "speculative") return "Spec";
   return "CSP";
 }
 
@@ -740,6 +744,7 @@ export function PositionCard(props: Props) {
                 <SelectItem value="rolled">Rolled recovery</SelectItem>
                 <SelectItem value="recovery_play">Recovery play</SelectItem>
                 <SelectItem value="swing">Swing trade</SelectItem>
+                <SelectItem value="speculative">Speculative</SelectItem>
               </SelectContent>
             </Select>
           ) : null}
@@ -1150,6 +1155,7 @@ export function PositionCard(props: Props) {
               <option value="rolled">Rolled recovery</option>
               <option value="recovery_play">Recovery play</option>
               <option value="swing">Swing trade</option>
+              <option value="speculative">Speculative</option>
             </select>
             <button
               type="button"

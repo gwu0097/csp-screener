@@ -542,11 +542,12 @@ function accentFor(key: string): AccountAccent {
 
 // "clean" (including unset — a position defaults to clean until
 // reclassified, matching the swatch's own default in position-card.tsx)
-// is the actual CSP strategy. rolled/recovery_play/swing are capital
-// deployed outside it — a defensive roll, a recovery attempt, or a
-// deliberate directional swing entry — tracked in their own bucket
-// (2026-09-10) so neither number silently absorbs the other: "how much
-// I can make from my CSP positions" shouldn't include a swing trade's
+// is the actual CSP strategy. rolled/recovery_play/swing/speculative
+// are capital deployed outside it — a defensive roll, a recovery
+// attempt, a deliberate directional swing entry, or a speculative long
+// bet — tracked in their own bucket (2026-09-10, extended 2026-09-11)
+// so neither number silently absorbs the other: "how much I can make
+// from my CSP positions" shouldn't include a swing trade's
 // premium, and "what's the rest doing" shouldn't be lost inside one
 // blended total.
 function isCspTradeType(tradeType: string | null | undefined): boolean {

@@ -137,7 +137,7 @@ type OpenPosition = {
   entryFinalGrade: string | null;
   // Trade-chain classification (lib/trade-chains). source 'auto' with a
   // non-clean type drives the confirmation chip on the position card.
-  tradeType: "clean" | "rolled" | "recovery_play" | "swing" | null;
+  tradeType: "clean" | "rolled" | "recovery_play" | "swing" | "speculative" | null;
   tradeTypeSource: "auto" | "user" | null;
   entryCrushGrade: string | null;
   entryOpportunityGrade: string | null;

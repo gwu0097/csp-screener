@@ -27,10 +27,16 @@
 //                   own count so the two reasons for exclusion — risk
 //                   mitigation on a losing CSP vs. an intentional swing
 //                   — don't get conflated in the summary.
+//   speculative   — also never auto-detected: a speculative long-option
+//                   bet (a lottery-ticket call bought purely to see if
+//                   it hits, or a longer-dated directional call) — not
+//                   a CSP recovery, not a swing's deep-ITM stock
+//                   surrogate, just a bet. Same CSP-grading exclusion
+//                   and own count as swing (2026-09-11).
 import { randomUUID } from "node:crypto";
 import { createServerClient } from "@/lib/supabase";
 
-export type TradeType = "clean" | "rolled" | "recovery_play" | "swing";
+export type TradeType = "clean" | "rolled" | "recovery_play" | "swing" | "speculative";
 
 export type ChainPosition = {
   id: string;

@@ -21,11 +21,12 @@ async function main() {
   const userId = "abfe5a91-6b34-4227-a60d-71c9249b372d";
 
   const chains = await classifyUserChains(userId);
-  // swing is never auto-detected (lib/trade-chains.ts's TradeType
-  // comment) — it only exists after a manual reclassification, which
-  // this auto-detection pass never produces. Kept in the tally purely
-  // for type-completeness against the 4-value TradeType union.
-  const counts = { clean: 0, rolled: 0, recovery_play: 0, swing: 0 };
+  // swing/speculative are never auto-detected (lib/trade-chains.ts's
+  // TradeType comment) — they only exist after a manual
+  // reclassification, which this auto-detection pass never produces.
+  // Kept in the tally purely for type-completeness against the
+  // 5-value TradeType union.
+  const counts = { clean: 0, rolled: 0, recovery_play: 0, swing: 0, speculative: 0 };
   for (const c of chains) counts[c.tradeType] += 1;
   console.log(
     `${chains.length} chains: ${counts.clean} clean, ${counts.rolled} rolled, ${counts.recovery_play} recovery plays\n`,
