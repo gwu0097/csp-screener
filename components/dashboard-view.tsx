@@ -159,6 +159,20 @@ function nextTradingSessionIso(fromIso: string): string {
   while (isWeekendIso(cursor)) cursor = addDayStr(cursor);
   return cursor;
 }
+// The Friday of the current calendar week — today itself if today IS
+// Friday (no trading days left this week), otherwise the next upcoming
+// Friday. Mirrors lib/screener.ts's own nextFridayOnOrAfter (not
+// exported there, and that version takes a Date — this file's
+// convention is ISO strings throughout, so re-derived rather than
+// imported).
+function endOfWeekFridayIso(todayIso: string): string {
+  const [y, m, d] = todayIso.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  const day = dt.getUTCDay(); // 0 Sun .. 6 Sat
+  const delta = (5 - day + 7) % 7;
+  dt.setUTCDate(dt.getUTCDate() + delta);
+  return dt.toISOString().slice(0, 10);
+}
 function weekdayNameFromIso(ymd: string): string {
   const [y, m, d] = ymd.split("-").map(Number);
   return new Intl.DateTimeFormat("en-US", { timeZone: "UTC", weekday: "long" }).format(
@@ -640,6 +654,14 @@ export function DashboardView() {
     );
 
   // ---------- Attention panel ----------
+  // A row expiring THIS week is the actually time-critical one — next
+  // week's EMERGENCY_CUT still needs a look, but there's no clock
+  // running out on it today the way there is on a same-week expiry
+  // (2026-09-11 feedback: the flat urgency-only sort buried this-week
+  // rows among next-week ones with identical badges, no way to tell
+  // which needed action NOW).
+  const weekEndIso = endOfWeekFridayIso(today);
+  const isExpiringThisWeek = (expiry: string) => expiry <= weekEndIso;
   const attention = pos
     .filter(
       (p) =>
@@ -649,7 +671,11 @@ export function DashboardView() {
     )
     .sort((a, b) => {
       const order = { EMERGENCY_CUT: 0, CUT: 1, MONITOR: 2, HOLD: 3 };
-      return order[a.urgency] - order[b.urgency];
+      const byUrgency = order[a.urgency] - order[b.urgency];
+      if (byUrgency !== 0) return byUrgency;
+      const byThisWeek = Number(isExpiringThisWeek(b.expiry)) - Number(isExpiringThisWeek(a.expiry));
+      if (byThisWeek !== 0) return byThisWeek;
+      return a.expiry.localeCompare(b.expiry);
     });
   // Named inline on the CSP Status stat strip so the count answers
   // "which ones" without making the user look at the panel below —
@@ -1003,14 +1029,34 @@ export function DashboardView() {
                   </tr>
                 </thead>
                 <tbody>
-                  {attention.map((p) => (
-                    <tr key={p.id} className="border-t border-border/60">
-                      <td className="py-1.5 pr-3 font-mono font-semibold">
+                  {attention.map((p) => {
+                    const thisWeek = isExpiringThisWeek(p.expiry);
+                    return (
+                    <tr
+                      key={p.id}
+                      className={cn(
+                        "border-t border-border/60",
+                        thisWeek ? "bg-rose-500/10" : "opacity-60",
+                      )}
+                    >
+                      <td
+                        className={cn(
+                          "py-1.5 pr-3 font-mono font-semibold",
+                          thisWeek && "border-l-2 border-rose-400 pl-2",
+                        )}
+                      >
                         {p.symbol}
                       </td>
                       <td className="py-1.5 pr-3 font-mono">${p.strike}</td>
-                      <td className="py-1.5 pr-3 font-mono text-muted-foreground">
+                      <td
+                        className={cn(
+                          "py-1.5 pr-3 font-mono",
+                          thisWeek ? "font-semibold text-rose-300" : "text-muted-foreground",
+                        )}
+                        title={thisWeek ? "Expires this week" : "Expires next week or later"}
+                      >
                         {p.expiry}
+                        {thisWeek && <span className="ml-1.5 text-[10px] font-semibold uppercase tracking-wider text-rose-400">this week</span>}
                       </td>
                       <td
                         className={cn(
@@ -1035,7 +1081,8 @@ export function DashboardView() {
                         </Link>
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
