@@ -531,8 +531,39 @@ export async function runBulkCreate(userId: string, body: BulkBody): Promise<Nex
         existingPositionId = null;
         createsNewPosition = false;
       } else {
+        // Zero matches under the parsed symbol — before giving up,
+        // check whether the exact same strike/expiry/broker resolves
+        // to an open position under a DIFFERENT symbol. A dropped or
+        // garbled character in OCR (e.g. "RM" read for "CRM") produces
+        // precisely this shape: broker, strike, and expiry all resolve
+        // correctly, only the ticker is wrong (2026-09-11 incident —
+        // confirmed via the DB: no RM position ever existed, but an
+        // open CRM position matched this fill's strike/expiry/broker
+        // exactly). Never auto-attaches — a ticker substitution is a
+        // real correction a human should confirm, not something to
+        // silently guess — but naming the likely intended symbol turns
+        // a dead-end "no matching position" into a one-line fix
+        // instead of a DB investigation.
+        const { data: symbolMismatchRaw } = await supabase
+          .from("positions")
+          .select("id,symbol")
+          .eq("user_id", userId)
+          .eq("strike", input.strike)
+          .eq("expiry", expiry)
+          .eq("broker", broker)
+          .eq("status", "open")
+          .neq("symbol", symbol);
+        const symbolMismatches = Array.from(
+          new Set(((symbolMismatchRaw ?? []) as Array<{ symbol: string }>).map((r) => r.symbol)),
+        );
+        const hint =
+          symbolMismatches.length === 1
+            ? ` — did you mean ${symbolMismatches[0]}? An open position with this exact strike/expiry/broker exists under that symbol.`
+            : symbolMismatches.length > 1
+              ? ` — open positions with this exact strike/expiry/broker exist under: ${symbolMismatches.join(", ")}. Check the symbol.`
+              : "";
         errors.push(
-          `${symbol}: close fill found no matching open position (strike=${input.strike}, broker=${broker}, expiry=${expiry})`,
+          `${symbol}: close fill found no matching open position (strike=${input.strike}, broker=${broker}, expiry=${expiry})${hint}`,
         );
         continue;
       }
