@@ -409,15 +409,35 @@ export async function createStockFromAssignment(
   // assigned (= opened − prior closes), not the historical "ever
   // opened" count on the row. Parents with partial-close / roll
   // history would otherwise mint too many shares.
+  //
+  // 2026-09-18 FN incident: this function only ever runs on a parent
+  // whose status is already 'assigned' (checked below) — which means
+  // recordAssignment (lib/expire-positions.ts) has ALREADY run and, as
+  // of the commit that started persisting its synthetic $0 close fill
+  // (b0fd796, 2026-07-06), that fill already sits in `fills` by the
+  // time this query runs. Counting it here as a real close
+  // double-counted the assignment's own close against itself, always
+  // computing remaining=0 and silently skipping stock creation on
+  // every auto-assigned put since — FN's 300-share assignment (and its
+  // -$8,024 stock-sale loss) never landed. autoExpirePosition inserts
+  // an identical-shaped synthetic close for expired-worthless, but
+  // never reaches this function (only 'assigned' parents do). Excluded
+  // by shape (fill_date === the option's own expiry, premium === 0) —
+  // the exact signature recordAssignment writes — capped to ONE
+  // exclusion per parent since exactly one such row is ever inserted;
+  // any additional zero-premium close (a real, if unusual, trade) is
+  // still counted normally.
   const fillsRes = await sb
     .from("fills")
-    .select("position_id, fill_type, contracts")
+    .select("position_id, fill_type, contracts, premium, fill_date")
     .in("position_id", ids)
     .eq("user_id", userId);
   type FillRow = {
     position_id: string;
     fill_type: string;
     contracts: number;
+    premium: number | null;
+    fill_date: string;
   };
   const fillsByPos = new Map<string, FillRow[]>();
   for (const f of (fillsRes.data ?? []) as FillRow[]) {
@@ -425,15 +445,21 @@ export async function createStockFromAssignment(
     arr.push(f);
     fillsByPos.set(f.position_id, arr);
   }
+  const expiryByPos = new Map(parents.map((p) => [p.id, p.expiry]));
   const remainingByPos = new Map<string, number>();
   for (const id of ids) {
     const fills = fillsByPos.get(id) ?? [];
     const opened = fills
       .filter((f) => f.fill_type === "open")
       .reduce((s, f) => s + f.contracts, 0);
-    const closed = fills
-      .filter((f) => f.fill_type === "close")
-      .reduce((s, f) => s + f.contracts, 0);
+    const closeFills = fills.filter((f) => f.fill_type === "close");
+    const expiry = expiryByPos.get(id);
+    const syntheticIdx = closeFills.findIndex(
+      (f) => f.fill_date === expiry && Number(f.premium ?? 0) === 0,
+    );
+    const realCloseFills =
+      syntheticIdx === -1 ? closeFills : closeFills.filter((_, i) => i !== syntheticIdx);
+    const closed = realCloseFills.reduce((s, f) => s + f.contracts, 0);
     remainingByPos.set(id, Math.max(0, opened - closed));
   }
 

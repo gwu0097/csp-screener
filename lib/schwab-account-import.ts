@@ -428,6 +428,29 @@ async function pollOneAccount(
           const created = await createStockFromAssignment(adminUserId, [pos.id]);
           if (created.status !== 200) {
             errors.push(`activity ${txn.activityId}: createStockFromAssignment failed (status ${created.status})`);
+          } else {
+            // createStockFromAssignment always returns HTTP 200 even
+            // when it skips every parent — the caller has to read the
+            // body to find out (2026-09-18 FN incident: a skip here
+            // was silently treated as success, and the resulting
+            // missing stock position meant the follow-on stock-sale
+            // fills failed with "no open stock_long position" days
+            // later with no link back to this root cause). "already
+            // exists" is the one skip reason that's a normal,
+            // idempotent no-op (a retry of an already-processed
+            // assignment) — anything else means the stock position
+            // this assignment should have created is missing.
+            const body = (await created.clone().json()) as {
+              skipped?: Array<{ parentId: string; reason: string }>;
+            };
+            const realSkips = (body.skipped ?? []).filter(
+              (s) => !s.reason.includes("already exists"),
+            );
+            if (realSkips.length > 0) {
+              errors.push(
+                `activity ${txn.activityId}: createStockFromAssignment skipped position ${pos.id} — ${realSkips.map((s) => s.reason).join("; ")}`,
+              );
+            }
           }
         } else {
           const shares = assignResult.contracts_closed * 100;
