@@ -1873,6 +1873,16 @@ export type T0Result =
 // still catching the ~20% of schwab_t0 rows landing 16+ days out.
 const FRONT_WEEK_MAX_DAYS = 9;
 
+// Width of the T0/T1 chain request window past fromDate. Must reach the
+// next MONTHLY expiry from any date — third Friday to third Friday can
+// be 35 days apart. It was 15 until 2026-09-26, which silently lost T0
+// (no_options_data, unrecoverable post-print) for every monthly-only
+// reporter more than ~2 weeks before the third Friday: A/BOX/SJM/VEEV/
+// WSM (week of 2026-08-24), AZO/PAYX/DRI (week of 2026-09-21). Weekly
+// symbols are unaffected — earliestChainExpiryOnOrAfter() still picks
+// the first listed expiry ≥ minExpiryIso.
+const CHAIN_WINDOW_DAYS = 40;
+
 export async function captureEarningsT0(
   symbol: string,
   earningsDate: string,
@@ -1945,8 +1955,8 @@ export async function captureEarningsT0(
   }
 
   // Earliest LISTED expiry on or after earningsDate+1. Weekly symbols:
-  // the same-week Friday. Monthly-only symbols: the next monthly. A
-  // 16-day range window covers both without assuming weeklies exist.
+  // the same-week Friday. Monthly-only symbols: the next monthly, up to
+  // 35 days out — see CHAIN_WINDOW_DAYS.
   const minExpiryIso = nextWeekdayOnOrAfterIso(addDaysIso(earningsDate, 1));
   // Schwab's chains endpoint 400s ("Invalid Paramter/Value") when
   // fromDate is in the past, even though toDate is still current/future
@@ -1961,7 +1971,7 @@ export async function captureEarningsT0(
   const fromDateIso = minExpiryIso > todayEasternIso() ? minExpiryIso : todayEasternIso();
   let chain: SchwabOptionsChain;
   try {
-    chain = await getOptionsChainRange(sym, fromDateIso, addDaysIso(fromDateIso, 15), "ALL");
+    chain = await getOptionsChainRange(sym, fromDateIso, addDaysIso(fromDateIso, CHAIN_WINDOW_DAYS), "ALL");
   } catch (e) {
     console.warn(
       `[encyclopedia:T0] chain(${sym}, ≥${minExpiryIso}) failed: ${e instanceof Error ? e.message : e}`,
@@ -2188,7 +2198,7 @@ export async function captureEarningsT1(
   const fromDateIso = minExpiryIso > todayEasternIso() ? minExpiryIso : todayEasternIso();
   let chain: SchwabOptionsChain;
   try {
-    chain = await getOptionsChainRange(sym, fromDateIso, addDaysIso(fromDateIso, 15), "ALL");
+    chain = await getOptionsChainRange(sym, fromDateIso, addDaysIso(fromDateIso, CHAIN_WINDOW_DAYS), "ALL");
   } catch (e) {
     console.warn(
       `[encyclopedia:T1] chain(${sym}, ≥${minExpiryIso}) failed: ${e instanceof Error ? e.message : e}`,
