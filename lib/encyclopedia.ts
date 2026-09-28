@@ -2734,7 +2734,11 @@ export type T0Candidate = { symbol: string; earnings_date: string; timing: "amc"
 // a local read-only chain-detail capture) without burning API budget.
 export async function selectT0Candidates(): Promise<T0Candidate[]> {
   const todayEt = todayEasternIso();
-  const tomorrowEt = addDaysIso(todayEt, 1);
+  // Next weekday, not calendar tomorrow: a Monday BMO's T0 session is the
+  // prior Friday, and a Friday run bounded at Saturday never saw it —
+  // CCL (2026-09-28 BMO) went uncaptured that way with the health panel
+  // reporting "nothing due".
+  const nextSessionEt = nextWeekdayOnOrAfterIso(addDaysIso(todayEt, 1));
   const byKey = new Map<string, T0Candidate>();
 
   // Source 1: live earnings calendar ∩ app-known symbols. Carries real
@@ -2757,7 +2761,7 @@ export async function selectT0Candidates(): Promise<T0Candidate[]> {
     .from("earnings_history")
     .select("symbol,earnings_date,iv_before")
     .gte("earnings_date", todayEt)
-    .lte("earnings_date", tomorrowEt)
+    .lte("earnings_date", nextSessionEt)
     .is("iv_before", null);
   for (const r of (pre.data ?? []) as Array<{ symbol: string; earnings_date: string }>) {
     const sym = r.symbol.toUpperCase();

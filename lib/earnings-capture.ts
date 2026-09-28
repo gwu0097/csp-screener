@@ -39,7 +39,17 @@ const CRUSH_T1_PHASE = "crush-t1";
 // Benign, expected skip reasons — never real failures, so excluded from
 // the errored/outstanding counts a health rollup reports. Same
 // vocabulary already returned by captureEarningsT0/T1 (see CaptureItem).
-const BENIGN_SKIP_REASONS = new Set(["already_captured", "manual_row", "row_not_found", "no_t0_data"]);
+// premature_capture_session is T0's session guard declining a candidate
+// outside its one valid session (AMC due tomorrow, or a BMO already
+// printed) — the correctly-timed run owns it, so counting it here only
+// double-reported the same event as "failed" on its neighbouring days.
+const BENIGN_SKIP_REASONS = new Set([
+  "already_captured",
+  "manual_row",
+  "row_not_found",
+  "no_t0_data",
+  "premature_capture_session",
+]);
 
 async function writeCrushHealthRollup(
   phase: typeof CRUSH_T0_PHASE | typeof CRUSH_T1_PHASE,
