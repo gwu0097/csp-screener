@@ -93,7 +93,13 @@ export async function editDiscordAlert(
     return { ok: false, error: "DISCORD_WEBHOOK_URL not configured" };
   }
   const mention = opts?.mention ?? true;
-  const payload = buildPayload(text, mention);
+  // Discord never pushes a notification for a mention added by an edit —
+  // the @ renders, but the phone stays silent. Every courier failure
+  // edits its quiet "starting" placeholder, so failures (e.g. the
+  // 2026-09-28 Robinhood login expiry) showed a tag nobody was pinged
+  // for. Edit without the mention, then post a short new message that
+  // carries it.
+  const payload = buildPayload(text, false);
   try {
     const res = await fetch(`${webhookUrl}/messages/${messageId}`, {
       method: "PATCH",
@@ -103,6 +109,10 @@ export async function editDiscordAlert(
     if (res.status !== 200) {
       const body = await res.text().catch(() => "");
       return { ok: false, error: `Discord HTTP ${res.status}: ${body.slice(0, 200)}` };
+    }
+    if (mention) {
+      const headline = text.split("\n")[0];
+      await sendDiscordAlert(`${headline}\n↑ details in the message above`, { mention: true });
     }
     return { ok: true };
   } catch (e) {

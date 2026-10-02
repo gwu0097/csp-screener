@@ -288,7 +288,17 @@ async function main() {
     const consecutiveFailures = (prev.consecutiveFailures ?? 0) + 1;
     const streak = consecutiveFailures > 1 ? ` (${ordinal(consecutiveFailures)} consecutive run)` : "";
     const endClock = fmtClock(new Date());
-    await finish(`🔴 ${endClock} — Robinhood courier ${outcomePhrase}${streak}.\n${detail}`);
+    // Login expiry needs a human, so name it in the headline (it's what
+    // the phone notification shows) instead of leaving it inside the raw
+    // CLI error. Claude's own login: refresh ~/.config/robinhood-agent/
+    // claude_oauth_token via `claude setup-token`. Robinhood's: /mcp.
+    const authExpired = /OAuth session expired|Failed to authenticate|Needs authentication|401|unauthori[sz]ed/i.test(detail);
+    const authLine = authExpired
+      ? "🔑 LOGIN EXPIRED — re-authenticate: Robinhood via `claude` → /mcp → robinhood; if the error says \"Failed to authenticate\", Claude's own token: `claude setup-token` → ~/.config/robinhood-agent/claude_oauth_token.\n"
+      : "";
+    await finish(
+      `🔴 ${endClock} — Robinhood courier ${authExpired ? "LOGIN EXPIRED — " : ""}${outcomePhrase}${streak}.\n${authLine}${detail}`,
+    );
     if (!opts?.reachedServer) {
       await logLocalAttempt(detail);
     }
