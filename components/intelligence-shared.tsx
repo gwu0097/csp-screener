@@ -61,6 +61,7 @@ export type PresetKey =
   | "month"
   | "last_month"
   | "last_quarter"
+  | "prev_quarter"
   | "ytd"
   | "all";
 
@@ -275,6 +276,7 @@ export const PRESET_OPTIONS: Array<{ value: PresetKey; label: string }> = [
   { value: "month", label: "Month" },
   { value: "last_month", label: "Last Month" },
   { value: "last_quarter", label: "Quarter" },
+  { value: "prev_quarter", label: "Last Quarter" },
   { value: "ytd", label: "YTD" },
   { value: "all", label: "All Time" },
 ];
@@ -333,6 +335,12 @@ export function presetToRange(key: PresetKey, today: Date = new Date()): DateRan
     // read "Quarter"). The old "previous quarter" behavior was
     // misleading: clicking "Quarter" in May surfaced Jan–Mar.
     return { from: iso(startOfQuarter(t)), to: iso(endOfQuarter(t)) };
+  }
+  if (key === "prev_quarter") {
+    // The full previous calendar quarter (Oct → Jul 1–Sep 30). Named
+    // prev_ because "last_quarter" is taken by the current-quarter preset.
+    const prevQuarter = new Date(Date.UTC(t.getUTCFullYear(), startOfQuarter(t).getUTCMonth() - 3, 15));
+    return { from: iso(startOfQuarter(prevQuarter)), to: iso(endOfQuarter(prevQuarter)) };
   }
   if (key === "ytd") {
     return { from: `${t.getUTCFullYear()}-01-01`, to: todayStr };
