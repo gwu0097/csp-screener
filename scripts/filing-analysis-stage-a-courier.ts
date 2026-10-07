@@ -56,6 +56,9 @@ const CLAUDE_BIN = "/Users/raitsai/.local/bin/claude";
 // calibration run. 240s gives real headroom above the largest observed
 // case rather than the old budget's now-stale comment.
 const CLAUDE_TIMEOUT_MS = 240_000;
+// Research page's Earnings Reports tab (components/research-stock-view.tsx
+// honours ?tab=), linked from each captured row in the Discord summary.
+const REPORT_URL_BASE = "https://csp-screener.vercel.app/research";
 const RUN_BUDGET_MS = 600_000; // stop starting new candidates past this, matches T0/T1's per-run budget philosophy
 
 // Whether a "stated" card whose metric_evidence doesn't verify against
@@ -442,7 +445,9 @@ async function main() {
     : results.map((r) => {
         if (r.status === "captured") {
           const dropNote = r.droppedCount > 0 ? ` ⚠️ ${r.droppedCount} dropped: ${r.droppedDetail.join("; ")}` : "";
-          return `${r.symbol} ✅ (${r.analysisChars} chars, ${r.countsSummary})${dropNote}`;
+          // <url> suppresses Discord's link-preview embed (one per symbol otherwise).
+          const link = `<${REPORT_URL_BASE}/${encodeURIComponent(r.symbol)}?tab=tenk>`;
+          return `${r.symbol} ✅ (${r.analysisChars} chars, ${r.countsSummary})${dropNote}\n  ${link}`;
         }
         if (r.status === "pending") return `${r.symbol} ⏳ pending — not yet filed`;
         return `${r.symbol} ⚠️ ${r.status}: ${r.detail}`;
