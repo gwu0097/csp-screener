@@ -9,6 +9,8 @@
 import { Fragment, useCallback, useEffect, useState } from "react";
 import {
   Check,
+  ChevronDown,
+  ChevronRight,
   ClipboardCopy,
   ExternalLink,
   Loader2,
@@ -16,6 +18,7 @@ import {
   RefreshCw,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import { ErrorBanner } from "@/components/error-banner";
 import {
   interpretError,
@@ -290,10 +293,11 @@ export function SecFilingsTab({
           </div>
         ) : (
           <div className="space-y-2">
-            {releases.map((r) => (
+            {releases.map((r, i) => (
               <ReleaseCard
                 key={r.id}
                 r={r}
+                defaultOpen={i === 0}
                 analysis={analysisFor("8-K", r.quarter)}
                 onAnalysesChanged={loadAnalyses}
               />
@@ -566,13 +570,18 @@ export function SecFilingsTab({
 
 function ReleaseCard({
   r,
+  defaultOpen,
   analysis,
   onAnalysesChanged,
 }: {
   r: EarningsReleaseRow;
+  // Releases list newest-first; only the newest starts expanded so the
+  // tab doesn't grow by a full report every quarter.
+  defaultOpen: boolean;
   analysis: FilingAnalysis | null;
   onAnalysesChanged: () => void | Promise<void>;
 }) {
+  const [open, setOpen] = useState(defaultOpen);
   const [aiOpen, setAiOpen] = useState(false);
   const [aiPasting, setAiPasting] = useState(false);
   const archiveHref =
@@ -599,14 +608,27 @@ function ReleaseCard({
 
   return (
     <div className="rounded-md border border-border bg-background/60 p-3">
-      <div className="mb-2 flex items-baseline justify-between gap-2">
+      <div className={cn("flex items-baseline justify-between gap-2", open && "mb-2")}>
         <div className="text-base font-semibold">
-          {r.quarter}
+          <button
+            type="button"
+            onClick={() => setOpen((v) => !v)}
+            className="inline-flex items-center gap-1 hover:text-foreground/80"
+            aria-expanded={open}
+            title={open ? "Collapse this quarter" : "Expand this quarter"}
+          >
+            {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+            {r.quarter}
+          </button>
           {analysis && (
             <span className="ml-2 align-middle">
               <AiSummaryBadge
-                open={aiOpen}
-                onClick={() => setAiOpen((v) => !v)}
+                open={open && aiOpen}
+                onClick={() => {
+                  // Opening the summary of a collapsed quarter expands it too.
+                  setOpen(true);
+                  setAiOpen((v) => !(open && v));
+                }}
               />
             </span>
           )}
@@ -617,7 +639,13 @@ function ReleaseCard({
         </div>
         <div className="flex items-center gap-3">
           {!analysis && (
-            <AddAiSummaryButton compact onClick={() => setAiPasting(true)} />
+            <AddAiSummaryButton
+              compact
+              onClick={() => {
+                setOpen(true);
+                setAiPasting(true);
+              }}
+            />
           )}
           <ExportFilingButton
             symbol={r.symbol}
@@ -640,6 +668,8 @@ function ReleaseCard({
         </div>
       </div>
 
+      {open && (
+      <>
       <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 font-mono text-[11px] sm:grid-cols-4">
         <Stat label="Revenue" value={fmtMillions(r.revenue)} />
         <Stat
@@ -744,6 +774,8 @@ function ReleaseCard({
         filingType="8-K"
         periodEnd={r.period_end}
       />
+      </>
+      )}
     </div>
   );
 }

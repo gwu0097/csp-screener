@@ -148,6 +148,19 @@ export function EarningsCardsView({ cards }: { cards: CardsPayload }) {
                 )}
               </div>
             )}
+            {(key === "red_flags" || key === "strengths") && cards.section_summaries?.[key] && (
+              <div
+                className={cn(
+                  "mt-1.5 rounded border-l-2 bg-background/40 px-2 py-1.5 text-[11px] leading-relaxed text-foreground/90",
+                  key === "red_flags" ? "border-rose-500/60" : "border-emerald-500/60",
+                )}
+              >
+                <span className="mr-1 text-[9px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  Summary
+                </span>
+                {cards.section_summaries[key]}
+              </div>
+            )}
           </div>
         );
       })}

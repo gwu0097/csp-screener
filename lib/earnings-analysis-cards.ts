@@ -42,7 +42,15 @@ export type CardsPayload = {
     red_flags: Array<Card | PendingStub>;
     strengths: Card[];
   };
+  // One-paragraph wrap-up of the red_flags / strengths cards. Optional:
+  // reports written before 2026-10-06 have none, and a summary is
+  // withheld when any card in its section failed validation (it could
+  // otherwise restate a claim whose evidence didn't check out).
+  section_summaries?: Partial<Record<"red_flags" | "strengths", string>>;
 };
+
+export type SummarizedSectionKey = "red_flags" | "strengths";
+const SUMMARIZED_SECTIONS: SummarizedSectionKey[] = ["red_flags", "strengths"];
 
 export function isPendingStub(c: Card | PendingStub): c is PendingStub {
   return (c as PendingStub).status === "pending_10q";
@@ -67,6 +75,10 @@ Output ONLY a single JSON object, no prose, no markdown fences, matching this ex
     "what_changed_this_quarter": [ <card>, ... ],
     "red_flags": [ <card>, ... ],
     "strengths": [ <card>, ... ]
+  },
+  "section_summaries": {
+    "red_flags": "one paragraph",
+    "strengths": "one paragraph"
   }
 }
 
@@ -94,6 +106,8 @@ what_changed_this_quarter — built ONLY from explicit sequential (quarter-over-
 red_flags — real risks only, do not manufacture one to fill the section; an empty array is a valid, honest answer for a clean quarter. Do NOT write anything about litigation, legal proceedings, or subsequent events — that material requires the 10-Q, which you don't have; leave those out entirely rather than guess.
 
 strengths — durable, structural positives: what's working because of how the business is built, not a one-quarter tailwind. Still needs its own metric evidence per card, same as every other section.
+
+section_summaries — for red_flags and for strengths, one paragraph (3-5 sentences) pulling that section's cards together into a single read: what they add up to and which one matters most. Use only the claims and figures already in that section's cards — introduce nothing new. If a section has no cards, use an empty string.
 
 Press release text (SEC EDGAR, live-fetched, HTML-stripped):
 
@@ -209,7 +223,7 @@ export function parseAndValidateCards(
   pressText: string,
   opts: { enforceStatedVerification: boolean },
 ): ParseResult {
-  const parsed = extractJsonObject(raw) as { sections?: Record<string, unknown> } | null;
+  const parsed = extractJsonObject(raw) as { sections?: Record<string, unknown>; section_summaries?: Record<string, unknown> } | null;
   if (!parsed || typeof parsed !== "object") return { ok: false, reason: "no JSON object found in claude -p output" };
   const rawSections = parsed.sections;
   if (!rawSections || typeof rawSections !== "object") return { ok: false, reason: "missing top-level sections object" };
@@ -296,6 +310,17 @@ export function parseAndValidateCards(
     }
   }
 
+  const summaries: NonNullable<CardsPayload["section_summaries"]> = {};
+  const rawSummaries = parsed.section_summaries;
+  for (const key of SUMMARIZED_SECTIONS) {
+    const text = rawSummaries && typeof rawSummaries[key] === "string" ? (rawSummaries[key] as string).trim() : "";
+    if (!text || sections[key].length === 0) continue;
+    // Not recorded in `dropped`: the courier pings on any dropped card,
+    // and a withheld summary isn't a new problem — the dropped card is.
+    if (dropped.some((d) => d.section === key)) continue;
+    summaries[key] = text.slice(0, 1500);
+  }
+
   // The one code-guaranteed card — never requested of the model.
   sections.red_flags.push(buildPendingLegalStub());
 
@@ -312,6 +337,7 @@ export function parseAndValidateCards(
       "what_changed_this_quarter: full comparison against last quarter's saved analysis",
     ],
     sections,
+    ...(Object.keys(summaries).length > 0 ? { section_summaries: summaries } : {}),
   };
 
   return { ok: true, payload, dropped, verificationLog, basisDefaulted };
@@ -345,6 +371,8 @@ export function renderCardsAsText(payload: CardsPayload): string {
       lines.push(`  ${c.argument}`);
       lines.push(`  Evidence: ${c.metric_evidence.join("; ")}`);
     }
+    const summary = key === "red_flags" || key === "strengths" ? payload.section_summaries?.[key] : undefined;
+    if (summary) lines.push(`Summary: ${summary}`);
     lines.push("");
   }
   return lines.join("\n").trim();
