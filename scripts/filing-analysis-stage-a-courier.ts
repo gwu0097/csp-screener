@@ -107,8 +107,23 @@ async function runCardsPipeline(opts: {
       maxBuffer: 10 * 1024 * 1024,
     });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    return { status: "claude_failed", detail: msg };
+    // Not e.message: execFileSync's message is "Command failed: <argv>",
+    // and argv carries the whole ~100k-char prompt — the real reason sat
+    // past Discord's truncation point (2026-09-28..10-06 runs). Report
+    // what the child actually printed instead.
+    const err = e as { status?: number | null; code?: string; stdout?: string | Buffer | null; stderr?: string | Buffer | null };
+    const text = (v: string | Buffer | null | undefined) => (typeof v === "string" ? v : (v?.toString("utf8") ?? "")).trim();
+    const out = text(err.stdout);
+    const errText = text(err.stderr);
+    const detail =
+      [
+        `exit=${err.status ?? err.code ?? "unknown"}`,
+        out ? `stdout: ${out.slice(0, 400)}` : null,
+        errText ? `stderr: ${errText.slice(0, 400)}` : null,
+      ]
+        .filter(Boolean)
+        .join(" | ") || (e instanceof Error ? e.message.slice(0, 400) : String(e).slice(0, 400));
+    return { status: "claude_failed", detail };
   }
   const callSeconds = (Date.now() - callStart) / 1000;
   console.log(`[filing-analysis-stage-a] ${opts.symbol}: claude -p returned in ${callSeconds.toFixed(1)}s, ${claudeOut.length} chars`);
