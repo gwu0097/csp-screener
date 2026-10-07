@@ -497,14 +497,42 @@ export async function fetchAndStoreEarningsRelease(
   }
 
   const sb = createServerClient();
-  const upsert = await sb.from("earnings_releases").upsert(row, { onConflict: "symbol,quarter" });
-  if (upsert.error) {
-    return { ok: false, status: 500, error: `DB upsert failed: ${upsert.error.message}`, reason: "db_error" };
+  // Same filing already stored (symbol + accession is unique) → update
+  // that row in place and keep its quarter/period_end. A re-read can
+  // derive a different label for the same document (ACN 2026-10-01:
+  // stored "Q4 FY2026" via the earnings_history hint, re-read without
+  // it), and the (symbol, quarter) upsert below then missed the row and
+  // tried to insert a duplicate accession. The stored label is the one
+  // the rest of the app (filing_analyses.period, the tab) already keys on.
+  const existing = await sb
+    .from("earnings_releases")
+    .select("id,quarter,period_end")
+    .eq("symbol", sym)
+    .eq("accession_number", chosen.accessionNumber)
+    .limit(1);
+  if (existing.error) {
+    return { ok: false, status: 500, error: `DB read failed: ${existing.error.message}`, reason: "db_error" };
+  }
+  const prior = ((existing.data ?? []) as Array<{ id: string; quarter: string; period_end: string | null }>)[0];
+  let storedQuarter: string = quarter;
+  if (prior) {
+    storedQuarter = prior.quarter;
+    row.quarter = prior.quarter;
+    if (prior.period_end) row.period_end = prior.period_end;
+    const update = await sb.from("earnings_releases").update(row).eq("id", prior.id);
+    if (update.error) {
+      return { ok: false, status: 500, error: `DB update failed: ${update.error.message}`, reason: "db_error" };
+    }
+  } else {
+    const upsert = await sb.from("earnings_releases").upsert(row, { onConflict: "symbol,quarter" });
+    if (upsert.error) {
+      return { ok: false, status: 500, error: `DB upsert failed: ${upsert.error.message}`, reason: "db_error" };
+    }
   }
 
   return {
     ok: true,
-    quarter,
+    quarter: storedQuarter,
     accessionNumber: chosen.accessionNumber,
     filingDate: chosen.filingDate,
     exhibitUrl: exhibit.url,
