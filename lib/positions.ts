@@ -385,7 +385,7 @@ export async function createStockFromAssignment(
   const lookup = await sb
     .from("positions")
     .select(
-      "id,symbol,broker,strike,expiry,total_contracts,avg_premium_sold,status",
+      "id,symbol,broker,strike,expiry,total_contracts,avg_premium_sold,status,closed_date",
     )
     .in("id", ids)
     .eq("user_id", userId);
@@ -401,6 +401,7 @@ export async function createStockFromAssignment(
     total_contracts: number | null;
     avg_premium_sold: number | null;
     status: string;
+    closed_date: string | null;
   };
   const parents = (lookup.data ?? []) as Parent[];
 
@@ -446,6 +447,10 @@ export async function createStockFromAssignment(
     fillsByPos.set(f.position_id, arr);
   }
   const expiryByPos = new Map(parents.map((p) => [p.id, p.expiry]));
+  // An early assignment's synthetic close is dated the assignment day
+  // (recordAssignment's assignedDate), which is also the parent's
+  // closed_date — match either.
+  const closedDateByPos = new Map(parents.map((p) => [p.id, p.closed_date]));
   const remainingByPos = new Map<string, number>();
   for (const id of ids) {
     const fills = fillsByPos.get(id) ?? [];
@@ -454,8 +459,9 @@ export async function createStockFromAssignment(
       .reduce((s, f) => s + f.contracts, 0);
     const closeFills = fills.filter((f) => f.fill_type === "close");
     const expiry = expiryByPos.get(id);
+    const closedDate = closedDateByPos.get(id);
     const syntheticIdx = closeFills.findIndex(
-      (f) => f.fill_date === expiry && Number(f.premium ?? 0) === 0,
+      (f) => (f.fill_date === expiry || f.fill_date === closedDate) && Number(f.premium ?? 0) === 0,
     );
     const realCloseFills =
       syntheticIdx === -1 ? closeFills : closeFills.filter((_, i) => i !== syntheticIdx);

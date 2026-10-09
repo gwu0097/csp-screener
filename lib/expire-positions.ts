@@ -396,6 +396,12 @@ export async function recordAssignment(
   positionId: string,
   stockPriceAtExpiry: number,
   userId: string,
+  // The day the assignment actually happened, when known (the Schwab
+  // import passes the broker event's date). Defaults to the expiry —
+  // right for the manual end-of-expiry flows, wrong for an EARLY
+  // assignment, which otherwise landed in the expiry's week/month
+  // (CELH 2026-10-09: assigned a week before its 10-16 expiry).
+  assignedDate?: string,
 ): Promise<{
   ok: boolean;
   realized_pnl: number;
@@ -448,6 +454,7 @@ export async function recordAssignment(
 
   const strike = Number(pos.strike);
   const stockPrice = Number(stockPriceAtExpiry);
+  const closeDate = assignedDate && assignedDate < pos.expiry ? assignedDate : pos.expiry;
 
   // Option A accounting: the option closes with full premium retained
   // (synthetic close at $0, same as worthless) — this generalizes to
@@ -464,7 +471,7 @@ export async function recordAssignment(
       fill_type: "close",
       contracts: remaining,
       premium: 0,
-      fill_date: pos.expiry,
+      fill_date: closeDate,
     },
   ];
   const realized_pnl =
@@ -481,7 +488,7 @@ export async function recordAssignment(
     .update({
       status: "assigned",
       realized_pnl,
-      closed_date: pos.expiry,
+      closed_date: closeDate,
       notes,
       updated_at: new Date().toISOString(),
     })
@@ -500,7 +507,7 @@ export async function recordAssignment(
     fill_type: "close",
     contracts: remaining,
     premium: 0,
-    fill_date: pos.expiry,
+    fill_date: closeDate,
   });
   if (closeFill.error) {
     console.warn(

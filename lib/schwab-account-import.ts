@@ -457,6 +457,14 @@ async function pollOneAccount(
       }
 
       if (desc.includes("Assignment")) {
+        // Market (Eastern) date of the event. Schwab posts assignments
+        // overnight (~06:40 UTC); Eastern keeps that on the right day.
+        const eventDateEt = new Intl.DateTimeFormat("en-CA", {
+          timeZone: "America/New_York",
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+        }).format(new Date(txn.time));
         // Assignment always transacts at the strike — confirmed live
         // against real data (the paired stock leg's price equals the
         // option's strike exactly), so there's no separate "market
@@ -464,7 +472,7 @@ async function pollOneAccount(
         const assigned: Array<{ id: string; avg_premium_sold: number | null; contracts: number }> = [];
         const failures: string[] = [];
         for (const t of targets) {
-          const assignResult = await recordAssignment(t.id, strike, adminUserId);
+          const assignResult = await recordAssignment(t.id, strike, adminUserId, eventDateEt);
           if (!assignResult.ok) failures.push(`${t.id}: ${assignResult.reason ?? "unknown"}`);
           else assigned.push({ id: t.id, avg_premium_sold: t.avg_premium_sold, contracts: assignResult.contracts_closed });
         }
