@@ -737,22 +737,29 @@ export async function runBulkCreate(userId: string, body: BulkBody): Promise<Nex
       continue;
     }
 
+    // Every open lot, oldest first — not just one. A multi-row
+    // assignment (e.g. CELH 2026-10-09: 3 puts stored as a 1-contract
+    // and a 2-contract row) mints one stock_long row per put row, so a
+    // single sale of all the shares has to draw down several lots. The
+    // old .limit(1) saw only the first lot and rejected the sale.
     const lookup = await supabase
       .from("positions")
       .select(
-        "id,symbol,total_contracts,entry_stock_price,position_type,status,realized_pnl,notes",
+        "id,symbol,total_contracts,entry_stock_price,position_type,status,realized_pnl,notes,created_at",
       )
       .eq("user_id", userId)
       .eq("symbol", symbol)
       .eq("broker", broker)
       .eq("position_type", "stock_long")
       .eq("status", "open")
-      .limit(1);
+      // created_at only: lib/supabase's builder keeps just the last
+      // .order() call, and lots are created in the order they opened.
+      .order("created_at", { ascending: true });
     if (lookup.error) {
       errors.push(`stock ${symbol}: lookup failed — ${lookup.error.message}`);
       continue;
     }
-    const stockRow = ((lookup.data ?? []) as Array<{
+    const stockRows = (lookup.data ?? []) as Array<{
       id: string;
       symbol: string;
       total_contracts: number;
@@ -760,53 +767,73 @@ export async function runBulkCreate(userId: string, body: BulkBody): Promise<Nex
       status: string;
       realized_pnl: number | null;
       notes: string | null;
-    }>)[0];
-    if (!stockRow) {
+    }>;
+    if (stockRows.length === 0) {
       errors.push(
         `stock ${symbol}: no open stock_long position for broker=${broker}`,
       );
       continue;
     }
 
-    const openingShares = Number(stockRow.total_contracts ?? 0);
-    const alreadyPlanned = plannedSharesByPos.get(stockRow.id) ?? 0;
-    const availableShares = openingShares - alreadyPlanned;
-    if (shares > availableShares) {
+    const lots = stockRows.map((row) => {
+      const openingShares = Number(row.total_contracts ?? 0);
+      const alreadyPlanned = plannedSharesByPos.get(row.id) ?? 0;
+      return { row, openingShares, available: Math.max(0, openingShares - alreadyPlanned) };
+    });
+    const totalAvailable = lots.reduce((n, l) => n + l.available, 0);
+    if (shares > totalAvailable) {
+      const totalPlanned = lots.reduce((n, l) => n + (plannedSharesByPos.get(l.row.id) ?? 0), 0);
       errors.push(
-        `stock ${symbol}: tried to sell ${shares} shares but only ${availableShares} remaining` +
-          (alreadyPlanned > 0 ? ` (${alreadyPlanned} already pending in this batch)` : ""),
+        `stock ${symbol}: tried to sell ${shares} shares but only ${totalAvailable} remaining` +
+          (totalPlanned > 0 ? ` (${totalPlanned} already pending in this batch)` : ""),
       );
       continue;
     }
-    plannedSharesByPos.set(stockRow.id, alreadyPlanned + shares);
-    const currentShares = openingShares;
-    const costBasis =
-      stockRow.entry_stock_price !== null
-        ? Number(stockRow.entry_stock_price)
-        : 0;
-    const stockPnl = Math.round((price - costBasis) * shares * 100) / 100;
-    const prevRealized = Number(stockRow.realized_pnl ?? 0) || 0;
-    const newRealized = Math.round((prevRealized + stockPnl) * 100) / 100;
-    const remainingShares = availableShares - shares;
-    const isFullClose = remainingShares === 0;
 
-    stockPlans.push({
-      input: s,
-      symbol,
-      broker,
-      date,
-      stockRowId: stockRow.id,
-      currentShares,
-      shares,
-      price,
-      costBasis,
-      stockPnl,
-      prevRealized,
-      newRealized,
-      remainingShares,
-      isFullClose,
-      prevNotes: stockRow.notes,
-    });
+    // FIFO across lots. Each slice is its own plan on its own row; the
+    // 2nd+ slice gets a suffixed externalId since fills.external_id is
+    // unique (stock sales are not de-duplicated by it — the importer's
+    // processed flag covers re-delivery).
+    let toSell = shares;
+    let slice = 0;
+    for (const lot of lots) {
+      if (toSell <= 0) break;
+      if (lot.available <= 0) continue;
+      const take = Math.min(toSell, lot.available);
+      toSell -= take;
+      slice += 1;
+      const stockRow = lot.row;
+      const alreadyPlanned = plannedSharesByPos.get(stockRow.id) ?? 0;
+      plannedSharesByPos.set(stockRow.id, alreadyPlanned + take);
+      const costBasis =
+        stockRow.entry_stock_price !== null
+          ? Number(stockRow.entry_stock_price)
+          : 0;
+      const stockPnl = Math.round((price - costBasis) * take * 100) / 100;
+      const prevRealized = Number(stockRow.realized_pnl ?? 0) || 0;
+      const newRealized = Math.round((prevRealized + stockPnl) * 100) / 100;
+      const remainingShares = lot.available - take;
+      const input =
+        slice > 1 && s.externalId ? { ...s, externalId: `${s.externalId}:lot${slice}` } : s;
+
+      stockPlans.push({
+        input,
+        symbol,
+        broker,
+        date,
+        stockRowId: stockRow.id,
+        currentShares: lot.openingShares,
+        shares: take,
+        price,
+        costBasis,
+        stockPnl,
+        prevRealized,
+        newRealized,
+        remainingShares,
+        isFullClose: remainingShares === 0,
+        prevNotes: stockRow.notes,
+      });
+    }
   }
 
   // Phase 1 gate — any error means zero writes happen.

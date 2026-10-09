@@ -377,9 +377,15 @@ async function pollOneAccount(
       // rule as the TRADE branch above.
       const rdBroker = optionType === "call" ? "covered_calls" : broker;
 
+      // Every open row for this contract, oldest first — the same
+      // contract can be split across rows (separate orders), and Schwab
+      // reports the event once for the whole quantity. The old
+      // .limit(1) applied it to the first row only: CELH 2026-10-09,
+      // 3 puts assigned as a 1-row + 2-row pair, recorded 1 contract /
+      // 100 shares and left 2 contracts "open".
       const posRes = await sb
         .from("positions")
-        .select("id,avg_premium_sold")
+        .select("id,avg_premium_sold,created_at")
         .eq("user_id", adminUserId)
         .eq("broker", rdBroker)
         .eq("symbol", symbol)
@@ -387,10 +393,9 @@ async function pollOneAccount(
         .eq("expiry", expiry)
         .eq("option_type", optionType)
         .eq("status", "open")
-        .limit(1)
-        .maybeSingle();
-      const pos = posRes.data as { id: string; avg_premium_sold: number | null } | null;
-      if (!pos) {
+        .order("created_at", { ascending: true });
+      const candidates = (posRes.data ?? []) as Array<{ id: string; avg_premium_sold: number | null }>;
+      if (candidates.length === 0) {
         await markProcessed(
           sb,
           row.id,
@@ -401,14 +406,52 @@ async function pollOneAccount(
         continue;
       }
 
+      // Remaining contracts per row (opened − closed fills), then take
+      // whole rows oldest-first until Schwab's quantity is covered.
+      // recordAssignment / autoExpirePosition close a row's entire
+      // remainder, so a quantity that would split a row (or exceeds
+      // every row combined) is refused for manual review rather than
+      // over- or under-applied.
+      const eventContracts = Math.abs(leg.amount ?? 0);
+      const fillsRes = await sb
+        .from("fills")
+        .select("position_id,fill_type,contracts")
+        .in("position_id", candidates.map((c) => c.id))
+        .eq("user_id", adminUserId);
+      const remainingById = new Map<string, number>();
+      for (const f of (fillsRes.data ?? []) as Array<{ position_id: string; fill_type: string; contracts: number }>) {
+        const sign = f.fill_type === "open" ? 1 : f.fill_type === "close" ? -1 : 0;
+        remainingById.set(f.position_id, (remainingById.get(f.position_id) ?? 0) + sign * Number(f.contracts));
+      }
+      const targets: Array<{ id: string; avg_premium_sold: number | null; remaining: number }> = [];
+      let covered = 0;
+      for (const c of candidates) {
+        if (eventContracts > 0 && covered >= eventContracts) break;
+        const remaining = Math.max(0, remainingById.get(c.id) ?? 0);
+        if (remaining === 0) continue;
+        targets.push({ ...c, remaining });
+        covered += remaining;
+      }
+      if (eventContracts > 0 && covered !== eventContracts) {
+        const detail = `${symbol} $${strike}${optionType === "call" ? "C" : "P"} ${expiry}: Schwab reports ${eventContracts} contract(s), open rows hold ${targets.map((t) => t.remaining).join("+") || "0"} — can't apply whole rows exactly; review manually`;
+        await markProcessed(sb, row.id, "error_quantity_mismatch", detail);
+        errors.push(`activity ${txn.activityId}: ${detail}`);
+        continue;
+      }
+      const targetIds = targets.map((t) => t.id).join(", ");
+
       if (desc.includes("Expiration")) {
-        const result = await autoExpirePosition(pos.id, adminUserId);
-        if (result.ok) {
+        const failures: string[] = [];
+        for (const t of targets) {
+          const result = await autoExpirePosition(t.id, adminUserId);
+          if (!result.ok) failures.push(`${t.id}: ${result.reason ?? "unknown"}`);
+        }
+        if (failures.length === 0) {
           base.expirationsRecorded += 1;
-          await markProcessed(sb, row.id, "expired", `position ${pos.id}`);
+          await markProcessed(sb, row.id, "expired", `position ${targetIds}`);
         } else {
-          await markProcessed(sb, row.id, "error_expire_failed", result.reason ?? "unknown");
-          errors.push(`activity ${txn.activityId}: autoExpirePosition failed (${result.reason})`);
+          await markProcessed(sb, row.id, "error_expire_failed", failures.join("; "));
+          errors.push(`activity ${txn.activityId}: autoExpirePosition failed (${failures.join("; ")})`);
         }
         continue;
       }
@@ -418,14 +461,23 @@ async function pollOneAccount(
         // against real data (the paired stock leg's price equals the
         // option's strike exactly), so there's no separate "market
         // price at assignment" to look up.
-        const assignResult = await recordAssignment(pos.id, strike, adminUserId);
-        if (!assignResult.ok) {
-          await markProcessed(sb, row.id, "error_assignment_failed", assignResult.reason ?? "unknown");
-          errors.push(`activity ${txn.activityId}: recordAssignment failed (${assignResult.reason})`);
+        const assigned: Array<{ id: string; avg_premium_sold: number | null; contracts: number }> = [];
+        const failures: string[] = [];
+        for (const t of targets) {
+          const assignResult = await recordAssignment(t.id, strike, adminUserId);
+          if (!assignResult.ok) failures.push(`${t.id}: ${assignResult.reason ?? "unknown"}`);
+          else assigned.push({ id: t.id, avg_premium_sold: t.avg_premium_sold, contracts: assignResult.contracts_closed });
+        }
+        if (assigned.length === 0) {
+          await markProcessed(sb, row.id, "error_assignment_failed", failures.join("; "));
+          errors.push(`activity ${txn.activityId}: recordAssignment failed (${failures.join("; ")})`);
           continue;
         }
+        if (failures.length > 0) {
+          errors.push(`activity ${txn.activityId}: recordAssignment partially failed (${failures.join("; ")})`);
+        }
         if (optionType === "put") {
-          const created = await createStockFromAssignment(adminUserId, [pos.id]);
+          const created = await createStockFromAssignment(adminUserId, assigned.map((a) => a.id));
           if (created.status !== 200) {
             errors.push(`activity ${txn.activityId}: createStockFromAssignment failed (status ${created.status})`);
           } else {
@@ -448,28 +500,29 @@ async function pollOneAccount(
             );
             if (realSkips.length > 0) {
               errors.push(
-                `activity ${txn.activityId}: createStockFromAssignment skipped position ${pos.id} — ${realSkips.map((s) => s.reason).join("; ")}`,
+                `activity ${txn.activityId}: createStockFromAssignment skipped ${realSkips.map((s) => `${s.parentId} — ${s.reason}`).join("; ")}`,
               );
             }
           }
         } else {
-          const shares = assignResult.contracts_closed * 100;
-          const premiumPerShare = pos.avg_premium_sold !== null ? Number(pos.avg_premium_sold) : 0;
-          const reduced = await reduceStockLotForCallAssignment(
-            sb,
-            adminUserId,
-            symbol,
-            shares,
-            strike,
-            expiry,
-            premiumPerShare,
-          );
-          if (!reduced.ok) {
-            errors.push(`activity ${txn.activityId}: reduceStockLotForCallAssignment failed (${reduced.reason})`);
+          for (const a of assigned) {
+            const premiumPerShare = a.avg_premium_sold !== null ? Number(a.avg_premium_sold) : 0;
+            const reduced = await reduceStockLotForCallAssignment(
+              sb,
+              adminUserId,
+              symbol,
+              a.contracts * 100,
+              strike,
+              expiry,
+              premiumPerShare,
+            );
+            if (!reduced.ok) {
+              errors.push(`activity ${txn.activityId}: reduceStockLotForCallAssignment failed (${reduced.reason})`);
+            }
           }
         }
         base.assignmentsRecorded += 1;
-        await markProcessed(sb, row.id, "assigned", `position ${pos.id}`);
+        await markProcessed(sb, row.id, failures.length > 0 ? "error_assignment_failed" : "assigned", `position ${assigned.map((a) => a.id).join(", ")}${failures.length > 0 ? `; failed: ${failures.join("; ")}` : ""}`);
         continue;
       }
 
