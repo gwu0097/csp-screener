@@ -46,8 +46,14 @@ export default async function RootLayout({
              and prevents the URL bar from auto-hiding. */
           <div className="flex min-h-screen md:h-screen">
             <Sidebar />
-            <main className="flex-1 md:overflow-y-auto">
-              <div className="container py-6">{children}</div>
+            {/* min-w-0: a flex item's min-width defaults to its content's
+                min-content width, so on mobile (where main is not a scroll
+                container) a wide table stretched main past the viewport and
+                Android Chrome zoomed the whole page out to ~35%. md+ was
+                already safe — md:overflow-y-auto zeroes the minimum. pt-16
+                clears the fixed mobile menu button (sidebar.tsx). */}
+            <main className="min-w-0 flex-1 md:overflow-y-auto">
+              <div className="container pb-6 pt-16 md:pt-6">{children}</div>
             </main>
           </div>
         ) : (

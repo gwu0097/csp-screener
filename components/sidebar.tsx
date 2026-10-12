@@ -265,7 +265,7 @@ export function Sidebar() {
       <button
         type="button"
         onClick={() => setMobileOpen(true)}
-        className="fixed left-3 top-3 z-40 rounded-md border border-white/10 bg-zinc-900 p-2 text-gray-300 shadow md:hidden"
+        className="fixed left-3 top-3 z-40 flex h-11 w-11 items-center justify-center rounded-md border border-white/10 bg-zinc-900 text-gray-300 shadow md:hidden"
         aria-label="Open navigation"
       >
         <Menu className="h-5 w-5" />

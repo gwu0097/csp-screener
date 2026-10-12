@@ -3603,8 +3603,9 @@ export function ExpandedDetail({
           as the old stacked layout. Refresh analysis shares the tab-bar
           row, right-justified. */}
       <Tabs defaultValue="overview">
-        <div className="flex items-center justify-between gap-2">
-          <TabsList>
+        <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+          {/* Scrolls sideways on mobile — five nowrap triggers are ~550px. */}
+          <TabsList className="w-full justify-start overflow-x-auto md:w-auto md:justify-center">
             <TabsTrigger value="overview">📋 Overview</TabsTrigger>
             <TabsTrigger value="flow">🌊 Flow</TabsTrigger>
             <TabsTrigger value="history">📅 History</TabsTrigger>
@@ -4450,6 +4451,7 @@ function OptionsChainTab({
           </span>
         </div>
       )}
+      <div className="overflow-x-auto">
       <table className="w-full text-sm">
         <thead>
           <tr className="border-b border-border text-left text-muted-foreground">
@@ -4509,6 +4511,7 @@ function OptionsChainTab({
           })}
         </tbody>
       </table>
+      </div>
     </div>
   );
 }

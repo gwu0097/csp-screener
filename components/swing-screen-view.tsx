@@ -1170,13 +1170,15 @@ const TAB_COLUMNS: Record<SetupTab, MetricColumn[]> = {
   base_breakout: [],
 };
 
-// Mobile stays a fixed 5-col strip (Symbol/Price/Chg%/Score/Actions) —
+// Mobile stays a fixed 4-col strip (Symbol/Price/Chg%/Score) —
 // same across tabs. Desktop column count varies by tab (3-4 metric
 // columns), so each tab gets its own literal grid-cols class: Tailwind's
 // scanner needs the full class text present in source, not assembled
 // from a runtime template string.
+// 4 columns on mobile (Actions moved under Line2 — see RowActions): the
+// old 5-col strip needed 386px, wider than a 360px phone's content box.
 const ROW_GRID_MOBILE =
-  "grid-cols-[minmax(60px,1fr)_70px_60px_60px_minmax(80px,1fr)]";
+  "grid-cols-[minmax(56px,1fr)_64px_56px_48px]";
 // Each tab's literal grid string gains two fixed columns (ADR%, Sector)
 // right after Chg% — same position in every tab, adjacent to whichever
 // column shows vs 50MA for that tab.
@@ -1196,7 +1198,7 @@ const ROW_GRID_DESKTOP: Record<SetupTab, string> = {
 };
 
 function rowGridClass(tab: SetupTab): string {
-  return `grid w-full items-center gap-2 px-3 ${ROW_GRID_MOBILE} ${ROW_GRID_DESKTOP[tab]}`;
+  return `grid w-full items-center gap-1.5 px-3 md:gap-2 ${ROW_GRID_MOBILE} ${ROW_GRID_DESKTOP[tab]}`;
 }
 
 function fmtRelDate(iso: string | null): string {
@@ -3213,7 +3215,7 @@ function TableHeader({
         onSort={onSort}
         className="hidden md:block"
       />
-      <SortHeader label="Actions" align="right" />
+      <SortHeader label="Actions" align="right" className="hidden md:block" />
     </div>
   );
 }
@@ -5854,6 +5856,79 @@ function BaseBreakoutNearMissSection({
 
 // ---------- Row ----------
 
+// Track / Research / Enter for a legacy-tab row. `touch` = the mobile
+// variant: full-width, 44px-tall targets, readable text.
+function RowActions({
+  c,
+  tracked,
+  tracking,
+  onTrack,
+  onEnterTrade,
+  touch = false,
+  className = "",
+}: {
+  c: SwingCandidate;
+  tracked: boolean;
+  tracking: boolean;
+  onTrack: () => void;
+  onEnterTrade: () => void;
+  touch?: boolean;
+  className?: string;
+}) {
+  const size = touch
+    ? "min-h-[44px] flex-1 justify-center gap-1.5 px-3 text-sm"
+    : "gap-1 px-1.5 py-0.5 text-[10px]";
+  const icon = touch ? "h-4 w-4" : "h-3 w-3";
+  return (
+    <div
+      className={`flex items-center gap-1 ${touch ? "gap-2" : "justify-end"} ${className}`}
+      onClick={(e) => e.stopPropagation()}
+    >
+      <button
+        type="button"
+        onClick={onTrack}
+        disabled={tracked || tracking}
+        className={`inline-flex items-center rounded border font-medium ${size} ${
+          tracked
+            ? "cursor-default border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
+            : "border-border text-muted-foreground hover:bg-white/5 hover:text-foreground"
+        }`}
+        title={
+          tracked
+            ? `${c.symbol} is on the Setup Ready board`
+            : `Save this setup — entry ${fmtMoney(c.entryPrice)}, target ${fmtMoney(c.targetPrice)}, stop ${fmtMoney(c.stopPrice)} — to the Swing Ideas Kanban as Setup Ready, before any money moves`
+        }
+      >
+        {tracking ? (
+          <Loader2 className={`${icon} animate-spin`} />
+        ) : tracked ? (
+          <BookmarkCheck className={icon} />
+        ) : (
+          <Bookmark className={icon} />
+        )}
+        {tracked ? "Tracked" : "Track"}
+      </button>
+      <Link
+        href={`/research/${encodeURIComponent(c.symbol)}`}
+        className={`inline-flex items-center rounded border border-border font-medium text-muted-foreground hover:bg-white/5 hover:text-foreground ${size}`}
+        title="Open Deep Research for this symbol"
+      >
+        <BookSearch className={icon} />
+        Research
+      </Link>
+      <button
+        type="button"
+        onClick={onEnterTrade}
+        className={`inline-flex items-center rounded border border-border bg-white/5 font-medium text-foreground hover:bg-white/10 ${size}`}
+        title={`Import a broker fill screenshot for ${c.symbol} — links to the tracked idea if one exists`}
+      >
+        <Upload className={icon} />
+        Enter
+      </button>
+    </div>
+  );
+}
+
 function CandidateRow({
   candidate: c,
   activeTab,
@@ -5980,59 +6055,32 @@ function CandidateRow({
           <ConfluenceBadge candidate={c} activeTab={activeTab} />
           <RrBadge rr={c.rr} />
         </div>
-        {/* 10. Actions */}
-        <div
-          className="flex items-center justify-end gap-1"
-          onClick={(e) => e.stopPropagation()}
-        >
-          <button
-            type="button"
-            onClick={onTrack}
-            disabled={tracked || tracking}
-            className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-medium ${
-              tracked
-                ? "cursor-default border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
-                : "border-border text-muted-foreground hover:bg-white/5 hover:text-foreground"
-            }`}
-            title={
-              tracked
-                ? `${c.symbol} is on the Setup Ready board`
-                : `Save this setup — entry ${fmtMoney(c.entryPrice)}, target ${fmtMoney(c.targetPrice)}, stop ${fmtMoney(c.stopPrice)} — to the Swing Ideas Kanban as Setup Ready, before any money moves`
-            }
-          >
-            {tracking ? (
-              <Loader2 className="h-3 w-3 animate-spin" />
-            ) : tracked ? (
-              <BookmarkCheck className="h-3 w-3" />
-            ) : (
-              <Bookmark className="h-3 w-3" />
-            )}
-            {tracked ? "Tracked" : "Track"}
-          </button>
-          <Link
-            href={`/research/${encodeURIComponent(c.symbol)}`}
-            className="inline-flex items-center gap-1 rounded border border-border px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground hover:bg-white/5 hover:text-foreground"
-            title="Open Deep Research for this symbol"
-          >
-            <BookSearch className="h-3 w-3" />
-            Research
-          </Link>
-          <button
-            type="button"
-            onClick={onEnterTrade}
-            className="inline-flex items-center gap-1 rounded border border-border bg-white/5 px-1.5 py-0.5 text-[10px] font-medium text-foreground hover:bg-white/10"
-            title={`Import a broker fill screenshot for ${c.symbol} — links to the tracked idea if one exists`}
-          >
-            <Upload className="h-3 w-3" />
-            Enter
-          </button>
-        </div>
+        {/* 10. Actions — desktop only; phones get the full-size row
+            under Line2 (the 5th mobile grid column overflowed a 360px
+            screen, and 22px-tall buttons are below touch-target size). */}
+        <RowActions
+          c={c}
+          tracked={tracked}
+          tracking={tracking}
+          onTrack={onTrack}
+          onEnterTrade={onEnterTrade}
+          className="hidden md:flex"
+        />
       </div>
       <Line2
         candidate={c}
         activeTab={activeTab}
         expanded={expanded}
         onToggle={() => setExpanded((v) => !v)}
+      />
+      <RowActions
+        c={c}
+        tracked={tracked}
+        tracking={tracking}
+        onTrack={onTrack}
+        onEnterTrade={onEnterTrade}
+        touch
+        className="px-3 pb-2 md:hidden"
       />
       {expanded && (
         <ExpandedDetail
