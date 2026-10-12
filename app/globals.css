@@ -57,3 +57,17 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* Mobile legibility floor. ~670 call sites use 9-11px text for desktop
+   density (detail panels, chips, table headers); below md that renders
+   unreadably small on a phone. Raise every one of them to 12px there
+   instead of editing each site — desktop (md+) keeps the dense sizes.
+   Kept outside @layer and after @tailwind utilities so it wins over the
+   arbitrary-value utilities it overrides (same specificity, later rule). */
+@media (max-width: 767px) {
+  .text-\[9px\],
+  .text-\[10px\],
+  .text-\[11px\] {
+    font-size: 0.75rem;
+  }
+}
