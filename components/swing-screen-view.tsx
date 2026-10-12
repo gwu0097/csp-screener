@@ -2706,18 +2706,20 @@ function UniverseSelectorBar({
   return (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-md border border-border bg-background/40 p-3 text-sm">
       <span className="text-muted-foreground">Universe:</span>
-      <label className="flex items-center gap-1.5 text-muted-foreground">
+      <label className="flex min-h-[44px] items-center gap-2 text-muted-foreground md:min-h-0 md:gap-1.5">
         <input
           type="checkbox"
+          className="h-5 w-5 md:h-auto md:w-auto"
           checked={selection.includeIndex}
           disabled={disabled}
           onChange={(e) => onChange({ ...selection, includeIndex: e.target.checked })}
         />
         S&amp;P 500 + Nasdaq 100
       </label>
-      <label className="flex items-center gap-1.5 text-muted-foreground">
+      <label className="flex min-h-[44px] items-center gap-2 text-muted-foreground md:min-h-0 md:gap-1.5">
         <input
           type="checkbox"
+          className="h-5 w-5 md:h-auto md:w-auto"
           checked={selection.allThemes}
           disabled={disabled}
           onChange={(e) => onChange({ ...selection, allThemes: e.target.checked })}
@@ -2725,9 +2727,10 @@ function UniverseSelectorBar({
         All themes
       </label>
       {activeThemes.map((t) => (
-        <label key={t.id} className="flex items-center gap-1.5 text-muted-foreground">
+        <label key={t.id} className="flex min-h-[44px] items-center gap-2 text-muted-foreground md:min-h-0 md:gap-1.5">
           <input
             type="checkbox"
+          className="h-5 w-5 md:h-auto md:w-auto"
             checked={selection.allThemes || selection.themeIds.includes(t.id)}
             disabled={disabled || selection.allThemes}
             onChange={(e) =>
@@ -2739,11 +2742,11 @@ function UniverseSelectorBar({
               })
             }
           />
-          {t.name} <span className="text-[10px]">({t.memberCount})</span>
+          {t.name} <span className="text-xs tabular-nums md:text-[10px]">({t.memberCount})</span>
         </label>
       ))}
       {activeThemes.length === 0 && (
-        <Link href="/swings/universe" className="text-xs text-muted-foreground underline">
+        <Link href="/swings/universe" className="inline-flex min-h-[44px] items-center text-sm text-muted-foreground underline md:min-h-0 md:text-xs">
           No themes yet — create one
         </Link>
       )}
@@ -2798,7 +2801,9 @@ function ControlsBar({
           ? "Run Base Breakout"
           : "Run Screen";
   return (
-    <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border bg-background/40 p-3">
+    // Below md: status on top, then a 2-col form (labels above inputs,
+    // 44px controls) with a full-width Run button. md+: the original row.
+    <div className="flex flex-col gap-3 rounded-md border border-border bg-background/40 p-3 md:flex-row md:flex-wrap md:items-center md:justify-between">
       <div className="flex flex-col gap-0.5">
         <div className="text-sm text-muted-foreground">
           Last screened:{" "}
@@ -2819,9 +2824,9 @@ function ControlsBar({
           </div>
         )}
       </div>
-      <div className="flex items-center gap-3">
+      <div className="grid grid-cols-2 gap-3 md:flex md:items-center">
         <label
-          className="flex items-center gap-1.5 text-sm text-muted-foreground"
+          className="flex flex-col gap-1 text-sm text-muted-foreground md:flex-row md:items-center md:gap-1.5"
           title="Runs only the selected tab(s) — the four legacy tabs (Finnhub insider/earnings + Schwab options) and RS Pullback (Finnhub earnings only) have different costs and different Finnhub exposure, so running only what's needed cuts throttling and turnaround time."
         >
           Run:
@@ -2831,7 +2836,7 @@ function ControlsBar({
               onRunTargetChange(e.target.value as "all" | "legacy" | "rs_pullback" | "base_breakout")
             }
             disabled={running}
-            className="rounded border border-border bg-background px-2 py-1 text-sm"
+            className="h-11 w-full rounded border border-border bg-background px-2 text-base md:h-auto md:w-auto md:py-1 md:text-sm"
           >
             <option value="all">All tabs</option>
             <option value="legacy">Legacy tabs only</option>
@@ -2850,14 +2855,14 @@ function ControlsBar({
           // would make this input silently start controlling a gate
           // threshold it was never meant to.
           <span
-            className="text-sm text-muted-foreground"
+            className="self-end text-sm text-muted-foreground md:self-auto"
             title="This tab's ADR% floor is set in its own 'Edit thresholds' panel, not here — this control only filters the four legacy tabs."
           >
             Min ADR% set per-tab below
           </span>
         ) : (
           <label
-            className="flex items-center gap-1.5 text-sm text-muted-foreground"
+            className="flex flex-col gap-1 text-sm text-muted-foreground md:flex-row md:items-center md:gap-1.5"
             title="Hides candidates whose 20-day Average Daily Range is below this — a 3R target needs enough daily movement to be reachable in a multi-week hold. Display/filter only; doesn't change any tab's score."
           >
             Min ADR%
@@ -2870,12 +2875,13 @@ function ControlsBar({
                 const n = Number(e.target.value);
                 if (Number.isFinite(n) && n >= 0) onMinAdrPctChange(n);
               }}
-              className="w-16 rounded border border-border bg-background px-1.5 py-1 text-right text-sm"
+              inputMode="decimal"
+              className="h-11 w-full rounded border border-border bg-background px-2 text-right text-base tabular-nums md:h-auto md:w-16 md:px-1.5 md:py-1 md:text-sm"
             />
           </label>
         )}
         <label
-          className="flex cursor-pointer items-center gap-1.5 text-sm text-muted-foreground"
+          className="col-span-2 flex min-h-[44px] cursor-pointer items-center gap-2 text-base text-muted-foreground md:min-h-0 md:gap-1.5 md:text-sm"
           title={
             "Bypasses the quote-sweep, insider/earnings-date, and ATR caches for this run — " +
             "everything is pulled live regardless of how fresh the cache is. Catalyst research " +
@@ -2888,7 +2894,7 @@ function ControlsBar({
             checked={forceFresh}
             onChange={(e) => onForceFreshChange(e.target.checked)}
             disabled={running}
-            className="h-3.5 w-3.5 accent-amber-400"
+            className="h-5 w-5 accent-amber-400 md:h-3.5 md:w-3.5"
           />
           Force fresh
         </label>
@@ -2896,7 +2902,7 @@ function ControlsBar({
           type="button"
           onClick={onRun}
           disabled={loading || running}
-          className="inline-flex items-center gap-2 rounded-md border border-border bg-emerald-500/10 px-3 py-1.5 text-base font-medium text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-50"
+          className="col-span-2 inline-flex h-11 items-center justify-center gap-2 rounded-md border border-border bg-emerald-500/10 px-3 text-base font-medium text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-50 md:h-auto md:justify-start md:py-1.5"
         >
           {running ? (
             <Loader2 className="h-4 w-4 animate-spin" />
@@ -3007,7 +3013,9 @@ function SetupTabBar({
   const blurb = SETUP_TABS.find((t) => t.key === active)?.blurb ?? "";
   return (
     <div className="space-y-1.5">
-      <div className="flex flex-wrap gap-1 rounded-md border border-border bg-background/40 p-1">
+      {/* Mobile: one swipeable strip of 44px tabs (no wrapping into a
+          ragged second row). md+: unchanged wrap. */}
+      <div className="flex flex-nowrap gap-1 overflow-x-auto rounded-md border border-border bg-background/40 p-1 [scrollbar-width:none] md:flex-wrap">
         {SETUP_TABS.map((t) => {
           const isActive = t.key === active;
           return (
@@ -3015,7 +3023,7 @@ function SetupTabBar({
               key={t.key}
               type="button"
               onClick={() => onSelect(t.key)}
-              className={`inline-flex items-center gap-1.5 rounded px-3 py-1.5 text-sm font-medium transition ${
+              className={`inline-flex min-h-[44px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded px-3 py-1.5 text-sm font-medium transition md:min-h-0 ${
                 isActive
                   ? "bg-background text-foreground shadow-sm"
                   : "text-muted-foreground hover:text-foreground"
@@ -3023,7 +3031,7 @@ function SetupTabBar({
             >
               {t.label}
               <span
-                className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${
+                className={`rounded-full px-1.5 py-0.5 text-xs font-semibold tabular-nums md:text-[10px] ${
                   isActive
                     ? "bg-emerald-500/20 text-emerald-300"
                     : "bg-muted text-muted-foreground"
@@ -3035,7 +3043,7 @@ function SetupTabBar({
           );
         })}
       </div>
-      <div className="px-1 text-[11px] text-muted-foreground/80">{blurb}</div>
+      <div className="px-1 text-sm text-muted-foreground md:text-[11px] md:text-muted-foreground/80">{blurb}</div>
     </div>
   );
 }
