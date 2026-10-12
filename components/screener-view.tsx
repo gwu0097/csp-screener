@@ -18,6 +18,7 @@ import {
   Star,
   ArrowUp,
   ArrowDown,
+  MoreHorizontal,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -54,6 +55,7 @@ import { OptionsFlowSection } from "@/components/options-flow-section";
 import { PriceChart } from "@/components/price-chart";
 import { TickerIntelligenceStrip } from "@/components/ticker-intelligence-strip";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { ErrorBanner } from "@/components/error-banner";
 import { ResearchAnalysisPasteBack, type SavedAnalysisInfo } from "@/components/research-analysis-paste";
 import { ResearchAnalysisModal } from "@/components/research-analysis-modal";
@@ -744,6 +746,7 @@ export function ScreenerView({ connected }: Props) {
   // Cards below md, table at md+. Exactly one renders (never both hidden
   // by CSS): ExpandedDetail fetches on mount, so dual-mounting doubles it.
   const isMobile = useIsMobile();
+  const [actionsOpen, setActionsOpen] = useState(false);
   // When `groupMode` is non-null, results render as two groups with a divider.
   // Clicking any column header switches to flat sort and sets groupMode=null.
   const [groupMode, setGroupMode] = useState<"stage2" | "grades" | null>(null);
@@ -2265,10 +2268,91 @@ export function ScreenerView({ connected }: Props) {
         ? "text-amber-300"
         : "text-emerald-300";
 
+  // Schwab badge state — one computation shared by the desktop badge and
+  // the mobile status chip. Trigger AND tone come from the shared
+  // lib/schwab-token-warning check (via tokenStatus.shouldWarn/
+  // warningClause), the same source of truth the dashboard banner uses —
+  // no local days-remaining threshold here. Click-through to
+  // /api/auth/schwab is the same surface as the SchwabTokenBanner
+  // reconnect button.
+  const schwab = ((): {
+    cls: string;
+    tone: "ok" | "warn" | "bad";
+    text: string;
+    reconnect: boolean;
+    title: string | undefined;
+  } => {
+    const ROSE = "border-transparent bg-rose-500/90 text-white hover:bg-rose-500";
+    if (!connected) {
+      return { cls: ROSE, tone: "bad", text: "disconnected", reconnect: true, title: undefined };
+    }
+    if (tokenStatus) {
+      if (tokenStatus.status === "expired" || tokenStatus.status === "refresh_failed") {
+        return {
+          cls: ROSE,
+          tone: "bad",
+          text: tokenStatus.status === "expired" ? "expired" : "refresh failed",
+          reconnect: true,
+          title: tokenStatus.warningMessage || undefined,
+        };
+      }
+      if (tokenStatus.shouldWarn) {
+        const title = tokenStatus.warningMessage;
+        if (tokenStatus.warningClause === 4) {
+          return {
+            cls: ROSE,
+            tone: "bad",
+            text:
+              tokenStatus.expiresInDays !== null && tokenStatus.expiresInDays <= 0
+                ? "expired"
+                : "expires <24h",
+            reconnect: true,
+            title,
+          };
+        }
+        if (tokenStatus.warningClause === 2) {
+          return {
+            cls: "border-transparent bg-orange-500/90 text-white hover:bg-orange-500",
+            tone: "warn",
+            text: "desynced",
+            reconnect: true,
+            title,
+          };
+        }
+        return {
+          cls: "border-transparent bg-amber-400/90 text-black hover:bg-amber-400",
+          tone: "warn",
+          text: "reconnect this weekend",
+          reconnect: true,
+          title,
+        };
+      }
+    }
+    return {
+      cls: "border-transparent bg-emerald-500/90 text-white hover:bg-emerald-500",
+      tone: "ok",
+      text: "connected",
+      reconnect: false,
+      title: undefined,
+    };
+  })();
+  const schwabBadge = (
+    <Badge className={schwab.cls} title={schwab.title}>Schwab: {schwab.text}</Badge>
+  );
+  const schwabBadgeEl = schwab.reconnect ? (
+    <a href="/api/auth/schwab" title={schwab.title ?? "Reconnect Schwab"} className="cursor-pointer">
+      {schwabBadge}
+    </a>
+  ) : (
+    schwabBadge
+  );
+
   return (
     <TooltipProvider>
       <div className="space-y-4">
         <SchwabTokenBanner />
+        {isMobile === false && (
+          <>
         {dailyContext && (
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-muted-foreground">
             <span>
@@ -2296,66 +2380,7 @@ export function ScreenerView({ connected }: Props) {
         )}
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-3 text-base">
-            {(() => {
-              // Trigger AND badge tone come from the shared
-              // lib/schwab-token-warning check (via tokenStatus.
-              // shouldWarn/warningClause), the same source of truth
-              // the dashboard banner uses — no local days-remaining
-              // threshold here. Click-through to /api/auth/schwab is
-              // the same surface as the SchwabTokenBanner reconnect
-              // button.
-              let cls =
-                "border-transparent bg-emerald-500/90 text-white hover:bg-emerald-500";
-              let text = "connected";
-              let reconnect = false;
-              let title: string | undefined;
-              if (!connected) {
-                cls =
-                  "border-transparent bg-rose-500/90 text-white hover:bg-rose-500";
-                text = "disconnected";
-                reconnect = true;
-              } else if (tokenStatus) {
-                if (tokenStatus.status === "expired" || tokenStatus.status === "refresh_failed") {
-                  cls =
-                    "border-transparent bg-rose-500/90 text-white hover:bg-rose-500";
-                  text = tokenStatus.status === "expired" ? "expired" : "refresh failed";
-                  reconnect = true;
-                  title = tokenStatus.warningMessage || undefined;
-                } else if (tokenStatus.shouldWarn) {
-                  title = tokenStatus.warningMessage;
-                  reconnect = true;
-                  if (tokenStatus.warningClause === 4) {
-                    cls =
-                      "border-transparent bg-rose-500/90 text-white hover:bg-rose-500";
-                    text =
-                      tokenStatus.expiresInDays !== null && tokenStatus.expiresInDays <= 0
-                        ? "expired"
-                        : "expires <24h";
-                  } else if (tokenStatus.warningClause === 2) {
-                    cls =
-                      "border-transparent bg-orange-500/90 text-white hover:bg-orange-500";
-                    text = "desynced";
-                  } else {
-                    cls =
-                      "border-transparent bg-amber-400/90 text-black hover:bg-amber-400";
-                    text = "reconnect this weekend";
-                  }
-                }
-              }
-              const badge = (
-                <Badge className={cls} title={title}>Schwab: {text}</Badge>
-              );
-              if (!reconnect) return badge;
-              return (
-                <a
-                  href="/api/auth/schwab"
-                  title={title ?? "Reconnect Schwab"}
-                  className="cursor-pointer"
-                >
-                  {badge}
-                </a>
-              );
-            })()}
+            {schwabBadgeEl}
             {screenedAt && (
               <span className="text-sm text-muted-foreground">
                 Last screened:{" "}
@@ -2487,6 +2512,219 @@ export function ScreenerView({ connected }: Props) {
             </Tooltip>
           </div>
         </div>
+          </>
+        )}
+        {isMobile && (
+          <div className="space-y-3">
+            {/* Status chips — one horizontally scrollable row instead of a
+                wrapped paragraph (Robinhood/Webull pattern). */}
+            <div className="-mx-4 flex gap-2 overflow-x-auto px-4 pb-1 text-sm [scrollbar-width:none]">
+              {(() => {
+                const chip = (
+                  <span
+                    className={cn(
+                      "inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full border px-3 font-medium",
+                      schwab.tone === "ok"
+                        ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300"
+                        : schwab.tone === "warn"
+                          ? "border-amber-500/40 bg-amber-500/15 text-amber-300"
+                          : "border-rose-500/40 bg-rose-500/15 text-rose-300",
+                    )}
+                  >
+                    <span className="h-2 w-2 rounded-full bg-current" aria-hidden />
+                    Schwab {schwab.text}
+                  </span>
+                );
+                return schwab.reconnect ? (
+                  <a href="/api/auth/schwab" className="shrink-0" aria-label={`Schwab ${schwab.text} — tap to reconnect`}>
+                    {chip}
+                  </a>
+                ) : (
+                  chip
+                );
+              })()}
+              {dailyContext && (
+                <span className="inline-flex h-8 shrink-0 items-center gap-1 rounded-full border border-border px-3 text-muted-foreground">
+                  VIX
+                  <span className={cn("font-semibold tabular-nums", vixRegimeColor)}>
+                    {dailyContext.market.vix !== null ? dailyContext.market.vix.toFixed(2) : "—"}
+                  </span>
+                  {dailyContext.market.regime && <span className={vixRegimeColor}>{dailyContext.market.regime}</span>}
+                </span>
+              )}
+              <span className="inline-flex h-8 shrink-0 items-center gap-1 rounded-full border border-border px-3 text-muted-foreground">
+                <span className="font-semibold tabular-nums text-foreground">{results?.length ?? 0}</span> today
+              </span>
+              {dailyContext && (
+                <span className="inline-flex h-8 shrink-0 items-center gap-1 rounded-full border border-border px-3 text-muted-foreground">
+                  <span className="font-semibold tabular-nums text-foreground">{dailyContext.openPositions}</span> open
+                </span>
+              )}
+              {screenedAt && (
+                <span className="inline-flex h-8 shrink-0 items-center rounded-full border border-border px-3 tabular-nums text-muted-foreground">
+                  Screened {screenedAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", hour12: true })}
+                </span>
+              )}
+            </div>
+            {bestCandidate && (
+              <div className="text-sm text-muted-foreground">
+                Best: <span className="font-semibold text-foreground">{bestCandidate.symbol}</span> ({bestCandidate.recommendation})
+              </div>
+            )}
+            {message && !error && (
+              <div className="whitespace-pre-line text-sm leading-snug text-emerald-300">{message}</div>
+            )}
+            {trackToast && <div className="text-sm text-sky-300">{trackToast}</div>}
+
+            {/* One context-sensitive primary action + an action sheet for
+                the rest, instead of six wrapping buttons. */}
+            <div className="flex gap-2">
+              {!connected ? (
+                <Button asChild className="h-11 flex-1 text-base">
+                  <a href="/api/auth/schwab">Connect Schwab</a>
+                </Button>
+              ) : !results ? (
+                <Button onClick={screenToday} disabled={busy} className="h-11 flex-1 text-base">
+                  {status === "screening" ? (
+                    <Loader2 className="mr-2 h-5 w-5 animate-spin" />
+                  ) : (
+                    <Play className="mr-2 h-5 w-5" />
+                  )}
+                  {status === "screening" ? "Screening…" : "Screen Today"}
+                </Button>
+              ) : (
+                <Button
+                  onClick={runAnalysis}
+                  disabled={busy}
+                  className="h-11 flex-1 bg-indigo-500 text-base text-white hover:bg-indigo-400 disabled:opacity-60"
+                >
+                  {status === "analyzing" ? (
+                    <Loader2 className="mr-2 h-5 w-5 animate-spin" />
+                  ) : (
+                    <Sparkles className="mr-2 h-5 w-5" />
+                  )}
+                  {status === "analyzing" ? "Analyzing…" : forceFresh ? "Run Analysis (fresh)" : "Run Analysis"}
+                </Button>
+              )}
+              <Sheet open={actionsOpen} onOpenChange={setActionsOpen}>
+                <SheetTrigger asChild>
+                  <Button variant="outline" className="h-11 px-4 text-base" aria-label="More screener actions">
+                    <MoreHorizontal className="mr-1.5 h-5 w-5" />
+                    More
+                  </Button>
+                </SheetTrigger>
+                <SheetContent
+                  side="bottom"
+                  className="rounded-t-2xl px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-5"
+                >
+                  <SheetTitle className="mb-1">Screener actions</SheetTitle>
+                  {(() => {
+                    const trackedCandidateCount = (results ?? []).filter((r) =>
+                      tracked.has(r.symbol.toUpperCase()),
+                    ).length;
+                    const items: Array<{
+                      key: string;
+                      icon: React.ReactNode;
+                      label: string;
+                      hint?: string;
+                      disabled: boolean;
+                      onSelect: () => void;
+                    }> = [
+                      {
+                        key: "screen",
+                        icon: <Play className="h-5 w-5" />,
+                        label: results ? "Re-screen today" : "Screen Today",
+                        disabled: busy,
+                        onSelect: () => void screenToday(),
+                      },
+                      {
+                        key: "analyze",
+                        icon: <Sparkles className="h-5 w-5" />,
+                        label: forceFresh ? "Run Analysis (fresh)" : "Run Analysis",
+                        hint: !connected ? "Connect Schwab first" : !results ? "Screen first" : undefined,
+                        disabled: !results || busy || !connected,
+                        onSelect: () => void runAnalysis(),
+                      },
+                      {
+                        key: "tracked",
+                        icon: <Star className="h-5 w-5" />,
+                        label: `Analyze Tracked (${trackedCandidateCount})`,
+                        hint:
+                          !connected
+                            ? "Connect Schwab first"
+                            : trackedCandidateCount === 0
+                              ? "Tick the box on cards you want analyzed"
+                              : undefined,
+                        disabled: !results || busy || !connected || trackedCandidateCount === 0,
+                        onSelect: () => void analyzeTracked(),
+                      },
+                      {
+                        key: "watchlist",
+                        icon: <RefreshCcw className="h-5 w-5" />,
+                        label: "Apply Watchlist",
+                        disabled: !results || busy,
+                        onSelect: () => void applyWatchlist(),
+                      },
+                    ];
+                    if (previousAvailable) {
+                      items.push({
+                        key: "previous",
+                        icon: <History className="h-5 w-5" />,
+                        label: "Load Previous",
+                        hint: `${new Date(previousAvailable.screenedAt).toLocaleString([], {
+                          month: "short",
+                          day: "numeric",
+                          hour: "numeric",
+                          minute: "2-digit",
+                          hour12: true,
+                        })} · ${previousAvailable.count} candidates${previousAvailable.graded ? ", graded" : ""}`,
+                        disabled: busy,
+                        onSelect: () => void loadPrevious(),
+                      });
+                    }
+                    return (
+                      <div className="divide-y divide-border">
+                        {items.map((it) => (
+                          <button
+                            key={it.key}
+                            type="button"
+                            disabled={it.disabled}
+                            onClick={() => {
+                              setActionsOpen(false);
+                              it.onSelect();
+                            }}
+                            className="flex min-h-[52px] w-full items-center gap-3 py-2 text-left text-base disabled:opacity-40"
+                          >
+                            <span className="text-muted-foreground">{it.icon}</span>
+                            <span className="flex-1">
+                              {it.label}
+                              {it.hint && <span className="block text-sm text-muted-foreground">{it.hint}</span>}
+                            </span>
+                          </button>
+                        ))}
+                        <label className="flex min-h-[52px] w-full cursor-pointer items-center gap-3 py-2 text-base">
+                          <span className="flex-1">
+                            Force fresh data
+                            <span className="block text-sm text-muted-foreground">
+                              Skip caches on the next Run Analysis
+                            </span>
+                          </span>
+                          <input
+                            type="checkbox"
+                            checked={forceFresh}
+                            onChange={(e) => setForceFresh(e.target.checked)}
+                            disabled={busy}
+                            className="h-6 w-6 accent-amber-400"
+                          />
+                        </label>
+                      </div>
+                    );
+                  })()}
+                </SheetContent>
+              </Sheet>
+            </div>
+          </div>
+        )}
 
         <SandboxTester connected={connected} />
 
@@ -3101,7 +3339,7 @@ function ScreenerCriteriaPanel() {
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-muted-foreground hover:text-foreground"
+        className="flex min-h-[44px] w-full items-center justify-between gap-2 px-3 py-2 text-left text-muted-foreground hover:text-foreground md:min-h-0"
       >
         <span className="inline-flex items-center gap-1.5">
           <Info className="h-3.5 w-3.5" />
@@ -6540,7 +6778,7 @@ function SandboxTester({ connected }: { connected: boolean }) {
         <button
           type="button"
           onClick={() => setOpen(true)}
-          className="text-sm text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+          className="inline-flex min-h-[44px] items-center text-sm text-muted-foreground underline-offset-2 hover:text-foreground hover:underline md:min-h-0"
         >
           Test any ticker →
         </button>
