@@ -2351,7 +2351,10 @@ export function ScreenerView({ connected }: Props) {
     <TooltipProvider>
       <div className="space-y-4">
         <SchwabTokenBanner />
-        {isMobile === false && (
+        {/* !== true (not === false): useIsMobile is null on the first
+            paint, and the desktop header must not pop in after
+            hydration. Mobile shows it for one frame before swapping. */}
+        {isMobile !== true && (
           <>
         {dailyContext && (
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-muted-foreground">
