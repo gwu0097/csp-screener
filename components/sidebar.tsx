@@ -37,6 +37,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { useIsMobile } from "@/lib/use-is-mobile";
 
 type NavItem = { href: string; label: string; icon: LucideIcon };
 type SubItem = { href: string; label: string };
@@ -206,7 +207,7 @@ export function Sidebar() {
   const [collapsed, setCollapsed] = useState<boolean>(false);
   // Viewport tracker — mobile drawer always renders the expanded
   // view regardless of the persisted desktop collapse state.
-  const [isMobile, setIsMobile] = useState<boolean>(false);
+  const isMobile = useIsMobile() ?? false;
 
   useEffect(() => {
     try {
@@ -215,14 +216,6 @@ export function Sidebar() {
     } catch {
       /* ignore — localStorage unavailable (private mode, etc.) */
     }
-  }, []);
-
-  useEffect(() => {
-    const mq = window.matchMedia("(max-width: 767px)");
-    const handler = () => setIsMobile(mq.matches);
-    handler();
-    mq.addEventListener("change", handler);
-    return () => mq.removeEventListener("change", handler);
   }, []);
 
   function toggleCollapsed() {

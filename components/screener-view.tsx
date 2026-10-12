@@ -36,6 +36,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { useIsMobile } from "@/lib/use-is-mobile";
 import type { ScreenerResult, StageFourResult, ReferenceStrikeCheck } from "@/lib/screener";
 import { computeLiquidityRead, capGradeByLiquidity } from "@/lib/liquidity";
 import { computeTradableGrade, type TradableResult } from "@/lib/tradable-grade";
@@ -384,6 +385,26 @@ function pctDrop(
   }
   return ((price - strike) / price) * 100;
 }
+// The strike/premium a row is graded on: the user's strike override
+// (Options Chain tab) when set, else Stage 4's 2xEM suggestion. Shared by
+// the desktop table and the mobile card so they can't disagree.
+type StrikeOverrideLike = {
+  strike?: number | null;
+  premium?: number | null;
+  last?: number | null;
+  delta?: number | null;
+  bidAskSpreadPct?: number | null;
+} | null;
+function effectiveContract(r: ScreenerResult, ov: StrikeOverrideLike) {
+  return {
+    effStrike: ov?.strike ?? r.stageFour?.suggestedStrike ?? null,
+    effPremium: ov?.premium ?? r.stageFour?.premium ?? null,
+    effLast: ov?.last ?? r.stageFour?.last ?? null,
+    effDelta: ov?.delta ?? r.stageFour?.delta ?? null,
+    effSpread: ov?.bidAskSpreadPct ?? r.stageFour?.bidAskSpreadPct ?? null,
+  };
+}
+
 function fmtPctDrop(
   price: number | null | undefined,
   strike: number | null | undefined,
@@ -720,6 +741,9 @@ export function ScreenerView({ connected }: Props) {
   // float to top.
   const [sortKey, setSortKey] = useState<SortKey>("grade");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+  // Cards below md, table at md+. Exactly one renders (never both hidden
+  // by CSS): ExpandedDetail fetches on mount, so dual-mounting doubles it.
+  const isMobile = useIsMobile();
   // When `groupMode` is non-null, results render as two groups with a divider.
   // Clicking any column header switches to flat sort and sets groupMode=null.
   const [groupMode, setGroupMode] = useState<"stage2" | "grades" | null>(null);
@@ -994,6 +1018,37 @@ export function ScreenerView({ connected }: Props) {
   }
 
   const toggle = (id: string) => setExpanded((s) => ({ ...s, [id]: !s[id] }));
+
+  // The expanded-row body, shared by the desktop table and mobile cards.
+  function renderDetail(r: ScreenerResult, id: string) {
+    return (
+      <ExpandedDetail
+        r={r}
+        analyzing={analyzingSymbols.has(r.symbol.toUpperCase())}
+        onAnalyze={connected ? runAnalysisSingle : null}
+        strikeOverride={strikeOverrides[id] ?? null}
+        onSelectStrike={(o) =>
+          setStrikeOverrides((prev) => ({ ...prev, [id]: o }))
+        }
+        onResetStrike={() =>
+          setStrikeOverrides((prev) => {
+            const next = { ...prev };
+            delete next[id];
+            return next;
+          })
+        }
+        screenedAt={screenedAt}
+        analysisIndex={analysisIndex}
+        onAnalysisSaved={(info) =>
+          setAnalysisIndex((prev) => {
+            const next = new Map(prev);
+            next.set(`${info.symbol}|${info.earningsDate}`, info);
+            return next;
+          })
+        }
+      />
+    );
+  }
 
   function onSort(key: SortKey) {
     // Any column click escapes grouped mode and becomes a flat sort.
@@ -2621,7 +2676,27 @@ export function ScreenerView({ connected }: Props) {
           </div>
         )}
 
-        {hasResults && status !== "screening" && (
+        {hasResults && status !== "screening" && isMobile && (
+          <MobileCandidateList
+            rows={sortedResults}
+            group1Count={group1Count}
+            expanded={expanded}
+            onToggle={toggle}
+            tracked={tracked}
+            onToggleTracked={toggleTracked}
+            prices={prices}
+            strikeOverrides={strikeOverrides}
+            analysisIndex={analysisIndex}
+            analyzingSymbols={analyzingSymbols}
+            onOpenAnalysis={(symbol, earningsDate) => setAnalysisModal({ symbol, earningsDate })}
+            sortKey={groupMode === null ? sortKey : null}
+            sortDir={sortDir}
+            onSort={onSort}
+            renderDetail={renderDetail}
+          />
+        )}
+
+        {hasResults && status !== "screening" && isMobile === false && (
           <div className="overflow-hidden rounded-lg border border-border">
             <Table>
               <TableHeader>
@@ -2857,11 +2932,7 @@ export function ScreenerView({ connected }: Props) {
                         </TableCell>
                         {(() => {
                           const ov = strikeOverrides[id] ?? null;
-                          const effStrike = ov?.strike ?? r.stageFour?.suggestedStrike ?? null;
-                          const effPremium = ov?.premium ?? r.stageFour?.premium ?? null;
-                          const effLast = ov?.last ?? r.stageFour?.last ?? null;
-                          const effDelta = ov?.delta ?? r.stageFour?.delta ?? null;
-                          const effSpread = ov?.bidAskSpreadPct ?? r.stageFour?.bidAskSpreadPct ?? null;
+                          const { effStrike, effPremium, effLast, effDelta, effSpread } = effectiveContract(r, ov);
                           return (
                             <>
                               <TableCell onClick={(e) => e.stopPropagation()}>
@@ -2963,31 +3034,7 @@ export function ScreenerView({ connected }: Props) {
                       {open && (
                         <TableRow key={`${id}-detail`}>
                           <TableCell colSpan={15} className="bg-muted/30">
-                            <ExpandedDetail
-                              r={r}
-                              analyzing={analyzingSymbols.has(r.symbol.toUpperCase())}
-                              onAnalyze={connected ? runAnalysisSingle : null}
-                              strikeOverride={strikeOverrides[id] ?? null}
-                              onSelectStrike={(o) =>
-                                setStrikeOverrides((prev) => ({ ...prev, [id]: o }))
-                              }
-                              onResetStrike={() =>
-                                setStrikeOverrides((prev) => {
-                                  const next = { ...prev };
-                                  delete next[id];
-                                  return next;
-                                })
-                              }
-                              screenedAt={screenedAt}
-                              analysisIndex={analysisIndex}
-                              onAnalysisSaved={(info) =>
-                                setAnalysisIndex((prev) => {
-                                  const next = new Map(prev);
-                                  next.set(`${info.symbol}|${info.earningsDate}`, info);
-                                  return next;
-                                })
-                              }
-                            />
+                            {renderDetail(r, id)}
                           </TableCell>
                         </TableRow>
                       )}
@@ -3087,6 +3134,282 @@ function ScreenerCriteriaPanel() {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// ---------- Mobile (<md) results: one card per candidate ----------
+// TradingView/Robinhood-style two-tier row: verdict (symbol, Tradable,
+// Risk, price) on top, the decision numbers (strike + cushion, premium +
+// yield, earnings timing) as a labeled stat grid, fillability last. Tap
+// anywhere to expand the same ExpandedDetail the desktop table uses.
+// Strike editing stays in the Options Chain tab: an inline editor would
+// collide with tap-to-expand. EM% / delta live in the detail — the
+// Tradable grade already consumed them.
+
+const MOBILE_SORT_OPTIONS: Array<{ key: SortKey; label: string }> = [
+  { key: "grade", label: "Tradable" },
+  { key: "risk", label: "Risk" },
+  { key: "yield", label: "Yield" },
+  { key: "premium", label: "Premium" },
+  { key: "strike", label: "Strike" },
+  { key: "em", label: "Expected move" },
+  { key: "price", label: "Price" },
+  { key: "symbol", label: "Symbol" },
+];
+
+function fmtEarningsDay(date: string): string {
+  const d = new Date(`${date}T12:00:00Z`);
+  if (!Number.isFinite(d.getTime())) return date;
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+}
+
+function CardStat({
+  label,
+  value,
+  sub,
+  subClassName,
+}: {
+  label: string;
+  value: React.ReactNode;
+  sub?: React.ReactNode;
+  subClassName?: string;
+}) {
+  return (
+    <div className="min-w-0">
+      <dt className="text-xs text-muted-foreground">{label}</dt>
+      <dd className="truncate text-base font-semibold tabular-nums">{value}</dd>
+      {sub !== undefined && (
+        <dd className={cn("truncate text-sm tabular-nums", subClassName ?? "text-muted-foreground")}>{sub}</dd>
+      )}
+    </div>
+  );
+}
+
+function MobileCandidateList({
+  rows,
+  group1Count,
+  expanded,
+  onToggle,
+  tracked,
+  onToggleTracked,
+  prices,
+  strikeOverrides,
+  analysisIndex,
+  analyzingSymbols,
+  onOpenAnalysis,
+  sortKey,
+  sortDir,
+  onSort,
+  renderDetail,
+}: {
+  rows: ScreenerResult[];
+  group1Count: number | null;
+  expanded: Record<string, boolean>;
+  onToggle: (id: string) => void;
+  tracked: Set<string>;
+  onToggleTracked: (symbol: string) => void;
+  prices: Record<string, number>;
+  strikeOverrides: Record<string, StrikeOverride>;
+  analysisIndex: Map<string, SavedAnalysisInfo>;
+  analyzingSymbols: Set<string>;
+  onOpenAnalysis: (symbol: string, earningsDate: string) => void;
+  sortKey: SortKey | null;
+  sortDir: "asc" | "desc";
+  onSort: (key: SortKey) => void;
+  renderDetail: (r: ScreenerResult, id: string) => React.ReactNode;
+}) {
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2">
+        <label className="flex flex-1 items-center gap-2 text-sm text-muted-foreground">
+          Sort
+          <select
+            value={sortKey ?? ""}
+            onChange={(e) => {
+              if (e.target.value) onSort(e.target.value as SortKey);
+            }}
+            className="h-11 min-w-0 flex-1 rounded-md border border-border bg-background px-3 text-base text-foreground"
+            aria-label="Sort candidates by"
+          >
+            {sortKey === null && <option value="">Grouped</option>}
+            {MOBILE_SORT_OPTIONS.map((o) => (
+              <option key={o.key} value={o.key}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button
+          type="button"
+          onClick={() => sortKey && onSort(sortKey)}
+          disabled={sortKey === null}
+          className="flex h-11 w-11 items-center justify-center rounded-md border border-border text-foreground disabled:opacity-40"
+          aria-label={sortDir === "asc" ? "Sorted ascending — tap for descending" : "Sorted descending — tap for ascending"}
+        >
+          {sortDir === "asc" ? <ArrowUp className="h-5 w-5" /> : <ArrowDown className="h-5 w-5" />}
+        </button>
+      </div>
+
+      {rows.length === 0 && (
+        <div className="rounded-lg border border-border py-10 text-center text-base text-muted-foreground">
+          No qualifying earnings today or tomorrow after filters.
+        </div>
+      )}
+
+      {rows.map((r, idx) => {
+        const id = `${r.symbol}-${r.earningsDate}`;
+        const open = !!expanded[id];
+        const sym = r.symbol.toUpperCase();
+        const displayedPrice = prices[sym] ?? r.price;
+        const showDivider = group1Count !== null && idx === group1Count && idx > 0;
+        const { effStrike, effPremium, effSpread } = effectiveContract(r, strikeOverrides[id] ?? null);
+        const grade = r.threeLayer ? displayTradableGrade(r.threeLayer) : null;
+        const risk = computeLiveRiskScore(r, analysisIndex);
+        const analysis = analysisIndex.get(`${sym}|${r.earningsDate}`);
+        const ref = r.threeLayer?.referenceStrikeCheck ?? null;
+        const suggestion = r.stageFour?.liquiditySuggestion ?? null;
+        return (
+          <div key={id} className="space-y-3">
+            {showDivider && (
+              <div className="flex items-center gap-2 rounded-md bg-amber-500/10 px-3 py-2 text-sm text-amber-300">
+                <AlertTriangle className="h-4 w-4 shrink-0" />
+                Outside screener criteria — use caution
+              </div>
+            )}
+            <div className="overflow-hidden rounded-lg border border-border bg-background/60">
+              <div
+                role="button"
+                tabIndex={0}
+                aria-expanded={open}
+                onClick={() => onToggle(id)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    onToggle(id);
+                  }
+                }}
+                className="flex cursor-pointer items-start gap-1 py-3 pl-1 pr-3 active:bg-muted/40"
+              >
+                <label
+                  onClick={(e) => e.stopPropagation()}
+                  className="flex h-11 w-11 shrink-0 items-center justify-center"
+                >
+                  <input
+                    type="checkbox"
+                    checked={tracked.has(sym)}
+                    onChange={() => onToggleTracked(r.symbol)}
+                    className="h-5 w-5 cursor-pointer rounded border-border bg-background"
+                    aria-label={`Track ${r.symbol}`}
+                  />
+                </label>
+                <div className="min-w-0 flex-1">
+                  <div className="flex min-h-[44px] items-center gap-2">
+                    <span className="truncate text-lg font-bold">{r.symbol}</span>
+                    {r.isWhitelisted && (
+                      <Star className="h-4 w-4 shrink-0 fill-amber-300 text-amber-300" aria-label="Whitelisted" />
+                    )}
+                    {r.industryStatus === "fail" && !r.isWhitelisted && (
+                      <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400" aria-label="Industry not on the preferred list" />
+                    )}
+                    {r.chainUnverified && (
+                      <AlertTriangle className="h-4 w-4 shrink-0 text-rose-400" aria-label="Chain check failed — re-run Screen Today" />
+                    )}
+                    {grade ? (
+                      <span
+                        className={cn("shrink-0 rounded-md border px-2 py-0.5 text-sm font-bold", finalGradeBadgeColor(grade))}
+                        aria-label={`Tradable grade ${grade}`}
+                      >
+                        {grade}
+                      </span>
+                    ) : analyzingSymbols.has(sym) ? (
+                      <Loader2 className="h-4 w-4 shrink-0 animate-spin text-muted-foreground" aria-label="Analyzing" />
+                    ) : null}
+                    {risk && (
+                      <span
+                        className={cn(
+                          "shrink-0 rounded-md border px-2 py-0.5 text-sm font-semibold tabular-nums",
+                          // 0 is the best risk score — the desktop palette
+                          // renders it muted, which reads as "disabled".
+                          risk.score <= 0
+                            ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
+                            : riskScoreColor(risk.score),
+                        )}
+                        aria-label={`Risk score ${risk.score}`}
+                      >
+                        Risk {risk.score}
+                      </span>
+                    )}
+                    {analysis && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onOpenAnalysis(r.symbol, r.earningsDate);
+                        }}
+                        className="flex h-8 shrink-0 items-center rounded border border-violet-500/40 bg-violet-500/15 px-2 text-xs font-semibold uppercase tracking-wide text-violet-300"
+                        aria-label={`Open saved research analysis for ${r.symbol}`}
+                      >
+                        AI
+                      </button>
+                    )}
+                    <span className="ml-auto shrink-0 text-base font-semibold tabular-nums">{fmtPrice(displayedPrice)}</span>
+                  </div>
+
+                  <dl className="mt-1 grid grid-cols-3 gap-x-3">
+                    <CardStat
+                      label="Strike"
+                      value={fmtPrice(effStrike)}
+                      sub={fmtPctDrop(displayedPrice, effStrike)}
+                      subClassName={pctDropColor(displayedPrice, effStrike)}
+                    />
+                    <CardStat
+                      label="Premium"
+                      value={effPremium !== null && effPremium !== undefined ? `$${fmtNum(effPremium, 2)}` : "—"}
+                      sub={fmtYield(effPremium, effStrike)}
+                      subClassName={yieldColor(effPremium, effStrike)}
+                    />
+                    <CardStat label="Earnings" value={fmtEarningsDay(r.earningsDate)} sub={r.earningsTiming} />
+                  </dl>
+
+                  {(ref || (effSpread !== null && effSpread !== undefined && effSpread > 50)) && (
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      {ref && (
+                        <span
+                          className={cn(
+                            "inline-flex items-center gap-1 rounded-md border px-2 py-1 text-sm font-medium",
+                            referenceStrikeBadgeColor(ref.status),
+                          )}
+                        >
+                          {referenceStrikeChipLabel(ref)}
+                          {suggestion?.status === "snapped" && (
+                            <span className="text-amber-300">→ ${suggestion.strike?.toFixed(2)}</span>
+                          )}
+                          {suggestion?.status === "none_qualify" && (
+                            <AlertTriangle className="h-4 w-4 text-rose-400" aria-label="No liquid strike qualifies" />
+                          )}
+                        </span>
+                      )}
+                      {effSpread !== null && effSpread !== undefined && effSpread > 50 && (
+                        <span className="inline-flex items-center gap-1 text-sm text-amber-300">
+                          <AlertTriangle className="h-4 w-4" />
+                          Wide spread
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+                <span className="flex h-11 shrink-0 items-center text-muted-foreground">
+                  {open ? <ChevronDown className="h-5 w-5" /> : <ChevronRight className="h-5 w-5" />}
+                </span>
+              </div>
+              {open && (
+                <div className="border-t border-border bg-muted/30 p-3">{renderDetail(r, id)}</div>
+              )}
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
