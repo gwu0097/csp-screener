@@ -4207,8 +4207,8 @@ function RsPullbackListSection({
         </div>
       ) : (
         <div className="overflow-x-auto rounded border border-border">
-          <table className="w-full min-w-[900px] text-sm">
-            <thead className="border-b border-border/60 text-left text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+          <table className="w-full min-w-[900px] text-sm [&_tr>td:first-child:not([colspan])]:sticky [&_tr>td:first-child:not([colspan])]:left-0 [&_tr>td:first-child:not([colspan])]:z-10 [&_tr>td:first-child:not([colspan])]:bg-background [&_tr>th:first-child]:sticky [&_tr>th:first-child]:left-0 [&_tr>th:first-child]:z-10 [&_tr>th:first-child]:bg-background">
+            <thead className="border-b border-border/60 text-left text-xs font-semibold uppercase tracking-wide text-muted-foreground md:text-[10px]">
               <tr>
                 <RsPullbackSortTh label="Symbol" sortKey="symbol" sort={sort} onSort={onSort} align="left" />
                 <RsPullbackSortTh label="Sector" sortKey="sector" sort={sort} onSort={onSort} align="left" />
@@ -4537,8 +4537,8 @@ function BaseBreakoutListSection({
         </div>
       ) : (
         <div className="overflow-x-auto rounded border border-border">
-          <table className="w-full min-w-[980px] text-sm">
-            <thead className="border-b border-border/60 text-left text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+          <table className="w-full min-w-[980px] text-sm [&_tr>td:first-child:not([colspan])]:sticky [&_tr>td:first-child:not([colspan])]:left-0 [&_tr>td:first-child:not([colspan])]:z-10 [&_tr>td:first-child:not([colspan])]:bg-background [&_tr>th:first-child]:sticky [&_tr>th:first-child]:left-0 [&_tr>th:first-child]:z-10 [&_tr>th:first-child]:bg-background">
+            <thead className="border-b border-border/60 text-left text-xs font-semibold uppercase tracking-wide text-muted-foreground md:text-[10px]">
               <tr>
                 <BaseBreakoutSortTh label="Symbol" sortKey="symbol" sort={sort} onSort={onSort} align="left" />
                 <BaseBreakoutSortTh label="Sector" sortKey="sector" sort={sort} onSort={onSort} align="left" />
@@ -5576,8 +5576,8 @@ function RsPullbackNearMissSection({
         </div>
       ) : (
         <div className="overflow-x-auto rounded border border-border">
-          <table className="w-full min-w-[860px] text-sm">
-            <thead className="border-b border-border/60 text-left text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+          <table className="w-full min-w-[860px] text-sm [&_tr>td:first-child:not([colspan])]:sticky [&_tr>td:first-child:not([colspan])]:left-0 [&_tr>td:first-child:not([colspan])]:z-10 [&_tr>td:first-child:not([colspan])]:bg-background [&_tr>th:first-child]:sticky [&_tr>th:first-child]:left-0 [&_tr>th:first-child]:z-10 [&_tr>th:first-child]:bg-background">
+            <thead className="border-b border-border/60 text-left text-xs font-semibold uppercase tracking-wide text-muted-foreground md:text-[10px]">
               <tr>
                 <th className="px-2 py-1.5 text-left">Symbol</th>
                 <th className="px-2 py-1.5 text-left">Sector</th>
@@ -5826,8 +5826,8 @@ function BaseBreakoutNearMissSection({
         </div>
       ) : (
         <div className="overflow-x-auto rounded border border-border">
-          <table className="w-full min-w-[760px] text-sm">
-            <thead className="border-b border-border/60 text-left text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+          <table className="w-full min-w-[760px] text-sm [&_tr>td:first-child:not([colspan])]:sticky [&_tr>td:first-child:not([colspan])]:left-0 [&_tr>td:first-child:not([colspan])]:z-10 [&_tr>td:first-child:not([colspan])]:bg-background [&_tr>th:first-child]:sticky [&_tr>th:first-child]:left-0 [&_tr>th:first-child]:z-10 [&_tr>th:first-child]:bg-background">
+            <thead className="border-b border-border/60 text-left text-xs font-semibold uppercase tracking-wide text-muted-foreground md:text-[10px]">
               <tr>
                 <th className="px-2 py-1.5 text-left">Symbol</th>
                 <th className="px-2 py-1.5 text-left">Sector</th>
