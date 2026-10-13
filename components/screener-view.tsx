@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   Play,
@@ -37,7 +37,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import { useIsMobile } from "@/lib/use-is-mobile";
+import { useElementWidth, useIsMobile } from "@/lib/use-is-mobile";
 import type { ScreenerResult, StageFourResult, ReferenceStrikeCheck } from "@/lib/screener";
 import { computeLiquidityRead, capGradeByLiquidity } from "@/lib/liquidity";
 import { computeTradableGrade, type TradableResult } from "@/lib/tradable-grade";
@@ -747,6 +747,12 @@ export function ScreenerView({ connected }: Props) {
   // by CSS): ExpandedDetail fetches on mount, so dual-mounting doubles it.
   const isMobile = useIsMobile();
   const [actionsOpen, setActionsOpen] = useState(false);
+  // Results layout follows the space the results actually get, not the
+  // viewport: the 15-column table needs ~TABLE_MIN_WIDTH px, so an iPad
+  // (≈800px beside the sidebar) or a narrow laptop window gets cards too.
+  const [resultsRef, resultsWidth] = useElementWidth<HTMLDivElement>();
+  const useCards: boolean | null =
+    isMobile === true ? true : resultsWidth === null ? null : resultsWidth < TABLE_MIN_WIDTH;
   // When `groupMode` is non-null, results render as two groups with a divider.
   // Clicking any column header switches to flat sort and sets groupMode=null.
   const [groupMode, setGroupMode] = useState<"stage2" | "grades" | null>(null);
@@ -2917,8 +2923,10 @@ export function ScreenerView({ connected }: Props) {
           </div>
         )}
 
-        {hasResults && status !== "screening" && isMobile && (
+        <div ref={resultsRef}>
+        {hasResults && status !== "screening" && useCards === true && (
           <MobileCandidateList
+            columns={resultsWidth !== null && resultsWidth >= 700 ? 2 : 1}
             rows={sortedResults}
             group1Count={group1Count}
             expanded={expanded}
@@ -2937,7 +2945,7 @@ export function ScreenerView({ connected }: Props) {
           />
         )}
 
-        {hasResults && status !== "screening" && isMobile === false && (
+        {hasResults && status !== "screening" && useCards === false && (
           <div className="overflow-hidden rounded-lg border border-border">
             <Table>
               <TableHeader>
@@ -3286,6 +3294,7 @@ export function ScreenerView({ connected }: Props) {
             </Table>
           </div>
         )}
+        </div>
 
         {(() => {
           // Two distinct notes, since they mean different things now:
@@ -3388,6 +3397,11 @@ function ScreenerCriteriaPanel() {
 // collide with tap-to-expand. EM% / delta live in the detail — the
 // Tradable grade already consumed them.
 
+// Below this content width the 15-column results table can't fit without
+// horizontal scrolling (its min-content width is ~1,080px), so cards are
+// used instead — phones, iPads beside the sidebar, narrow laptop windows.
+const TABLE_MIN_WIDTH = 1080;
+
 const MOBILE_SORT_OPTIONS: Array<{ key: SortKey; label: string }> = [
   { key: "grade", label: "Tradable" },
   { key: "risk", label: "Risk" },
@@ -3428,6 +3442,7 @@ function CardStat({
 }
 
 function MobileCandidateList({
+  columns,
   rows,
   group1Count,
   expanded,
@@ -3444,6 +3459,8 @@ function MobileCandidateList({
   onSort,
   renderDetail,
 }: {
+  // 2 on tablet-width containers; an expanded card spans both columns.
+  columns: 1 | 2;
   rows: ScreenerResult[];
   group1Count: number | null;
   expanded: Record<string, boolean>;
@@ -3498,6 +3515,7 @@ function MobileCandidateList({
         </div>
       )}
 
+      <div className={columns === 2 ? "grid grid-cols-2 items-start gap-3" : "space-y-3"}>
       {rows.map((r, idx) => {
         const id = `${r.symbol}-${r.earningsDate}`;
         const open = !!expanded[id];
@@ -3511,14 +3529,14 @@ function MobileCandidateList({
         const ref = r.threeLayer?.referenceStrikeCheck ?? null;
         const suggestion = r.stageFour?.liquiditySuggestion ?? null;
         return (
-          <div key={id} className="space-y-3">
+          <Fragment key={id}>
             {showDivider && (
-              <div className="flex items-center gap-2 rounded-md bg-amber-500/10 px-3 py-2 text-sm text-amber-300">
+              <div className="col-span-2 flex items-center gap-2 rounded-md bg-amber-500/10 px-3 py-2 text-sm text-amber-300">
                 <AlertTriangle className="h-4 w-4 shrink-0" />
                 Outside screener criteria — use caution
               </div>
             )}
-            <div className="overflow-hidden rounded-lg border border-border bg-background/60">
+            <div className={cn("overflow-hidden rounded-lg border border-border bg-background/60", open && "col-span-2")}>
               <div
                 role="button"
                 tabIndex={0}
@@ -3648,9 +3666,10 @@ function MobileCandidateList({
                 <div className="border-t border-border bg-muted/30 p-3">{renderDetail(r, id)}</div>
               )}
             </div>
-          </div>
+          </Fragment>
         );
       })}
+      </div>
     </div>
   );
 }
