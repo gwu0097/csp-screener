@@ -1197,6 +1197,17 @@ const ROW_GRID_DESKTOP: Record<SetupTab, string> = {
   base_breakout: "",
 };
 
+// Sum of each tab's ROW_GRID_DESKTOP minimum tracks + gaps + padding —
+// literal class strings for Tailwind's scanner.
+const ROW_MIN_WIDTH_DESKTOP: Record<SetupTab, string> = {
+  capitulation: "md:min-w-[1250px]",
+  pullback: "md:min-w-[1270px]",
+  insider: "md:min-w-[1350px]",
+  options_flow: "md:min-w-[1380px]",
+  rs_pullback: "",
+  base_breakout: "",
+};
+
 function rowGridClass(tab: SetupTab): string {
   return `grid w-full items-center gap-1.5 px-3 md:gap-2 ${ROW_GRID_MOBILE} ${ROW_GRID_DESKTOP[tab]}`;
 }
@@ -3112,8 +3123,13 @@ function ResultsTable({
   trackedSymbols: Set<string>;
   trackingSymbol: string | null;
 }) {
+  // md+ rows need 1,250-1,380px (ROW_GRID_DESKTOP's fixed tracks). In a
+  // narrower container (iPad beside the sidebar, small laptop) they were
+  // clipped by each row's rounded box; now the whole list scrolls
+  // sideways together with Symbol pinned. Phones use the 4-col strip.
   return (
-    <div className="space-y-1">
+    <div className="md:overflow-x-auto">
+    <div className={`space-y-1 ${ROW_MIN_WIDTH_DESKTOP[activeTab]}`}>
       <TableHeader sort={sort} onSort={onSort} activeTab={activeTab} />
       <div className="space-y-1">
         {candidates.map((c) => (
@@ -3128,6 +3144,7 @@ function ResultsTable({
           />
         ))}
       </div>
+    </div>
     </div>
   );
 }
@@ -3145,7 +3162,13 @@ function TableHeader({
     <div
       className={`${rowGridClass(activeTab)} border-b border-border/60 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground`}
     >
-      <SortHeader label="Symbol" sortKey="symbol" sort={sort} onSort={onSort} />
+      <SortHeader
+        label="Symbol"
+        sortKey="symbol"
+        sort={sort}
+        onSort={onSort}
+        className="md:sticky md:left-0 md:z-10 md:bg-background"
+      />
       <SortHeader
         label="Company"
         sortKey="company"
@@ -6011,10 +6034,13 @@ function CandidateRow({
         ? "text-emerald-300"
         : "text-rose-300";
   return (
-    <div className="overflow-hidden rounded-md border border-border bg-background/30">
+    // overflow-clip, not overflow-hidden: hidden makes this row a scroll
+    // container, which would pin the sticky Symbol cell to the row
+    // instead of the sideways-scrolling list.
+    <div className="overflow-clip rounded-md border border-border bg-background/30">
       <div className={`${rowGridClass(activeTab)} pt-2 text-sm`}>
         {/* 1. Symbol */}
-        <div className="truncate text-left font-mono text-base font-semibold text-foreground">
+        <div className="truncate text-left font-mono text-base font-semibold text-foreground md:sticky md:left-0 md:z-10 md:bg-background">
           {c.symbol}
         </div>
         {/* 2. Company — hidden mobile */}
