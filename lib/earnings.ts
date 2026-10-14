@@ -1,4 +1,5 @@
 import { createServerClient } from "@/lib/supabase";
+import { usSessionFor } from "./foreign-listing-session";
 
 const FINNHUB_BASE = "https://finnhub.io/api/v1";
 const FINNHUB_KEY = process.env.FINNHUB_API_KEY ?? "";
@@ -308,13 +309,16 @@ export async function getSupplementalWhitelistEarnings(
       const rows = data.earningsCalendar ?? [];
       for (const r of rows) {
         const hour = (r.hour ?? "").toLowerCase();
-        const timing: EarningsCalendarItem["timing"] | null =
+        const finnhubTiming: EarningsCalendarItem["timing"] | null =
           hour === "bmo" ? "BMO" : hour === "amc" ? "AMC" : hour === "dmh" ? "DMH" : null;
-        if (!timing) continue;
+        if (!finnhubTiming) continue;
+        // A home listing in Asia (2330.TW) reports overnight in New York:
+        // Finnhub's "amc" on D is a BMO on D+1 for a US trader.
+        const { date, timing } = usSessionFor(r.symbol ?? symbol, r.date, finnhubTiming);
         if (
           !(
-            (r.date === today && timing === "AMC") ||
-            (r.date === tomorrow && timing === "BMO")
+            (date === today && timing === "AMC") ||
+            (date === tomorrow && timing === "BMO")
           )
         ) {
           continue;
@@ -324,7 +328,7 @@ export async function getSupplementalWhitelistEarnings(
         // opted in on so downstream price/chain lookups match.
         out.push({
           symbol,
-          date: r.date,
+          date,
           timing,
           estimatedEPS: r.epsEstimate ?? null,
           actualEPS: r.epsActual ?? null,
