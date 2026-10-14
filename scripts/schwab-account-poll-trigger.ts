@@ -190,39 +190,59 @@ async function main() {
     writeState({ lastStatus: "ok", checkedAt: nowIso, consecutiveFailures: 0 });
   }
 
-  let res: Response;
-  try {
-    res = await fetch(POLL_URL, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${process.env.CRON_SECRET ?? ""}` },
-    });
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    await fail("request failed", msg);
+  // One request per account, sequentially: each gets its own 60s
+  // Vercel budget (one request polling both timed out when trades were
+  // waiting — 2026-10-14). Both are always attempted, so one account's
+  // failure doesn't skip the other; the per-account responses are then
+  // merged into the single-response shape the logic below expects.
+  const BROKERS = ["schwab", "schwab2"] as const;
+  const httpFailures: string[] = [];
+  const merged: PollResponse = { ok: true, reports: [] };
+  const errorStrings: string[] = [];
+  const rawParts: string[] = [];
+  let lastStatus = 0;
+  for (const b of BROKERS) {
+    let r: Response;
+    try {
+      r = await fetch(`${POLL_URL}?broker=${b}`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${process.env.CRON_SECRET ?? ""}` },
+      });
+    } catch (e) {
+      httpFailures.push(`${b}: request failed — ${e instanceof Error ? e.message : String(e)}`);
+      continue;
+    }
+    lastStatus = r.status;
+    // Read the raw body FIRST so a non-JSON or unparseable response
+    // (e.g. a Vercel error page on a 500/504) still has its actual
+    // content available for the alert.
+    const body = await r.text().catch(() => "");
+    let part: PollResponse = {};
+    try {
+      part = JSON.parse(body);
+    } catch {
+      // leave empty — handled via body below
+    }
+    console.log(`[schwab-account-poll-trigger] ${nowIso} ${b} status=${r.status} ok=${part.ok}`);
+    // A non-2xx HTTP status is always a real failure — never
+    // content-classified, regardless of what the body says.
+    if (!r.ok) {
+      httpFailures.push(`${b}: HTTP ${r.status}. Response: ${body.trim() ? truncateWithNote(body, 400) : "(empty body)"}`);
+      continue;
+    }
+    rawParts.push(body);
+    if (!part.ok) merged.ok = false;
+    if (part.error) errorStrings.push(`${b}: ${part.error}`);
+    merged.reports = [...(merged.reports ?? []), ...(part.reports ?? [])];
+  }
+  if (httpFailures.length > 0) {
+    await fail("failed", httpFailures.join(" | "));
     return;
   }
-
-  // Read the raw body FIRST so a non-JSON or unparseable response
-  // (e.g. a Vercel error page on a 500) still has its actual content
-  // available for the alert, rather than silently collapsing to a
-  // bare status code.
-  const rawBody = await res.text().catch(() => "");
-  let json: PollResponse = {};
-  try {
-    json = JSON.parse(rawBody);
-  } catch {
-    // leave json empty — handled via rawBody below
-  }
-  console.log(`[schwab-account-poll-trigger] ${nowIso} status=${res.status} ok=${json.ok}`);
-
-  // A non-2xx HTTP status (e.g. the route's own 500 on a fatal
-  // exception) is always a real failure — never content-classified,
-  // regardless of what the body says.
-  if (!res.ok) {
-    const bodyPreview = rawBody.trim() ? truncateWithNote(rawBody, 500) : "(empty body)";
-    await fail("failed", `HTTP ${res.status}. Response: ${bodyPreview}`);
-    return;
-  }
+  if (errorStrings.length > 0) merged.error = errorStrings.join("; ");
+  const json = merged;
+  const rawBody = rawParts.join("\n");
+  const res = { status: lastStatus };
 
   if (!json.ok) {
     const allErrors = json.error

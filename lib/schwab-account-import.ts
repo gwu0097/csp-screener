@@ -152,7 +152,13 @@ export type PollReport = {
   ok: boolean;
 };
 
-export async function pollSchwabAccountTransactions(): Promise<PollReport[]> {
+// onlyBroker: poll just that account. The Mac trigger calls once per
+// account so each gets its own 60s Hobby-plan budget — polling both in
+// one request ran out of time when trades were waiting (2026-10-14
+// 1pm: schwab took ~38s, schwab2 then hit FUNCTION_INVOCATION_TIMEOUT).
+export async function pollSchwabAccountTransactions(
+  onlyBroker?: "schwab" | "schwab2",
+): Promise<PollReport[]> {
   const sb = createServerClient();
   const adminUserId = await resolveAdminUserId();
   const accounts = await getAccountNumbers();
@@ -161,6 +167,7 @@ export async function pollSchwabAccountTransactions(): Promise<PollReport[]> {
   for (const acct of accounts) {
     const broker = brokerForAccountNumber(acct.accountNumber);
     if (!broker) continue; // an account outside the known 2 — never touched
+    if (onlyBroker && broker !== onlyBroker) continue;
 
     const report = await pollOneAccount(sb, adminUserId, acct.accountNumber, acct.hashValue, broker);
     reports.push(report);

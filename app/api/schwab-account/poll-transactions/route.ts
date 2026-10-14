@@ -25,8 +25,15 @@ export async function POST(req: NextRequest) {
   const denied = requireCronSecret(req);
   if (denied) return denied;
 
+  // Optional ?broker=schwab|schwab2 — poll one account per request (see
+  // pollSchwabAccountTransactions). No param = both, as before.
+  const brokerParam = req.nextUrl.searchParams.get("broker");
+  if (brokerParam !== null && brokerParam !== "schwab" && brokerParam !== "schwab2") {
+    return NextResponse.json({ ok: false, error: `unknown broker "${brokerParam}"` }, { status: 400 });
+  }
+
   try {
-    const reports = await pollSchwabAccountTransactions();
+    const reports = await pollSchwabAccountTransactions(brokerParam ?? undefined);
     const ok = reports.every((r) => r.ok);
     console.log(
       `[schwab-account-poll] ok=${ok} ${reports
