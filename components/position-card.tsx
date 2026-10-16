@@ -73,8 +73,10 @@ export type OpenPositionClientView = {
   pnlPct: number | null;
   // 'mark' = computed off live option mark. 'intrinsic' = ITM put
   // estimate when option mark is unavailable. 'maxProfitOtm' = OTM
-  // put assumed worthless. null = no P&L computed.
-  pnlSource?: "mark" | "intrinsic" | "maxProfitOtm" | null;
+  // put assumed worthless. 'snapshot' = non-live request using the last
+  // live snapshot's option price (see pnlAsOf). null = no P&L computed.
+  pnlSource?: "mark" | "intrinsic" | "maxProfitOtm" | "snapshot" | null;
+  pnlAsOf?: string | null;
   distanceToStrikePct: number | null;
   thetaDecayTotal: number | null;
   momentum: Momentum | null;
@@ -560,7 +562,7 @@ export function PositionCard(props: Props) {
   // exact since the realized P&L is final.
   const pnlSource = open?.pnlSource ?? "mark";
   const pnlIsEstimate =
-    pnlSource === "intrinsic" || pnlSource === "maxProfitOtm";
+    pnlSource === "intrinsic" || pnlSource === "maxProfitOtm" || pnlSource === "snapshot";
 
   // ---- Manual after-hours mark ----
   // When the row is open + optionsStale, the user can type the mark
@@ -676,7 +678,9 @@ export function PositionCard(props: Props) {
       ? `Estimated P&L based on intrinsic value (strike − stock price). Actual closing price may differ.`
       : pnlSource === "maxProfitOtm"
         ? `Estimated P&L assuming OTM at expiry (full premium kept). Actual closing price may differ.`
-        : "";
+        : pnlSource === "snapshot"
+          ? `P&L from the last live price${open?.pnlAsOf ? ` at ${new Date(open.pnlAsOf).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : ""} — refresh for a live mark.`
+          : "";
   // Live-only fields; closed rows render as "—" since these are
   // meaningful at a moment-in-time only. Stock price moved into the
   // ticker sub-header in positions-view, so the row no longer renders

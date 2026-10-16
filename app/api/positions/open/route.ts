@@ -85,8 +85,13 @@ type OpenPosition = {
   // option mark (most accurate). 'intrinsic' = ITM put estimate
   // when the option mark is unavailable: pnl = (entry - intrinsic)
   // × qty × 100. 'maxProfitOtm' = OTM put with no mark — assume
-  // worthless and credit full premium. null = no P&L computed.
-  pnlSource: "mark" | "intrinsic" | "maxProfitOtm" | null;
+  // worthless and credit full premium. 'snapshot' = non-live request:
+  // the latest position_snapshot's option price (<24h old) used as the
+  // mark — see pnlAsOf. null = no P&L computed.
+  pnlSource: "mark" | "intrinsic" | "maxProfitOtm" | "snapshot" | null;
+  // When pnlSource is 'snapshot', the snapshot's time (ISO) — the P&L is
+  // "as of" then, not now. null for every live-computed source.
+  pnlAsOf: string | null;
   distanceToStrikePct: number | null;
   thetaDecayTotal: number | null;
   momentum: Momentum | null;
@@ -511,6 +516,7 @@ export async function GET(req: NextRequest) {
   // stock / option prices). One query, dedupe in memory to keep the
   // latest row per position_id.
   type LatestSnapshot = {
+    snapshot_time: string;
     stock_price: number | null;
     option_price: number | null;
     current_delta: number | null;
@@ -539,6 +545,7 @@ export async function GET(req: NextRequest) {
     for (const row of snapRows) {
       if (latestSnapshotByPosition.has(row.position_id)) continue;
       latestSnapshotByPosition.set(row.position_id, {
+        snapshot_time: row.snapshot_time,
         stock_price: row.stock_price,
         option_price: row.option_price,
         current_delta: row.current_delta,
@@ -762,7 +769,25 @@ export async function GET(req: NextRequest) {
         : "short";
     let pnlDollars: number | null = null;
     let pnlPct: number | null = null;
-    let pnlSource: "mark" | "intrinsic" | "maxProfitOtm" | null = null;
+    let pnlSource: "mark" | "intrinsic" | "maxProfitOtm" | "snapshot" | null = null;
+    let pnlAsOf: string | null = null;
+    // Non-live requests (the dashboard) fetch no chain, so there's no
+    // mark and P&L used to come back null — and recommendPosition then
+    // read that as 0% captured, judging urgency on distance alone and
+    // disagreeing with the Positions page (2026-10-16, TSM $395: flagged
+    // MONITOR at 98% captured). Use the latest live snapshot's option
+    // price as a recent mark instead, with today's fills/contracts, and
+    // label the result with its time.
+    const SNAPSHOT_MARK_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+    const snap = latestSnapshotByPosition.get(p.id);
+    const snapMark =
+      !live &&
+      mark === null &&
+      snap &&
+      snap.option_price !== null &&
+      Date.now() - Date.parse(snap.snapshot_time) <= SNAPSHOT_MARK_MAX_AGE_MS
+        ? Number(snap.option_price)
+        : null;
     if (mark !== null && premiumSold > 0) {
       // short: profit when buy-back is cheaper than what was sold.
       // long:  profit when mark exceeds the premium paid.
@@ -771,6 +796,13 @@ export async function GET(req: NextRequest) {
       pnlDollars = diff * remaining * 100;
       pnlPct = (diff / premiumSold) * 100;
       pnlSource = "mark";
+    } else if (snapMark !== null && premiumSold > 0 && snap) {
+      const diff =
+        directionForPnl === "long" ? snapMark - premiumSold : premiumSold - snapMark;
+      pnlDollars = diff * remaining * 100;
+      pnlPct = (diff / premiumSold) * 100;
+      pnlSource = "snapshot";
+      pnlAsOf = snap.snapshot_time;
     } else if (
       directionForPnl === "short" &&
       !pickerRejected &&
@@ -924,7 +956,8 @@ export async function GET(req: NextRequest) {
       currentStockPrice !== null ? postEarningsMomentum(null, currentStockPrice) : null;
 
     const rec = recommendPosition({
-      profitPct: pnlPct ?? 0,
+      // null = unknown, never "0% captured" — see recommendPosition.
+      profitPct: pnlPct,
       distanceToStrikePct: distanceToStrikePct ?? 100,
       dte: Math.max(0, dte),
       entryDelta: null,
@@ -987,6 +1020,7 @@ export async function GET(req: NextRequest) {
       pnlDollars,
       pnlPct,
       pnlSource,
+      pnlAsOf,
       distanceToStrikePct,
       distanceImplausible,
       thetaDecayTotal,

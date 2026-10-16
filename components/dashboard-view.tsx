@@ -67,6 +67,9 @@ type Position = {
   expiry: string;
   remainingContracts: number;
   pnlDollars: number | null;
+  // Set when the P&L comes from the last live snapshot rather than a
+  // live mark (this page loads positions without a chain fetch).
+  pnlAsOf?: string | null;
   urgency: "EMERGENCY_CUT" | "CUT" | "MONITOR" | "HOLD";
   badgeLabel: string;
 };
@@ -900,6 +903,21 @@ export function DashboardView() {
                   />
                   <CompactStat label="Expiring ≤2d" value={expiringSoon} />
                 </div>
+                {(() => {
+                  // Oldest snapshot time behind any P&L shown here — the
+                  // dashboard doesn't fetch live option prices.
+                  const asOf = pos
+                    .map((p) => p.pnlAsOf)
+                    .filter((t): t is string => !!t)
+                    .sort()[0];
+                  return asOf ? (
+                    <div className="text-xs text-muted-foreground">
+                      P&amp;L as of{" "}
+                      {new Date(asOf).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" })}{" "}
+                      — last live refresh on Positions
+                    </div>
+                  ) : null;
+                })()}
                 {attention.length > 0 ? (
                   <div className="text-sm font-medium text-rose-400">
                     {attention.length} need{attention.length === 1 ? "s" : ""} attention
