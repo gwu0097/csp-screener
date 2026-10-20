@@ -150,7 +150,13 @@ const OBSERVATION_BARE_TERM_LINE = /^([a-z][a-z0-9_]*)$/;
 // into the span because "## PART 1" didn't match a plain "PART 1" regex
 // and the span ran to end-of-input instead. Deliberately NOT a blank
 // line — see the comment on extractCandidateObservationsBlock below.
-const SECTION_MARKER_LINE = /^(#{1,6}\s*)?(\*\*)?(===.*===|PART\s+\d+\b.*)$/;
+// The third alternative is a bare capitalized heading on its own line
+// (`Sources:`, `**References:**`): a trailing appendix written after the
+// block when it's the last section. It swallowed a real COF paste's
+// source list on 2026-10-20 and failed the parse. It can't collide with
+// a term line — terms are lowercase snake_case.
+const SECTION_MARKER_LINE =
+  /^(#{1,6}\s*)?(\*\*)?(===.*===|PART\s+\d+\b.*|[A-Z][A-Za-z ]{0,40}:(\*\*)?)$/;
 
 // Extracts the numeric part of a declared CHECKLIST_VERSION ("v6" -> 6),
 // or null if unparseable/absent — in which case a caller can't tell
