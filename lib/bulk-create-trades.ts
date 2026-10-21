@@ -20,6 +20,7 @@ import {
   type Fill,
   type PositionRow,
 } from "@/lib/positions";
+import { classifyIncomingFill } from "@/lib/fill-dedup";
 import { buildSnapshotRow, fetchChainWideSafe } from "@/lib/snapshots";
 import { recordPositionOutcome } from "@/lib/post-earnings";
 import { buildStampContext, stampEntryContext } from "@/lib/entry-context";
@@ -587,27 +588,17 @@ export async function runBulkCreate(userId: string, body: BulkBody): Promise<Nex
         continue;
       }
       // Cross-batch duplicate: an identical fill already exists on this
-      // position from a previous import. Warning only — the user may be
-      // re-importing a corrected screenshot on purpose. When this fill
-      // carries a broker-supplied externalId (auto-import), that's the
-      // only signal trusted: an exact id match is a real duplicate, no
-      // match is a proven-separate execution regardless of matching
-      // contracts/premium/date. Without an externalId (manual/
-      // screenshot import), fall back to the fuzzy economic-terms match.
-      const alreadyImported = input.externalId
-        ? posFills.some((f) => f.external_id === input.externalId)
-        : posFills.some(
-            (f) =>
-              f.fill_type === input.action &&
-              Number(f.contracts) === Number(input.contracts) &&
-              Math.abs(Number(f.premium) - Number(input.premium)) < 0.005 &&
-              f.fill_date === fillDate,
-          );
-      if (alreadyImported) {
+      // position from a previous import. See lib/fill-dedup.ts for the
+      // rule. A broker-id match is the same execution re-delivered and
+      // is already in the position's balance, so it skips the over-close
+      // guard below (which would count it twice) and is never planned.
+      const dedup = classifyIncomingFill(input, fillDate, posFills);
+      if (dedup !== "new") {
         duplicateWarnings.push(
           `${positionLabel}: an identical ${input.action} fill (${input.contracts} @ $${input.premium}, ${fillDate}) already exists from a previous import`,
         );
       }
+      if (dedup === "duplicate_by_id") continue;
       if (input.action === "close") {
         const available =
           remainingContracts(posFills) +

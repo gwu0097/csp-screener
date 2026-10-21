@@ -26,6 +26,7 @@
 import { createServerClient } from "@/lib/supabase";
 import { getAccountNumbers, getAccountTransactions } from "@/lib/schwab-account";
 import { runBulkCreate, type TradeInput, type StockTradeInput } from "@/lib/bulk-create-trades";
+import { partitionByRecordedExternalId } from "@/lib/fill-dedup";
 import { autoExpirePosition, recordAssignment } from "@/lib/expire-positions";
 import { reduceStockLotForCallAssignment, createStockFromAssignment } from "@/lib/positions";
 
@@ -559,6 +560,37 @@ async function pollOneAccount(
     positions_created?: number;
     fills_inserted?: number;
   };
+
+  // Rows whose Schwab activity id is already on a fill were imported by
+  // an earlier run that died before marking them processed (a 504 on
+  // 2026-10-20 left an ISRG close that the next run then flagged as an
+  // over-close). Skip them before bulk-create touches anything.
+  const pendingIds = pending.map((p) => p.input.externalId).filter((id): id is string => !!id);
+  if (pendingIds.length > 0) {
+    const recordedRes = await sb
+      .from("fills")
+      .select("external_id")
+      .eq("user_id", adminUserId)
+      .in("external_id", pendingIds);
+    if (recordedRes.error) {
+      // Unknown state: leave every row unprocessed for the next run
+      // rather than risk importing a fill twice.
+      errors.push(`recorded-fill lookup failed: ${recordedRes.error.message}`);
+      base.ok = false;
+      return base;
+    }
+    const recordedIds = new Set(
+      ((recordedRes.data ?? []) as Array<{ external_id: string | null }>)
+        .map((r) => r.external_id)
+        .filter((id): id is string => !!id),
+    );
+    const { recorded, fresh } = partitionByRecordedExternalId(pending, recordedIds);
+    for (const p of recorded) {
+      base.skipped += 1;
+      await markProcessed(sb, p.row.id, "skipped_duplicate", `fill with Schwab activity ${p.input.externalId} already recorded by an earlier run`);
+    }
+    pending.splice(0, pending.length, ...fresh);
+  }
 
   if (pending.length > 0) {
     const result = await runBulkCreate(adminUserId, {
