@@ -71,7 +71,7 @@ type SchwabTransaction = {
   transferItems?: TransferItem[];
 };
 
-async function resolveAdminUserId(): Promise<string> {
+export async function resolveAdminUserId(): Promise<string> {
   const sb = createServerClient();
   const res = await sb.from("users").select("id").eq("role", "admin").limit(1).maybeSingle();
   const row = res.data as { id: string } | null;
@@ -151,6 +151,9 @@ export type PollReport = {
   skipped: number;
   errors: string[];
   ok: boolean;
+  // Symbols whose post-import enrichment was deferred — the trigger
+  // calls POST /api/schwab-account/enrich-imports for each.
+  enrichSymbols: string[];
 };
 
 // onlyBroker: poll just that account. The Mac trigger calls once per
@@ -227,6 +230,7 @@ async function pollOneAccount(
     skipped: 0,
     errors,
     ok: true,
+    enrichSymbols: [],
   };
 
   if (windowStart === windowEnd) {
@@ -559,6 +563,12 @@ async function pollOneAccount(
     requires_confirmation?: boolean;
     positions_created?: number;
     fills_inserted?: number;
+    enrich_symbols?: string[];
+  };
+  const noteEnrich = (json: BulkCreateJson) => {
+    for (const sym of json.enrich_symbols ?? []) {
+      if (!base.enrichSymbols.includes(sym)) base.enrichSymbols.push(sym);
+    }
   };
 
   // Rows whose Schwab activity id is already on a fill were imported by
@@ -602,8 +612,12 @@ async function pollOneAccount(
       // manual entry) — the correct response is to leave it alone, not
       // push a second fill through.
       confirmDuplicates: false,
+      // Enrichment runs in its own request (lib/import-enrichment.ts) so
+      // this one stays inside the 60s limit.
+      deferEnrichment: true,
     });
     const json = (await result.json()) as BulkCreateJson;
+    noteEnrich(json);
 
     if (result.status === 200) {
       base.tradesSubmitted = pending.length;
@@ -640,8 +654,10 @@ async function pollOneAccount(
           stockTrades: p.kind === "stock" ? [p.input] : [],
           sourceTimezone: "UTC",
           confirmDuplicates: false,
+          deferEnrichment: true,
         });
         const singleJson = (await singleResult.json()) as BulkCreateJson;
+        noteEnrich(singleJson);
         if (singleResult.status === 200) {
           base.tradesSubmitted += 1;
           await markProcessed(sb, p.row.id, "submitted", `bulk-create ok (individual retry after batch failure) — fills_inserted=${singleJson.fills_inserted ?? 0}`);

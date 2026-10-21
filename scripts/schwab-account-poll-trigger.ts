@@ -48,6 +48,7 @@ let startMessageId: string | null = null;
 const STATE_DIR = resolve(homedir(), "Library/Application Support/csp-screener");
 const STATE_PATH = resolve(STATE_DIR, "schwab-account-poll-state.json");
 const POLL_URL = "https://csp-screener.vercel.app/api/schwab-account/poll-transactions";
+const ENRICH_URL = "https://csp-screener.vercel.app/api/schwab-account/enrich-imports";
 const RECONNECT_URL = "https://csp-screener.vercel.app/settings";
 
 type Severity = "ok" | "warning" | "failed";
@@ -116,8 +117,60 @@ type PollResponse = {
     expirationsRecorded?: number;
     assignmentsRecorded?: number;
     skipped?: number;
+    enrichSymbols?: string[];
   }>;
 };
+
+type EnrichResponse = { ok?: boolean; error?: string; stamped?: number; closeSnapshots?: number; remaining?: number };
+
+// Market-data enrichment for what the poll imported (entry context,
+// close snapshots, chain classification) — split off the poll request
+// so it can't push it past Vercel's 60s limit. One request per symbol
+// the poll named, then a sweep for leftovers from earlier runs, each
+// repeated while the route reports work remaining (bounded). Returns a
+// one-line note for the Discord message, or "" when there was nothing
+// to do. Never throws: enrichment is best-effort and must not mask the
+// poll's own result.
+async function runEnrichment(symbols: string[]): Promise<string> {
+  const { MAX_ENRICH_CALLS_PER_TARGET } = await import("../lib/import-enrichment-rules");
+  let stamped = 0;
+  let snapshots = 0;
+  const failures: string[] = [];
+  for (const target of [...symbols, null]) {
+    for (let i = 0; i < MAX_ENRICH_CALLS_PER_TARGET; i++) {
+      const url = target ? `${ENRICH_URL}?symbol=${encodeURIComponent(target)}` : ENRICH_URL;
+      const label = target ?? "sweep";
+      let body: EnrichResponse = {};
+      try {
+        const r = await fetch(url, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${process.env.CRON_SECRET ?? ""}` },
+        });
+        const text = await r.text().catch(() => "");
+        try {
+          body = JSON.parse(text);
+        } catch {
+          body = {};
+        }
+        if (!r.ok || !body.ok) {
+          failures.push(`${label}: HTTP ${r.status} ${body.error ?? truncateWithNote(text, 120)}`);
+          break;
+        }
+      } catch (e) {
+        failures.push(`${label}: ${e instanceof Error ? e.message : String(e)}`);
+        break;
+      }
+      stamped += body.stamped ?? 0;
+      snapshots += body.closeSnapshots ?? 0;
+      console.log(`[schwab-account-poll-trigger] enrich ${label}: stamped=${body.stamped} close_snapshots=${body.closeSnapshots} remaining=${body.remaining}`);
+      if (!body.remaining) break;
+    }
+  }
+  if (failures.length > 0) return `\n⚠️ Entry-details step failed (trades are imported; details fill in on the next run): ${failures.join(" | ")}`;
+  if (stamped + snapshots === 0) return "";
+  return `\nEntry details filled for ${stamped} position(s)${snapshots > 0 ? `, ${snapshots} close snapshot(s)` : ""}.`;
+}
+let enrichNote = "";
 
 // A closing fill with no matching open position on file isn't a
 // broken poller — it means the trade isn't part of a position this
@@ -152,7 +205,8 @@ async function main() {
   });
   startMessageId = startPost.messageId ?? null;
 
-  async function finish(text: string, opts?: { mention?: boolean }): Promise<void> {
+  async function finish(rawText: string, opts?: { mention?: boolean }): Promise<void> {
+    const text = rawText + enrichNote;
     if (startMessageId) {
       const res = await editDiscordAlert(startMessageId, text, opts);
       if (res.ok) return;
@@ -235,6 +289,13 @@ async function main() {
     if (part.error) errorStrings.push(`${b}: ${part.error}`);
     merged.reports = [...(merged.reports ?? []), ...(part.reports ?? [])];
   }
+  // Always attempted, even after a failed poll: the leftover sweep
+  // catches up work from earlier runs regardless.
+  {
+    const { symbolsToEnrich } = await import("../lib/import-enrichment-rules");
+    enrichNote = await runEnrichment(symbolsToEnrich(merged.reports ?? []));
+  }
+
   if (httpFailures.length > 0) {
     await fail("failed", httpFailures.join(" | "));
     return;

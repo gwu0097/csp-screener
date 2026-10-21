@@ -28,5 +28,8 @@ export async function POST(req: NextRequest) {
   } catch {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
-  return runBulkCreate(userId, body);
+  // deferEnrichment is for the Schwab poller only (its follow-up enrich
+  // route serves the admin user); a client-sent flag would leave this
+  // user's positions never enriched.
+  return runBulkCreate(userId, { ...body, deferEnrichment: false });
 }

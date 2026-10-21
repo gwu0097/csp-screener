@@ -21,12 +21,13 @@ import {
   type PositionRow,
 } from "@/lib/positions";
 import { classifyIncomingFill } from "@/lib/fill-dedup";
-import { buildSnapshotRow, fetchChainWideSafe } from "@/lib/snapshots";
 import { recordPositionOutcome } from "@/lib/post-earnings";
-import { buildStampContext, stampEntryContext } from "@/lib/entry-context";
-import { classifyUserChains, persistChains } from "@/lib/trade-chains";
-import { classifyAndPersistCoveredCallChains } from "@/lib/covered-call-chains";
-import { buildAndPersistCampaigns } from "@/lib/campaigns";
+import {
+  captureCloseSnapshot,
+  reclassifySymbols,
+  stampOpenedPositions,
+  type OpenedPositionMeta,
+} from "@/lib/import-enrichment";
 
 export type TradeInput = {
   symbol: string;
@@ -89,6 +90,12 @@ export type BulkBody = {
   // the user may legitimately have filled the same contract twice at
   // the same price, or be re-importing a corrected screenshot.
   confirmDuplicates?: boolean;
+  // Skip the market-data enrichment (close snapshot, entry-context
+  // stamping, chain/campaign re-classification) — the caller runs it in
+  // a separate request via lib/import-enrichment.ts. Set by the Schwab
+  // Account Data poll so its request stays inside Vercel's 60s limit.
+  // The response's enrich_symbols names the symbols that had opens.
+  deferEnrichment?: boolean;
 };
 
 // Code → IANA timezone identifier. Add new codes to both this map
@@ -317,6 +324,7 @@ export async function runBulkCreate(userId: string, body: BulkBody): Promise<Nex
   // not rejections — see BulkBody.confirmDuplicates.
   const duplicateWarnings: string[] = [];
   const confirmDuplicates = body.confirmDuplicates === true;
+  const deferEnrichment = body.deferEnrichment === true;
 
   // Fills of every pre-existing position touched by this batch, fetched
   // once per position. Feeds the over-close guard and the cross-batch
@@ -1190,58 +1198,8 @@ export async function runBulkCreate(userId: string, body: BulkBody): Promise<Nex
 
     // Close-time snapshot — only when the close fill is dated today
     // (live IV/delta/theta from the chain). Historical backfills skip.
-    if (input.action === "close" && fillDate === todayIso()) {
-      try {
-        const { data: posRow } = await supabase
-          .from("positions")
-          .select(
-            "id, symbol, strike, expiry, avg_premium_sold, opened_date, entry_stock_price, entry_em_pct, option_type, direction",
-          )
-          .eq("id", positionId)
-          .eq("user_id", userId)
-          .single();
-        const position = posRow as {
-          id: string;
-          symbol: string;
-          strike: number;
-          expiry: string;
-          avg_premium_sold: number | null;
-          opened_date: string | null;
-          entry_stock_price: number | null;
-          entry_em_pct: number | null;
-          option_type: "put" | "call" | null;
-          direction: "short" | "long" | null;
-        } | null;
-        if (position) {
-          const { data: preFillsRaw } = await supabase
-            .from("fills")
-            .select("fill_type, contracts, premium, fill_date")
-            .eq("position_id", positionId)
-            .eq("user_id", userId);
-          const preFills = (preFillsRaw ?? []) as Fill[];
-          const chain = await fetchChainWideSafe(
-            position.symbol,
-            position.expiry,
-            position.option_type === "call" ? "call" : "put",
-          );
-          const snapshotRow = buildSnapshotRow(position, chain, preFills, {
-            nowIso: new Date().toISOString(),
-            closeSnapshot: true,
-          });
-          const { error: sErr } = await supabase
-            .from("position_snapshots")
-            .insert({ ...snapshotRow, user_id: userId });
-          if (sErr) {
-            console.warn(
-              `[bulk-create] close snapshot insert failed for ${input.symbol}: ${sErr.message}`,
-            );
-          }
-        }
-      } catch (e) {
-        console.warn(
-          `[bulk-create] close snapshot capture failed for ${input.symbol}: ${e instanceof Error ? e.message : e}`,
-        );
-      }
+    if (input.action === "close" && fillDate === todayIso() && !deferEnrichment) {
+      await captureCloseSnapshot(supabase, userId, positionId);
     }
 
     // Entry-grades merge from tracked_tickers — only on OPEN fills,
@@ -1323,112 +1281,31 @@ export async function runBulkCreate(userId: string, body: BulkBody): Promise<Nex
   // Entry-context stamping — every position that received an OPEN fill
   // in this batch gets VIX / spot / EM% / IV / delta / DTE / market cap
   // / earnings linkage filled in (nulls only — the tracked_tickers
-  // merge above already ran and its richer values win). Best-effort:
-  // stampEntryContext never throws.
-  {
-    const openMeta = new Map<
-      string,
-      { symbol: string; strike: number; expiry: string; optionType: "put" | "call"; openedDate: string }
-    >();
-    for (const rec of optionFillRecords) {
-      if (rec.plan.input.action !== "open") continue;
-      if (openMeta.has(rec.positionId)) continue;
-      openMeta.set(rec.positionId, {
-        symbol: rec.plan.symbol,
-        strike: Number(rec.plan.input.strike),
-        expiry: rec.plan.expiry,
-        optionType: rec.plan.input.optionType ?? "put",
-        openedDate: rec.plan.fillDate,
-      });
-    }
-    if (openMeta.size > 0) {
-      try {
-        const stampCtx = await buildStampContext();
-        for (const [positionId, meta] of Array.from(openMeta.entries())) {
-          const r = await stampEntryContext(stampCtx, {
-            id: positionId,
-            userId,
-            ...meta,
-          });
-          if (r.stamped.length > 0 || r.earningsLinked) {
-            console.log(
-              `[bulk-create] entry context ${meta.symbol}: stamped=[${r.stamped.join(",")}] earningsLinked=${r.earningsLinked}`,
-            );
-          }
-        }
-      } catch (e) {
-        console.warn(
-          `[bulk-create] entry-context pass failed: ${e instanceof Error ? e.message : e}`,
-        );
-      }
-    }
+  // merge above already ran and its richer values win). Then trade-chain
+  // / campaign re-classification for every symbol with an open (after
+  // stamping, so the deep-ITM test can use entry_stock_price).
+  const openMeta = new Map<string, OpenedPositionMeta>();
+  for (const rec of optionFillRecords) {
+    if (rec.plan.input.action !== "open") continue;
+    if (openMeta.has(rec.positionId)) continue;
+    openMeta.set(rec.positionId, {
+      positionId: rec.positionId,
+      symbol: rec.plan.symbol,
+      strike: Number(rec.plan.input.strike),
+      expiry: rec.plan.expiry,
+      optionType: rec.plan.input.optionType ?? "put",
+      openedDate: rec.plan.fillDate,
+    });
   }
-
-  // Trade-chain detection — re-classify every symbol that received an
-  // OPEN fill this batch (runs AFTER entry-context stamping so the
-  // deep-ITM test can use entry_stock_price). User-confirmed rows are
-  // never clobbered. The positions page shows a confirmation chip for
-  // auto-detected rolled / recovery_play positions.
-  {
-    const symbolsWithOpens = Array.from(
-      new Set(
-        optionFillRecords
-          .filter((rec) => rec.plan.input.action === "open")
-          .map((rec) => rec.plan.symbol),
-      ),
+  const symbolsWithOpens = Array.from(new Set(Array.from(openMeta.values()).map((m) => m.symbol)));
+  if (!deferEnrichment) {
+    const t0 = Date.now();
+    await stampOpenedPositions(userId, Array.from(openMeta.values()));
+    const t1 = Date.now();
+    await reclassifySymbols(userId, symbolsWithOpens);
+    console.log(
+      `[bulk-create] enrichment batch=${importBatchId} stamp_ms=${t1 - t0} reclassify_ms=${Date.now() - t1} positions=${openMeta.size} symbols=${symbolsWithOpens.length}`,
     );
-    for (const sym of symbolsWithOpens) {
-      try {
-        const chains = await classifyUserChains(userId, sym);
-        await persistChains(chains, "auto", { skipConfirmed: true });
-        const flagged = chains.filter((c) => c.tradeType !== "clean");
-        if (flagged.length > 0) {
-          console.log(
-            `[bulk-create] chain detection ${sym}: ${flagged.map((c) => `${c.tradeType} (${c.optionCount} legs, $${c.chainPnl})`).join("; ")}`,
-          );
-        }
-      } catch (e) {
-        console.warn(
-          `[bulk-create] chain detection failed for ${sym}: ${e instanceof Error ? e.message : e}`,
-        );
-      }
-      // Covered-call roll-chain linking — separate from the CSP chain
-      // detection above (which excludes covered calls entirely; see
-      // lib/covered-call-chains.ts's header). Purely mechanical, no
-      // skipConfirmed concept needed here.
-      try {
-        const result = await classifyAndPersistCoveredCallChains(userId, sym);
-        if (result.chainsWritten > 0) {
-          console.log(
-            `[bulk-create] covered-call chain detection ${sym}: ${result.chainsWritten} chain(s), ${result.membersUpdated} member(s) linked`,
-          );
-        }
-      } catch (e) {
-        console.warn(
-          `[bulk-create] covered-call chain detection failed for ${sym}: ${e instanceof Error ? e.message : e}`,
-        );
-      }
-    }
-
-    // Campaign layer — resolve each just-reclassified chain to the
-    // earnings event it belongs to (lib/campaigns.ts) and stamp
-    // campaign_id on every member. Runs AFTER chain detection so a
-    // roll/scale-in fill that just joined an existing chain gets
-    // folded into that chain's campaign rather than left unstamped.
-    for (const sym of symbolsWithOpens) {
-      try {
-        const built = await buildAndPersistCampaigns(userId, sym);
-        if (built.unresolved > 0) {
-          console.log(
-            `[bulk-create] campaign resolution ${sym}: ${built.resolved} resolved, ${built.unresolved} unresolved`,
-          );
-        }
-      } catch (e) {
-        console.warn(
-          `[bulk-create] campaign build failed for ${sym}: ${e instanceof Error ? e.message : e}`,
-        );
-      }
-    }
   }
 
   const positionsCreated = positionsCreatedIds.length;
@@ -1448,5 +1325,8 @@ export async function runBulkCreate(userId: string, body: BulkBody): Promise<Nex
     skipped,
     // Duplicates the caller confirmed past — echoed back for the record.
     warnings: duplicateWarnings,
+    // Symbols whose enrichment was skipped (deferEnrichment) and still
+    // needs POST /api/schwab-account/enrich-imports. Empty otherwise.
+    enrich_symbols: deferEnrichment ? symbolsWithOpens : [],
   });
 }
