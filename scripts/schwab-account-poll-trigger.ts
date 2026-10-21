@@ -168,7 +168,7 @@ async function runEnrichment(symbols: string[]): Promise<string> {
   }
   if (failures.length > 0) return `\n⚠️ Entry-details step failed (trades are imported; details fill in on the next run): ${failures.join(" | ")}`;
   if (stamped + snapshots === 0) return "";
-  return `\nEntry details filled for ${stamped} position(s)${snapshots > 0 ? `, ${snapshots} close snapshot(s)` : ""}.`;
+  return `\nEntry details attempted for ${stamped} position(s)${snapshots > 0 ? `, ${snapshots} close snapshot(s)` : ""}.`;
 }
 let enrichNote = "";
 

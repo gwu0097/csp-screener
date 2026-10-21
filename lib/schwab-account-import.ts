@@ -154,6 +154,9 @@ export type PollReport = {
   // Symbols whose post-import enrichment was deferred — the trigger
   // calls POST /api/schwab-account/enrich-imports for each.
   enrichSymbols: string[];
+  // Phase timings for diagnosing the 60s limit: Schwab fetch + landing
+  // rows, bulk-create (incl. any per-row retry), whole account.
+  timingsMs: { fetch: number; bulk: number; total: number };
 };
 
 // onlyBroker: poll just that account. The Mac trigger calls once per
@@ -204,6 +207,7 @@ async function pollOneAccount(
   broker: "schwab" | "schwab2",
 ): Promise<PollReport> {
   const errors: string[] = [];
+  const startedMs = Date.now();
   const windowEnd = new Date().toISOString();
 
   const lastRun = await sb
@@ -231,6 +235,7 @@ async function pollOneAccount(
     errors,
     ok: true,
     enrichSymbols: [],
+    timingsMs: { fetch: 0, bulk: 0, total: 0 },
   };
 
   if (windowStart === windowEnd) {
@@ -282,6 +287,7 @@ async function pollOneAccount(
   // Process only rows this run actually landed (unprocessed rows from
   // a prior failed run get picked up too, via the `processed=false`
   // filter, not just this run's fresh set).
+  base.timingsMs.fetch = Date.now() - startedMs;
   const unprocessedRes = await sb
     .from("schwab_account_transactions")
     .select("id,activity_id,type,transaction_time,raw")
@@ -602,6 +608,7 @@ async function pollOneAccount(
     pending.splice(0, pending.length, ...fresh);
   }
 
+  const bulkStartedMs = Date.now();
   if (pending.length > 0) {
     const result = await runBulkCreate(adminUserId, {
       trades: pending.filter((p) => p.kind === "trade").map((p) => p.input as TradeInput),
@@ -683,6 +690,8 @@ async function pollOneAccount(
     }
   }
 
+  base.timingsMs.bulk = Date.now() - bulkStartedMs;
+  base.timingsMs.total = Date.now() - startedMs;
   base.ok = errors.length === 0;
   return base;
 }

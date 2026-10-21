@@ -39,7 +39,7 @@ export async function POST(req: NextRequest) {
       `[schwab-account-poll] ok=${ok} ${reports
         .map(
           (r) =>
-            `${r.broker}: seen=${r.transactionsSeen} landed=${r.transactionsLanded} trades=${r.tradesSubmitted} expired=${r.expirationsRecorded} assigned=${r.assignmentsRecorded} skipped=${r.skipped} errors=${r.errors.length}`,
+            `${r.broker}: seen=${r.transactionsSeen} landed=${r.transactionsLanded} trades=${r.tradesSubmitted} expired=${r.expirationsRecorded} assigned=${r.assignmentsRecorded} skipped=${r.skipped} errors=${r.errors.length} fetch_ms=${r.timingsMs.fetch} bulk_ms=${r.timingsMs.bulk} total_ms=${r.timingsMs.total}`,
         )
         .join(" | ")}`,
     );

@@ -299,6 +299,7 @@ function normalizeExpiryToWeekday(expiry: string): {
 // Failures there log but don't roll the whole batch back — they're
 // observational records, not the trades themselves.
 export async function runBulkCreate(userId: string, body: BulkBody): Promise<NextResponse> {
+  const bulkStartedMs = Date.now();
   const itemsRaw = Array.isArray(body.trades) ? body.trades : [];
   const stockItemsRaw = Array.isArray(body.stockTrades) ? body.stockTrades : [];
   if (itemsRaw.length === 0 && stockItemsRaw.length === 0) {
@@ -1312,7 +1313,7 @@ export async function runBulkCreate(userId: string, body: BulkBody): Promise<Nex
   const positionsUpdated = touchedPreExistingIds.size;
 
   console.log(
-    `[bulk-create] OK batch=${importBatchId} options=${optionPlans.length} stocks=${stockPlans.length} positions_created=${positionsCreated} positions_updated=${positionsUpdated} fills_inserted=${fillsInserted} stocks_closed=${stocksClosed} stocks_partial=${stocksPartial}`,
+    `[bulk-create] OK batch=${importBatchId} options=${optionPlans.length} stocks=${stockPlans.length} positions_created=${positionsCreated} positions_updated=${positionsUpdated} fills_inserted=${fillsInserted} stocks_closed=${stocksClosed} stocks_partial=${stocksPartial} ms=${Date.now() - bulkStartedMs}`,
   );
 
   return NextResponse.json({
