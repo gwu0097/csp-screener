@@ -47,6 +47,13 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { BROKER_ORDER, BROKER_LABEL, type BrokerKey } from "@/lib/brokers";
+import { ArrowDown, ArrowUp } from "lucide-react";
+import {
+  defaultSortDir,
+  sortTickerRankings,
+  type SortDir,
+  type TickerRankingSortKey,
+} from "@/lib/ticker-ranking-sort";
 
 ChartJS.register(CategoryScale, LinearScale, BarElement, ChartJsTooltip);
 
@@ -2039,21 +2046,32 @@ export function TickerRankingsSection({
   onToggleSymbol: (s: string) => void;
 }) {
   const [search, setSearch] = useState("");
+  const [sortKey, setSortKey] = useState<TickerRankingSortKey>("avg_roc");
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
   const normalized = search.trim().toLowerCase();
-  const filtered = useMemo(
-    () =>
+  const filtered = useMemo(() => {
+    const matched =
       normalized === ""
         ? rankings
-        : rankings.filter((r) => r.symbol.toLowerCase().includes(normalized)),
-    [rankings, normalized],
-  );
+        : rankings.filter((r) => r.symbol.toLowerCase().includes(normalized));
+    return sortTickerRankings(matched, sortKey, sortDir);
+  }, [rankings, normalized, sortKey, sortDir]);
+  const onSort = (k: TickerRankingSortKey) => {
+    if (k === sortKey) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(k);
+      setSortDir(defaultSortDir(k));
+    }
+  };
+  const sortProps = { sortKey, sortDir, onSort };
 
   return (
     <section className="space-y-3">
       <div>
         <h2 className="text-lg font-semibold">Capital Efficiency by Ticker</h2>
         <p className="text-sm text-muted-foreground">
-          Sorted by average ROC — your best-performing setups
+          Sorted by {SORT_LABEL[sortKey]} ({sortDir === "asc" ? "low to high" : "high to low"}) — tap a column to re-sort
         </p>
       </div>
       <div className="flex flex-wrap items-center gap-2">
@@ -2075,13 +2093,13 @@ export function TickerRankingsSection({
             <Table>
               <TableHeader className="sticky top-0 z-10 bg-background">
                 <TableRow>
-                  <TableHead>Symbol</TableHead>
-                  <TableHead className="text-right">Trades</TableHead>
-                  <TableHead className="text-right">Win Rate</TableHead>
-                  <TableHead className="text-right">Avg ROC</TableHead>
-                  <TableHead className="text-right">Best ROC</TableHead>
-                  <TableHead>Grade</TableHead>
-                  <TableHead className="text-right">Rec Accuracy</TableHead>
+                  <SortableTickerHead k="symbol" label="Symbol" {...sortProps} />
+                  <SortableTickerHead k="trades" label="Trades" align="right" {...sortProps} />
+                  <SortableTickerHead k="win_rate" label="Win Rate" align="right" {...sortProps} />
+                  <SortableTickerHead k="avg_roc" label="Avg ROC" align="right" {...sortProps} />
+                  <SortableTickerHead k="best_roc" label="Best ROC" align="right" {...sortProps} />
+                  <SortableTickerHead k="grade" label="Grade" {...sortProps} />
+                  <SortableTickerHead k="rec_accuracy" label="Rec Accuracy" align="right" {...sortProps} />
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -2113,6 +2131,58 @@ export function TickerRankingsSection({
         </>
       )}
     </section>
+  );
+}
+
+const SORT_LABEL: Record<TickerRankingSortKey, string> = {
+  symbol: "symbol",
+  trades: "trades",
+  win_rate: "win rate",
+  avg_roc: "average ROC",
+  best_roc: "best ROC",
+  grade: "grade",
+  rec_accuracy: "rec accuracy",
+};
+
+// Header cell that toggles the table sort. The whole cell is the tap
+// target (>= 44px tall); the arrow shows on the active column only.
+function SortableTickerHead({
+  k,
+  label,
+  align = "left",
+  sortKey,
+  sortDir,
+  onSort,
+}: {
+  k: TickerRankingSortKey;
+  label: string;
+  align?: "left" | "right";
+  sortKey: TickerRankingSortKey;
+  sortDir: SortDir;
+  onSort: (k: TickerRankingSortKey) => void;
+}) {
+  const active = sortKey === k;
+  return (
+    <TableHead
+      className={align === "right" ? "text-right" : undefined}
+      aria-sort={active ? (sortDir === "asc" ? "ascending" : "descending") : "none"}
+    >
+      <button
+        type="button"
+        onClick={() => onSort(k)}
+        className={`inline-flex min-h-[44px] items-center gap-1 select-none transition-colors ${
+          align === "right" ? "flex-row-reverse" : ""
+        } ${active ? "text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+      >
+        <span>{label}</span>
+        {active &&
+          (sortDir === "asc" ? (
+            <ArrowUp className="h-3 w-3" aria-hidden />
+          ) : (
+            <ArrowDown className="h-3 w-3" aria-hidden />
+          ))}
+      </button>
+    </TableHead>
   );
 }
 
