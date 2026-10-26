@@ -25,6 +25,7 @@ import type { PositionRow } from "@/lib/positions";
 import { isT1SessionEligible } from "@/lib/session-eligibility";
 import { recordCaptureAttempt, markT1RowsUnrecoverable, T1_RETRY_CUTOFF_DAYS } from "@/lib/earnings-capture-attempts";
 import { upsertHealthRollup } from "@/lib/capture-health";
+import { isCrushCaptureFailure } from "@/lib/crush-capture-outcomes";
 
 // Distinct phase labels for capture_health_daily — NOT "t0"/"t1", which
 // scripts/capture-t0-t1-chain-detail.ts already writes for a completely
@@ -36,20 +37,8 @@ import { upsertHealthRollup } from "@/lib/capture-health";
 const CRUSH_T0_PHASE = "crush-t0";
 const CRUSH_T1_PHASE = "crush-t1";
 
-// Benign, expected skip reasons — never real failures, so excluded from
-// the errored/outstanding counts a health rollup reports. Same
-// vocabulary already returned by captureEarningsT0/T1 (see CaptureItem).
-// premature_capture_session is T0's session guard declining a candidate
-// outside its one valid session (AMC due tomorrow, or a BMO already
-// printed) — the correctly-timed run owns it, so counting it here only
-// double-reported the same event as "failed" on its neighbouring days.
-const BENIGN_SKIP_REASONS = new Set([
-  "already_captured",
-  "manual_row",
-  "row_not_found",
-  "no_t0_data",
-  "premature_capture_session",
-]);
+// Which skip reasons count as errored lives in lib/crush-capture-outcomes.ts
+// (shared with the capture-health panel route).
 
 async function writeCrushHealthRollup(
   phase: typeof CRUSH_T0_PHASE | typeof CRUSH_T1_PHASE,
@@ -59,9 +48,7 @@ async function writeCrushHealthRollup(
   runFinishedAt: string,
 ): Promise<void> {
   const schwabDisconnected = report.skipped.filter((s) => s.reason === "schwab_disconnected").length;
-  const realFailures = report.skipped.filter(
-    (s) => s.reason !== "schwab_disconnected" && !(s.reason && BENIGN_SKIP_REASONS.has(s.reason)),
-  );
+  const realFailures = report.skipped.filter((s) => isCrushCaptureFailure(s.reason));
   await upsertHealthRollup(captureDate, phase, {
     due: report.candidates,
     fired: report.captured.length,

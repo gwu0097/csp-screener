@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
 import { requireAdmin, authErrorResponse } from "@/lib/auth";
+import { t1DayFailedCount } from "@/lib/crush-capture-outcomes";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -159,7 +160,14 @@ export async function GET(): Promise<NextResponse> {
   // panel reporting "did not run" for a T1 run that actually completed
   // and wrote its rollup that same morning, purely because the old
   // version of this loop always started at yesterday.
-  function dailyStates(byDate: Map<string, HealthRow>, bdaysWanted: number) {
+  // `failedOf` lets T1 re-judge each stored rollup against the attempt
+  // log (see t1DayFailedCount) — older rollups counted interim
+  // too_early_capture retries as errored.
+  function dailyStates(
+    byDate: Map<string, HealthRow>,
+    bdaysWanted: number,
+    failedOf: (row: HealthRow) => number = (row) => row.errored,
+  ) {
     const out: Array<{ date: string; state: "no_run" | "ran_nothing_due" | "ran_ok" | "ran_failed"; due: number; fired: number; failed: number }> = [];
     let i = 0;
     // Generous ceiling so a long holiday run can't spin this forever.
@@ -173,7 +181,7 @@ export async function GET(): Promise<NextResponse> {
         out.push({ date: d, state: "no_run", due: 0, fired: 0, failed: 0 });
         continue;
       }
-      const failed = row.errored + row.schwab_disconnected;
+      const failed = failedOf(row) + row.schwab_disconnected;
       const state = row.due === 0 ? "ran_nothing_due" : failed > 0 ? "ran_failed" : "ran_ok";
       out.push({ date: d, state, due: row.due, fired: row.fired, failed });
     }
@@ -210,7 +218,10 @@ export async function GET(): Promise<NextResponse> {
   return NextResponse.json({
     todayEt,
     t0: { last: t0Rows[0] ?? null, days: dailyStates(t0ByDate, 7) },
-    t1: { last: t1Rows[0] ?? null, days: dailyStates(t1ByDate, 7) },
+    t1: {
+      last: t1Rows[0] ?? null,
+      days: dailyStates(t1ByDate, 7, (row) => t1DayFailedCount(row.outstanding ?? [], attempts)),
+    },
     incomplete,
     unrecoverable,
   });

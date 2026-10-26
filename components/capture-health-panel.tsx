@@ -321,7 +321,10 @@ export function CrushCaptureHealthPanel() {
   }
 
   const { t0, t1, incomplete } = resp;
-  const degraded = incomplete.length > 0 || unrecoverable.length > 0 || t0.days.some((d) => d.state === "no_run" || d.state === "ran_failed") || t1.days.some((d) => d.state === "no_run" || d.state === "ran_failed");
+  // Rows still inside the T1 retry window are normal (the job retries
+  // them on its own) and don't make the panel amber; one that never
+  // completes ages out into `unrecoverable`, which does.
+  const degraded = unrecoverable.length > 0 || t0.days.some((d) => d.state === "no_run" || d.state === "ran_failed") || t1.days.some((d) => d.state === "no_run" || d.state === "ran_failed");
 
   return (
     <div
@@ -369,14 +372,18 @@ export function CrushCaptureHealthPanel() {
 
       {incomplete.length > 0 && (
         <div className="mt-3">
-          <div className="text-xs font-semibold text-amber-200">
-            Incomplete T1 ({incomplete.length}) — still within retry window
+          <div className="text-xs font-semibold text-foreground/70">
+            Waiting on T1 ({incomplete.length}) — retries automatically
           </div>
-          <ul className="mt-1 space-y-1 text-xs text-amber-100/90">
+          <ul className="mt-1 space-y-1 text-xs text-muted-foreground">
             {incomplete.map((r) => (
               <li key={`${r.symbol}|${r.earningsDate}`} className="font-mono">
                 {r.symbol} ({r.earningsDate}): {r.attempts} attempt{r.attempts === 1 ? "" : "s"}
-                {r.lastFailureReason ? ` — last failure: ${r.lastFailureReason}` : " — never attempted"}
+                {r.lastFailureReason
+                  ? ` — last result: ${r.lastFailureReason}`
+                  : r.attempts === 0
+                    ? " — no T1 attempt yet"
+                    : ""}
               </li>
             ))}
           </ul>
