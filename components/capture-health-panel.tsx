@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { AlertOctagon, AlertTriangle, CheckCircle2, Loader2 } from "lucide-react";
+import { crushIssueKeys, isAcknowledged } from "@/lib/crush-alert-ack";
 
 // Reads /api/capture-health, which reads capture_health_daily — NOT
 // Parquet chain-data presence. A day with zero due symbols and a day
@@ -188,6 +189,30 @@ type CrushHealthResp = {
   unrecoverable: Array<{ id: string; symbol: string; earningsDate: string; reason: string | null }>;
 };
 
+// Per-browser acknowledgement of the crush card (see lib/crush-alert-ack.ts).
+// Storage can be unavailable (private mode) — then the card just never
+// collapses, which is the safe default.
+const CRUSH_ACK_KEY = "csp.crushCaptureAck.v1";
+
+function readCrushAck(): string[] | null {
+  try {
+    const raw = window.localStorage.getItem(CRUSH_ACK_KEY);
+    const v = raw ? JSON.parse(raw) : null;
+    return Array.isArray(v) ? v.filter((k): k is string => typeof k === "string") : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeCrushAck(keys: string[] | null) {
+  try {
+    if (keys) window.localStorage.setItem(CRUSH_ACK_KEY, JSON.stringify(keys));
+    else window.localStorage.removeItem(CRUSH_ACK_KEY);
+  } catch {
+    // ignore — see readCrushAck
+  }
+}
+
 function dayStateLabel(s: CrushHealthDay["state"]): string {
   switch (s) {
     case "no_run":
@@ -241,6 +266,12 @@ export function CrushCaptureHealthPanel() {
   // route) — a page reload won't bring these back.
   const [unrecoverable, setUnrecoverable] = useState<CrushHealthResp["unrecoverable"]>([]);
   const [dismissingKey, setDismissingKey] = useState<string | null>(null);
+  const [acked, setAcked] = useState<string[] | null>(null);
+  const [expanded, setExpanded] = useState(false);
+
+  useEffect(() => {
+    setAcked(readCrushAck());
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -324,7 +355,32 @@ export function CrushCaptureHealthPanel() {
   // Rows still inside the T1 retry window are normal (the job retries
   // them on its own) and don't make the panel amber; one that never
   // completes ages out into `unrecoverable`, which does.
-  const degraded = unrecoverable.length > 0 || t0.days.some((d) => d.state === "no_run" || d.state === "ran_failed") || t1.days.some((d) => d.state === "no_run" || d.state === "ran_failed");
+  const issueKeys = crushIssueKeys(t0.days, t1.days, unrecoverable.map((r) => r.id));
+  const degraded = issueKeys.length > 0;
+
+  if (degraded && isAcknowledged(issueKeys, acked) && !expanded) {
+    return (
+      <div className="flex items-center justify-between gap-2 rounded-lg border border-border bg-muted/20 px-3 py-1">
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <CheckCircle2 className="h-4 w-4 shrink-0 text-muted-foreground" />
+          T0/T1 crush capture: {issueKeys.length} known issue{issueKeys.length === 1 ? "" : "s"} dismissed
+        </div>
+        <button
+          type="button"
+          onClick={() => setExpanded(true)}
+          className="min-h-[44px] px-2 text-xs text-muted-foreground hover:text-foreground"
+        >
+          Show
+        </button>
+      </div>
+    );
+  }
+
+  function dismissCard() {
+    writeCrushAck(issueKeys);
+    setAcked(issueKeys);
+    setExpanded(false);
+  }
 
   return (
     <div
@@ -343,6 +399,16 @@ export function CrushCaptureHealthPanel() {
         <span className={degraded ? "text-base font-bold text-amber-200" : "text-sm font-medium text-foreground/80"}>
           {degraded ? "T0/T1 crush capture: attention needed" : "T0/T1 crush capture healthy"}
         </span>
+        {degraded && (
+          <button
+            type="button"
+            onClick={dismissCard}
+            title="Hide until a new failure shows up"
+            className="ml-auto min-h-[44px] rounded px-3 text-xs text-amber-200/80 hover:bg-amber-500/10 hover:text-amber-100"
+          >
+            Dismiss
+          </button>
+        )}
       </div>
 
       <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
