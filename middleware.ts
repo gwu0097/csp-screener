@@ -119,5 +119,5 @@ export async function middleware(req: NextRequest) {
 export const config = {
   // Everything except Next internals and static assets. API routes ARE
   // matched — that's the point.
-  matcher: ["/((?!_next/static|_next/image|favicon\\.ico|fonts/).*)"],
+  matcher: ["/((?!_next/static|_next/image|favicon\\.ico|icon\\.svg|apple-icon\\.png|fonts/).*)"],
 };
