@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Short-put payoff: flat premium above the strike, loss sloping down below it -->
+  <rect width="64" height="64" rx="14" fill="#0b1220"/>
+  <line x1="10" y1="40" x2="54" y2="40" stroke="#334155" stroke-width="3" stroke-linecap="round"/>
+  <polyline points="11,54 30,23 53,23" fill="none" stroke="#34d399" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="30" cy="23" r="5" fill="#f8fafc"/>
+</svg>
