@@ -84,9 +84,14 @@ export function ResearchAnalysisPasteBack({
   earningsDate,
   snapshot,
   onSaved,
+  saveBlockedReason = null,
 }: {
   symbol: string;
   earningsDate: string;
+  // Set when earningsDate is a stand-in (sandbox run with no stored
+  // print near today): saving would file the analysis under an event
+  // that doesn't exist, so the save button is disabled with this reason.
+  saveBlockedReason?: string | null;
   snapshot: {
     referenceStrike: number | null;
     spot: number | null;
@@ -678,11 +683,18 @@ export function ResearchAnalysisPasteBack({
             </div>
           )}
 
+          {saveBlockedReason && (
+            <div className="rounded border border-amber-500/40 bg-amber-500/10 p-1.5 text-amber-200">
+              {saveBlockedReason}
+            </div>
+          )}
+
           <Button
             size="sm"
             onClick={() => void handleSave()}
             disabled={
               saving ||
+              saveBlockedReason !== null ||
               (hasMismatch && !confirmedMismatch) ||
               (parsed.observationsBlockFound &&
                 (observationsBlockedOnDictionary || !observationValidation.ok))

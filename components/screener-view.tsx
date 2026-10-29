@@ -5966,6 +5966,11 @@ function AnalysisDumpTab({
         earningsDate={r.earningsDate}
         snapshot={analysisSnapshot}
         onSaved={onAnalysisSaved}
+        saveBlockedReason={
+          r.stageOne.details.earningsDateSource === "stand_in"
+            ? `No earnings date on file for ${r.symbol} near today, so ${r.earningsDate} is a stand-in. Saving is off so the analysis isn't filed under an event that doesn't exist.`
+            : null
+        }
       />
     </div>
   );
@@ -6850,8 +6855,14 @@ function SandboxTester({ connected }: { connected: boolean }) {
       {result && (
         <div className="space-y-3">
           <div className="rounded border border-indigo-500/30 bg-indigo-500/5 px-3 py-1.5 text-sm text-indigo-200">
-            Sandbox — {result.symbol} is not a live earnings candidate. Nothing is
-            saved; the main candidates table is untouched.
+            <div>
+              Sandbox — {result.symbol} is not in the candidates table, and that table is untouched.
+            </div>
+            <div className="text-xs text-indigo-200/80">
+              {result.stageOne.details.earningsDateSource === "earnings_history"
+                ? `Earnings ${result.earningsDate} (${result.earningsTiming}) from history`
+                : `No earnings date on file near today: ${result.earningsDate} is a stand-in`}
+            </div>
           </div>
           {note && (
             <div className="rounded border border-amber-500/30 bg-amber-500/5 px-3 py-1.5 text-sm text-amber-200">

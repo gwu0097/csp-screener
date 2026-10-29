@@ -12,6 +12,14 @@ import { getMarketContext } from "@/lib/market";
 import { getCachedCompanyName } from "@/lib/market-snapshot";
 import { requireUserId, authErrorResponse } from "@/lib/auth";
 import { createServerClient } from "@/lib/supabase";
+import {
+  resolveSandboxEarnings,
+  sandboxExpiryFor,
+  SANDBOX_LOOKAHEAD_DAYS,
+  SANDBOX_LOOKBACK_DAYS,
+  type SandboxEarnings,
+  type SandboxEarningsRow,
+} from "@/lib/sandbox-earnings";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -26,7 +34,7 @@ type Body = {
   candidate?: unknown;
   // Sandbox ("Test any ticker") calls set this so the pipeline skips
   // its earnings_history market-data writes — the sandbox candidate
-  // carries a synthetic earnings date. Nothing else here persists.
+  // may carry a stand-in earnings date (see withSandboxEarnings). Nothing else here persists.
   sandbox?: unknown;
   // When true, the user has opted into analyzing a symbol that the
   // Stage 2 quality floor would normally fail. The route-level
@@ -44,6 +52,52 @@ function isCandidate(v: unknown): v is ScreenerResult {
     typeof o.earningsDate === "string" &&
     typeof o.expiry === "string"
   );
+}
+
+// Sandbox candidates arrive with today's date as a stand-in. Swap in the
+// symbol's real print from earnings_history when one is near today so
+// the dump header, the saved-flags lookup and the paste-back box all key
+// on the actual event. stageOne.details.earningsDateSource tells the UI
+// which it got; "stand_in" means nothing may be saved against the date.
+async function withSandboxEarnings(candidate: ScreenerResult, symbol: string): Promise<ScreenerResult> {
+  const today = new Date().toISOString().slice(0, 10);
+  const shift = (days: number) => new Date(Date.parse(today + "T00:00:00Z") + days * 86400000).toISOString().slice(0, 10);
+  let resolved: SandboxEarnings | null = null;
+  try {
+    const res = await createServerClient()
+      .from("earnings_history")
+      .select("earnings_date,timing")
+      .eq("symbol", symbol)
+      .gte("earnings_date", shift(-SANDBOX_LOOKBACK_DAYS))
+      .lte("earnings_date", shift(SANDBOX_LOOKAHEAD_DAYS));
+    if (res.error) throw new Error(res.error.message);
+    resolved = resolveSandboxEarnings(today, (res.data ?? []) as SandboxEarningsRow[]);
+  } catch (e) {
+    console.warn(`[analyze-single] ${symbol} sandbox earnings lookup failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (!resolved) {
+    return {
+      ...candidate,
+      stageOne: { ...candidate.stageOne, details: { ...candidate.stageOne.details, earningsDateSource: "stand_in" } },
+    };
+  }
+  const expiry = sandboxExpiryFor(today, resolved);
+  const daysToExpiry = Math.max(1, Math.round((Date.parse(expiry) - Date.parse(today)) / 86400000));
+  return {
+    ...candidate,
+    earningsDate: resolved.earningsDate,
+    earningsTiming: resolved.timing,
+    expiry,
+    daysToExpiry,
+    stageOne: {
+      ...candidate.stageOne,
+      details: {
+        ...candidate.stageOne.details,
+        earningsDateSource: "earnings_history",
+        earningsTimingAssumed: resolved.timingAssumed,
+      },
+    },
+  };
 }
 
 export async function POST(req: NextRequest) {
@@ -73,10 +127,10 @@ export async function POST(req: NextRequest) {
       { status: 400 },
     );
   }
-  const base = body.candidate;
-  const upper = base.symbol.toUpperCase();
+  const upper = body.candidate.symbol.toUpperCase();
   const force = body.force === true;
   const sandbox = body.sandbox === true;
+  const base = sandbox ? await withSandboxEarnings(body.candidate, upper) : body.candidate;
   if (force) {
     console.log(`[analyze-single] ${upper} force=true — Stage 2 quality floor explicitly bypassed`);
   }
