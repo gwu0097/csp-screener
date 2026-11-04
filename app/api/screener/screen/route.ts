@@ -273,7 +273,10 @@ export async function POST(req: NextRequest) {
     );
 
     // Step 3: fetch prices
-    const prices = await getBatchPrices(survivors.map((s) => s.symbol));
+    const provisional = new Set(survivors.filter((s) => s.check.timingProvisional).map((s) => s.symbol.toUpperCase()));
+    const prices = await getBatchPrices(survivors.map((s) => s.symbol), {
+      finnhubFallback: (sym) => !provisional.has(sym),
+    });
     const priceHits = Object.values(prices).filter((p) => p > 0).length;
     console.log(
       `[screen] priced ${survivors.length} symbols, ${priceHits} with non-zero price`,

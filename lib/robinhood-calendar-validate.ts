@@ -50,9 +50,13 @@ export function windowEndFor(windowStart: string, days = RH_WINDOW_DAYS): string
 // the previous batch (if any) listed for the dates both windows cover.
 // count != rows.length is the other truncation detector.
 export const FLOOR_RATIO_OF_PREVIOUS = 0.5;
+// Below this many previous rows the ratio means nothing: one company
+// rescheduling out of a 1-row holiday window is a 100% "drop". In-season
+// overlaps run in the hundreds, so truncation is still caught there.
+export const FLOOR_MIN_PREVIOUS_OVERLAP = 20;
 
 export function minRowsFloor(previousOverlapCount: number | null): number {
-  if (previousOverlapCount === null || previousOverlapCount <= 0) return 0;
+  if (previousOverlapCount === null || previousOverlapCount < FLOOR_MIN_PREVIOUS_OVERLAP) return 0;
   return Math.ceil(previousOverlapCount * FLOOR_RATIO_OF_PREVIOUS);
 }
 
@@ -107,7 +111,9 @@ export function validateRobinhoodCalendarPayload(
 
     // Robinhood repeats some events verbatim (AMCR, NHP, TGLS… twice in
     // the 2026-11-04 sample). One row per symbol+date; on a conflicting
-    // repeat keep the verified, then the timed, one.
+    // repeat keep the verified, then the timed, one. Two equally-ranked
+    // rows that disagree on am/pm are Robinhood contradicting itself:
+    // store timing null so Screen Today flags it, never pick by position.
     const key = `${symbol}|${date}`;
     const row: RhCalendarRow = { symbol, reportDate: date, timing, verified };
     const prev = out.get(key);
@@ -115,6 +121,7 @@ export function validateRobinhoodCalendarPayload(
       duplicates++;
       const score = (x: RhCalendarRow) => (x.verified ? 2 : 0) + (x.timing ? 1 : 0);
       if (score(row) > score(prev)) out.set(key, row);
+      else if (score(row) === score(prev) && row.timing !== prev.timing) out.set(key, { ...prev, timing: null });
       continue;
     }
     out.set(key, row);

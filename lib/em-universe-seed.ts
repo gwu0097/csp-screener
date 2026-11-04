@@ -127,7 +127,10 @@ export async function runEmUniverseSeed(opts?: { dryRun?: boolean }): Promise<Se
   if (missingAdrGaps.length > 0) {
     try {
       const supplemental = await getSupplementalWhitelistEarnings(missingAdrGaps);
-      inScope.push(...supplemental);
+      // Supplemental rows can now carry unknown timing (Screen Today
+      // flags those); the seed only ever handled known BMO/AMC, so keep
+      // it to those as before.
+      inScope.push(...supplemental.filter((e) => e.timing === "BMO" || e.timing === "AMC"));
     } catch (e) {
       report.errors.push({
         symbol: missingAdrGaps.join(","),

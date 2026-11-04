@@ -637,15 +637,28 @@ export async function getQuote(symbol: string): Promise<SchwabQuote | null> {
 }
 
 // Batch quote — one HTTP call for up to ~500 symbols. Schwab accepts comma-separated symbols.
+// Schwab's /quotes docs don't state a per-request symbol limit, and the
+// screen now sends ~735 symbols. Chunked so an oversized list can't fail
+// the whole batch (one failed chunk falls back to Yahoo for just its
+// symbols), sequential to keep the request rate modest.
+const QUOTES_CHUNK = 200;
+
 export async function getBatchQuotes(symbols: string[]): Promise<Record<string, SchwabQuote>> {
   if (symbols.length === 0) return {};
-  try {
-    const resp = await schwabGet<Record<string, SchwabQuote>>(`${MARKETDATA_BASE}/quotes`, {
-      symbols: symbols.join(","),
-    });
-    return resp ?? {};
-  } catch (e) {
-    console.error("[schwab] getBatchQuotes failed:", e instanceof Error ? e.message : e);
-    return {};
+  const out: Record<string, SchwabQuote> = {};
+  for (let i = 0; i < symbols.length; i += QUOTES_CHUNK) {
+    const chunk = symbols.slice(i, i + QUOTES_CHUNK);
+    try {
+      const resp = await schwabGet<Record<string, SchwabQuote>>(`${MARKETDATA_BASE}/quotes`, {
+        symbols: chunk.join(","),
+      });
+      Object.assign(out, resp ?? {});
+    } catch (e) {
+      console.error(
+        `[schwab] getBatchQuotes chunk ${i / QUOTES_CHUNK + 1} (${chunk.length} symbols) failed:`,
+        e instanceof Error ? e.message : e,
+      );
+    }
   }
+  return out;
 }

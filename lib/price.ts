@@ -14,7 +14,16 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 // understand why Yahoo returns $0 on Vercel.
 //
 // Returns { SYMBOL: price } — price is 0 for lookups that failed everywhere.
-export async function getBatchPrices(symbols: string[]): Promise<Record<string, number>> {
+export async function getBatchPrices(
+  symbols: string[],
+  opts: {
+    // Symbols allowed to use the slow sequential Finnhub /quote fallback
+    // (default: all). Screen Today excludes Finnhub rows with no report
+    // time — mostly unlisted-in-cache microcaps the $ floor drops anyway
+    // — so they can't add ~26 one-at-a-time calls to every screen.
+    finnhubFallback?: (symbol: string) => boolean;
+  } = {},
+): Promise<Record<string, number>> {
   if (symbols.length === 0) return {};
   const uniqueSymbols = Array.from(new Set(symbols.map((s) => s.trim().toUpperCase())));
   console.log(
@@ -87,7 +96,7 @@ export async function getBatchPrices(symbols: string[]): Promise<Record<string, 
 
   // Finnhub /quote fallback — fills any remaining zeros. Sequential with a
   // 100 ms gap between calls so we stay well under the free-tier 60/min cap.
-  const zeros = uniqueSymbols.filter((s) => !map[s] || map[s] === 0);
+  const zeros = uniqueSymbols.filter((s) => (!map[s] || map[s] === 0) && (opts.finnhubFallback?.(s) ?? true));
   if (zeros.length > 0) {
     console.log(
       `[price] finnhub fallback: ${zeros.length} symbols still at 0, sequential with ${FINNHUB_DELAY_MS}ms gap`,

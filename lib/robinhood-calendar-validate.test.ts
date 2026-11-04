@@ -78,10 +78,15 @@ test("rows on the new day outside the overlap don't count toward the floor", () 
   assert.equal(r.ok, false);
 });
 
-test("no previous batch means no floor", () => {
+test("no previous batch, or a tiny previous overlap, means no floor", () => {
   assert.equal(minRowsFloor(null), 0);
   assert.equal(minRowsFloor(0), 0);
-  assert.equal(minRowsFloor(3), 2);
+  // Holiday-week overlaps: one reschedule must not reject the batch.
+  assert.equal(minRowsFloor(3), 0);
+  assert.equal(minRowsFloor(19), 0);
+  // In-season overlaps keep the half-of-previous truncation check.
+  assert.equal(minRowsFloor(20), 10);
+  assert.equal(minRowsFloor(695), 348);
 });
 
 test("symbol/date checks stay identical to lib/traded-status.ts", async () => {
