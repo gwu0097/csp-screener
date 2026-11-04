@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   Play,
@@ -19,6 +19,7 @@ import {
   ArrowUp,
   ArrowDown,
   MoreHorizontal,
+  Circle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -71,6 +72,8 @@ import {
   type ObservationDictionaryEntry,
 } from "@/lib/observation-dictionary";
 import { formatCapturedLine, isChainStale } from "@/lib/dump-capture-timing";
+import { describeTradedLegs, tradedKey, type TradedStatus } from "@/lib/traded-status";
+import { dominantSession, timingLabel } from "@/lib/earnings-session";
 import {
   interpretError,
   interpretFetchError,
@@ -968,6 +971,107 @@ export function ScreenerView({ connected }: Props) {
     };
   }, [resultSymbolsKey]);
 
+  // Position column: what's already traded for each row's print, from
+  // synced positions plus the user's manual marks (/api/screener/traded,
+  // matching rules in lib/traded-status.ts). One batched call per screen;
+  // refetched when the tab regains focus so a broker sync that landed
+  // meanwhile shows up without a reload.
+  const resultEventsKey = useMemo(() => {
+    if (!results || results.length === 0) return "";
+    return Array.from(new Set(results.map((r) => `${r.symbol.toUpperCase()}:${r.earningsDate}`))).sort().join(",");
+  }, [results]);
+  const [tradedStatuses, setTradedStatuses] = useState<Map<string, TradedStatus>>(new Map());
+  const [tradedLoadFailed, setTradedLoadFailed] = useState(false);
+  // Bumped on every manual toggle; a load that started before the latest
+  // toggle is dropped so it can't overwrite the optimistic state.
+  const tradedMutationSeq = useRef(0);
+  const loadTradedStatuses = useCallback(async (eventsKey: string, signal?: { cancelled: boolean }) => {
+    const seqAtStart = tradedMutationSeq.current;
+    if (!eventsKey) {
+      setTradedStatuses(new Map());
+      setTradedLoadFailed(false);
+      return;
+    }
+    try {
+      const res = await fetch(`/api/screener/traded?events=${encodeURIComponent(eventsKey)}`, { cache: "no-store" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = (await res.json()) as { statuses?: Record<string, TradedStatus> };
+      if (signal?.cancelled || seqAtStart !== tradedMutationSeq.current) return;
+      setTradedStatuses(new Map(Object.entries(json.statuses ?? {})));
+      setTradedLoadFailed(false);
+    } catch (e) {
+      if (signal?.cancelled) return;
+      // Keep whatever was shown before; the cells say "unavailable"
+      // only when nothing was ever loaded.
+      setTradedLoadFailed(true);
+      console.warn("[screener] traded-status fetch failed", e);
+    }
+  }, []);
+  useEffect(() => {
+    const signal = { cancelled: false };
+    void loadTradedStatuses(resultEventsKey, signal);
+    const onFocus = () => void loadTradedStatuses(resultEventsKey, signal);
+    window.addEventListener("focus", onFocus);
+    return () => {
+      signal.cancelled = true;
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [resultEventsKey, loadTradedStatuses]);
+
+  async function setManualTraded(symbol: string, earningsDate: string, traded: boolean) {
+    const key = tradedKey(symbol, earningsDate);
+    const before = tradedStatuses.get(key);
+    // A synced status is the broker's truth; the manual toggle never
+    // overrides it.
+    if (before?.status === "synced") return;
+    tradedMutationSeq.current += 1;
+    setTradedStatuses((prev) => {
+      const next = new Map(prev);
+      next.set(key, traded ? { status: "manual", markedAt: new Date().toISOString() } : { status: "none" });
+      return next;
+    });
+    try {
+      const res = await fetch("/api/screener/traded", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ symbol, earningsDate, traded }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    } catch (e) {
+      setTradedStatuses((prev) => {
+        const next = new Map(prev);
+        if (before) next.set(key, before);
+        else next.delete(key);
+        return next;
+      });
+      setTrackToast(`Couldn't save the traded mark for ${symbol.toUpperCase()} — try again`);
+      window.setTimeout(() => setTrackToast(null), 4000);
+      console.warn("[screener] traded mark save failed", e);
+    }
+  }
+
+  // Bare AMC/BMO unless a row reacts on a different session than most
+  // of the screen (lib/earnings-session.ts).
+  const screenSession = useMemo(
+    () =>
+      dominantSession(
+        (results ?? []).map((r) => ({ earningsDate: r.earningsDate, earningsTiming: r.earningsTiming === "BMO" ? "BMO" : "AMC" })),
+      ),
+    [results],
+  );
+  const timingLabelFor = (r: ScreenerResult) =>
+    timingLabel(r.earningsDate, r.earningsTiming === "BMO" ? "BMO" : "AMC", screenSession);
+
+  const renderPosition = (r: ScreenerResult, variant: "table" | "card") => (
+    <PositionCell
+      symbol={r.symbol}
+      status={tradedStatuses.get(tradedKey(r.symbol, r.earningsDate))}
+      loadFailed={tradedLoadFailed}
+      variant={variant}
+      onToggle={(traded) => void setManualTraded(r.symbol, r.earningsDate, traded)}
+    />
+  );
+
   async function loadPrevious() {
     setError(null);
     setMessage(null);
@@ -1032,6 +1136,16 @@ export function ScreenerView({ connected }: Props) {
   // The expanded-row body, shared by the desktop table and mobile cards.
   function renderDetail(r: ScreenerResult, id: string) {
     return (
+      <>
+      <div className="px-3 pt-3 text-sm text-muted-foreground">
+        Earnings <span className="text-foreground">{fmtEarningsLong(r.earningsDate)}</span> ·{" "}
+        {r.earningsTiming === "BMO" ? "before the open" : "after the close"}
+        {r.expiry && (
+          <>
+            {" "}· expiry <span className="text-foreground">{fmtEarningsDay(r.expiry)}</span>
+          </>
+        )}
+      </div>
       <ExpandedDetail
         r={r}
         analyzing={analyzingSymbols.has(r.symbol.toUpperCase())}
@@ -1057,6 +1171,7 @@ export function ScreenerView({ connected }: Props) {
           })
         }
       />
+      </>
     );
   }
 
@@ -2937,6 +3052,8 @@ export function ScreenerView({ connected }: Props) {
             sortDir={sortDir}
             onSort={onSort}
             renderDetail={renderDetail}
+            renderPosition={renderPosition}
+            timingLabelFor={timingLabelFor}
           />
         )}
 
@@ -2982,7 +3099,20 @@ export function ScreenerView({ connected }: Props) {
                     }
                   />
                   <SortableHeader label="Price" active={sortKey === "price"} dir={sortDir} onClick={() => onSort("price")} />
-                  <TableHead>Earnings</TableHead>
+                  <TableHead>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <span className="cursor-help">Position</span>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        Capital already securing short puts on this print
+                        (strike × 100 × open contracts), from your synced
+                        Robinhood and Schwab positions. Not synced yet?
+                        Tap &ldquo;Mark traded&rdquo; — it&apos;s replaced by the real
+                        position once sync picks it up.
+                      </TooltipContent>
+                    </Tooltip>
+                  </TableHead>
                   <SortableHeader
                     label="EM%"
                     active={sortKey === "em"}
@@ -3055,6 +3185,7 @@ export function ScreenerView({ connected }: Props) {
                         <TableCell className="text-[15px] font-bold">
                           <span className="inline-flex items-center gap-1">
                             {r.symbol}
+                            <span className="text-xs font-medium text-muted-foreground">{timingLabelFor(r)}</span>
                             {r.isWhitelisted && (
                               <Tooltip>
                                 <TooltipTrigger asChild>
@@ -3154,9 +3285,7 @@ export function ScreenerView({ connected }: Props) {
                           })()}
                         </TableCell>
                         <TableCell className="text-base">{fmtPrice(displayedPrice)}</TableCell>
-                        <TableCell className="text-sm">
-                          {r.earningsDate} <span className="text-muted-foreground">· {r.earningsTiming}</span>
-                        </TableCell>
+                        <TableCell onClick={(e) => e.stopPropagation()}>{renderPosition(r, "table")}</TableCell>
                         <TableCell className="font-mono text-base">
                           {(() => {
                             const em = r.stageThree?.details?.expectedMovePct;
@@ -3414,6 +3543,97 @@ function fmtEarningsDay(date: string): string {
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
 }
 
+function fmtEarningsLong(date: string): string {
+  const d = new Date(`${date}T12:00:00Z`);
+  if (!Number.isFinite(d.getTime())) return date;
+  return d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" });
+}
+
+function fmtCapital(n: number): string {
+  return `$${Math.round(n).toLocaleString("en-US")}`;
+}
+
+// Position column cell, shared by the table and the mobile cards.
+// synced → capital from the broker sync (read-only); manual → the
+// user's own mark, tap to clear; none → tap to mark traded. Unknown
+// status renders a dash, never "not traded".
+function PositionCell({
+  symbol,
+  status,
+  loadFailed,
+  variant,
+  onToggle,
+}: {
+  symbol: string;
+  status: TradedStatus | undefined;
+  loadFailed: boolean;
+  variant: "table" | "card";
+  onToggle: (traded: boolean) => void;
+}) {
+  if (!status) {
+    return (
+      <span
+        className="text-base text-muted-foreground"
+        title={loadFailed ? "Couldn't load positions — refocus the tab to retry" : "Loading positions…"}
+      >
+        —
+      </span>
+    );
+  }
+  if (status.status === "synced") {
+    // Unknown beats closed: a null count/capital means an open leg's
+    // fills are missing, so "Closed" would be a guess.
+    const unknown = status.openCapital === null || status.openContracts === null;
+    const main = unknown ? "Traded" : status.openContracts === 0 ? "Closed" : fmtCapital(status.openCapital ?? 0);
+    const sub = unknown
+      ? "capital unverified"
+      : status.openContracts === 0
+        ? "traded, nothing open"
+        : `${status.openContracts} open`;
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <div className="inline-flex min-h-[44px] cursor-help flex-col justify-center">
+            <span className="inline-flex items-center gap-1 text-base font-semibold tabular-nums text-emerald-300">
+              <Check className="h-3.5 w-3.5 shrink-0" aria-hidden />
+              {main}
+            </span>
+            <span className="text-xs text-muted-foreground">{sub}</span>
+            {status.staleOpenLegs > 0 && (
+              <span className="text-xs text-amber-300">
+                +{status.staleOpenLegs} past expiry, not counted
+              </span>
+            )}
+          </div>
+        </TooltipTrigger>
+        <TooltipContent className="whitespace-pre-line">{describeTradedLegs(status.legs)}</TooltipContent>
+      </Tooltip>
+    );
+  }
+  const marked = status.status === "manual";
+  return (
+    <button
+      type="button"
+      onClick={() => onToggle(!marked)}
+      aria-pressed={marked}
+      aria-label={marked ? `Clear traded mark for ${symbol}` : `Mark ${symbol} as traded`}
+      className={cn(
+        "inline-flex min-h-[44px] flex-col justify-center rounded-md border px-2 text-left transition",
+        variant === "card" && "w-full",
+        marked
+          ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20"
+          : "border-dashed border-border text-muted-foreground hover:bg-muted/40",
+      )}
+    >
+      <span className="inline-flex items-center gap-1 text-sm font-medium">
+        {marked ? <Check className="h-3.5 w-3.5 shrink-0" aria-hidden /> : <Circle className="h-3.5 w-3.5 shrink-0" aria-hidden />}
+        {marked ? "Marked" : "Mark traded"}
+      </span>
+      {marked && <span className="text-xs text-muted-foreground">waiting for sync</span>}
+    </button>
+  );
+}
+
 function CardStat({
   label,
   value,
@@ -3453,6 +3673,8 @@ function MobileCandidateList({
   sortDir,
   onSort,
   renderDetail,
+  renderPosition,
+  timingLabelFor,
 }: {
   // 2 on tablet-width containers; an expanded card spans both columns.
   columns: 1 | 2;
@@ -3471,6 +3693,8 @@ function MobileCandidateList({
   sortDir: "asc" | "desc";
   onSort: (key: SortKey) => void;
   renderDetail: (r: ScreenerResult, id: string) => React.ReactNode;
+  renderPosition: (r: ScreenerResult, variant: "table" | "card") => React.ReactNode;
+  timingLabelFor: (r: ScreenerResult) => string;
 }) {
   return (
     <div className="space-y-3">
@@ -3560,6 +3784,7 @@ function MobileCandidateList({
                 <div className="min-w-0 flex-1">
                   <div className="flex min-h-[44px] items-center gap-2">
                     <span className="truncate text-lg font-bold">{r.symbol}</span>
+                    <span className="shrink-0 text-xs font-medium text-muted-foreground">{timingLabelFor(r)}</span>
                     {r.isWhitelisted && (
                       <Star className="h-4 w-4 shrink-0 fill-amber-300 text-amber-300" aria-label="Whitelisted" />
                     )}
@@ -3623,7 +3848,10 @@ function MobileCandidateList({
                       sub={fmtYield(effPremium, effStrike)}
                       subClassName={yieldColor(effPremium, effStrike)}
                     />
-                    <CardStat label="Earnings" value={fmtEarningsDay(r.earningsDate)} sub={r.earningsTiming} />
+                    <div className="min-w-0" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+                      <dt className="text-xs text-muted-foreground">Position</dt>
+                      <dd>{renderPosition(r, "card")}</dd>
+                    </div>
                   </dl>
 
                   {(ref || (effSpread !== null && effSpread !== undefined && effSpread > 50)) && (
