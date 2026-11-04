@@ -1,113 +1,11 @@
 import { createServerClient } from "@/lib/supabase";
 import { usSessionFor } from "./foreign-listing-session";
+import { parseAndDedupeCalendarRows, type EarningsCalendarItem, type FinnhubCalendarEntry } from "./finnhub-calendar-parse";
 
 const FINNHUB_BASE = "https://finnhub.io/api/v1";
 const FINNHUB_KEY = process.env.FINNHUB_API_KEY ?? "";
 
-export type EarningsCalendarItem = {
-  symbol: string;
-  date: string;
-  timing: "BMO" | "AMC" | "DMH"; // during market hours = excluded upstream
-  estimatedEPS: number | null;
-  actualEPS: number | null;
-};
-
-type FinnhubCalendarEntry = {
-  symbol: string;
-  date: string;
-  hour?: string; // "bmo" | "amc" | "dmh"
-  epsEstimate?: number | null;
-  epsActual?: number | null;
-  revenueEstimate?: number | null;
-  quarter?: number;
-  year?: number;
-};
-
-// Collapses raw Finnhub calendar rows that share the same
-// symbol+date+timing key. Confirmed via a live query (2026-08-18) that
-// Finnhub can return the same real-world earnings event twice under
-// different fiscal quarter/year labels — TGT's 2026-08-19 BMO print
-// appeared as both fiscal "2026 Q2" (epsEstimate/revenueEstimate both
-// null) and fiscal "2027 Q2" (live consensus data), almost certainly a
-// fiscal-year-offset artifact for a retailer whose fiscal year doesn't
-// match the calendar year. Nothing downstream ever deduped on symbol —
-// not getTodayEarnings' date/timing filter, not the screener's
-// candidate pipeline — so both rows survived all the way to the
-// rendered table as two identical-looking TGT rows.
-//
-// When two rows collapse, keep the more complete one — count of
-// non-null epsEstimate/revenueEstimate — rather than picking by array
-// position: Finnhub does not guarantee the live-data row comes first
-// (TGT's case had it second), so first-wins would silently discard
-// whichever row happened to carry the real estimates. A genuine tie
-// (equal completeness) keeps whichever was seen first — a stable,
-// harmless tiebreak, since the asymmetric null-vs-live case is the one
-// that actually matters and that's never decided by position.
-//
-// Logged at info level (symbol, date, timing, and what differed
-// between the two rows) so it's visible in Vercel function logs how
-// often this happens and whether it clusters on off-calendar fiscal
-// years, without needing a dedicated table for something expected to
-// be rare.
-function parseAndDedupeCalendarRows(rows: FinnhubCalendarEntry[]): EarningsCalendarItem[] {
-  type Candidate = {
-    symbol: string;
-    date: string;
-    timing: EarningsCalendarItem["timing"];
-    estimatedEPS: number | null;
-    actualEPS: number | null;
-    revenueEstimate: number | null;
-    quarter: number | null;
-    year: number | null;
-  };
-
-  const completeness = (c: Candidate): number =>
-    (c.estimatedEPS !== null ? 1 : 0) + (c.revenueEstimate !== null ? 1 : 0);
-
-  const byKey = new Map<string, Candidate>();
-  for (const r of rows) {
-    const hour = (r.hour ?? "").toLowerCase();
-    const timing: EarningsCalendarItem["timing"] | null =
-      hour === "bmo" ? "BMO" : hour === "amc" ? "AMC" : hour === "dmh" ? "DMH" : null;
-    if (!timing) continue;
-
-    const candidate: Candidate = {
-      symbol: r.symbol,
-      date: r.date,
-      timing,
-      estimatedEPS: r.epsEstimate ?? null,
-      actualEPS: r.epsActual ?? null,
-      revenueEstimate: r.revenueEstimate ?? null,
-      quarter: r.quarter ?? null,
-      year: r.year ?? null,
-    };
-    const key = `${candidate.symbol}|${candidate.date}|${candidate.timing}`;
-    const existing = byKey.get(key);
-    if (!existing) {
-      byKey.set(key, candidate);
-      continue;
-    }
-
-    const kept = completeness(candidate) > completeness(existing) ? candidate : existing;
-    const dropped = kept === candidate ? existing : candidate;
-    console.info(
-      `[earnings] duplicate calendar row collapsed: ${kept.symbol} ${kept.date} ${kept.timing} — ` +
-        `kept fiscal Q${kept.quarter ?? "?"}/${kept.year ?? "?"} ` +
-        `(epsEstimate=${kept.estimatedEPS ?? "null"}, revenueEstimate=${kept.revenueEstimate ?? "null"}), ` +
-        `dropped fiscal Q${dropped.quarter ?? "?"}/${dropped.year ?? "?"} ` +
-        `(epsEstimate=${dropped.estimatedEPS ?? "null"}, revenueEstimate=${dropped.revenueEstimate ?? "null"})`,
-    );
-    byKey.set(key, kept);
-  }
-
-  return Array.from(byKey.values()).map((c) => ({
-    symbol: c.symbol,
-    date: c.date,
-    timing: c.timing,
-    estimatedEPS: c.estimatedEPS,
-    actualEPS: c.actualEPS,
-  }));
-}
+export type { EarningsCalendarItem, FinnhubCalendarEntry } from "./finnhub-calendar-parse";
 
 // Typed so callers that need to react differently to different failure
 // modes can (e.g. eps-sweep's verify branch backing off on a rate limit
@@ -285,6 +183,16 @@ export async function getTodayEarnings(): Promise<EarningsCalendarItem[]> {
   }
 }
 
+// Every parsed calendar row (BMO/AMC/DMH/unknown) for [from, to], US
+// Eastern dates. THROWS on failure, unlike getTodayEarnings, so Screen
+// Today can tell "Finnhub failed" from "nothing reports". Screen Today
+// asks for a wider range than its window so a date Robinhood disagrees
+// on is still visible for comparison (lib/earnings-source-merge.ts).
+export async function getFinnhubCalendarRange(from: string, to: string): Promise<EarningsCalendarItem[]> {
+  const data = await finnhubGet<{ earningsCalendar: FinnhubCalendarEntry[] }>("/calendar/earnings", { from, to });
+  return parseAndDedupeCalendarRows(data.earningsCalendar ?? []);
+}
+
 // Finnhub's bulk /calendar/earnings range query silently excludes some
 // ADRs whose earnings record is filed under a foreign primary listing
 // (e.g. TSM is filed as 2330.TW) — the bulk endpoint doesn't return
@@ -309,20 +217,18 @@ export async function getSupplementalWhitelistEarnings(
       const rows = data.earningsCalendar ?? [];
       for (const r of rows) {
         const hour = (r.hour ?? "").toLowerCase();
-        const finnhubTiming: EarningsCalendarItem["timing"] | null =
-          hour === "bmo" ? "BMO" : hour === "amc" ? "AMC" : hour === "dmh" ? "DMH" : null;
-        if (!finnhubTiming) continue;
+        const finnhubTiming: EarningsCalendarItem["timing"] =
+          hour === "bmo" ? "BMO" : hour === "amc" ? "AMC" : hour === "dmh" ? "DMH" : "unknown";
         // A home listing in Asia (2330.TW) reports overnight in New York:
         // Finnhub's "amc" on D is a BMO on D+1 for a US trader.
         const { date, timing } = usSessionFor(r.symbol ?? symbol, r.date, finnhubTiming);
-        if (
-          !(
-            (date === today && timing === "AMC") ||
-            (date === tomorrow && timing === "BMO")
-          )
-        ) {
-          continue;
-        }
+        // Blank hour on today/tomorrow is kept as "unknown" (Screen Today
+        // flags it) instead of being silently dropped.
+        const inWindow =
+          (date === today && timing === "AMC") ||
+          (date === tomorrow && timing === "BMO") ||
+          (timing === "unknown" && (date === today || date === tomorrow));
+        if (!inWindow) continue;
         // Finnhub may key this row to a foreign primary listing (e.g.
         // 2330.TW) — stamp back the whitelist symbol the user actually
         // opted in on so downstream price/chain lookups match.
@@ -367,7 +273,10 @@ export async function getUpcomingEarnings(
     // symbol+date+timing collision spanning DMH is still caught), then
     // drop DMH — a mid-session print isn't a clean before/after-the-bell
     // event.
-    return parseAndDedupeCalendarRows(rows).filter((x) => x.timing !== "DMH");
+    // "unknown" is dropped here too, as before parseAndDedupeCalendarRows
+    // kept it — this feed's callers (dashboard, EM seed, entry context)
+    // are unchanged by the Screen Today blank-hour fix.
+    return parseAndDedupeCalendarRows(rows).filter((x) => x.timing === "BMO" || x.timing === "AMC");
   } catch (e) {
     console.error(
       "[earnings] getUpcomingEarnings failed:",
