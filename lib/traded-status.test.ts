@@ -151,3 +151,14 @@ test("a leg still marked open past its expiry is counted as stale, not as open c
   const same = resolveTradedStatus([ev], [put({ expiry: "2026-11-05" })], none, "2026-11-05").get("COHR|2026-11-04");
   assert.equal(same?.status === "synced" && same.staleOpenLegs, 0);
 });
+
+test("request parsing: impossible dates rejected, trailing comma tolerated, duplicates collapsed", async () => {
+  const { isIsoDate, parseTradedEvents } = await import("./traded-status.ts");
+  assert.equal(isIsoDate("2026-11-04"), true);
+  assert.equal(isIsoDate("2026-13-45"), false);
+  assert.equal(isIsoDate("2026-02-30"), false);
+  assert.equal(parseTradedEvents("COHR:2026-13-45"), null);
+  assert.deepEqual(parseTradedEvents("cohr:2026-11-04,,COHR:2026-11-04,"), [{ symbol: "COHR", earningsDate: "2026-11-04" }]);
+  assert.equal(parseTradedEvents("CO HR:2026-11-04"), null);
+  assert.deepEqual(parseTradedEvents(null), []);
+});

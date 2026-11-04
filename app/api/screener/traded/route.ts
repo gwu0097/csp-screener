@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
 import { requireUserId, authErrorResponse } from "@/lib/auth";
-import { tradedKey, type TradedEvent } from "@/lib/traded-status";
+import { isIsoDate, parseTradedEvents, SYMBOL_RE } from "@/lib/traded-status";
 import { loadTradedStatuses } from "@/lib/traded-status-loader";
 
 export const dynamic = "force-dynamic";
@@ -17,34 +17,7 @@ export const revalidate = 0;
 // POST /api/screener/traded { symbol, earningsDate, traded: boolean }
 //   Sets or clears the user's manual mark for one event.
 
-const SYMBOL_RE = /^[A-Z][A-Z0-9.-]{0,9}$/;
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-
-// Shape AND calendar validity: 2026-13-45 matches DATE_RE but isn't a date.
-function isIsoDate(s: string): boolean {
-  if (!DATE_RE.test(s)) return false;
-  const t = Date.parse(s + "T00:00:00Z");
-  return Number.isFinite(t) && new Date(t).toISOString().slice(0, 10) === s;
-}
 const MAX_EVENTS = 200;
-
-function parseEvents(param: string | null): TradedEvent[] | null {
-  if (!param) return [];
-  const seen = new Set<string>();
-  const out: TradedEvent[] = [];
-  for (const part of param.split(",")) {
-    if (part.trim() === "") continue;
-    const [rawSym, rawDate] = part.trim().split(":");
-    const symbol = (rawSym ?? "").toUpperCase();
-    const earningsDate = rawDate ?? "";
-    if (!SYMBOL_RE.test(symbol) || !isIsoDate(earningsDate)) return null;
-    const key = tradedKey(symbol, earningsDate);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push({ symbol, earningsDate });
-  }
-  return out;
-}
 
 export async function GET(req: NextRequest) {
   let userId: string;
@@ -53,7 +26,7 @@ export async function GET(req: NextRequest) {
   } catch (e) {
     return authErrorResponse(e);
   }
-  const events = parseEvents(req.nextUrl.searchParams.get("events"));
+  const events = parseTradedEvents(req.nextUrl.searchParams.get("events"));
   if (events === null) {
     return NextResponse.json({ error: "Malformed events (expected SYMBOL:YYYY-MM-DD,...)" }, { status: 400 });
   }

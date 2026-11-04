@@ -157,3 +157,35 @@ function brokerLabel(b: string): string {
   if (b === "schwab2") return "Schwab 2";
   return b;
 }
+
+// Request parsing for /api/screener/traded, here so it's unit-tested.
+// parseTradedEvents returns null on any malformed segment (the route
+// answers 400); empty segments from a trailing comma are skipped.
+export const SYMBOL_RE = /^[A-Z][A-Z0-9.-]{0,9}$/;
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+// Shape AND calendar validity: 2026-13-45 matches DATE_RE but isn't a date.
+export function isIsoDate(s: string): boolean {
+  if (!DATE_RE.test(s)) return false;
+  const t = Date.parse(s + "T00:00:00Z");
+  return Number.isFinite(t) && new Date(t).toISOString().slice(0, 10) === s;
+}
+
+export function parseTradedEvents(param: string | null): TradedEvent[] | null {
+  if (!param) return [];
+  const seen = new Set<string>();
+  const out: TradedEvent[] = [];
+  for (const part of param.split(",")) {
+    if (part.trim() === "") continue;
+    const [rawSym, rawDate] = part.trim().split(":");
+    const symbol = (rawSym ?? "").toUpperCase();
+    const earningsDate = rawDate ?? "";
+    if (!SYMBOL_RE.test(symbol) || !isIsoDate(earningsDate)) return null;
+    const key = tradedKey(symbol, earningsDate);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ symbol, earningsDate });
+  }
+  return out;
+}
+
