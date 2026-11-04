@@ -74,6 +74,8 @@ import {
 import { formatCapturedLine, isChainStale } from "@/lib/dump-capture-timing";
 import { describeTradedLegs, tradedKey, type TradedStatus } from "@/lib/traded-status";
 import { dominantSession, timingLabel } from "@/lib/earnings-session";
+import { sourceCheckChip } from "@/lib/earnings-source-merge";
+import { calendarStatusLine, choiceOptions, timingWords, type ChoiceOption } from "@/lib/earnings-source-display";
 import {
   interpretError,
   interpretFetchError,
@@ -605,6 +607,7 @@ function normaliseResult(r: Partial<ScreenerResult> & { symbol?: string }): Scre
     industryStatus: r.industryStatus ?? "unknown",
     spreadTooWide: r.spreadTooWide ?? false,
     threeLayer: r.threeLayer ?? null,
+    earningsSourceCheck: r.earningsSourceCheck,
   };
 }
 
@@ -737,6 +740,11 @@ export function ScreenerView({ connected }: Props) {
   const [strikeOverrides, setStrikeOverrides] = useState<Record<string, StrikeOverride>>({});
   // Transient toast for Track confirmations. One line above the table.
   const [trackToast, setTrackToast] = useState<string | null>(null);
+  // Calendar-source sheet ("Dates differ" / "RH only" / "Timing?" chip).
+  const [sourceSheetRow, setSourceSheetRow] = useState<ScreenerResult | null>(null);
+  // Set only by a fresh Screen Today response; a reloaded run derives
+  // its status line from the rows' checks.
+  const [finnhubCalendarError, setFinnhubCalendarError] = useState<string | null>(null);
   // Stream C (chain verification) progress strip — populated while
   // batches stream in, cleared a few seconds after completion.
   const [chainProgress, setChainProgress] = useState<
@@ -1062,6 +1070,19 @@ export function ScreenerView({ connected }: Props) {
   const timingLabelFor = (r: ScreenerResult) =>
     timingLabel(r.earningsDate, r.earningsTiming === "BMO" ? "BMO" : "AMC", screenSession);
 
+  const renderSourceChip = (r: ScreenerResult) => (
+    <SourceChip check={r.earningsSourceCheck} symbol={r.symbol} onOpen={() => setSourceSheetRow(r)} />
+  );
+  const calendarLine = useMemo(
+    () =>
+      calendarStatusLine(
+        (results ?? []).map((r) => r.earningsSourceCheck),
+        (iso) => new Date(iso).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }),
+        finnhubCalendarError,
+      ),
+    [results, finnhubCalendarError],
+  );
+
   const renderPosition = (r: ScreenerResult, variant: "table" | "card") => (
     <PositionCell
       symbol={r.symbol}
@@ -1097,6 +1118,7 @@ export function ScreenerView({ connected }: Props) {
       const parsed = json.candidates
         .map((r) => normaliseResult(r))
         .filter((r): r is ScreenerResult => r !== null);
+      setFinnhubCalendarError(null);
       setResults(parsed);
       setPrices(json.prices ?? {});
       setScreenedAt(new Date(json.screenedAt));
@@ -1351,8 +1373,12 @@ export function ScreenerView({ connected }: Props) {
         prices?: Record<string, number>;
         screenedAt?: string;
         stats?: ScreenStats;
+        calendarSources?: { finnhub?: { status: string; error?: string } };
         error?: string;
       };
+      setFinnhubCalendarError(
+        j1.calendarSources?.finnhub?.status === "failed" ? (j1.calendarSources.finnhub.error ?? "failed") : null,
+      );
       if (!r1.ok || j1.error) {
         const interpreted = await interpretFetchError(
           new Response(JSON.stringify(j1), { status: r1.status }),
@@ -3034,6 +3060,26 @@ export function ScreenerView({ connected }: Props) {
         )}
 
         <div ref={resultsRef}>
+        <SourceSheet
+          row={sourceSheetRow}
+          onClose={() => setSourceSheetRow(null)}
+          onSaved={(text) => {
+            setSourceSheetRow(null);
+            setTrackToast(text);
+            window.setTimeout(() => setTrackToast(null), 6000);
+          }}
+        />
+        {hasResults && status !== "screening" && calendarLine && (
+          <div
+            className={cn(
+              "mb-2 text-sm",
+              calendarLine.tone === "amber" ? "text-amber-300" : "text-muted-foreground",
+            )}
+          >
+            {calendarLine.tone === "amber" && <AlertTriangle className="mr-1.5 inline h-3.5 w-3.5" aria-hidden />}
+            {calendarLine.text}
+          </div>
+        )}
         {hasResults && status !== "screening" && useCards === true && (
           <MobileCandidateList
             columns={resultsWidth !== null && resultsWidth >= 700 ? 2 : 1}
@@ -3053,6 +3099,7 @@ export function ScreenerView({ connected }: Props) {
             onSort={onSort}
             renderDetail={renderDetail}
             renderPosition={renderPosition}
+            renderSourceChip={renderSourceChip}
             timingLabelFor={timingLabelFor}
           />
         )}
@@ -3186,6 +3233,7 @@ export function ScreenerView({ connected }: Props) {
                           <span className="inline-flex items-center gap-1">
                             {r.symbol}
                             <span className="text-xs font-medium text-muted-foreground">{timingLabelFor(r)}</span>
+                            {renderSourceChip(r)}
                             {r.isWhitelisted && (
                               <Tooltip>
                                 <TooltipTrigger asChild>
@@ -3553,6 +3601,158 @@ function fmtCapital(n: number): string {
   return `$${Math.round(n).toLocaleString("en-US")}`;
 }
 
+// Calendar-source chip next to the AMC/BMO label (lib/earnings-source-
+// merge.ts sourceCheckChip). A button inside a row/card that expands on
+// click, so click AND keydown stop propagating. The visible pill is
+// small; the button around it is the 44px tap target.
+function SourceChip({
+  check,
+  symbol,
+  onOpen,
+}: {
+  check: ScreenerResult["earningsSourceCheck"];
+  symbol: string;
+  onOpen: () => void;
+}) {
+  const chip = sourceCheckChip(check);
+  if (!chip) return null;
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation();
+        onOpen();
+      }}
+      onKeyDown={(e) => e.stopPropagation()}
+      className="-my-2 inline-flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center"
+      aria-label={`${chip.label} — compare earnings calendars for ${symbol}`}
+    >
+      <span
+        className={cn(
+          "whitespace-nowrap rounded-full border px-2 py-0.5 text-xs font-medium",
+          chip.tone === "amber"
+            ? "border-amber-500/50 bg-amber-500/10 text-amber-300"
+            : "border-border text-muted-foreground",
+        )}
+      >
+        {chip.label}
+      </span>
+    </button>
+  );
+}
+
+function fmtCalDate(iso: string): string {
+  const d = new Date(iso + "T12:00:00Z");
+  return d.toLocaleDateString([], { weekday: "short", month: "numeric", day: "numeric", timeZone: "UTC" });
+}
+
+// Bottom sheet: both calendars side by side, and buttons that save the
+// user's pick (POST /api/screener/earnings-source). The pick applies on
+// the next Screen Today run — not re-merged in place, because a new date
+// can move the expiry Friday and every number on the row with it.
+function SourceSheet({
+  row,
+  onClose,
+  onSaved,
+}: {
+  row: ScreenerResult | null;
+  onClose: () => void;
+  onSaved: (toast: string) => void;
+}) {
+  const [saving, setSaving] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const check = row?.earningsSourceCheck ?? null;
+  const options = check ? choiceOptions(check) : [];
+
+  async function choose(o: ChoiceOption) {
+    if (!row || !check) return;
+    const k = `${o.chosenSource}|${o.chosenDate}|${o.chosenTiming}`;
+    setSaving(k);
+    setErr(null);
+    try {
+      const res = await fetch("/api/screener/earnings-source", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ symbol: row.symbol, conflictKey: check.conflictKey, ...o }),
+      });
+      const j = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!res.ok) throw new Error(j.error ?? `HTTP ${res.status}`);
+      onSaved(`${row.symbol}: saved ${fmtCalDate(o.chosenDate)} ${o.chosenTiming} — run Screen Today again to apply`);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(null);
+    }
+  }
+
+  const sideRow = (
+    name: string,
+    side: { date: string; timing: string; verified?: boolean } | null,
+    missing: string,
+  ) => (
+    <div className="flex min-h-[44px] items-center justify-between gap-3 border-b border-border py-2 last:border-b-0">
+      <span className="text-sm text-muted-foreground">{name}</span>
+      {side ? (
+        <span className="text-right text-base">
+          <span className="font-semibold">{fmtCalDate(side.date)}</span>{" "}
+          <span className="text-muted-foreground">{timingWords(side.timing as Parameters<typeof timingWords>[0])}</span>
+          {side.verified !== undefined && (
+            <span className={cn("ml-2 text-xs", side.verified ? "text-emerald-300" : "text-amber-300")}>
+              {side.verified ? "verified" : "unverified"}
+            </span>
+          )}
+        </span>
+      ) : (
+        <span className="text-right text-sm text-muted-foreground">{missing}</span>
+      )}
+    </div>
+  );
+
+  return (
+    <Sheet open={!!row && !!check} onOpenChange={(open) => !open && onClose()}>
+      <SheetContent side="bottom" className="mx-auto max-w-lg rounded-t-xl p-4 pb-6">
+        <SheetTitle>{row?.symbol} — which earnings date is right?</SheetTitle>
+        {check && row && (
+          <div className="mt-3 space-y-3">
+            <div>
+              {sideRow("Finnhub", check.finnhub, "not listed")}
+              {sideRow(
+                "Robinhood",
+                check.robinhood,
+                check.kind === "robinhood_unavailable" ? "calendar unavailable" : "not listed",
+              )}
+            </div>
+            <div className="text-sm text-muted-foreground">
+              Screened as <span className="font-semibold text-foreground">{fmtCalDate(row.earningsDate)} {row.earningsTiming}</span>
+              {check.timingProvisional ? " (time assumed — neither calendar gives one)" : ` (from ${check.resolvedSource === "user" ? "your pick" : check.resolvedSource === "robinhood" ? "Robinhood" : "Finnhub"})`}
+            </div>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              {options.map((o) => {
+                const k = `${o.chosenSource}|${o.chosenDate}|${o.chosenTiming}`;
+                return (
+                  <Button
+                    key={k}
+                    variant="outline"
+                    className="min-h-[44px] justify-between text-base"
+                    disabled={saving !== null}
+                    onClick={() => void choose(o)}
+                  >
+                    <span>{o.label}</span>
+                    <span className="text-sm text-muted-foreground">
+                      {saving === k ? "Saving…" : `${fmtCalDate(o.chosenDate)} ${o.chosenTiming}`}
+                    </span>
+                  </Button>
+                );
+              })}
+            </div>
+            {err && <div className="text-sm text-rose-300">Couldn&apos;t save: {err}</div>}
+          </div>
+        )}
+      </SheetContent>
+    </Sheet>
+  );
+}
+
 // Position column cell, shared by the table and the mobile cards.
 // synced → capital from the broker sync (read-only); manual → the
 // user's own mark, tap to clear; none → tap to mark traded. Unknown
@@ -3674,6 +3874,7 @@ function MobileCandidateList({
   onSort,
   renderDetail,
   renderPosition,
+  renderSourceChip,
   timingLabelFor,
 }: {
   // 2 on tablet-width containers; an expanded card spans both columns.
@@ -3694,6 +3895,7 @@ function MobileCandidateList({
   onSort: (key: SortKey) => void;
   renderDetail: (r: ScreenerResult, id: string) => React.ReactNode;
   renderPosition: (r: ScreenerResult, variant: "table" | "card") => React.ReactNode;
+  renderSourceChip: (r: ScreenerResult) => React.ReactNode;
   timingLabelFor: (r: ScreenerResult) => string;
 }) {
   return (
@@ -3785,6 +3987,7 @@ function MobileCandidateList({
                   <div className="flex min-h-[44px] items-center gap-2">
                     <span className="truncate text-lg font-bold">{r.symbol}</span>
                     <span className="shrink-0 text-xs font-medium text-muted-foreground">{timingLabelFor(r)}</span>
+                    {renderSourceChip(r)}
                     {r.isWhitelisted && (
                       <Star className="h-4 w-4 shrink-0 fill-amber-300 text-amber-300" aria-label="Whitelisted" />
                     )}
