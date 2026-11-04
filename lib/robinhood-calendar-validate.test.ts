@@ -92,3 +92,37 @@ test("symbol/date checks stay identical to lib/traded-status.ts", async () => {
     assert.equal(v.isIsoDate(d), t.isIsoDate(d), d);
   }
 });
+
+test("source choice: accepts a pick that matches what the source showed", async () => {
+  const { parseSourceChoice } = await import("./robinhood-calendar-validate.ts");
+  const key = "F=2026-11-05:unknown|R=2026-11-04:AMC";
+  assert.deepEqual(
+    parseSourceChoice({ symbol: "arm", conflictKey: key, chosenSource: "robinhood", chosenDate: "2026-11-04", chosenTiming: "AMC" }),
+    { symbol: "ARM", conflictKey: key, chosenSource: "robinhood", chosenDate: "2026-11-04", chosenTiming: "AMC" },
+  );
+  // Finnhub's blank timing can be filled in by the user's AMC/BMO pick.
+  assert.ok(!("error" in parseSourceChoice({ symbol: "ARM", conflictKey: key, chosenSource: "finnhub", chosenDate: "2026-11-05", chosenTiming: "BMO" })));
+  assert.ok(!("error" in parseSourceChoice({ symbol: "UNK", conflictKey: "F=2026-11-04:unknown|R=-", chosenSource: "user", chosenDate: "2026-11-04", chosenTiming: "AMC" })));
+});
+
+test("source choice: rejects picks the sources never showed and malformed keys", async () => {
+  const { parseSourceChoice } = await import("./robinhood-calendar-validate.ts");
+  const key = "F=2026-11-05:unknown|R=2026-11-04:AMC";
+  const bad = [
+    { symbol: "ARM", conflictKey: key, chosenSource: "robinhood", chosenDate: "2026-11-05", chosenTiming: "AMC" },
+    { symbol: "ARM", conflictKey: key, chosenSource: "robinhood", chosenDate: "2026-11-04", chosenTiming: "BMO" },
+    { symbol: "ARM", conflictKey: "F=-|R=-", chosenSource: "finnhub", chosenDate: "2026-11-05", chosenTiming: "BMO" },
+    { symbol: "ARM", conflictKey: "garbage", chosenSource: "robinhood", chosenDate: "2026-11-04", chosenTiming: "AMC" },
+    { symbol: "ARM", conflictKey: "F=2026-13-45:AMC|R=-", chosenSource: "finnhub", chosenDate: "2026-13-45", chosenTiming: "AMC" },
+    { symbol: "ARM", conflictKey: key, chosenSource: "user", chosenDate: "2026-11-09", chosenTiming: "AMC" },
+    { symbol: "ARM", conflictKey: key, chosenSource: "robinhood", chosenDate: "2026-11-04", chosenTiming: "DMH" },
+  ];
+  for (const b of bad) assert.ok("error" in parseSourceChoice(b), JSON.stringify(b));
+});
+
+test("source choice keys produced by the merge parse back", async () => {
+  const { conflictKey } = await import("./earnings-source-merge.ts");
+  const { parseSourceChoice } = await import("./robinhood-calendar-validate.ts");
+  const key = conflictKey({ date: "2026-11-04", timing: "unknown" }, null);
+  assert.ok(!("error" in parseSourceChoice({ symbol: "X", conflictKey: key, chosenSource: "finnhub", chosenDate: "2026-11-04", chosenTiming: "AMC" })));
+});

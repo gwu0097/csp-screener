@@ -1,5 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getTodayEarnings, getSupplementalWhitelistEarnings } from "@/lib/earnings";
+import { easternScreenWindow, getFinnhubCalendarRange, getSupplementalWhitelistEarnings } from "@/lib/earnings";
+import { addDaysIso } from "@/lib/robinhood-calendar-validate";
+import { loadLatestRhBatch } from "@/lib/robinhood-calendar-store";
+import { loadSourceChoices } from "@/lib/earnings-source-choices";
+import {
+  mergeEarningsSources,
+  rhBatchAvailability,
+  type EarningsSourceCheck,
+  type SourceChoice,
+} from "@/lib/earnings-source-merge";
 import { getBatchPrices } from "@/lib/price";
 import { isSchwabConnected } from "@/lib/schwab";
 import { getWatchlistSymbols } from "@/lib/watchlist";
@@ -18,7 +27,9 @@ export const dynamic = "force-dynamic";
 export const revalidate = 0;
 // Stream A: filter-only "what's reporting today and is it worth
 // scoring?" pass. Pipeline:
-//   1. Finnhub earnings calendar
+//   1. Finnhub earnings calendar ∪ latest Robinhood calendar batch
+//      (lib/earnings-source-merge.ts) — each candidate carries a
+//      source check the UI shows as a chip
 //   2. ETF / blacklist filter
 //   3. $70 price floor (Yahoo batch quotes)
 //   4. Stage 2 quality floor (business simplicity + market cap +
@@ -42,8 +53,17 @@ const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
 
 const MAX_RESULTS = 20;
 
+// Shown as the status line above the table.
+export type CalendarSourcesStatus = {
+  robinhood:
+    | { status: "ok"; fetchedAt: string; rows: number }
+    | { status: "unavailable"; fetchedAt: string | null; reason: string };
+  finnhub: { status: "ok"; rows: number } | { status: "failed"; error: string };
+};
+
 type ScreenResponse = {
   connected: boolean;
+  calendarSources?: CalendarSourcesStatus;
   screenedAt: string;
   configId?: string;
   configName?: string;
@@ -51,6 +71,10 @@ type ScreenResponse = {
   prices: Record<string, number>;
   stats: {
     finnhub: number;
+    // In-window candidates after the Finnhub ∪ Robinhood merge, and how
+    // many came only from Robinhood.
+    merged?: number;
+    robinhoodOnly?: string[];
     afterEtfAndBlacklist: number;
     afterPriceFilter: number;
     afterMcapFloor: number;
@@ -100,6 +124,8 @@ export async function POST(req: NextRequest) {
 
   const stats: ScreenResponse["stats"] = {
     finnhub: 0,
+    merged: 0,
+    robinhoodOnly: [],
     afterEtfAndBlacklist: 0,
     afterPriceFilter: 0,
     afterMcapFloor: 0,
@@ -125,15 +151,27 @@ export async function POST(req: NextRequest) {
       `[screen] watchlist: whitelist=${whitelist.size} blacklist=${blacklist.size}`,
     );
 
-    const bulkEarnings = await getTodayEarnings();
-    stats.finnhub = bulkEarnings.length;
-    console.log(`[screen] earnings from Finnhub (bulk): ${bulkEarnings.length}`);
-    if (bulkEarnings.length === 0) {
-      console.warn(
-        "[screen] Finnhub returned 0 eligible earnings for today-AMC or tomorrow-BMO. " +
-          "Check [finnhub] and [earnings] log lines above for the exact URL, date window, and raw row breakdown.",
-      );
+    const { today, tomorrow } = easternScreenWindow();
+
+    // Finnhub over a wider range than the window (yesterday..today+3) so
+    // a date Robinhood disagrees on is still there to compare. A failed
+    // Finnhub call is reported, not turned into an empty calendar.
+    let finnhubStatus: CalendarSourcesStatus["finnhub"];
+    let bulkEarnings: Awaited<ReturnType<typeof getFinnhubCalendarRange>> = [];
+    try {
+      bulkEarnings = await getFinnhubCalendarRange(addDaysIso(today, -1), addDaysIso(today, 3));
+      finnhubStatus = { status: "ok", rows: bulkEarnings.length };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`[screen] Finnhub calendar failed: ${msg}`);
+      finnhubStatus = { status: "failed", error: msg };
     }
+    const inWindow = (e: { date: string; timing: string }) =>
+      (e.date === today && e.timing === "AMC") ||
+      (e.date === tomorrow && e.timing === "BMO") ||
+      (e.timing === "unknown" && (e.date === today || e.date === tomorrow));
+    stats.finnhub = bulkEarnings.filter(inWindow).length;
+    console.log(`[screen] earnings from Finnhub (bulk, ${today}..+3): ${bulkEarnings.length} rows, ${stats.finnhub} in window`);
 
     // Whitelist symbols the bulk calendar pull missed — e.g. ADRs
     // Finnhub files under a foreign primary listing (TSM -> 2330.TW)
@@ -153,21 +191,63 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const earnings = [...bulkEarnings, ...supplemental];
+    // Robinhood batch (courier-fed) + this user's saved conflict choices.
+    const rhLoaded = await loadLatestRhBatch();
+    const rhBatch = rhLoaded.status === "ok" ? rhLoaded.batch : null;
+    const now = new Date();
+    const rhAvail = rhBatchAvailability(rhBatch, now, today, tomorrow);
+    const robinhoodStatus: CalendarSourcesStatus["robinhood"] =
+      rhLoaded.status === "error"
+        ? { status: "unavailable", fetchedAt: rhLoaded.fetchedAt, reason: `read failed: ${rhLoaded.message}` }
+        : rhAvail.available && rhBatch
+          ? { status: "ok", fetchedAt: rhBatch.fetchedAt, rows: rhBatch.rows.length }
+          : { status: "unavailable", fetchedAt: rhBatch?.fetchedAt ?? null, reason: rhAvail.available ? "unknown" : rhAvail.reason };
+    if (robinhoodStatus.status === "unavailable") {
+      console.warn(`[screen] Robinhood calendar unavailable — Finnhub-only: ${robinhoodStatus.reason}`);
+    }
+    let choices: SourceChoice[] = [];
+    try {
+      choices = await loadSourceChoices(userId);
+    } catch (e) {
+      console.warn(`[screen] source choices unavailable: ${e instanceof Error ? e.message : e}`);
+    }
 
-    // Step 2: hard kill ETFs + blacklist. Also narrow the timing type to BMO|AMC.
-    // Whitelist tickers bypass the ETF/fund classifier (which has false
-    // positives on legit common stock) but still get removed if explicitly
-    // blacklisted.
+    const merged = mergeEarningsSources({
+      finnhub: [...bulkEarnings, ...supplemental].map((e) => ({ symbol: e.symbol, date: e.date, timing: e.timing })),
+      robinhood: rhBatch,
+      choices,
+      today,
+      tomorrow,
+      now,
+    });
+    stats.merged = merged.length;
+    stats.robinhoodOnly = merged.filter((m) => m.check.kind === "robinhood_only").map((m) => m.symbol);
+    console.log(
+      `[screen] merged calendar: ${merged.length} in window ` +
+        `(robinhood=${robinhoodStatus.status}, rhOnly=${stats.robinhoodOnly.length}, ` +
+        `disagree=${merged.filter((m) => m.check.kind === "dates_disagree").length}, ` +
+        `timingProvisional=${merged.filter((m) => m.check.timingProvisional).length})`,
+    );
+    if (merged.length === 0) {
+      console.warn(
+        "[screen] 0 eligible earnings for today-AMC or tomorrow-BMO from either calendar. " +
+          "Check [finnhub], [earnings] and [screen] Robinhood lines above.",
+      );
+    }
+
+    // Step 2: hard kill ETFs + blacklist. Whitelist tickers bypass the
+    // ETF/fund classifier (which has false positives on legit common
+    // stock) but still get removed if explicitly blacklisted. The merge
+    // already resolved each symbol to one in-window BMO/AMC date.
     type Survivor = {
       symbol: string;
       date: string;
       timing: "BMO" | "AMC";
       isWhitelisted: boolean;
+      check: EarningsSourceCheck;
     };
     const survivors: Survivor[] = [];
-    for (const e of earnings) {
-      if (e.timing !== "AMC" && e.timing !== "BMO") continue;
+    for (const e of merged) {
       const upper = e.symbol.toUpperCase();
       if (blacklist.has(upper)) {
         stats.droppedByBlacklist.push(upper);
@@ -181,8 +261,9 @@ export async function POST(req: NextRequest) {
       survivors.push({
         symbol: e.symbol,
         date: e.date,
-        timing: e.timing as "BMO" | "AMC",
+        timing: e.timing,
         isWhitelisted,
+        check: e.check,
       });
     }
     stats.afterEtfAndBlacklist = survivors.length;
@@ -304,6 +385,7 @@ export async function POST(req: NextRequest) {
           date: v.row.date,
           timing: v.row.timing,
           isWhitelisted: v.row.isWhitelisted,
+          check: v.row.check,
           price: v.price,
           cls: v.cls,
           industryStatus: v.industryStatus,
@@ -371,6 +453,7 @@ export async function POST(req: NextRequest) {
         industryStatus: row.industryStatus,
         spreadTooWide: false,
         threeLayer: null,
+        earningsSourceCheck: row.check,
       };
     });
 
@@ -381,7 +464,7 @@ export async function POST(req: NextRequest) {
     stats.final = final.length;
 
     console.log(
-      `[screen] SUMMARY finnhub=${stats.finnhub} afterEtfBlacklist=${stats.afterEtfAndBlacklist} ` +
+      `[screen] SUMMARY finnhub=${stats.finnhub} merged=${stats.merged} afterEtfBlacklist=${stats.afterEtfAndBlacklist} ` +
         `afterPrice(>=$${f.priceFloor})=${stats.afterPriceFilter} ` +
         `afterMcap(>=$${f.minMarketCapBillions}B)=${stats.afterMcapFloor} ` +
         `afterQuality=${stats.afterQualityFilter} afterChain=${stats.afterChainFilter} ` +
@@ -390,6 +473,7 @@ export async function POST(req: NextRequest) {
 
     const response: ScreenResponse = {
       connected,
+      calendarSources: { robinhood: robinhoodStatus, finnhub: finnhubStatus },
       screenedAt: new Date().toISOString(),
       configId: cfg.id,
       configName: cfg.name,

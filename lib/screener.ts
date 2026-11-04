@@ -42,6 +42,7 @@ import { computeTradableGrade, tradableRuleText } from "@/lib/tradable-grade";
 import { computeLiquidityAwareSuggestion, type LiquidityStrikeSuggestion } from "@/lib/liquidity-strike";
 import { computeRiskScore, canonicalizeFlags, hasPriorLossOnTicker, type RiskScoreResult } from "@/lib/risk-score";
 import { hasPriorCspEarningsLoss } from "@/lib/campaigns";
+import type { EarningsSourceCheck } from "@/lib/earnings-source-merge";
 
 // ---------- Hard-kill thresholds ----------
 // The price floor, market-cap floor, and Stage 2 tier gate live in
@@ -399,6 +400,10 @@ export type ScreenerResult = {
   // route has news + personal context to feed in. Null when not computed
   // yet (e.g. screen-only run, pre-analysis).
   threeLayer: ThreeLayerGrade | null;
+  // How Finnhub and Robinhood compare on this print, set by Screen Today
+  // (lib/earnings-source-merge.ts). earningsDate/earningsTiming above are
+  // already the resolved values. Optional: older saved runs predate it.
+  earningsSourceCheck?: EarningsSourceCheck;
 };
 
 export type Grade = "A" | "B" | "C" | "F";

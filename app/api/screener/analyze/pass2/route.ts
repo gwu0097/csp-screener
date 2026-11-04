@@ -166,7 +166,9 @@ export async function POST(req: NextRequest) {
             isWhitelisted: base.isWhitelisted,
             forceFresh,
           };
-          working = await evaluateStagesOneTwo(candidate, ctx);
+          // evaluateStagesOneTwo builds a fresh result; carry over the
+          // Screen Today source check so it survives analysis.
+          working = { ...(await evaluateStagesOneTwo(candidate, ctx)), earningsSourceCheck: base.earningsSourceCheck };
           stageOneTwoRan += 1;
         } catch (e) {
           console.warn(

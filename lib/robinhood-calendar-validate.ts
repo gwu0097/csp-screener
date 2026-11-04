@@ -132,3 +132,60 @@ export function validateRobinhoodCalendarPayload(
   }
   return { ok: true, rows: deduped, reportedCount: count, duplicatesCollapsed: duplicates };
 }
+
+// ---- Source-choice request body (app/api/screener/earnings-source) ----
+// The user's answer to a flagged row. Validated against the conflict
+// key it answers (lib/earnings-source-merge.ts conflictKey format
+// "F=<date>:<timing>|R=<date>:<timing>", "-" for a missing side) so a
+// "Use Robinhood" can only pick the date Robinhood actually showed.
+
+export type ParsedSourceChoice = {
+  symbol: string;
+  conflictKey: string;
+  chosenSource: "finnhub" | "robinhood" | "user";
+  chosenDate: string;
+  chosenTiming: "BMO" | "AMC";
+};
+
+const SIDE_RE = /^(-|(\d{4}-\d{2}-\d{2}):(BMO|AMC|DMH|unknown))$/;
+
+function parseSide(s: string): { date: string; timing: string } | null | undefined {
+  const m = SIDE_RE.exec(s);
+  if (!m) return undefined; // malformed
+  if (m[1] === "-") return null; // side absent
+  return isIsoDate(m[2]) ? { date: m[2], timing: m[3] } : undefined;
+}
+
+export function parseSourceChoice(body: unknown): ParsedSourceChoice | { error: string } {
+  if (!body || typeof body !== "object") return { error: "body must be an object" };
+  const b = body as Record<string, unknown>;
+  const symbol = typeof b.symbol === "string" ? b.symbol.trim().toUpperCase() : "";
+  if (!SYMBOL_RE.test(symbol)) return { error: "bad symbol" };
+  const conflictKey = typeof b.conflictKey === "string" ? b.conflictKey : "";
+  const parts = /^F=([^|]+)\|R=([^|]+)$/.exec(conflictKey);
+  const f = parts ? parseSide(parts[1]) : undefined;
+  const r = parts ? parseSide(parts[2]) : undefined;
+  if (f === undefined || r === undefined) return { error: "bad conflictKey" };
+  const chosenSource = b.chosenSource;
+  if (chosenSource !== "finnhub" && chosenSource !== "robinhood" && chosenSource !== "user") return { error: "bad chosenSource" };
+  const chosenDate = typeof b.chosenDate === "string" ? b.chosenDate : "";
+  if (!isIsoDate(chosenDate)) return { error: "bad chosenDate" };
+  const chosenTiming = b.chosenTiming;
+  if (chosenTiming !== "BMO" && chosenTiming !== "AMC") return { error: "chosenTiming must be BMO or AMC" };
+
+  // A named source must match what that source showed; its timing may
+  // only be filled in by the user when the source had none.
+  if (chosenSource !== "user") {
+    const side = chosenSource === "finnhub" ? f : r;
+    if (!side) return { error: `${chosenSource} has no date for this conflict` };
+    if (side.date !== chosenDate) return { error: `${chosenSource} showed ${side.date}, not ${chosenDate}` };
+    if (side.timing !== "unknown" && side.timing !== chosenTiming) {
+      return { error: `${chosenSource} showed ${side.timing}, not ${chosenTiming}` };
+    }
+  } else {
+    // "user" = only the timing was unknown; the date must be one a source showed.
+    const dates = [f?.date, r?.date].filter(Boolean);
+    if (!dates.includes(chosenDate)) return { error: "chosenDate must be a date one of the sources showed" };
+  }
+  return { symbol, conflictKey, chosenSource, chosenDate, chosenTiming };
+}

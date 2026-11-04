@@ -156,6 +156,12 @@ function addOneDayIso(date: string): string {
   return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, "0")}-${String(dt.getUTCDate()).padStart(2, "0")}`;
 }
 
+/** Today and tomorrow as US Eastern calendar dates — the Screen Today window. */
+export function easternScreenWindow(): { today: string; tomorrow: string } {
+  const today = todayInEastern();
+  return { today, tomorrow: addOneDayIso(today) };
+}
+
 // Only returns the earnings a trader can act on TODAY:
 //   - today's AMC (after market close)
 //   - tomorrow's BMO (before market open)
