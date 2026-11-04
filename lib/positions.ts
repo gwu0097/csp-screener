@@ -4,6 +4,7 @@
 import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase";
 import { isAfterMarketCloseET } from "@/lib/expire-positions";
+import { assignmentCostBasis } from "@/lib/assignment-cost-basis";
 //
 // Two layers live here:
 //   1. Recommendation engine (Urgency/Momentum + recommendPosition)
@@ -385,7 +386,7 @@ export async function createStockFromAssignment(
   const lookup = await sb
     .from("positions")
     .select(
-      "id,symbol,broker,strike,expiry,total_contracts,avg_premium_sold,status,closed_date",
+      "id,symbol,broker,strike,expiry,total_contracts,avg_premium_sold,realized_pnl,status,closed_date",
     )
     .in("id", ids)
     .eq("user_id", userId);
@@ -400,6 +401,7 @@ export async function createStockFromAssignment(
     expiry: string;
     total_contracts: number | null;
     avg_premium_sold: number | null;
+    realized_pnl: number | string | null;
     status: string;
     closed_date: string | null;
   };
@@ -520,15 +522,22 @@ export async function createStockFromAssignment(
       });
       continue;
     }
-    // Premium reduces cost basis: the put's realized_pnl gets zeroed
-    // below (in the same request as this insert, so the two rows never
-    // go out of sync) and its collected premium is folded into the
-    // stock's cost basis instead. The stock round-trip then carries the
-    // whole economic result of the assignment cycle.
-    const avgPremiumSold =
-      p.avg_premium_sold !== null ? Number(p.avg_premium_sold) : 0;
-    const costBasis = Math.round((strike - avgPremiumSold) * 10000) / 10000;
+    // The put's realized P&L gets zeroed below (in the same request as
+    // this insert, so the two rows never go out of sync) and folded into
+    // the stock's cost basis instead, so the stock round-trip carries
+    // the whole economic result. lib/assignment-cost-basis.ts has why
+    // it's the realized P&L and not avg_premium_sold.
     const shares = contracts * 100;
+    const costBasis = assignmentCostBasis({
+      strike,
+      shares,
+      parentRealizedPnl: p.realized_pnl === null || p.realized_pnl === "" ? null : Number(p.realized_pnl),
+      avgPremiumSold: p.avg_premium_sold !== null ? Number(p.avg_premium_sold) : null,
+    });
+    // Shares arrive on the assignment day (recordAssignment's closed
+    // date, earlier than today for an early or late-recorded
+    // assignment), not on the day this runs.
+    const acquiredDate = p.closed_date ?? today;
 
     const insert = await sb
       .from("positions")
@@ -541,7 +550,7 @@ export async function createStockFromAssignment(
         total_contracts: shares,
         avg_premium_sold: null,
         status: "open",
-        opened_date: today,
+        opened_date: acquiredDate,
         notes: `Assigned from ${p.symbol} $${strike}P ${p.expiry}`,
         position_type: "stock_long",
         assignment_source_id: p.id,
@@ -570,7 +579,7 @@ export async function createStockFromAssignment(
       fill_type: "open",
       contracts: shares,
       premium: costBasis,
-      fill_date: today,
+      fill_date: acquiredDate,
       user_id: userId,
     });
     if (openFill.error) {

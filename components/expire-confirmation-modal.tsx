@@ -61,8 +61,10 @@ function shortExpiry(iso: string): string {
 
 function fmtPctOtm(p: number | null): string {
   if (p === null || !Number.isFinite(p)) return "—";
+  // Safety-signed (positive = OTM). A negative value is in the money,
+  // so say that instead of "−10.8% OTM".
   const pct = p * 100;
-  return `${pct > 0 ? "+" : ""}${pct.toFixed(1)}% OTM`;
+  return pct > 0 ? `+${pct.toFixed(1)}% OTM` : `${Math.abs(pct).toFixed(1)}% ITM`;
 }
 
 // Deterministic ITM/OTM rule, for either put or call:
@@ -254,11 +256,11 @@ export function ExpireConfirmationModal({ open, rows, onCancel, onConfirm }: Pro
                     Number.isFinite(r.avgPremiumSold)
                       ? r.avgPremiumSold
                       : null;
-                  // Option A cost basis = strike. Premium stays on
-                  // the put as realized P&L; the stock entry is the
-                  // raw strike. (spot − strike) × shares tracks
-                  // assignment-side market loss without
-                  // double-counting against the put's premium kept.
+                  // Shares are bought at the strike. On record, the
+                  // server (lib/positions.ts createStockFromAssignment)
+                  // moves the put's realized P&L into the stock's cost
+                  // basis and zeroes the put, so the copy below must
+                  // not say the premium "stays as realized P&L".
                   const costBasis = r.strike;
                   const shares = r.totalContracts * 100;
                   return (
@@ -315,10 +317,9 @@ export function ExpireConfirmationModal({ open, rows, onCancel, onConfirm }: Pro
                             <span className="text-foreground">
                               ${costBasis.toFixed(2)}
                             </span>{" "}
-                            /share (strike).{" "}
-                            {avgPremium !== null
-                              ? `Premium $${avgPremium.toFixed(2)} stays as realized P&L.`
-                              : null}
+                            /share strike, less the premium kept on this put
+                            {avgPremium !== null ? ` (avg $${avgPremium.toFixed(2)} sold)` : ""} — the put&apos;s
+                            P&amp;L moves into the stock&apos;s cost basis.
                           </div>
                           <label
                             className={`flex cursor-pointer items-center gap-2 ${
@@ -333,8 +334,8 @@ export function ExpireConfirmationModal({ open, rows, onCancel, onConfirm }: Pro
                               disabled={submitting || !checked}
                             />
                             <span>
-                              Create {shares} shares of {r.symbol} at{" "}
-                              <span className="font-mono">${costBasis.toFixed(2)}</span>
+                              Create {shares} shares of {r.symbol} (strike{" "}
+                              <span className="font-mono">${costBasis.toFixed(2)}</span>)
                             </span>
                           </label>
                         </div>
@@ -382,7 +383,13 @@ export function ExpireConfirmationModal({ open, rows, onCancel, onConfirm }: Pro
                 Expiring…
               </>
             ) : (
-              `Confirm — Expire Worthless${selectedCount > 0 ? ` (${selectedCount})` : ""}`
+              `Confirm — ${
+                assignedCount === 0
+                  ? "Expire Worthless"
+                  : assignedCount === selectedCount
+                    ? "Record Assignment"
+                    : "Expire & Record Assignment"
+              }${selectedCount > 0 ? ` (${selectedCount})` : ""}`
             )}
           </Button>
         </DialogFooter>
