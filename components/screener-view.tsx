@@ -78,7 +78,8 @@ import {
 } from "@/lib/errors";
 
 // localStorage key for the Track checkbox state (screener_tracked is an
-// array of UPPERCASE symbols). Cleared whenever Screen Today runs.
+// array of UPPERCASE symbols). Persists across screens and quarters
+// until the user unchecks a symbol.
 const LS_TRACKED = "screener_tracked";
 
 type Props = { connected: boolean };
@@ -717,7 +718,7 @@ export function ScreenerView({ connected }: Props) {
   const [analyzingSymbols, setAnalyzingSymbols] = useState<Set<string>>(new Set());
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   // Track checkbox state: set of UPPERCASE symbols the user has opted to
-  // track for tonight's trades. Persisted in localStorage; passed to the
+  // track across quarters. Persisted in localStorage; passed to the
   // analyze endpoint so tracked_tickers gets upserted on every run.
   const [tracked, setTracked] = useState<Set<string>>(new Set());
   // Per-row strike overrides applied via inline-edit. Snapshots premium /
@@ -1206,15 +1207,9 @@ export function ScreenerView({ connected }: Props) {
     // defaults — yesterday's reduced sizes (after a slow Perplexity
     // afternoon) shouldn't penalize today's run.
     resetBatchSizes();
-    // A new screen = a new trading day. Tracked tickers from the previous
-    // day's analysis shouldn't carry over (they apply to yesterday's
-    // expiry chain).
-    setTracked(new Set());
-    try {
-      localStorage.removeItem(LS_TRACKED);
-    } catch {
-      /* ignore */
-    }
+    // Tracked symbols deliberately survive a new screen: they're names
+    // the user trades every quarter. tracked_tickers rows are keyed by
+    // symbol + expiry + screened_date, so each event still gets its own row.
     setStatus("screening");
     setError(null);
     setMessage(null);
