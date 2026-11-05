@@ -1067,8 +1067,11 @@ export function ScreenerView({ connected }: Props) {
       ),
     [results],
   );
+  // "?" when neither calendar gave a time and the screen assumed one
+  // (lib/earnings-source-merge.ts timingProvisional).
   const timingLabelFor = (r: ScreenerResult) =>
-    timingLabel(r.earningsDate, r.earningsTiming === "BMO" ? "BMO" : "AMC", screenSession);
+    timingLabel(r.earningsDate, r.earningsTiming === "BMO" ? "BMO" : "AMC", screenSession) +
+    (r.earningsSourceCheck?.timingProvisional ? "?" : "");
 
   const renderSourceChip = (r: ScreenerResult) => (
     <SourceChip check={r.earningsSourceCheck} symbol={r.symbol} onOpen={() => setSourceSheetRow(r)} />
@@ -3726,6 +3729,11 @@ function SourceSheet({
               Screened as <span className="font-semibold text-foreground">{fmtCalDate(row.earningsDate)} {row.earningsTiming}</span>
               {check.timingProvisional ? " (time assumed — neither calendar gives one)" : ` (from ${check.resolvedSource === "user" ? "your pick" : check.resolvedSource === "robinhood" ? "Robinhood" : "Finnhub"})`}
             </div>
+            {check.robinhood && check.robinhood.date < row.earningsDate && (
+              <div className="text-sm text-amber-300">
+                Robinhood says it already reported on {fmtCalDate(check.robinhood.date)}. Picking that date drops it from the next screen.
+              </div>
+            )}
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
               {options.map((o) => {
                 const k = `${o.chosenSource}|${o.chosenDate}|${o.chosenTiming}`;

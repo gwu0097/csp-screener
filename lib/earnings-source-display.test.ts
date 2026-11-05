@@ -59,3 +59,16 @@ test("a DMH side gets no button", () => {
   const c: EarningsSourceCheck = { ...base, kind: "dates_disagree", finnhub: { date: "2026-11-04", timing: "DMH" } };
   assert.deepEqual(choiceOptions(c).map((o) => o.chosenSource), ["robinhood"]);
 });
+
+test("a past Robinhood date is offered as a pick (lets the user say 'already reported')", () => {
+  const opts = choiceOptions({
+    kind: "dates_disagree",
+    finnhub: { date: "2026-11-05", timing: "unknown" },
+    robinhood: { date: "2026-11-04", timing: "AMC", verified: true },
+    conflictKey: "F=2026-11-05:unknown|R=2026-11-04:AMC",
+    resolvedSource: "finnhub",
+    timingProvisional: true,
+    rhFetchedAt: "2026-11-05T11:31:00Z",
+  });
+  assert.ok(opts.some((o) => o.chosenSource === "robinhood" && o.chosenDate === "2026-11-04" && o.chosenTiming === "AMC"));
+});

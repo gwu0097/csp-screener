@@ -1,13 +1,17 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { minRowsFloor, validateRobinhoodCalendarPayload, windowEndFor } from "./robinhood-calendar-validate.ts";
+import { courierWindow, minRowsFloor, validateRobinhoodCalendarPayload } from "./robinhood-calendar-validate.ts";
 
 const W = { start: "2026-11-04", end: "2026-11-06" };
 const ARM = ["ARM", "2026-11-04", "pm", true];
 
-test("window of 3 days from D ends on D+2", () => {
-  assert.equal(windowEndFor("2026-11-04"), "2026-11-06");
-  assert.equal(windowEndFor("2026-12-30"), "2027-01-01");
+test("courier window looks back to the previous weekday and ends on today+2", () => {
+  // Thursday: Wed..Sat — Wednesday is where ARM's real report sits.
+  assert.deepEqual(courierWindow("2026-11-05"), { start: "2026-11-04", end: "2026-11-07", days: 4 });
+  // Monday looks back to Friday.
+  assert.deepEqual(courierWindow("2026-11-09"), { start: "2026-11-06", end: "2026-11-11", days: 6 });
+  // Year boundary.
+  assert.deepEqual(courierWindow("2026-12-31"), { start: "2026-12-30", end: "2027-01-02", days: 4 });
 });
 
 test("accepts a well-formed batch and collapses Robinhood's verbatim repeats", () => {

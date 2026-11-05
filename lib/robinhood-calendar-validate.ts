@@ -26,17 +26,30 @@ export function isIsoDate(s: string): boolean {
 export type RhTiming = "am" | "pm" | null;
 export type RhCalendarRow = { symbol: string; reportDate: string; timing: RhTiming; verified: boolean };
 
-export const RH_WINDOW_DAYS = 3;
-
 export function addDaysIso(date: string, days: number): string {
   const [y, m, d] = date.split("-").map(Number);
   return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10);
 }
 
-/** Last date covered by the tool's window: days=3 from D covers D, D+1, D+2
- * (verified 2026-11-04: rows dated 11-04, 11-05, 11-06 only). */
-export function windowEndFor(windowStart: string, days = RH_WINDOW_DAYS): string {
-  return addDaysIso(windowStart, days - 1);
+/** Days after today the window reaches: today AMC / tomorrow BMO, plus a
+ * spare day for a run straddling midnight ET. */
+export const RH_WINDOW_AHEAD_DAYS = 2;
+
+/**
+ * The courier's window for an ET date: from the previous weekday through
+ * today+2. The look-back is what lets the screen see that a company
+ * already reported: on 2026-11-05 Finnhub still listed ARM for 11-05
+ * (blank hour) a day after it reported on 11-04 pm, and a window
+ * starting today had no Robinhood row to contradict it. Monday looks
+ * back to Friday. `days` is the tool's inclusive length from `start`
+ * (verified 2026-11-04: start 11-04, days=3 → rows dated 11-04..11-06).
+ */
+export function courierWindow(today: string): { start: string; end: string; days: number } {
+  const dow = new Date(today + "T12:00:00Z").getUTCDay(); // 0 Sun … 6 Sat
+  const back = dow === 1 ? 3 : dow === 0 ? 2 : 1;
+  const start = addDaysIso(today, -back);
+  const end = addDaysIso(today, RH_WINDOW_AHEAD_DAYS);
+  return { start, end, days: back + RH_WINDOW_AHEAD_DAYS + 1 };
 }
 
 // Sanity floor. Real data rules out a fixed minimum: the in-season

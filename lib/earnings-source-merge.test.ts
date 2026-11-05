@@ -149,3 +149,41 @@ test("same date, BMO vs AMC is a disagreement; verified Robinhood wins the tie",
 test("neither source in the window → not a candidate", () => {
   assert.equal(merge([{ symbol: "L8R", date: "2026-11-06", timing: "AMC" }], batch([{ symbol: "L8R", reportDate: "2026-11-06", timing: "pm", verified: true }])).length, 0);
 });
+
+test("ARM the day after (real 2026-11-05 case): Finnhub still says today, Robinhood's look-back says it reported yesterday", () => {
+  const out = mergeEarningsSources({
+    finnhub: [{ symbol: "ARM", date: "2026-11-05", timing: "unknown" }],
+    robinhood: {
+      fetchedAt: "2026-11-05T11:31:00Z",
+      windowStart: "2026-11-04",
+      windowEnd: "2026-11-07",
+      rows: [{ symbol: "ARM", reportDate: "2026-11-04", timing: "pm", verified: true }],
+    },
+    choices: [],
+    today: "2026-11-05",
+    tomorrow: "2026-11-06",
+    now: new Date("2026-11-05T17:00:00Z"),
+  });
+  const arm = one(out, "ARM");
+  // Still shown so the user can see the disagreement, flagged as such.
+  assert.ok(arm);
+  assert.equal(arm.check.kind, "dates_disagree");
+  assert.deepEqual(arm.check.robinhood, { date: "2026-11-04", timing: "AMC", verified: true });
+  assert.deepEqual(sourceCheckChip(arm.check), { label: "Dates differ", tone: "amber" });
+
+  // Picking Robinhood's (past) date drops ARM from the next screen.
+  const picked = mergeEarningsSources({
+    finnhub: [{ symbol: "ARM", date: "2026-11-05", timing: "unknown" }],
+    robinhood: {
+      fetchedAt: "2026-11-05T11:31:00Z",
+      windowStart: "2026-11-04",
+      windowEnd: "2026-11-07",
+      rows: [{ symbol: "ARM", reportDate: "2026-11-04", timing: "pm", verified: true }],
+    },
+    choices: [{ symbol: "ARM", conflictKey: arm.check.conflictKey, chosenSource: "robinhood", chosenDate: "2026-11-04", chosenTiming: "AMC" }],
+    today: "2026-11-05",
+    tomorrow: "2026-11-06",
+    now: new Date("2026-11-05T17:00:00Z"),
+  });
+  assert.equal(one(picked, "ARM"), undefined);
+});

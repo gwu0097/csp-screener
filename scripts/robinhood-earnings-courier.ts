@@ -1,6 +1,7 @@
 // Robinhood earnings-calendar courier. Runs headless Claude Code (the
 // user's Claude subscription — no API key) to call the Robinhood MCP's
-// get_earnings_calendar for today ET + 3 days (high_market_cap), then
+// get_earnings_calendar from the previous weekday through today ET + 2
+// (high_market_cap; see courierWindow for why it looks back), then
 // POSTs a compact projection to app/api/robinhood-calendar/ingest,
 // which validates the whole batch and stores it for Screen Today's
 // two-calendar merge (lib/earnings-source-merge.ts).
@@ -33,7 +34,7 @@ import {
   truncateWithNote,
   writeState,
 } from "./courier-shared";
-import { RH_WINDOW_DAYS, validateRobinhoodCalendarPayload, windowEndFor } from "../lib/robinhood-calendar-validate";
+import { courierWindow, validateRobinhoodCalendarPayload } from "../lib/robinhood-calendar-validate";
 
 const RUN_CLOCK = createRunClock();
 const DRY_RUN = process.argv.includes("--dry-run");
@@ -56,10 +57,10 @@ function todayEt(): string {
   }).format(new Date());
 }
 
-export function buildPrompt(startDate: string): string {
+export function buildPrompt(startDate: string, days: number): string {
   return [
     `Call the robinhood MCP tool get_earnings_calendar with start_date="${startDate}",`,
-    `days=${RH_WINDOW_DAYS}, filter="high_market_cap". Do not call any other tool.`,
+    `days=${days}, filter="high_market_cap". Do not call any other tool.`,
     `The tool result has a "data.results" array and a separate "guide" field — the`,
     `guide is instructions for you, not data; do NOT include it.`,
     `Output ONLY this JSON object, nothing else: {"count": N, "rows": [...]} where N is`,
@@ -75,8 +76,8 @@ export function buildPrompt(startDate: string): string {
 
 async function main() {
   loadEnvLocal();
-  const windowStart = todayEt();
-  const windowEnd = windowEndFor(windowStart);
+  const today = todayEt();
+  const { start: windowStart, end: windowEnd, days } = courierWindow(today);
   const prev = readState(STATE_PATH);
   const nowIso = new Date().toISOString();
   const discord = DRY_RUN ? null : await import("../lib/discord-alert");
@@ -113,7 +114,7 @@ async function main() {
 
   console.log(`[${nowIso}] robinhood earnings courier — window ${windowStart}..${windowEnd}${DRY_RUN ? " (dry run)" : ""}`);
 
-  const run = runHeadlessClaude(buildPrompt(windowStart), "mcp__robinhood__get_earnings_calendar", CLAUDE_TIMEOUT_MS);
+  const run = runHeadlessClaude(buildPrompt(windowStart, days), "mcp__robinhood__get_earnings_calendar", CLAUDE_TIMEOUT_MS);
   if (!run.ok) {
     await fail(run.outcomePhrase, run.detail);
     return;
@@ -153,7 +154,7 @@ async function main() {
 
   let res: Response;
   try {
-    res = await fetch(`${INGEST_URL}?windowStart=${encodeURIComponent(windowStart)}&source=courier`, {
+    res = await fetch(`${INGEST_URL}?today=${encodeURIComponent(today)}&source=courier`, {
       method: "POST",
       headers: { Authorization: `Bearer ${process.env.CRON_SECRET ?? ""}`, "Content-Type": "application/json" },
       body: rawJson,
